@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sbt test:*)",
+      "Bash(sbt compile:*)",
+      "Bash(sbt:*)",
+      "Bash(dir:*)",
+      "Bash(cmd.exe /c \"where cl.exe 2>nul && where nvcc.exe 2>nul\")",
+      "Bash(cmd.exe /c \"dir /s /b \"\"C:\\\\Program Files*\\\\vcvars64.bat\"\" 2>nul\")",
+      "Bash(cmd.exe /c \"if exist \"\"C:\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\"\" echo FOUND_BuildTools\")",
+      "Bash(cmd.exe /c \"if exist \"\"C:\\\\Program Files\\\\NVIDIA GPU Computing Toolkit\\\\CUDA\\\\v11.8\\\\bin\\\\nvcc.exe\"\" echo FOUND_NVCC\")",
+      "Bash(cmd.exe /c \"dir /s /b C:\\\\vcvars64.bat 2>nul & dir /s /b C:\\\\nvcc.exe 2>nul\")",
+      "Bash(powershell.exe -NoProfile -Command \"Get-ChildItem ''C:\\\\Program Files*'' -Filter ''vcvars64.bat'' -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName\")",
+      "Bash(powershell.exe -NoProfile -Command \"Test-Path ''C:\\\\Program Files\\\\NVIDIA GPU Computing Toolkit\\\\CUDA\\\\v11.8\\\\bin\\\\nvcc.exe''\")",
+      "Bash(powershell.exe -NoProfile -Command \"Write-Host $env:JAVA_HOME\")",
+      "Bash(echo:*)",
+      "Bash(powershell.exe -NoProfile -Command \"[System.Environment]::GetEnvironmentVariable\\(''JAVA_HOME'',''User''\\)\")",
+      "Bash(powershell.exe -NoProfile -Command \"Test-Path ''C:\\\\Program Files\\\\Java\\\\jdk-22\\\\include\\\\jni.h''\")",
+      "Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\alexl\\\\code\\\\math\\\\untitled\\\\src\\\\main\\\\native\\\\build-windows-opencl.ps1\" -JavaHome \"C:\\\\Program Files\\\\Java\\\\jdk-22\")",
+      "Bash(ls:*)",
+      "Bash(cmd //c \"dir C:\\\\Users\\\\alexl\\\\code\\\\math\\\\untitled\\\\src\\\\main\\\\scala\"\")",
+      "Bash(test:*)",
+      "Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\alexl\\\\code\\\\math\\\\untitled\\\\rename_sifun.ps1\")",
+      "Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\alexl\\\\code\\\\math\\\\untitled\\\\rename_dirs.ps1\")",
+      "Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\alexl\\\\code\\\\math\\\\untitled\\\\rename_dlls.ps1\")",
+      "Bash(powershell.exe -NoProfile -Command \"Remove-Item ''C:\\\\Users\\\\alexl\\\\code\\\\math\\\\untitled\\\\rename_sifun.ps1''; Remove-Item ''C:\\\\Users\\\\alexl\\\\code\\\\math\\\\untitled\\\\rename_dirs.ps1''; Remove-Item ''C:\\\\Users\\\\alexl\\\\code\\\\math\\\\untitled\\\\rename_dlls.ps1''; Write-Host ''Cleanup done.''\")",
+      "Bash(powershell.exe -NoProfile -Command \"Write-Host \"\"JAVA_HOME: $env:JAVA_HOME\"\"; Test-Path ''C:\\\\Program Files\\\\NVIDIA GPU Computing Toolkit\\\\CUDA\\\\v11.8\\\\bin\\\\nvcc.exe''; Test-Path ''C:\\\\Program Files\\\\Java\\\\jdk-22\\\\include\\\\jni.h''\")",
+      "Bash(git init:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

@@ -1,0 +1,465 @@
+package sicfun.holdem
+
+import sicfun.core.{Deck, DiscreteDistribution}
+
+import java.io.{DataInputStream, DataOutputStream, FileOutputStream}
+import java.util.Arrays
+import java.util.concurrent.{ConcurrentHashMap, Executors}
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.duration.Duration
+import scala.util.Random
+
+/** Bijective mapping between all 1326 canonical hole-card combinations and dense integer IDs.
+  *
+  * Each unique unordered two-card hand drawn from a standard 52-card deck is assigned
+  * a stable integer index in `[0, 1326)`. This index space is used as the key domain for
+  * the precomputed heads-up equity tables.
+  */
+object HoleCardsIndex:
+  /** All 1326 canonical hole-card hands, ordered by the deck-based enumeration. */
+  private val allHands: Vector[HoleCards] =
+    HoldemCombinator.holeCardsFrom(Deck.full)
+
+  /** Reverse lookup: canonical HoleCards to its integer ID. */
+  private val idByHand: Map[HoleCards, Int] = allHands.zipWithIndex.toMap
+
+  /** Total number of canonical two-card hands (C(52,2) = 1326). */
+  val size: Int = allHands.length
+
+  /** Returns all canonical hole-card hands in index order. */
+  def all: Vector[HoleCards] = allHands
+
+  /** Returns the integer ID for the given hole cards (canonicalized internally).
+    *
+    * @throws IllegalArgumentException if the hand is not recognized
+    */
+  def idOf(hand: HoleCards): Int =
+    idByHand.getOrElse(HoleCards.canonical(hand.first, hand.second), throw new IllegalArgumentException("unknown hand"))
+
+  /** Retrieves the hole cards at the given index. Package-private for internal table construction. */
+  private[holdem] def byId(id: Int): HoleCards =
+    require(id >= 0 && id < allHands.length, s"invalid hole cards id: $id")
+    allHands(id)
+
+  /** Returns `true` if the two hands share no cards. */
+  def areDisjoint(hero: HoleCards, villain: HoleCards): Boolean =
+    !hero.asSet.exists(villain.asSet.contains)
+
+  /** Iterates over all ordered (i < j) non-overlapping hand pairs, invoking `f` until it returns `false`.
+    *
+    * The callback receives `(heroId, heroHand, villainId, villainHand)`. Early termination
+    * occurs when `f` returns `false`.
+    */
+  def foreachNonOverlappingPairWhile(f: (Int, HoleCards, Int, HoleCards) => Boolean): Unit =
+    var i = 0
+    var keepGoing = true
+    while i < size && keepGoing do
+      val hero = byId(i)
+      var j = i + 1
+      while j < size && keepGoing do
+        val villain = byId(j)
+        if areDisjoint(hero, villain) then
+          keepGoing = f(i, hero, j, villain)
+        j += 1
+      i += 1
+
+  /** Iterates over all ordered (i < j) non-overlapping hand pairs. */
+  def foreachNonOverlappingPair(f: (Int, HoleCards, Int, HoleCards) => Unit): Unit =
+    foreachNonOverlappingPairWhile { (i, hero, j, villain) =>
+      f(i, hero, j, villain)
+      true
+    }
+
+  /** Counts the total number of non-overlapping hand pairs. */
+  def countNonOverlappingPairs: Long =
+    var count = 0L
+    foreachNonOverlappingPair { (_, _, _, _) =>
+      count += 1
+    }
+    count
+
+
+/** Precomputed heads-up equity lookup table mapping all non-overlapping hole-card pairs to
+  * their equity results.
+  *
+  * Keys are packed Long values encoding an ordered `(lowId, highId)` pair using 11-bit fields
+  * (see [[HeadsUpEquityTable.pack]]). The table always stores results from the perspective of
+  * the lower-ID hand; when the caller's hero has the higher ID, the result is "flipped"
+  * (win/loss swapped) transparently.
+  *
+  * @param values Map from packed key to the equity result stored in low-ID-hero perspective
+  */
+final case class HeadsUpEquityTable(values: Map[Long, EquityResultWithError]):
+  /** Number of matchups stored in this table. */
+  def size: Int = values.size
+
+  /** Returns the equity for `hero` vs `villain`, flipping perspective as needed.
+    *
+    * @throws NoSuchElementException if the matchup is not in the table
+    */
+  def equity(hero: HoleCards, villain: HoleCards): EquityResultWithError =
+    lookup(hero, villain).getOrElse(throw new NoSuchElementException("matchup not found"))
+
+  /** Optional lookup; returns `None` if the matchup is absent. */
+  def get(hero: HoleCards, villain: HoleCards): Option[EquityResultWithError] =
+    lookup(hero, villain)
+
+  /** Core lookup: computes the normalized key, fetches the stored result, and flips if the
+    * caller's hero was the higher-ID hand (the "flipped key" concept).
+    */
+  private def lookup(hero: HoleCards, villain: HoleCards): Option[EquityResultWithError] =
+    val key = HeadsUpEquityTable.keyFor(hero, villain)
+    values.get(key.value).map(base => HeadsUpEquityTable.flipIfNeeded(base, key.flipped))
+
+/** Companion object providing factory methods, key encoding, batch computation, and I/O
+  * for full (non-canonical) heads-up equity tables.
+  */
+object HeadsUpEquityTable:
+  /** A normalized lookup key with a flag indicating whether hero/villain were swapped.
+    *
+    * The "flipped" flag enables hero/villain ordering normalization: the table always
+    * stores results from the lower-ID hand's perspective, and `flipped = true` signals
+    * that the caller's hero had the higher ID, so win/loss must be swapped on retrieval.
+    *
+    * @param value   packed Long key with lowId in upper bits, highId in lower bits
+    * @param flipped `true` if the original hero had the higher ID and results need swapping
+    */
+  final case class Key(value: Long, flipped: Boolean)
+
+  /** Internal batch descriptor carrying parallel arrays of packed keys and key material
+    * (used for deterministic Monte Carlo seed derivation).
+    */
+  private[holdem] final case class FullBatch(packedKeys: Array[Long], keyMaterial: Array[Long])
+
+  /** Equity computation strategy. */
+  enum Mode:
+    /** Exhaustive enumeration of all remaining board run-outs. */
+    case Exact
+    /** Monte Carlo sampling with the specified number of random trials. */
+    case MonteCarlo(trials: Int)
+
+  /** Selects CPU or GPU computation backend. */
+  enum ComputeBackend:
+    case Cpu
+    case Gpu
+
+  /** Parses a backend name from a CLI string. */
+  object ComputeBackend:
+    def parse(raw: String): ComputeBackend =
+      raw.trim.toLowerCase match
+        case "cpu" => ComputeBackend.Cpu
+        case "gpu" => ComputeBackend.Gpu
+        case other => throw new IllegalArgumentException(s"unknown backend: $other (expected cpu or gpu)")
+
+  private val DefaultParallelism = math.max(1, Runtime.getRuntime.availableProcessors())
+  /** Minimum work items before switching from sequential to parallel execution. */
+  private val ParallelMinWorkItems = 1_000
+  /** Work-stealing granularity factor.  Each worker gets `totalItems / (workers * ChunkDivisor)` items
+    * per atomic grab. A higher divisor yields finer chunks, improving load balance at the cost of
+    * slightly more atomic contention. 16 is a good empirical trade-off.
+    */
+  private val ChunkDivisor = 16
+  /** Number of bits used per hole-card ID in the packed key representation. 11 bits can
+    * address up to 2048 values, comfortably covering the 1326 canonical hands.
+    */
+  private val IdBits = 11
+  /** Bitmask for extracting the lower (highId) field from a packed key. */
+  private val IdMask = (1 << IdBits) - 1
+
+  /** Lazily computed array of packed keys for every non-overlapping pair, in enumeration order. */
+  private lazy val nonOverlappingPairKeys: Array[Long] =
+    val buf = scala.collection.mutable.ArrayBuffer.empty[Long]
+    HoleCardsIndex.foreachNonOverlappingPair { (i, _, j, _) =>
+      buf += pack(i, j)
+    }
+    buf.toArray
+
+  /** Selects up to `maxMatchups` non-overlapping pairs and bundles them into a [[FullBatch]]
+    * ready for CPU or GPU computation. The `keyMaterial` array mirrors the packed keys and is
+    * used to derive deterministic per-matchup Monte Carlo seeds.
+    */
+  private[holdem] def selectFullBatch(maxMatchups: Long): FullBatch =
+    require(maxMatchups > 0L, "maxMatchups must be positive")
+    val total = totalMatchups
+    val limit = math.min(maxMatchups, total)
+    require(limit <= Int.MaxValue.toLong, s"max supported matchups is ${Int.MaxValue}")
+    val limitInt = limit.toInt
+    val pairKeys =
+      if limitInt == nonOverlappingPairKeys.length then nonOverlappingPairKeys
+      else Arrays.copyOf(nonOverlappingPairKeys, limitInt)
+    val keyMaterial = new Array[Long](pairKeys.length)
+    var idx = 0
+    while idx < pairKeys.length do
+      keyMaterial(idx) = pairKeys(idx)
+      idx += 1
+    FullBatch(packedKeys = pairKeys, keyMaterial = keyMaterial)
+
+  /** Computes a normalized [[Key]] for the given hero/villain pair.
+    *
+    * The key always encodes `(lowId, highId)` where `lowId < highId`. If the hero's ID is
+    * greater than the villain's, the key is flagged as `flipped = true` so that the
+    * stored equity result (from the low-ID perspective) can be inverted at query time.
+    *
+    * @throws IllegalArgumentException if the hands overlap or are identical
+    */
+  def keyFor(hero: HoleCards, villain: HoleCards): Key =
+    if !HoleCardsIndex.areDisjoint(hero, villain) then
+      throw new IllegalArgumentException("hands must be non-overlapping")
+    val heroId = HoleCardsIndex.idOf(hero)
+    val villainId = HoleCardsIndex.idOf(villain)
+    if heroId == villainId then throw new IllegalArgumentException("hands must be distinct")
+    // Always store with the lower ID first; flag when hero/villain are swapped.
+    if heroId < villainId then Key(pack(heroId, villainId), flipped = false)
+    else Key(pack(villainId, heroId), flipped = true)
+
+  /** Builds the full heads-up equity table, computing equity for every non-overlapping pair
+    * (up to `maxMatchups`) using the specified mode and backend.
+    *
+    * GPU failures are fail-fast by default. CPU fallback is available only when explicitly
+    * enabled via `sicfun_GPU_FALLBACK_TO_CPU=true` (or `-Dsicfun.gpu.fallbackToCpu=true`).
+    *
+    * @param mode         exact enumeration or Monte Carlo with a given trial count
+    * @param rng          source of randomness; a seed base is drawn once for deterministic replay
+    * @param maxMatchups  cap on the number of matchups to compute (default: all)
+    * @param progress     optional `(completed, total)` callback invoked periodically
+    * @param parallelism  number of CPU worker threads (only used for CPU backend)
+    * @param backend      CPU or GPU computation backend
+    * @return a populated [[HeadsUpEquityTable]]
+    */
+  def buildAll(
+      mode: Mode,
+      rng: Random = new Random(),
+      maxMatchups: Long = Long.MaxValue,
+      progress: Option[(Long, Long) => Unit] = None,
+      parallelism: Int = DefaultParallelism,
+      backend: ComputeBackend = ComputeBackend.Cpu
+  ): HeadsUpEquityTable =
+    require(parallelism > 0, "parallelism must be positive")
+    val batch = selectFullBatch(maxMatchups)
+    val total = totalMatchups
+    val monteCarloSeedBase = rng.nextLong()
+    val cpuCompute = () =>
+      computeBatchCpu(
+        mode = mode,
+        packedKeys = batch.packedKeys,
+        keyMaterial = batch.keyMaterial,
+        parallelism = parallelism,
+        monteCarloSeedBase = monteCarloSeedBase,
+        progress = progress,
+        totalForProgress = total
+      )
+
+    val results =
+      backend match
+        case ComputeBackend.Cpu =>
+          cpuCompute()
+        case ComputeBackend.Gpu =>
+          HeadsUpGpuRuntime.computeBatch(batch.packedKeys, batch.keyMaterial, mode, monteCarloSeedBase) match
+            case Right(gpuResults) =>
+              progress.foreach(callback => callback(batch.packedKeys.length.toLong, total))
+              gpuResults
+            case Left(reason) =>
+              if HeadsUpGpuRuntime.allowCpuFallbackOnGpuFailure then
+                System.err.println(s"GPU backend unavailable ($reason); using CPU workers")
+                cpuCompute()
+              else
+                throw new IllegalStateException(
+                  s"GPU backend failed ($reason). CPU fallback is disabled; set sicfun_GPU_FALLBACK_TO_CPU=true to re-enable it."
+                )
+
+    buildFromBatchResults(batch.packedKeys, results)
+
+  def cache(mode: Mode, rng: Random = new Random()): HeadsUpEquityCache =
+    new HeadsUpEquityCache(mode, rng.nextLong())
+
+  def totalMatchups: Long =
+    nonOverlappingPairKeys.length.toLong
+
+  private[sicfun] def computeEquity(hero: HoleCards, villain: HoleCards, mode: Mode, rng: Random): EquityResultWithError =
+    mode match
+      case Mode.Exact => computeExactAgainstFixedVillain(hero, villain)
+      case Mode.MonteCarlo(trials) => computeMonteCarloAgainstFixedVillain(hero, villain, trials, rng)
+
+  private[holdem] def computeEquityDeterministic(
+      hero: HoleCards,
+      villain: HoleCards,
+      mode: Mode,
+      monteCarloSeedBase: Long,
+      keyMaterial: Long
+  ): EquityResultWithError =
+    mode match
+      case Mode.Exact => computeExactAgainstFixedVillain(hero, villain)
+      case Mode.MonteCarlo(trials) =>
+        val localSeed = monteCarloSeed(monteCarloSeedBase, keyMaterial)
+        computeMonteCarloAgainstFixedVillain(hero, villain, trials, new Random(localSeed))
+
+  private[sicfun] def pack(lowId: Int, highId: Int): Long =
+    (lowId.toLong << IdBits) | (highId.toLong & IdMask)
+
+  private[holdem] def unpackLowId(packedKey: Long): Int =
+    (packedKey >>> IdBits).toInt
+
+  private[holdem] def unpackHighId(packedKey: Long): Int =
+    (packedKey & IdMask).toInt
+
+  private[holdem] def flipIfNeeded(result: EquityResultWithError, flipped: Boolean): EquityResultWithError =
+    if flipped then EquityResultWithError(result.loss, result.tie, result.win, result.stderr) else result
+
+  private[holdem] def monteCarloSeed(monteCarloSeedBase: Long, keyMaterial: Long): Long =
+    mix64(monteCarloSeedBase ^ keyMaterial)
+
+  private[holdem] def computeBatchCpu(
+      mode: Mode,
+      packedKeys: Array[Long],
+      keyMaterial: Array[Long],
+      parallelism: Int,
+      monteCarloSeedBase: Long,
+      progress: Option[(Long, Long) => Unit] = None,
+      totalForProgress: Long = 0L
+  ): Array[EquityResultWithError] =
+    require(parallelism > 0, "parallelism must be positive")
+    require(packedKeys.length == keyMaterial.length, "packedKeys and keyMaterial must have equal length")
+    val results = new Array[EquityResultWithError](packedKeys.length)
+    val progressTotal = if totalForProgress > 0L then totalForProgress else packedKeys.length.toLong
+    if shouldRunParallel(packedKeys.length, parallelism) then
+      val workers = math.min(parallelism, packedKeys.length)
+      val chunkSize = math.max(1, packedKeys.length / (workers * ChunkDivisor))
+      val nextStart = new AtomicInteger(0)
+      val done = new AtomicLong(0L)
+      val executor = Executors.newFixedThreadPool(workers)
+      given ExecutionContext = ExecutionContext.fromExecutorService(executor)
+      try
+        val tasks = (0 until workers).map { _ =>
+          Future {
+            var start = nextStart.getAndAdd(chunkSize)
+            while start < packedKeys.length do
+              val end = math.min(start + chunkSize, packedKeys.length)
+              var idx = start
+              while idx < end do
+                val packed = packedKeys(idx)
+                val hero = HoleCardsIndex.byId(unpackLowId(packed))
+                val villain = HoleCardsIndex.byId(unpackHighId(packed))
+                results(idx) =
+                  computeEquityDeterministic(
+                    hero = hero,
+                    villain = villain,
+                    mode = mode,
+                    monteCarloSeedBase = monteCarloSeedBase,
+                    keyMaterial = keyMaterial(idx)
+                  )
+                idx += 1
+              val completed = done.addAndGet((end - start).toLong)
+              progress.foreach(callback => callback(completed, progressTotal))
+              start = nextStart.getAndAdd(chunkSize)
+          }
+        }
+        Await.result(Future.sequence(tasks), Duration.Inf)
+      finally
+        executor.shutdown()
+    else
+      var idx = 0
+      while idx < packedKeys.length do
+        val packed = packedKeys(idx)
+        val hero = HoleCardsIndex.byId(unpackLowId(packed))
+        val villain = HoleCardsIndex.byId(unpackHighId(packed))
+        results(idx) =
+          computeEquityDeterministic(
+            hero = hero,
+            villain = villain,
+            mode = mode,
+            monteCarloSeedBase = monteCarloSeedBase,
+            keyMaterial = keyMaterial(idx)
+          )
+        val done = idx + 1L
+        progress.foreach(callback => callback(done, progressTotal))
+        idx += 1
+    results
+
+  private def shouldRunParallel(workSize: Int, parallelism: Int): Boolean =
+    parallelism > 1 && workSize >= ParallelMinWorkItems
+
+  private def buildFromBatchResults(
+      packedKeys: Array[Long],
+      results: Array[EquityResultWithError]
+  ): HeadsUpEquityTable =
+    require(packedKeys.length == results.length, "packedKeys and results must have equal length")
+    val map = scala.collection.mutable.Map.empty[Long, EquityResultWithError]
+    var idx = 0
+    while idx < packedKeys.length do
+      map.put(packedKeys(idx), results(idx))
+      idx += 1
+    HeadsUpEquityTable(map.toMap)
+
+  private def computeExactAgainstFixedVillain(hero: HoleCards, villain: HoleCards): EquityResultWithError =
+    val dist = DiscreteDistribution(Map(villain -> 1.0))
+    val result = HoldemEquity.equityExact(hero, Board.empty, dist)
+    EquityResultWithError(result.win, result.tie, result.loss, 0.0)
+
+  private def computeMonteCarloAgainstFixedVillain(
+      hero: HoleCards,
+      villain: HoleCards,
+      trials: Int,
+      rng: Random
+  ): EquityResultWithError =
+    val dist = DiscreteDistribution(Map(villain -> 1.0))
+    val estimate = HoldemEquity.equityMonteCarlo(hero, Board.empty, dist, trials, rng)
+    EquityResultWithError(estimate.winRate, estimate.tieRate, estimate.lossRate, estimate.stderr)
+
+  private def mix64(value: Long): Long =
+    var z = value + 0x9E3779B97F4A7C15L
+    z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L
+    z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL
+    z ^ (z >>> 31)
+
+final class HeadsUpEquityCache(mode: HeadsUpEquityTable.Mode, monteCarloSeedBase: Long):
+  private val cache = new ConcurrentHashMap[Long, EquityResultWithError]()
+
+  def size: Int = cache.size()
+
+  def equity(hero: HoleCards, villain: HoleCards): EquityResultWithError =
+    val key = HeadsUpEquityTable.keyFor(hero, villain)
+    val cached = cache.get(key.value)
+    val base =
+      if cached != null then cached
+      else
+        val heroCanonical = HoleCardsIndex.byId(HeadsUpEquityTable.unpackLowId(key.value))
+        val villainCanonical = HoleCardsIndex.byId(HeadsUpEquityTable.unpackHighId(key.value))
+        val computed =
+          HeadsUpEquityTable.computeEquityDeterministic(
+            heroCanonical,
+            villainCanonical,
+            mode,
+            monteCarloSeedBase,
+            key.value
+          )
+        val prev = cache.putIfAbsent(key.value, computed)
+        if prev != null then prev else computed
+    HeadsUpEquityTable.flipIfNeeded(base, key.flipped)
+
+object HeadsUpEquityTableIO:
+  def write(path: String, table: HeadsUpEquityTable, meta: HeadsUpEquityTableMeta): Unit =
+    require(!meta.canonical, "meta.canonical must be false for full heads-up table")
+    val out = new DataOutputStream(new FileOutputStream(path))
+    try
+      HeadsUpEquityTableIOUtil.writeHeader(out, meta)
+      HeadsUpEquityTableIOUtil.writeEntries(out, table.values, (o, key: Long) => o.writeLong(key))
+    finally out.close()
+
+  def read(path: String): HeadsUpEquityTable =
+    readWithMeta(path)._1
+
+  def readWithMeta(path: String): (HeadsUpEquityTable, HeadsUpEquityTableMeta) =
+    HeadsUpEquityTableIOUtil.withFileInputStream(path)(readWithMeta)
+
+  def readResource(resourcePath: String): HeadsUpEquityTable =
+    readResourceWithMeta(resourcePath)._1
+
+  def readResourceWithMeta(resourcePath: String): (HeadsUpEquityTable, HeadsUpEquityTableMeta) =
+    HeadsUpEquityTableIOUtil.withResourceInputStream(resourcePath, getClass)(readWithMeta)
+
+  private def readWithMeta(in: DataInputStream): (HeadsUpEquityTable, HeadsUpEquityTableMeta) =
+    val meta = HeadsUpEquityTableIOUtil.readHeader(in)
+    require(!meta.canonical, "expected non-canonical heads-up table")
+    val map = HeadsUpEquityTableIOUtil.readEntries(in, meta.count, _.readLong())
+    (HeadsUpEquityTable(map), meta)
