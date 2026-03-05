@@ -8,6 +8,13 @@ package sicfun.core
 enum Suit:
   case Clubs, Diamonds, Hearts, Spades
 
+  /** Returns the canonical single-character representation (inverse of [[Suit.fromChar]]). */
+  inline def toChar: Char = this match
+    case Clubs    => 'c'
+    case Diamonds => 'd'
+    case Hearts   => 'h'
+    case Spades   => 's'
+
 /** Companion object providing parsing utilities for [[Suit]]. */
 object Suit:
   /** Parses a single character into a [[Suit]].
@@ -49,6 +56,22 @@ enum Rank(val value: Int):
   case King extends Rank(13)
   case Ace extends Rank(14)
 
+  /** Returns the canonical single-character representation (inverse of [[Rank.fromChar]]). */
+  inline def toChar: Char = this match
+    case Two   => '2'
+    case Three => '3'
+    case Four  => '4'
+    case Five  => '5'
+    case Six   => '6'
+    case Seven => '7'
+    case Eight => '8'
+    case Nine  => '9'
+    case Ten   => 'T'
+    case Jack  => 'J'
+    case Queen => 'Q'
+    case King  => 'K'
+    case Ace   => 'A'
+
 /** Companion object providing ordering and parsing utilities for [[Rank]]. */
 object Rank:
   /** Natural ordering of ranks by their numeric value (Two < ... < Ace). */
@@ -87,7 +110,9 @@ object Rank:
   * @param rank the card's rank (Two through Ace)
   * @param suit the card's suit (Clubs, Diamonds, Hearts, or Spades)
   */
-final case class Card(rank: Rank, suit: Suit)
+final case class Card(rank: Rank, suit: Suit):
+  /** Returns the canonical two-character token (e.g., "Ah", "2c"). Inverse of [[Card.parse]]. */
+  inline def toToken: String = s"${rank.toChar}${suit.toChar}"
 
 /** Companion object providing parsing utilities for [[Card]]. */
 object Card:
@@ -117,8 +142,9 @@ object Card:
     * @return a vector of parsed cards, or `None` on any parse failure
     */
   def parseAll(tokens: Seq[String]): Option[Vector[Card]] =
-    val parsed = tokens.map(parse)
-    if parsed.forall(_.isDefined) then Some(parsed.flatten.toVector) else None
+    tokens.foldLeft(Option(Vector.newBuilder[Card])) { (acc, token) =>
+      acc.flatMap(builder => parse(token).map(builder += _))
+    }.map(_.result())
 
 /** Provides a bijective mapping between [[Card]] instances and integer identifiers in the range [0, 51].
   *
@@ -134,17 +160,35 @@ object Card:
   * array indexing, and set membership via bit masks in hand evaluation.
   */
 object CardId:
+  opaque type Id = Int
+
+  object Id:
+    private val MaxId = 51
+
+    def fromInt(value: Int): Id =
+      require(value >= 0 && value <= MaxId, s"invalid card id: $value")
+      value
+
+    private[core] inline def unsafe(value: Int): Id = value
+
+  extension (inline id: Id)
+    inline def toInt: Int = id
+
   private val rankValues = Rank.values
   private val suitValues = Suit.values
   private val rankCount = rankValues.length
+  private val maxIdExclusive = rankCount * suitValues.length
 
   /** Converts a [[Card]] to its unique integer identifier.
     *
     * @param card the card to encode
     * @return an integer in [0, 51] computed as `suit.ordinal * 13 + rank.ordinal`
     */
-  def toId(card: Card): Int =
-    card.suit.ordinal * rankCount + card.rank.ordinal
+  inline def toOpaque(card: Card): Id =
+    Id.unsafe(card.suit.ordinal * rankCount + card.rank.ordinal)
+
+  inline def toId(card: Card): Int =
+    toOpaque(card).toInt
 
   /** Reconstructs a [[Card]] from its integer identifier.
     *
@@ -152,11 +196,15 @@ object CardId:
     * @return the corresponding card
     * @throws IllegalArgumentException if `id` is out of range
     */
-  def fromId(id: Int): Card =
-    require(id >= 0 && id < rankCount * suitValues.length, s"invalid card id: $id")
-    val suit = suitValues(id / rankCount)
-    val rank = rankValues(id % rankCount)
+  def fromOpaque(id: Id): Card =
+    val raw = id.toInt
+    val suit = suitValues(raw / rankCount)
+    val rank = rankValues(raw % rankCount)
     Card(rank, suit)
+
+  def fromId(id: Int): Card =
+    require(id >= 0 && id < maxIdExclusive, s"invalid card id: $id")
+    fromOpaque(Id.unsafe(id))
 
 /** Provides the standard 52-card deck. */
 object Deck:
@@ -164,21 +212,4 @@ object Deck:
     * then by rank (Two through Ace) within each suit.
     */
   val full: Vector[Card] =
-    for
-      suit <- Vector(Suit.Clubs, Suit.Diamonds, Suit.Hearts, Suit.Spades)
-      rank <- Vector(
-        Rank.Two,
-        Rank.Three,
-        Rank.Four,
-        Rank.Five,
-        Rank.Six,
-        Rank.Seven,
-        Rank.Eight,
-        Rank.Nine,
-        Rank.Ten,
-        Rank.Jack,
-        Rank.Queen,
-        Rank.King,
-        Rank.Ace
-      )
-    yield Card(rank, suit)
+    (for s <- Suit.values; r <- Rank.values yield Card(r, s)).toVector

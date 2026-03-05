@@ -1,49 +1,79 @@
 package sicfun.core
 
 import munit.FunSuite
+import sicfun.holdem.*
 
 class ActionMetricsTest extends FunSuite:
+  private def card(token: String): Card =
+    Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
-  // A uniform action model: every action equally likely regardless of hypothesis
-  private object UniformModel extends ActionModel[String, Int, String]:
-    def likelihood(action: Int, features: String, hypothesis: String): Double = 0.25
+  private def hole(a: String, b: String): HoleCards =
+    HoleCards.from(Vector(card(a), card(b)))
 
-  // A deterministic model: each hypothesis maps to exactly one action
-  private object DeterministicModel extends ActionModel[String, Int, String]:
-    def likelihood(action: Int, features: String, hypothesis: String): Double =
-      hypothesis match
-        case "A" => if action == 0 then 1.0 else 0.0
-        case "B" => if action == 1 then 1.0 else 0.0
-        case "C" => if action == 2 then 1.0 else 0.0
-        case "D" => if action == 3 then 1.0 else 0.0
-        case _   => 0.25
+  private val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
+  private val state = GameState(
+    street = Street.Flop,
+    board = board,
+    pot = 20.0,
+    toCall = 10.0,
+    position = Position.Button,
+    stackSize = 200.0,
+    betHistory = Vector.empty
+  )
 
-  private val actions = Seq(0, 1, 2, 3)
-  private val state = "any"
-  private val uniformPosterior = DiscreteDistribution.uniform(Seq("A", "B", "C", "D"))
+  private val actions: Seq[PokerAction] = Seq(
+    PokerAction.Fold, PokerAction.Check, PokerAction.Call, PokerAction.Raise(20.0)
+  )
+
+  private val hand1 = hole("Ah", "Kh")
+  private val hand2 = hole("7c", "2d")
+  private val hand3 = hole("Qs", "Jd")
+  private val hand4 = hole("9c", "8c")
+
+  private val uniformPosterior = DiscreteDistribution.uniform(Seq(hand1, hand2, hand3, hand4))
+
+  // Real production uniform model: returns 0.25 for every action category
+  private val uniformModel: PokerActionModel = PokerActionModel.uniform
+
+  // Real production trained model on strongly separable data
+  private lazy val trainedModel: PokerActionModel =
+    val data = Seq.fill(100)(Seq(
+      (state, hand1, PokerAction.Raise(20.0)),
+      (state, hand2, PokerAction.Fold)
+    )).flatten
+    PokerActionModel.train(data, learningRate = 0.1, iterations = 1000)
+
+  private val trainedPosterior = DiscreteDistribution.uniform(Seq(hand1, hand2))
 
   test("uniform model yields action entropy = log2(numActions)") {
-    val h = ActionMetrics.actionEntropy(state, uniformPosterior, UniformModel, actions)
+    val h = ActionMetrics.actionEntropy(state, uniformPosterior, uniformModel, actions)
     assertEqualsDouble(h, 2.0, 1e-9) // log2(4) = 2
   }
 
-  test("deterministic model yields conditional entropy = 0") {
-    val ce = ActionMetrics.conditionalActionEntropy(state, uniformPosterior, DeterministicModel, actions)
-    assertEqualsDouble(ce, 0.0, 1e-9)
+  test("trained model conditional entropy is well below marginal entropy") {
+    val h = ActionMetrics.actionEntropy(state, trainedPosterior, trainedModel, actions)
+    val ce = ActionMetrics.conditionalActionEntropy(state, trainedPosterior, trainedModel, actions)
+    assert(ce < h,
+      s"conditional entropy ($ce) should be smaller than marginal entropy ($h) for separable data")
+    assert(ce < 1.0,
+      s"conditional entropy ($ce) should be well below maximum for a strongly trained model")
   }
 
   test("mutual information is non-negative") {
-    val mi = ActionMetrics.mutualInformation(state, uniformPosterior, UniformModel, actions)
+    val mi = ActionMetrics.mutualInformation(state, uniformPosterior, uniformModel, actions)
     assert(mi >= -1e-9, s"mutual information should be non-negative, got $mi")
   }
 
-  test("mutual information equals action entropy when conditional entropy is 0") {
-    val h = ActionMetrics.actionEntropy(state, uniformPosterior, DeterministicModel, actions)
-    val mi = ActionMetrics.mutualInformation(state, uniformPosterior, DeterministicModel, actions)
-    assertEqualsDouble(mi, h, 1e-9)
+  test("trained model mutual information is positive and close to action entropy") {
+    val h = ActionMetrics.actionEntropy(state, trainedPosterior, trainedModel, actions)
+    val mi = ActionMetrics.mutualInformation(state, trainedPosterior, trainedModel, actions)
+    assert(mi > 0.0,
+      s"expected positive mutual information for separable data, got $mi")
+    assert(mi > h * 0.2,
+      s"mutual information ($mi) should capture a meaningful fraction of action entropy ($h)")
   }
 
   test("uniform model yields zero mutual information") {
-    val mi = ActionMetrics.mutualInformation(state, uniformPosterior, UniformModel, actions)
+    val mi = ActionMetrics.mutualInformation(state, uniformPosterior, uniformModel, actions)
     assertEqualsDouble(mi, 0.0, 1e-9)
   }

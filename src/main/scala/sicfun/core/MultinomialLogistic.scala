@@ -40,7 +40,7 @@ final case class MultinomialLogistic(weights: Vector[Vector[Double]], bias: Vect
   /** Numerically stable softmax: subtracts the max logit before exponentiating
     * to prevent overflow (exp of large positive) while preserving the output distribution.
     */
-  private def softmax(logits: Vector[Double]): Vector[Double] =
+  private inline def softmax(logits: Vector[Double]): Vector[Double] =
     val maxLogit = logits.max
     val exps = logits.map(l => math.exp(l - maxLogit)) // shift for numerical stability
     val sum = exps.sum

@@ -10,7 +10,25 @@ final case class Outcome(probability: Double, value: Double)
 /** Utility methods for basic probability computations. */
 object Probability:
   /** Tolerance threshold for numerical comparisons to avoid floating-point artifacts. */
-  private val Eps = 1e-12
+  private[sicfun] inline val Eps = 1e-12
+
+  private[core] inline def isFiniteNonNegative(value: Double): Boolean =
+    java.lang.Double.isFinite(value) && value >= 0.0
+
+  private def normalizeChecked[A](
+      weights: Iterable[(A, Double)],
+      zeroMessage: String
+  ): Map[A, Double] =
+    val normalized = Map.newBuilder[A, Double]
+    var total = 0.0
+    weights.foreach { case (key, weight) =>
+      require(isFiniteNonNegative(weight), s"invalid weight for key '$key': $weight")
+      total += weight
+      normalized += key -> weight
+    }
+    require(total > Eps, zeroMessage)
+    val invTotal = 1.0 / total
+    normalized.result().view.mapValues(_ * invTotal).toMap
 
   /** Computes the expected value (weighted average) of a set of outcomes.
     *
@@ -21,6 +39,14 @@ object Probability:
     * @throws IllegalArgumentException if probabilities do not sum to 1
     */
   def expectedValue(outcomes: Seq[Outcome]): Double =
+    require(outcomes.nonEmpty, "outcomes must be non-empty")
+    outcomes.foreach { outcome =>
+      require(
+        isFiniteNonNegative(outcome.probability),
+        s"invalid probability: ${outcome.probability}"
+      )
+      require(java.lang.Double.isFinite(outcome.value), s"value must be finite, got ${outcome.value}")
+    }
     val totalP = outcomes.map(_.probability).sum
     require(math.abs(totalP - 1.0) < 1e-9, s"probabilities must sum to 1, got $totalP")
     outcomes.map(o => o.probability * o.value).sum
@@ -33,9 +59,7 @@ object Probability:
     * @throws IllegalArgumentException if the total weight is effectively zero
     */
   def normalize[A](weights: Map[A, Double]): Map[A, Double] =
-    val total = weights.values.sum
-    require(total > Eps, "cannot normalize empty or zero-sum weights")
-    weights.view.mapValues(_ / total).toMap
+    normalizeChecked(weights, "cannot normalize empty or zero-sum weights")
 
 /** The result of a Monte Carlo estimation run.
   *
@@ -63,35 +87,3 @@ object MonteCarlo:
     val stderr = math.sqrt(variance / trials)
     Estimate(mean, variance, stderr, trials)
 
-final case class DiscreteDistribution[A](weights: Map[A, Double]):
-  private val Eps = 1e-12
-
-  require(weights.values.forall(_ >= 0.0), "distribution weights must be non-negative")
-
-  def normalized: DiscreteDistribution[A] =
-    val total = weights.values.sum
-    require(total > Eps, "cannot normalize empty or zero-sum distribution")
-    DiscreteDistribution(weights.view.mapValues(_ / total).toMap)
-
-  def probabilityOf(a: A): Double = weights.getOrElse(a, 0.0)
-
-  def support: Set[A] = weights.keySet
-
-  def map[B](f: A => B): DiscreteDistribution[B] =
-    val mapped = weights.toSeq.groupBy { case (a, _) => f(a) }
-      .view
-      .mapValues(_.map(_._2).sum)
-      .toMap
-    DiscreteDistribution(mapped)
-
-  def updateWithLikelihood(likelihood: A => Double): (DiscreteDistribution[A], Double) =
-    val raw = weights.map { case (a, w) => a -> (w * likelihood(a)) }
-    val evidence = raw.values.sum
-    require(evidence > Eps, "likelihoods produce zero evidence")
-    (DiscreteDistribution(raw.view.mapValues(_ / evidence).toMap), evidence)
-
-object DiscreteDistribution:
-  def uniform[A](values: Seq[A]): DiscreteDistribution[A] =
-    require(values.nonEmpty, "uniform distribution requires non-empty support")
-    val p = 1.0 / values.size
-    DiscreteDistribution(values.distinct.map(_ -> p).toMap)

@@ -7,9 +7,8 @@ package sicfun.core
   * All entropy-based quantities are computed in bits (log base 2) unless noted otherwise.
   */
 object CollapseMetrics:
-  /** Guard against log(0) in entropy/divergence calculations. */
-  private val Eps = 1e-12
-  private val Ln2 = math.log(2.0)
+  private inline val Eps = Probability.Eps
+  private inline val Ln2 = 0.6931471805599453 // math.log(2.0), precomputed to avoid runtime call
 
   /** Computes the entropy reduction (information gain) from prior to posterior.
     *

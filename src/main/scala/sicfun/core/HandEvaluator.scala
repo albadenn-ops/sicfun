@@ -36,13 +36,15 @@ final case class HandRank(category: HandCategory, tiebreak: Vector[Int]) extends
 
   /** Element-wise comparison; shorter vectors are "less than" longer ones if all shared elements match. */
   private def lexicographicCompare(a: Vector[Int], b: Vector[Int]): Int =
+    import scala.util.boundary, boundary.break
     val len = math.min(a.length, b.length)
-    var i = 0
-    while i < len do
-      val cmp = a(i).compare(b(i))
-      if cmp != 0 then return cmp
-      i += 1
-    a.length.compare(b.length)
+    boundary:
+      var i = 0
+      while i < len do
+        val cmp = a(i).compare(b(i))
+        if cmp != 0 then break(cmp)
+        i += 1
+      a.length.compare(b.length)
 
 /** Companion providing a given [[Ordering]] instance so HandRank can be used
   * with standard library sort and collection operations.
@@ -223,7 +225,7 @@ object HandEvaluator:
     * @param isFlush true if all 5 cards share the same suit
     * @return the [[HandCategory]] without tiebreak information
     */
-  def categorize5(r0: Int, r1: Int, r2: Int, r3: Int, r4: Int, isFlush: Boolean): HandCategory =
+  inline def categorize5(r0: Int, r1: Int, r2: Int, r3: Int, r4: Int, isFlush: Boolean): HandCategory =
     // Count matching rank-pairs among the 5 cards (C(5,2) = 10 comparisons).
     // matchCount uniquely identifies the frequency pattern:
     //   0 → all distinct   1 → one pair   2 → two pair
@@ -284,11 +286,13 @@ object HandEvaluator:
 
   /** Checks whether a sorted ascending sequence has no gaps (each element = predecessor + 1). */
   private def isConsecutive(sortedAsc: Seq[Int]): Boolean =
-    var i = 0
-    while i < sortedAsc.length - 1 do
-      if sortedAsc(i + 1) != sortedAsc(i) + 1 then return false
-      i += 1
-    true
+    import scala.util.boundary, boundary.break
+    boundary:
+      var i = 0
+      while i < sortedAsc.length - 1 do
+        if sortedAsc(i + 1) != sortedAsc(i) + 1 then break(false)
+        i += 1
+      true
 
   /** Encodes a set of cards into a single Long for use as a cache key.
     *
@@ -298,7 +302,7 @@ object HandEvaluator:
     * into a Long. For 5 cards this uses 30 bits; for 7 cards, 42 bits -- both fit
     * comfortably within a 64-bit Long, avoiding any object allocation for the key.
     */
-  private def keyFor(cards: Seq[Card]): Long =
+  private inline def keyFor(cards: Seq[Card]): Long =
     val ids = new Array[Int](cards.length)
     var i = 0
     cards.foreach { card =>

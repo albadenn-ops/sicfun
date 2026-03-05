@@ -68,7 +68,7 @@ final case class BayesianRange[H](distribution: DiscreteDistribution[H]):
         probabilities(i) = distribution.weights(hypotheses(i))
         i += 1
 
-      val eps = 1e-12
+      val eps = Probability.Eps
       var logEvidence = 0.0
       actions.foreach { case (action, features) =>
         var evidence = 0.0

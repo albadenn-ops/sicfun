@@ -1,7 +1,7 @@
 package sicfun.core
 
 object Metrics:
-  private val Eps = 1e-12
+  private inline val Eps = Probability.Eps
 
   def entropy(probabilities: Iterable[Double], base: Double = 2.0): Double =
     require(base > 0.0 && base != 1.0, "entropy base must be positive and not 1")

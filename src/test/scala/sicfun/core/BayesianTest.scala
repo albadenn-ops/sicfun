@@ -1,52 +1,72 @@
 package sicfun.core
 
 import munit.FunSuite
+import sicfun.holdem.*
 
 class BayesianTest extends FunSuite:
-  private object ToyModel extends ActionModel[String, String, String]:
-    def likelihood(action: String, features: String, hypothesis: String): Double =
-      if hypothesis == "good" then
-        action match
-          case "bet"  => 0.8
-          case "fold" => 0.2
-          case _      => 0.5
-      else
-        action match
-          case "bet"  => 0.3
-          case "fold" => 0.7
-          case _      => 0.5
+  private def card(token: String): Card =
+    Card.parse(token).getOrElse(fail(s"invalid card: $token"))
+
+  private def hole(a: String, b: String): HoleCards =
+    HoleCards.from(Vector(card(a), card(b)))
+
+  private val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
+  private val state = GameState(
+    street = Street.Flop,
+    board = board,
+    pot = 20.0,
+    toCall = 10.0,
+    position = Position.Button,
+    stackSize = 200.0,
+    betHistory = Vector.empty
+  )
+
+  private val strongHand = hole("Ah", "Kh")
+  private val weakHand = hole("7c", "2d")
+
+  // Real production trained model: strongHand → Raise, weakHand → Fold
+  private lazy val trainedModel: PokerActionModel =
+    val data = Seq.fill(30)(Seq(
+      (state, strongHand, PokerAction.Raise(20.0)),
+      (state, weakHand, PokerAction.Fold)
+    )).flatten
+    PokerActionModel.train(data, learningRate = 0.1, iterations = 500)
 
   test("single update shifts probability toward hypothesis consistent with action") {
-    val prior = BayesianRange(DiscreteDistribution(Map("good" -> 0.5, "bad" -> 0.5)))
-    val (posterior, evidence) = prior.update("bet", "ignored", ToyModel)
-    assert(posterior.distribution.probabilityOf("good") > 0.5)
+    val prior = BayesianRange(DiscreteDistribution(Map(strongHand -> 0.5, weakHand -> 0.5)))
+    val (posterior, evidence) = prior.update(PokerAction.Raise(20.0), state, trainedModel)
+    assert(posterior.distribution.probabilityOf(strongHand) > 0.5)
     assert(evidence > 0.0)
   }
 
   test("update preserves normalization") {
-    val prior = BayesianRange(DiscreteDistribution(Map("good" -> 0.5, "bad" -> 0.5)))
-    val (posterior, _) = prior.update("bet", "ignored", ToyModel)
+    val prior = BayesianRange(DiscreteDistribution(Map(strongHand -> 0.5, weakHand -> 0.5)))
+    val (posterior, _) = prior.update(PokerAction.Raise(20.0), state, trainedModel)
     val total = posterior.distribution.weights.values.sum
     assert(math.abs(total - 1.0) < 1e-9)
   }
 
   test("updateAll applies sequential updates and returns log-evidence") {
-    val prior = BayesianRange(DiscreteDistribution(Map("good" -> 0.5, "bad" -> 0.5)))
-    val actions = Seq(("bet", "ignored"), ("bet", "ignored"), ("bet", "ignored"))
-    val (posterior, logEvidence) = prior.updateAll(actions, ToyModel)
-    assert(posterior.distribution.probabilityOf("good") > 0.8)
+    val prior = BayesianRange(DiscreteDistribution(Map(strongHand -> 0.5, weakHand -> 0.5)))
+    val actions = Seq(
+      (PokerAction.Raise(20.0), state),
+      (PokerAction.Raise(20.0), state),
+      (PokerAction.Raise(20.0), state)
+    )
+    val (posterior, logEvidence) = prior.updateAll(actions, trainedModel)
+    assert(posterior.distribution.probabilityOf(strongHand) > 0.8)
     assert(logEvidence < 0.0, "log-evidence should be negative (evidence < 1)")
   }
 
   test("updateAll with empty sequence returns prior unchanged") {
-    val prior = BayesianRange(DiscreteDistribution(Map("good" -> 0.5, "bad" -> 0.5)))
-    val (posterior, logEvidence) = prior.updateAll(Seq.empty, ToyModel)
-    assertEquals(posterior.distribution.probabilityOf("good"), 0.5)
+    val prior = BayesianRange(DiscreteDistribution(Map(strongHand -> 0.5, weakHand -> 0.5)))
+    val (posterior, logEvidence) = prior.updateAll(Seq.empty, trainedModel)
+    assertEquals(posterior.distribution.probabilityOf(strongHand), 0.5)
     assertEquals(logEvidence, 0.0)
   }
 
   test("BayesianRange.uniform creates equal weights") {
-    val range = BayesianRange.uniform(Seq("a", "b", "c"))
+    val range = BayesianRange.uniform(Seq(strongHand, weakHand, hole("Qs", "Jd")))
     val probs = range.distribution.weights.values.toSeq
     probs.foreach(p => assert(math.abs(p - 1.0 / 3.0) < 1e-9))
   }
