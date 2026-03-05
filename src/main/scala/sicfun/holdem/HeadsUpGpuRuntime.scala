@@ -1,20 +1,28 @@
 package sicfun.holdem
 
-import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 
 /** GPU compute abstraction for batch equity computation in heads-up table generation.
   *
+  * ==Thread Safety==
+  * This object is '''thread-safe'''. All mutable state is managed through atomic references
+  * (`AtomicReference[BatchTelemetry]`, `AtomicReference[Boolean]` for packed API support).
+  * Provider selection is derived from immutable system properties/environment variables.
+  * Native library loading is guarded by `lazy val` (JVM-level synchronization).
+  * Multiple threads may call `computeBatch` concurrently; however, note that the
+  * underlying native JNI calls may serialize on the GPU device.
+  *
+  * ==Provider Selection==
   * Supports multiple provider backends, selected via the `sicfun.gpu.provider` system property
   * or `sicfun_GPU_PROVIDER` environment variable:
   *
-  *   - `"native"` (default) — loads a native JNI library (e.g. CUDA kernel) and delegates
+  *   - `"native"` (default) - loads a native JNI library (e.g. CUDA kernel) and delegates
   *     batch computation to the GPU via [[HeadsUpGpuNativeBindings]].
-  *   - `"opencl"` — loads the OpenCL native library for iGPU computation (Monte Carlo only).
-  *   - `"hybrid"` — distributes work across all available devices (CUDA + OpenCL + CPU).
-  *   - `"cpu-emulated"` — runs the same per-matchup computation on the JVM CPU, useful
+  *   - `"opencl"` - loads the OpenCL native library for iGPU computation (Monte Carlo only).
+  *   - `"hybrid"` - distributes work across all available devices (CUDA + OpenCL + CPU).
+  *   - `"cpu-emulated"` - runs the same per-matchup computation on the JVM CPU, useful
   *     for integration testing the GPU code path without actual GPU hardware.
-  *   - `"disabled"` — always returns `Left`, disabling the GPU backend entirely.
+  *   - `"disabled"` - always returns `Left`, disabling the GPU backend entirely.
   *
   * When the GPU backend fails, CPU fallback is available only if explicitly enabled
   * via `sicfun_GPU_FALLBACK_TO_CPU=true` (or `-Dsicfun.gpu.fallbackToCpu=true`).
@@ -53,6 +61,17 @@ object HeadsUpGpuRuntime:
   private val DefaultNativeLibrary = "sicfun_gpu_kernel"
   private val NativePackedIoProperty = "sicfun.gpu.native.packedIo"
   private val NativePackedIoEnv = "sicfun_GPU_NATIVE_PACKED_IO"
+  private val NativePackedExactIoProperty = "sicfun.gpu.native.packedExactIo"
+  private val NativePackedExactIoEnv = "sicfun_GPU_NATIVE_PACKED_EXACT_IO"
+  private val NativeEngineProperty = "sicfun.gpu.native.engine"
+  private val NativeEngineEnv = "sicfun_GPU_NATIVE_ENGINE"
+  private val NativeWarmupProperty = "sicfun.gpu.native.warmup"
+  private val NativeWarmupEnv = "sicfun_GPU_NATIVE_WARMUP"
+  private val NativeWarmupMatchupsProperty = "sicfun.gpu.native.warmupMatchups"
+  private val NativeWarmupMatchupsEnv = "sicfun_GPU_NATIVE_WARMUP_MATCHUPS"
+  private val NativeWarmupTrialsProperty = "sicfun.gpu.native.warmupTrials"
+  private val NativeWarmupTrialsEnv = "sicfun_GPU_NATIVE_WARMUP_TRIALS"
+  private val DefaultWarmupTrials = 8
 
   private val OpenCLPathProperty = "sicfun.opencl.native.path"
   private val OpenCLPathEnv = "sicfun_OPENCL_NATIVE_PATH"
@@ -137,54 +156,29 @@ object HeadsUpGpuRuntime:
     * and delegates batch computation to native code via [[HeadsUpGpuNativeBindings]].
     *
     * Library resolution order:
-    *   1. Explicit path via `sicfun.gpu.native.path` / `sicfun_GPU_NATIVE_PATH` → `System.load(path)`
-    *   2. Library name via `sicfun.gpu.native.lib` / `sicfun_GPU_NATIVE_LIB` → `System.loadLibrary(name)`
-    *   3. Default library name `"sicfun_gpu_kernel"` → `System.loadLibrary("sicfun_gpu_kernel")`
+    *   1. Explicit path via `sicfun.gpu.native.path` / `sicfun_GPU_NATIVE_PATH` - `System.load(path)`
+    *   2. Library name via `sicfun.gpu.native.lib` / `sicfun_GPU_NATIVE_LIB` - `System.loadLibrary(name)`
+    *   3. Default library name `"sicfun_gpu_kernel"` - `System.loadLibrary("sicfun_gpu_kernel")`
     */
   private object NativeJniProvider extends Provider:
     override val id: String = "native"
     private val packedApiSupportRef = new AtomicReference[java.lang.Boolean](null)
+    private val warmupDoneRef = new AtomicReference[java.lang.Boolean](java.lang.Boolean.FALSE)
 
     private lazy val nativeLoadResult: Either[String, String] =
-      val pathOpt =
-        sys.props
-          .get(NativePathProperty)
-          .orElse(sys.env.get(NativePathEnv))
-          .map(_.trim)
-          .filter(_.nonEmpty)
-      val libName =
-        sys.props
-          .get(NativeLibProperty)
-          .orElse(sys.env.get(NativeLibEnv))
-          .map(_.trim)
-          .filter(_.nonEmpty)
-          .getOrElse(DefaultNativeLibrary)
-      pathOpt match
-        case Some(path) =>
-          try
-            System.load(path)
-            Right(s"path=$path")
-          catch
-            case ex: Throwable =>
-              Left(s"failed to load native GPU library '$path': ${ex.getMessage}")
-        case None =>
-          try
-            System.loadLibrary(libName)
-            Right(s"library=$libName")
-          catch
-            case ex: Throwable =>
-              val fallbackCandidates = localNativeFallbackCandidates(libName)
-              tryLoadFirstExistingPath(fallbackCandidates) match
-                case Right(source) =>
-                  Right(source)
-                case Left(fallbackReason) =>
-                  Left(
-                    s"failed to load native GPU library '$libName': ${ex.getMessage}; $fallbackReason"
-                  )
+      GpuRuntimeSupport.loadNativeLibrary(
+        pathProperty = NativePathProperty,
+        pathEnv = NativePathEnv,
+        libProperty = NativeLibProperty,
+        libEnv = NativeLibEnv,
+        defaultLib = DefaultNativeLibrary,
+        label = "native GPU library"
+      )
 
     override def availability: Availability =
       nativeLoadResult match
         case Right(source) =>
+          maybeWarmUpOnAvailability()
           Availability(
             available = true,
             provider = id,
@@ -212,8 +206,19 @@ object HeadsUpGpuRuntime:
               mode match
                 case HeadsUpEquityTable.Mode.Exact => (0, 0)
                 case HeadsUpEquityTable.Mode.MonteCarlo(t) => (1, t)
-            if modeCode == 1 && isPackedIoEnabled then
-              computeBatchPackedFastPath(packedKeys, keyMaterial, trials, monteCarloSeedBase) match
+            if modeCode == 1 && configuredNativeEngine != "cpu" then
+              ensureNativeWarmup(trials, monteCarloSeedBase)
+            val shouldUsePacked =
+              isPackedIoEnabled &&
+                (modeCode == 1 || isPackedExactIoEnabled)
+            if shouldUsePacked then
+              computeBatchPackedFastPath(
+                packedKeys = packedKeys,
+                keyMaterial = keyMaterial,
+                modeCode = modeCode,
+                trials = trials,
+                monteCarloSeedBase = monteCarloSeedBase
+              ) match
                 case Some(result) => result
                 case None => computeBatchLegacyPath(packedKeys, keyMaterial, modeCode, trials, monteCarloSeedBase)
             else
@@ -225,9 +230,95 @@ object HeadsUpGpuRuntime:
             case ex: Throwable =>
               Left(ex.getMessage)
 
+    private def maybeWarmUpOnAvailability(): Unit =
+      if configuredNativeEngine != "cpu" then
+        ensureNativeWarmup(
+          requestedTrials = DefaultWarmupTrials,
+          monteCarloSeedBase = 0x00000000BADC0FFEL
+        )
+
+    private def ensureNativeWarmup(requestedTrials: Int, monteCarloSeedBase: Long): Unit =
+      if !nativeWarmupEnabled then
+        ()
+      else if !warmupDoneRef.compareAndSet(java.lang.Boolean.FALSE, java.lang.Boolean.TRUE) then
+        ()
+      else
+        try
+          val matchups = nativeWarmupMatchups
+          val batch = HeadsUpEquityTable.selectFullBatch(matchups.toLong)
+          val n = batch.packedKeys.length
+          if n <= 0 then
+            ()
+          else
+            val lowIds = new Array[Int](n)
+            val highIds = new Array[Int](n)
+            val seeds = new Array[Long](n)
+            var idx = 0
+            while idx < n do
+              val packed = batch.packedKeys(idx)
+              lowIds(idx) = HeadsUpEquityTable.unpackLowId(packed)
+              highIds(idx) = HeadsUpEquityTable.unpackHighId(packed)
+              seeds(idx) = HeadsUpEquityTable.monteCarloSeed(monteCarloSeedBase, batch.keyMaterial(idx))
+              idx += 1
+
+            val trials = nativeWarmupTrials(requestedTrials)
+            val wins = new Array[Double](n)
+            val ties = new Array[Double](n)
+            val losses = new Array[Double](n)
+            val stderrs = new Array[Double](n)
+            val legacyStatus =
+              HeadsUpGpuNativeBindings.computeBatch(
+                lowIds,
+                highIds,
+                1,
+                trials,
+                seeds,
+                wins,
+                ties,
+                losses,
+                stderrs
+              )
+            if legacyStatus != 0 then
+              GpuRuntimeSupport.log(s"native warmup legacy status=$legacyStatus")
+
+            if isPackedIoEnabled then
+              val packed = new Array[Int](n)
+              idx = 0
+              while idx < n do
+                packed(idx) = batch.packedKeys(idx).toInt
+                idx += 1
+              val winsF = new Array[Float](n)
+              val tiesF = new Array[Float](n)
+              val lossesF = new Array[Float](n)
+              val stderrsF = new Array[Float](n)
+              try
+                val packedStatus =
+                  HeadsUpGpuNativeBindings.computeBatchPacked(
+                    packed,
+                    1,
+                    trials,
+                    monteCarloSeedBase,
+                    batch.keyMaterial,
+                    winsF,
+                    tiesF,
+                    lossesF,
+                    stderrsF
+                  )
+                packedApiSupportRef.compareAndSet(null, java.lang.Boolean.TRUE)
+                if packedStatus != 0 then
+                  GpuRuntimeSupport.log(s"native warmup packed status=$packedStatus")
+              catch
+                case _: UnsatisfiedLinkError =>
+                  packedApiSupportRef.set(java.lang.Boolean.FALSE)
+        catch
+          case ex: Throwable =>
+            val detail = Option(ex.getMessage).filter(_.nonEmpty).getOrElse(ex.getClass.getSimpleName)
+            GpuRuntimeSupport.log(s"native warmup skipped: $detail")
+
     private def computeBatchPackedFastPath(
         packedKeys: Array[Long],
         keyMaterial: Array[Long],
+        modeCode: Int,
         trials: Int,
         monteCarloSeedBase: Long
     ): Option[Either[String, BatchSuccess]] =
@@ -247,7 +338,7 @@ object HeadsUpGpuRuntime:
           val status =
             HeadsUpGpuNativeBindings.computeBatchPacked(
               packed,
-              1,
+              modeCode,
               trials,
               monteCarloSeedBase,
               keyMaterial,
@@ -275,7 +366,13 @@ object HeadsUpGpuRuntime:
               Right(
                 BatchSuccess(
                   out,
-                  detail = Some(s"nativeEngine=$nativeEngine, io=packed-f32-seed-on-device")
+                  detail =
+                    Some(
+                      if modeCode == 0 then
+                        s"nativeEngine=$nativeEngine, io=packed-f32"
+                      else
+                        s"nativeEngine=$nativeEngine, io=packed-f32-seed-on-device"
+                    )
                 )
               )
             )
@@ -330,47 +427,32 @@ object HeadsUpGpuRuntime:
         Right(BatchSuccess(out, detail = Some(s"nativeEngine=$nativeEngine, io=legacy-f64")))
 
     private def isPackedIoEnabled: Boolean =
-      sys.props
-        .get(NativePackedIoProperty)
-        .orElse(sys.env.get(NativePackedIoEnv))
-        .map(parseTruthy)
+      GpuRuntimeSupport.resolveNonEmpty(NativePackedIoProperty, NativePackedIoEnv)
+        .map(GpuRuntimeSupport.parseTruthy)
         .getOrElse(true)
 
-    private def localNativeFallbackCandidates(libName: String): Vector[File] =
-      val userDir = new File(System.getProperty("user.dir", "."))
-      val buildDir = new File(userDir, "src/main/native/build")
-      platformNativeFileNames(libName)
-        .map(name => new File(buildDir, name))
-        .distinct
+    private def isPackedExactIoEnabled: Boolean =
+      GpuRuntimeSupport.resolveNonEmpty(NativePackedExactIoProperty, NativePackedExactIoEnv)
+        .map(GpuRuntimeSupport.parseTruthy)
+        .getOrElse(false)
 
-    private def platformNativeFileNames(libName: String): Vector[String] =
-      val osName = System.getProperty("os.name", "").toLowerCase
-      if osName.contains("win") then
-        Vector(s"$libName.dll")
-      else if osName.contains("mac") then
-        Vector(s"lib$libName.dylib", s"$libName.dylib")
-      else
-        Vector(s"lib$libName.so", s"$libName.so")
+    private def nativeWarmupEnabled: Boolean =
+      GpuRuntimeSupport.resolveNonEmpty(NativeWarmupProperty, NativeWarmupEnv)
+        .map(GpuRuntimeSupport.parseTruthy)
+        .getOrElse(true)
 
-    private def tryLoadFirstExistingPath(candidates: Vector[File]): Either[String, String] =
-      @annotation.tailrec
-      def loop(remaining: List[File], errors: List[String]): Either[String, String] =
-        remaining match
-          case Nil =>
-            Left(s"also tried local native paths: ${errors.reverse.mkString("; ")}")
-          case candidate :: tail =>
-            val absPath = candidate.getAbsolutePath
-            if candidate.isFile then
-              try
-                System.load(absPath)
-                Right(s"path=$absPath")
-              catch
-                case ex: Throwable =>
-                  loop(tail, s"$absPath (${ex.getMessage})" :: errors)
-            else
-              loop(tail, s"$absPath (missing)" :: errors)
+    private def nativeWarmupMatchups: Int =
+      GpuRuntimeSupport.resolveNonEmpty(NativeWarmupMatchupsProperty, NativeWarmupMatchupsEnv)
+        .flatMap(GpuRuntimeSupport.parsePositiveIntOpt)
+        .getOrElse(64)
 
-      loop(candidates.toList, Nil)
+    private def nativeWarmupTrials(requestedTrials: Int): Int =
+      GpuRuntimeSupport.resolveNonEmpty(NativeWarmupTrialsProperty, NativeWarmupTrialsEnv)
+        .flatMap(GpuRuntimeSupport.parsePositiveIntOpt)
+        .getOrElse(math.min(DefaultWarmupTrials, math.max(1, requestedTrials)))
+
+    private def configuredNativeEngine: String =
+      GpuRuntimeSupport.resolveNonEmptyLower(NativeEngineProperty, NativeEngineEnv).getOrElse("cuda")
 
     private def readNativeEngineLabel: String =
       try
@@ -392,49 +474,14 @@ object HeadsUpGpuRuntime:
     override val id: String = "opencl"
 
     private lazy val openclLoadResult: Either[String, String] =
-      val pathOpt =
-        sys.props
-          .get(OpenCLPathProperty)
-          .orElse(sys.env.get(OpenCLPathEnv))
-          .map(_.trim)
-          .filter(_.nonEmpty)
-      val libName =
-        sys.props
-          .get(OpenCLLibProperty)
-          .orElse(sys.env.get(OpenCLLibEnv))
-          .map(_.trim)
-          .filter(_.nonEmpty)
-          .getOrElse(DefaultOpenCLLibrary)
-      pathOpt match
-        case Some(path) =>
-          try
-            System.load(path)
-            Right(s"path=$path")
-          catch
-            case ex: Throwable =>
-              Left(s"failed to load OpenCL native library '$path': ${ex.getMessage}")
-        case None =>
-          try
-            System.loadLibrary(libName)
-            Right(s"library=$libName")
-          catch
-            case ex: Throwable =>
-              val buildDir = new File(System.getProperty("user.dir", "."), "src/main/native/build")
-              val osName = System.getProperty("os.name", "").toLowerCase
-              val dllName =
-                if osName.contains("win") then s"$libName.dll"
-                else if osName.contains("mac") then s"lib$libName.dylib"
-                else s"lib$libName.so"
-              val candidate = new File(buildDir, dllName)
-              if candidate.isFile then
-                try
-                  System.load(candidate.getAbsolutePath)
-                  Right(s"path=${candidate.getAbsolutePath}")
-                catch
-                  case ex2: Throwable =>
-                    Left(s"failed to load OpenCL native library '$libName': ${ex.getMessage}; also tried ${candidate.getAbsolutePath} (${ex2.getMessage})")
-              else
-                Left(s"failed to load OpenCL native library '$libName': ${ex.getMessage}")
+      GpuRuntimeSupport.loadNativeLibrary(
+        pathProperty = OpenCLPathProperty,
+        pathEnv = OpenCLPathEnv,
+        libProperty = OpenCLLibProperty,
+        libEnv = OpenCLLibEnv,
+        defaultLib = DefaultOpenCLLibrary,
+        label = "OpenCL native library"
+      )
 
     override def availability: Availability =
       openclLoadResult match
@@ -503,7 +550,7 @@ object HeadsUpGpuRuntime:
       val devices = HeadsUpHybridDispatcher.devices
       if devices.nonEmpty then
         val summary = devices.map(d => s"${d.id}(${d.name})").mkString(", ")
-        Availability(available = true, provider = id, detail = s"hybrid: ${devices.size} devices — $summary")
+        Availability(available = true, provider = id, detail = s"hybrid: ${devices.size} devices - $summary")
       else
         Availability(available = false, provider = id, detail = "no compute devices discovered")
 
@@ -568,10 +615,8 @@ object HeadsUpGpuRuntime:
     * environment variable. Defaults to `false` (fail-fast on GPU errors).
     */
   def allowCpuFallbackOnGpuFailure: Boolean =
-    sys.props
-      .get(FallbackToCpuProperty)
-      .orElse(sys.env.get(FallbackToCpuEnv))
-      .exists(parseTruthy)
+    GpuRuntimeSupport.resolveNonEmpty(FallbackToCpuProperty, FallbackToCpuEnv)
+      .exists(GpuRuntimeSupport.parseTruthy)
 
   def lastBatchTelemetry: Option[BatchTelemetry] =
     Option(telemetryRef.get())
@@ -607,12 +652,7 @@ object HeadsUpGpuRuntime:
     result.map(_.values)
 
   private def configuredProvider: String =
-    sys.props
-      .get(ProviderProperty)
-      .orElse(sys.env.get(ProviderEnv))
-      .map(_.trim.toLowerCase)
-      .filter(_.nonEmpty)
-      .getOrElse("native")
+    GpuRuntimeSupport.resolveNonEmptyLower(ProviderProperty, ProviderEnv).getOrElse("native")
 
   private def activeProvider: Provider =
     configuredProvider match
@@ -625,38 +665,11 @@ object HeadsUpGpuRuntime:
         telemetryRef.set(BatchTelemetry(provider = other, success = false, detail = s"unknown GPU provider '$other'"))
         DisabledProvider
 
-  private def parseTruthy(raw: String): Boolean =
-    raw.trim.toLowerCase match
-      case "1" | "true" | "yes" | "on" => true
-      case _ => false
-
   /** Maps native JNI status codes to human-readable error descriptions.
     * Status codes 100-127 are JNI/input validation errors; 130+ are CUDA runtime errors.
     */
   private def describeNativeStatus(status: Int): String =
-    val detail =
-      status match
-        case 100 => "null JNI input array"
-        case 101 => "JNI input arrays have mismatched lengths"
-        case 102 => "failed reading JNI input arrays"
-        case 111 => "invalid compute mode code"
-        case 112 => "invalid CSR range layout"
-        case 124 => "failed writing JNI output arrays"
-        case 125 => "invalid hole-card id"
-        case 126 => "invalid monte-carlo trial count"
-        case 127 => "overlapping hole cards in matchup"
-        case 130 => "CUDA device/runtime unavailable"
-        case 131 => "CUDA device allocation failed"
-        case 132 => "CUDA host-to-device transfer failed"
-        case 133 => "CUDA kernel launch failed"
-        case 134 =>
-          "CUDA synchronize failed (likely Windows WDDM/TDR timeout for long kernels; reduce chunk size or trials)"
-        case 135 => "CUDA device-to-host transfer failed"
-        case 136 => "CUDA lookup upload failed"
-        case 137 => "CUDA kernel timed out (Windows WDDM/TDR watchdog)"
-        case 138 => "invalid CUDA device index"
-        case _ => "unknown native status"
-    s"native GPU kernel returned status=$status ($detail)"
+    GpuRuntimeSupport.describeNativeStatus(status)
 
   private def describeNativeEngine(code: Int): String =
     code match
@@ -668,18 +681,7 @@ object HeadsUpGpuRuntime:
       case other => s"unknown(code=$other)"
 
   private def describeOpenCLStatus(status: Int): String =
-    val detail =
-      status match
-        case s if s >= 100 && s <= 127 => describeNativeStatus(s).stripPrefix("native GPU kernel returned ")
-        case 200 => "OpenCL runtime not available (OpenCL.dll not found)"
-        case 201 => "no OpenCL GPU devices found"
-        case 202 => "OpenCL kernel compilation failed"
-        case 203 => "OpenCL buffer allocation failed"
-        case 204 => "OpenCL kernel execution failed"
-        case 205 => "OpenCL result read-back failed"
-        case 206 => "invalid OpenCL device index"
-        case _ => s"unknown OpenCL status ($status)"
-    s"OpenCL kernel returned status=$status ($detail)"
+    GpuRuntimeSupport.describeOpenCLStatus(status)
 
   private def validateBatchShape(packedKeys: Array[Long], keyMaterial: Array[Long]): Unit =
     require(packedKeys.length == keyMaterial.length, "packedKeys and keyMaterial must have equal length")

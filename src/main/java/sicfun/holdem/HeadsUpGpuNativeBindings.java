@@ -74,6 +74,27 @@ public final class HeadsUpGpuNativeBindings {
   );
 
   /**
+   * Computes heads-up equity using the native CPU engine only.
+   *
+   * <p>Unlike {@link #computeBatch}, this method never routes through CUDA and is
+   * safe to use when callers need an explicit CPU baseline while CUDA calls may be
+   * executing in parallel.
+   *
+   * <p>Parameter and status semantics are identical to {@link #computeBatch}.
+   */
+  public static native int computeBatchCpuOnly(
+      int[] lowIds,
+      int[] highIds,
+      int modeCode,
+      int trials,
+      long[] seeds,
+      double[] wins,
+      double[] ties,
+      double[] losses,
+      double[] stderrs
+  );
+
+  /**
    * Returns the engine used by the most recent {@link #computeBatch} call in this
    * native library instance.
    *

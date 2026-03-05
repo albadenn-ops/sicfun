@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -20,8 +21,10 @@
 
 #if defined(__CUDACC__)
 #define HD __host__ __device__
+#define HD_FORCE __host__ __device__ __forceinline__
 #else
 #define HD
+#define HD_FORCE inline
 #endif
 
 namespace {
@@ -34,10 +37,11 @@ constexpr int kHoleCardsCount = 1326;
 constexpr int kRemainingAfterHoleCards = 48;
 constexpr int kBoardCardCount = 5;
 constexpr int kExactBoardCount = 1712304;  // C(48,5)
+constexpr int kAbsoluteBoardCount = 2598960;  // C(52,5)
 constexpr int kCpuWorkChunkSize = 8;
 constexpr int kIdBits = 11;
 constexpr int kIdMask = (1 << kIdBits) - 1;
-constexpr int kDefaultCudaThreadsPerBlock = 128;
+constexpr int kDefaultCudaThreadsPerBlock = 96;
 constexpr int kDefaultRangeCudaThreadsPerBlock = 128;
 constexpr int kDefaultCudaThreadsPerBlockExact = 256;
 constexpr int kDefaultCudaMaxChunkMatchups = 4096;
@@ -49,6 +53,9 @@ constexpr jint kEngineUnknown = 0;
 constexpr jint kEngineCpu = 1;
 constexpr jint kEngineCuda = 2;
 constexpr jint kEngineCpuFallbackAfterCudaFailure = 3;
+constexpr uint32_t kInvalidScoreSentinel = 0xFFFFFFFFu;
+constexpr int kRankPairCount = kRanksPerSuit * kRanksPerSuit;
+constexpr int kRankPatternCount = 6188;  // C(13 + 5 - 1, 5)
 
 struct HoleCards {
   uint8_t first;
@@ -75,6 +82,9 @@ enum class RangeMemoryPath {
 
 __device__ __constant__ uint8_t d_hole_first[kHoleCardsCount];
 __device__ __constant__ uint8_t d_hole_second[kHoleCardsCount];
+__device__ __constant__ uint8_t d_card_rank[kDeckSize];
+__device__ __constant__ uint8_t d_card_suit[kDeckSize];
+__device__ __constant__ uint16_t d_card_rank_bit[kDeckSize];
 std::atomic<jint> g_last_engine_code(kEngineUnknown);
 
 bool check_and_clear_exception(JNIEnv* env) {
@@ -85,12 +95,71 @@ bool check_and_clear_exception(JNIEnv* env) {
   return true;
 }
 
-HD inline int card_rank(const int card_id) {
+HD_FORCE int card_rank(const int card_id) {
+#if defined(__CUDA_ARCH__)
+  return static_cast<int>(d_card_rank[card_id]);
+#else
   return (card_id % kRanksPerSuit) + kMinRankValue;
+#endif
 }
 
-HD inline int card_suit(const int card_id) {
+HD_FORCE int card_suit(const int card_id) {
+#if defined(__CUDA_ARCH__)
+  return static_cast<int>(d_card_suit[card_id]);
+#else
   return card_id / kRanksPerSuit;
+#endif
+}
+
+HD_FORCE uint16_t card_rank_bit(const int card_id) {
+#if defined(__CUDA_ARCH__)
+  return d_card_rank_bit[card_id];
+#else
+  return static_cast<uint16_t>(1) << ((card_id % kRanksPerSuit));
+#endif
+}
+
+HD_FORCE int choose_small(const int n, const int k) {
+  if (k < 0 || k > n) {
+    return 0;
+  }
+  if (k == 0 || k == n) {
+    return 1;
+  }
+  if (k == 1) {
+    return n;
+  }
+  if (k == 2) {
+    return (n * (n - 1)) / 2;
+  }
+  if (k == 3) {
+    return (n * (n - 1) * (n - 2)) / 6;
+  }
+  if (k == 4) {
+    return (n * (n - 1) * (n - 2) * (n - 3)) / 24;
+  }
+  if (k == 5) {
+    return (n * (n - 1) * (n - 2) * (n - 3) * (n - 4)) / 120;
+  }
+  int result = 1;
+  const int kk = k < (n - k) ? k : (n - k);
+  for (int i = 1; i <= kk; ++i) {
+    result = (result * (n - kk + i)) / i;
+  }
+  return result;
+}
+
+HD_FORCE int rank_multiset5_id_from_offsets(const int sorted_rank_offsets[5]) {
+  const int b0 = sorted_rank_offsets[0];
+  const int b1 = sorted_rank_offsets[1] + 1;
+  const int b2 = sorted_rank_offsets[2] + 2;
+  const int b3 = sorted_rank_offsets[3] + 3;
+  const int b4 = sorted_rank_offsets[4] + 4;
+  return choose_small(b0, 1) +
+         choose_small(b1, 2) +
+         choose_small(b2, 3) +
+         choose_small(b3, 4) +
+         choose_small(b4, 5);
 }
 
 const std::vector<HoleCards>& hole_cards_lookup() {
@@ -120,9 +189,19 @@ bool ensure_cuda_lookup_uploaded_for_device(const int device) {
   const auto& lookup = hole_cards_lookup();
   std::vector<uint8_t> first(kHoleCardsCount);
   std::vector<uint8_t> second(kHoleCardsCount);
+  std::vector<uint8_t> card_rank_lookup(kDeckSize);
+  std::vector<uint8_t> card_suit_lookup(kDeckSize);
+  std::vector<uint16_t> card_rank_bit_lookup(kDeckSize);
   for (int i = 0; i < kHoleCardsCount; ++i) {
     first[static_cast<size_t>(i)] = lookup[static_cast<size_t>(i)].first;
     second[static_cast<size_t>(i)] = lookup[static_cast<size_t>(i)].second;
+  }
+  for (int card = 0; card < kDeckSize; ++card) {
+    const int rank = (card % kRanksPerSuit) + kMinRankValue;
+    card_rank_lookup[static_cast<size_t>(card)] = static_cast<uint8_t>(rank);
+    card_suit_lookup[static_cast<size_t>(card)] = static_cast<uint8_t>(card / kRanksPerSuit);
+    card_rank_bit_lookup[static_cast<size_t>(card)] =
+        static_cast<uint16_t>(1) << static_cast<uint16_t>(rank - kMinRankValue);
   }
   cudaError_t err = cudaMemcpyToSymbol(d_hole_first, first.data(), first.size() * sizeof(uint8_t));
   if (err != cudaSuccess) {
@@ -132,7 +211,68 @@ bool ensure_cuda_lookup_uploaded_for_device(const int device) {
   if (err != cudaSuccess) {
     return false;
   }
+  err = cudaMemcpyToSymbol(d_card_rank, card_rank_lookup.data(), card_rank_lookup.size() * sizeof(uint8_t));
+  if (err != cudaSuccess) {
+    return false;
+  }
+  err = cudaMemcpyToSymbol(d_card_suit, card_suit_lookup.data(), card_suit_lookup.size() * sizeof(uint8_t));
+  if (err != cudaSuccess) {
+    return false;
+  }
+  err = cudaMemcpyToSymbol(
+      d_card_rank_bit,
+      card_rank_bit_lookup.data(),
+      card_rank_bit_lookup.size() * sizeof(uint16_t));
+  if (err != cudaSuccess) {
+    return false;
+  }
   initialized_devices.insert(device);
+  return true;
+}
+
+bool ensure_cuda_hole_cards_uploaded_for_device(const int device, const uint32_t** out_device_ptr) {
+  static std::mutex init_mutex;
+  static std::unordered_map<int, uint32_t*> per_device_table;
+
+  std::lock_guard<std::mutex> guard(init_mutex);
+  const auto found = per_device_table.find(device);
+  if (found != per_device_table.end()) {
+    *out_device_ptr = found->second;
+    return true;
+  }
+
+  const auto& lookup = hole_cards_lookup();
+  std::vector<uint32_t> packed_pairs(kHoleCardsCount);
+  for (int i = 0; i < kHoleCardsCount; ++i) {
+    const uint32_t first = static_cast<uint32_t>(lookup[static_cast<size_t>(i)].first);
+    const uint32_t second = static_cast<uint32_t>(lookup[static_cast<size_t>(i)].second);
+    const uint32_t first_rank = first % static_cast<uint32_t>(kRanksPerSuit);
+    const uint32_t second_rank = second % static_cast<uint32_t>(kRanksPerSuit);
+    const uint32_t first_suit = first / static_cast<uint32_t>(kRanksPerSuit);
+    const uint32_t second_suit = second / static_cast<uint32_t>(kRanksPerSuit);
+    packed_pairs[static_cast<size_t>(i)] =
+        (first & 0x3Fu) |
+        ((second & 0x3Fu) << 6) |
+        ((first_rank & 0x0Fu) << 12) |
+        ((second_rank & 0x0Fu) << 16) |
+        ((first_suit & 0x03u) << 20) |
+        ((second_suit & 0x03u) << 22);
+  }
+
+  uint32_t* device_table = nullptr;
+  const size_t bytes = packed_pairs.size() * sizeof(uint32_t);
+  cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&device_table), bytes);
+  if (err != cudaSuccess) {
+    return false;
+  }
+  err = cudaMemcpy(device_table, packed_pairs.data(), bytes, cudaMemcpyHostToDevice);
+  if (err != cudaSuccess) {
+    cudaFree(device_table);
+    return false;
+  }
+
+  per_device_table.insert({device, device_table});
+  *out_device_ptr = device_table;
   return true;
 }
 
@@ -189,6 +329,166 @@ bool ensure_cuda_exact_board_indices_uploaded_for_device(const int device, const
   return true;
 }
 
+const std::vector<uint8_t>& absolute_board_cards() {
+  static const std::vector<uint8_t> boards = [] {
+    std::vector<uint8_t> out;
+    out.reserve(static_cast<size_t>(kAbsoluteBoardCount) * static_cast<size_t>(kBoardCardCount));
+    for (int a = 0; a <= (kDeckSize - 5); ++a) {
+      for (int b = a + 1; b <= (kDeckSize - 4); ++b) {
+        for (int c = b + 1; c <= (kDeckSize - 3); ++c) {
+          for (int d = c + 1; d <= (kDeckSize - 2); ++d) {
+            for (int e = d + 1; e <= (kDeckSize - 1); ++e) {
+              out.push_back(static_cast<uint8_t>(a));
+              out.push_back(static_cast<uint8_t>(b));
+              out.push_back(static_cast<uint8_t>(c));
+              out.push_back(static_cast<uint8_t>(d));
+              out.push_back(static_cast<uint8_t>(e));
+            }
+          }
+        }
+      }
+    }
+    return out;
+  }();
+  return boards;
+}
+
+bool ensure_cuda_absolute_board_cards_uploaded_for_device(const int device, const uint8_t** out_device_ptr) {
+  static std::mutex init_mutex;
+  static std::unordered_map<int, uint8_t*> per_device_table;
+
+  std::lock_guard<std::mutex> guard(init_mutex);
+  const auto found = per_device_table.find(device);
+  if (found != per_device_table.end()) {
+    *out_device_ptr = found->second;
+    return true;
+  }
+
+  const auto& host_table = absolute_board_cards();
+  uint8_t* device_table = nullptr;
+  const size_t bytes = host_table.size() * sizeof(uint8_t);
+  cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&device_table), bytes);
+  if (err != cudaSuccess) {
+    return false;
+  }
+  err = cudaMemcpy(device_table, host_table.data(), bytes, cudaMemcpyHostToDevice);
+  if (err != cudaSuccess) {
+    cudaFree(device_table);
+    return false;
+  }
+
+  per_device_table.insert({device, device_table});
+  *out_device_ptr = device_table;
+  return true;
+}
+
+struct AbsoluteBoardMetadata {
+  std::vector<uint16_t> rank_pattern_ids;
+  std::vector<uint8_t> flush_meta;
+};
+
+const AbsoluteBoardMetadata& absolute_board_metadata() {
+  static const AbsoluteBoardMetadata metadata = [] {
+    AbsoluteBoardMetadata out;
+    const auto& boards = absolute_board_cards();
+    out.rank_pattern_ids.resize(static_cast<size_t>(kAbsoluteBoardCount));
+    out.flush_meta.resize(static_cast<size_t>(kAbsoluteBoardCount));
+    for (int board_idx = 0; board_idx < kAbsoluteBoardCount; ++board_idx) {
+      const int base = board_idx * kBoardCardCount;
+      uint8_t rank_counts[kMaxRankValue + 1];
+      for (int rank = 0; rank <= kMaxRankValue; ++rank) {
+        rank_counts[rank] = static_cast<uint8_t>(0);
+      }
+      uint8_t suit_counts[4] = {0, 0, 0, 0};
+      for (int i = 0; i < kBoardCardCount; ++i) {
+        const int card = static_cast<int>(boards[static_cast<size_t>(base + i)]);
+        const int rank = card_rank(card);
+        const int suit = card_suit(card);
+        ++rank_counts[rank];
+        ++suit_counts[suit];
+      }
+      int sorted_offsets[5] = {0, 0, 0, 0, 0};
+      int sorted_idx = 0;
+      for (int rank_offset = 0; rank_offset < kRanksPerSuit; ++rank_offset) {
+        const int rank = rank_offset + kMinRankValue;
+        const int count = static_cast<int>(rank_counts[rank]);
+        for (int copy = 0; copy < count && sorted_idx < 5; ++copy) {
+          sorted_offsets[sorted_idx++] = rank_offset;
+        }
+      }
+      int pattern_id = 0;
+      if (sorted_idx == 5) {
+        const int id = rank_multiset5_id_from_offsets(sorted_offsets);
+        if (id >= 0 && id < kRankPatternCount) {
+          pattern_id = id;
+        }
+      }
+      int max_suit_count = 0;
+      int max_suit_index = 0;
+      for (int suit = 0; suit < 4; ++suit) {
+        const int count = static_cast<int>(suit_counts[suit]);
+        if (count > max_suit_count) {
+          max_suit_count = count;
+          max_suit_index = suit;
+        }
+      }
+      out.rank_pattern_ids[static_cast<size_t>(board_idx)] = static_cast<uint16_t>(pattern_id);
+      out.flush_meta[static_cast<size_t>(board_idx)] =
+          static_cast<uint8_t>((max_suit_index & 0x03) | ((max_suit_count & 0x07) << 2));
+    }
+    return out;
+  }();
+  return metadata;
+}
+
+bool ensure_cuda_absolute_board_metadata_uploaded_for_device(
+    const int device,
+    const uint16_t** out_rank_pattern_ids,
+    const uint8_t** out_flush_meta) {
+  static std::mutex init_mutex;
+  static std::unordered_map<int, std::pair<uint16_t*, uint8_t*>> per_device_table;
+
+  std::lock_guard<std::mutex> guard(init_mutex);
+  const auto found = per_device_table.find(device);
+  if (found != per_device_table.end()) {
+    *out_rank_pattern_ids = found->second.first;
+    *out_flush_meta = found->second.second;
+    return true;
+  }
+
+  const auto& metadata = absolute_board_metadata();
+  uint16_t* d_pattern_ids = nullptr;
+  uint8_t* d_flush_meta = nullptr;
+  const size_t pattern_bytes = metadata.rank_pattern_ids.size() * sizeof(uint16_t);
+  const size_t flush_bytes = metadata.flush_meta.size() * sizeof(uint8_t);
+  cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&d_pattern_ids), pattern_bytes);
+  if (err != cudaSuccess) {
+    return false;
+  }
+  err = cudaMalloc(reinterpret_cast<void**>(&d_flush_meta), flush_bytes);
+  if (err != cudaSuccess) {
+    cudaFree(d_pattern_ids);
+    return false;
+  }
+  err = cudaMemcpy(d_pattern_ids, metadata.rank_pattern_ids.data(), pattern_bytes, cudaMemcpyHostToDevice);
+  if (err != cudaSuccess) {
+    cudaFree(d_pattern_ids);
+    cudaFree(d_flush_meta);
+    return false;
+  }
+  err = cudaMemcpy(d_flush_meta, metadata.flush_meta.data(), flush_bytes, cudaMemcpyHostToDevice);
+  if (err != cudaSuccess) {
+    cudaFree(d_pattern_ids);
+    cudaFree(d_flush_meta);
+    return false;
+  }
+
+  per_device_table.insert({device, {d_pattern_ids, d_flush_meta}});
+  *out_rank_pattern_ids = d_pattern_ids;
+  *out_flush_meta = d_flush_meta;
+  return true;
+}
+
 HD inline uint32_t encode_score(const int category, const int* tiebreak, const int tiebreak_size) {
   uint32_t score = static_cast<uint32_t>(category) << 24;
   for (int i = 0; i < tiebreak_size && i < 5; ++i) {
@@ -197,43 +497,66 @@ HD inline uint32_t encode_score(const int category, const int* tiebreak, const i
   return score;
 }
 
-HD inline int straight_high_from_rank_mask(const uint16_t rank_mask) {
-  for (int high = kMaxRankValue; high >= 6; --high) {
-    const uint16_t window = static_cast<uint16_t>(0x1F) << (high - 6);
-    if ((rank_mask & window) == window) {
-      return high;
+HD_FORCE int highest_bit_index_16(const uint16_t mask) {
+  if (mask == 0) {
+    return -1;
+  }
+#if defined(__CUDA_ARCH__)
+  return 31 - __clz(static_cast<unsigned int>(mask));
+#else
+  for (int bit = 15; bit >= 0; --bit) {
+    if ((mask & (static_cast<uint16_t>(1) << bit)) != 0) {
+      return bit;
     }
+  }
+  return -1;
+#endif
+}
+
+HD_FORCE int popcount_16(const uint16_t mask) {
+#if defined(__CUDA_ARCH__)
+  return __popc(static_cast<unsigned int>(mask));
+#else
+  int count = 0;
+  uint16_t value = mask;
+  while (value != 0) {
+    value = static_cast<uint16_t>(value & static_cast<uint16_t>(value - 1));
+    ++count;
+  }
+  return count;
+#endif
+}
+
+HD_FORCE int highest_rank_from_mask(const uint16_t mask) {
+  const int bit = highest_bit_index_16(mask);
+  return bit >= 0 ? (bit + kMinRankValue) : 0;
+}
+
+HD inline int straight_high_from_rank_mask(const uint16_t rank_mask) {
+  const uint16_t run = static_cast<uint16_t>(
+      rank_mask &
+      static_cast<uint16_t>(rank_mask >> 1) &
+      static_cast<uint16_t>(rank_mask >> 2) &
+      static_cast<uint16_t>(rank_mask >> 3) &
+      static_cast<uint16_t>(rank_mask >> 4));
+  const int start_bit = highest_bit_index_16(run);
+  if (start_bit >= 0) {
+    return start_bit + 6;
   }
   const uint16_t wheel_mask =
       (static_cast<uint16_t>(1) << 12) | (static_cast<uint16_t>(1) << 3) |
       (static_cast<uint16_t>(1) << 2) | (static_cast<uint16_t>(1) << 1) |
       (static_cast<uint16_t>(1) << 0);
-  if ((rank_mask & wheel_mask) == wheel_mask) {
-    return 5;
-  }
-  return 0;
+  return ((rank_mask & wheel_mask) == wheel_mask) ? 5 : 0;
 }
 
-HD uint32_t evaluate7_score(const int cards[7]) {
-  int rank_counts[kMaxRankValue + 1];
-  for (int rank = 0; rank <= kMaxRankValue; ++rank) {
-    rank_counts[rank] = 0;
-  }
-
-  int suit_counts[4] = {0, 0, 0, 0};
-  uint16_t rank_mask = 0;
-  uint16_t suit_rank_mask[4] = {0, 0, 0, 0};
-
-  for (int i = 0; i < 7; ++i) {
-    const int rank = card_rank(cards[i]);
-    const int suit = card_suit(cards[i]);
-    ++rank_counts[rank];
-    ++suit_counts[suit];
-    const uint16_t bit = static_cast<uint16_t>(1) << (rank - kMinRankValue);
-    rank_mask |= bit;
-    suit_rank_mask[suit] |= bit;
-  }
-
+HD uint32_t evaluate7_score_from_masks(
+    const uint16_t rank_mask,
+    const uint16_t pair_mask,
+    const uint16_t trip_mask,
+    const uint16_t quad_mask,
+    const uint8_t suit_counts[4],
+    const uint16_t suit_rank_mask[4]) {
   int flush_suit = -1;
   for (int suit = 0; suit < 4; ++suit) {
     if (suit_counts[suit] >= 5) {
@@ -243,7 +566,6 @@ HD uint32_t evaluate7_score(const int cards[7]) {
   }
 
   int tiebreak[5] = {0, 0, 0, 0, 0};
-
   if (flush_suit >= 0) {
     const int straight_flush_high = straight_high_from_rank_mask(suit_rank_mask[flush_suit]);
     if (straight_flush_high > 0) {
@@ -252,60 +574,36 @@ HD uint32_t evaluate7_score(const int cards[7]) {
     }
   }
 
-  int quad_rank = 0;
-  int trip1 = 0;
-  int trip2 = 0;
-  int pair1 = 0;
-  int pair2 = 0;
-
-  for (int rank = kMaxRankValue; rank >= kMinRankValue; --rank) {
-    const int count = rank_counts[rank];
-    if (count == 4) {
-      quad_rank = rank;
-    } else if (count == 3) {
-      if (trip1 == 0) {
-        trip1 = rank;
-      } else {
-        trip2 = rank;
-      }
-    } else if (count == 2) {
-      if (pair1 == 0) {
-        pair1 = rank;
-      } else {
-        pair2 = rank;
-      }
-    }
-  }
-
-  if (quad_rank > 0) {
-    int kicker = 0;
-    for (int rank = kMaxRankValue; rank >= kMinRankValue; --rank) {
-      if (rank != quad_rank && rank_counts[rank] > 0) {
-        kicker = rank;
-        break;
-      }
-    }
+  if (quad_mask != 0) {
+    const int quad_rank = highest_rank_from_mask(quad_mask);
+    const uint16_t quad_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(quad_rank - kMinRankValue);
+    const int kicker = highest_rank_from_mask(static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~quad_bit)));
     tiebreak[0] = quad_rank;
     tiebreak[1] = kicker;
     return encode_score(7, tiebreak, 2);  // FourOfKind
   }
 
-  if (trip1 > 0) {
-    const int full_house_pair = (trip2 > 0) ? trip2 : pair1;
-    if (full_house_pair > 0) {
-      tiebreak[0] = trip1;
-      tiebreak[1] = full_house_pair;
+  if (trip_mask != 0) {
+    const int top_trip_rank = highest_rank_from_mask(trip_mask);
+    const uint16_t top_trip_bit =
+        static_cast<uint16_t>(1) << static_cast<uint16_t>(top_trip_rank - kMinRankValue);
+    const uint16_t other_trips = static_cast<uint16_t>(trip_mask & static_cast<uint16_t>(~top_trip_bit));
+    const uint16_t full_house_candidates =
+        other_trips != 0 ? other_trips : static_cast<uint16_t>(pair_mask & static_cast<uint16_t>(~top_trip_bit));
+    if (full_house_candidates != 0) {
+      tiebreak[0] = top_trip_rank;
+      tiebreak[1] = highest_rank_from_mask(full_house_candidates);
       return encode_score(6, tiebreak, 2);  // FullHouse
     }
   }
 
   if (flush_suit >= 0) {
-    int idx = 0;
-    for (int rank = kMaxRankValue; rank >= kMinRankValue && idx < 5; --rank) {
-      const uint16_t bit = static_cast<uint16_t>(1) << (rank - kMinRankValue);
-      if ((suit_rank_mask[flush_suit] & bit) != 0) {
-        tiebreak[idx++] = rank;
-      }
+    uint16_t mask = suit_rank_mask[flush_suit];
+    for (int idx = 0; idx < 5; ++idx) {
+      const int rank = highest_rank_from_mask(mask);
+      tiebreak[idx] = rank;
+      const uint16_t bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(rank - kMinRankValue);
+      mask = static_cast<uint16_t>(mask & static_cast<uint16_t>(~bit));
     }
     return encode_score(5, tiebreak, 5);  // Flush
   }
@@ -316,49 +614,328 @@ HD uint32_t evaluate7_score(const int cards[7]) {
     return encode_score(4, tiebreak, 1);  // Straight
   }
 
-  if (trip1 > 0) {
-    int kick_idx = 1;
-    for (int rank = kMaxRankValue; rank >= kMinRankValue && kick_idx < 3; --rank) {
-      if (rank != trip1 && rank_counts[rank] > 0) {
-        tiebreak[kick_idx++] = rank;
-      }
-    }
-    tiebreak[0] = trip1;
+  if (trip_mask != 0) {
+    const int trip_rank = highest_rank_from_mask(trip_mask);
+    const uint16_t trip_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(trip_rank - kMinRankValue);
+    uint16_t kick_mask = static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~trip_bit));
+    tiebreak[0] = trip_rank;
+    tiebreak[1] = highest_rank_from_mask(kick_mask);
+    kick_mask = static_cast<uint16_t>(
+        kick_mask & static_cast<uint16_t>(~(static_cast<uint16_t>(1) << static_cast<uint16_t>(tiebreak[1] - kMinRankValue))));
+    tiebreak[2] = highest_rank_from_mask(kick_mask);
     return encode_score(3, tiebreak, 3);  // ThreeOfKind
   }
 
-  if (pair1 > 0 && pair2 > 0) {
-    int kicker = 0;
-    for (int rank = kMaxRankValue; rank >= kMinRankValue; --rank) {
-      if (rank != pair1 && rank != pair2 && rank_counts[rank] > 0) {
-        kicker = rank;
-        break;
-      }
-    }
-    tiebreak[0] = pair1;
-    tiebreak[1] = pair2;
+  if (popcount_16(pair_mask) >= 2) {
+    const int high_pair = highest_rank_from_mask(pair_mask);
+    const uint16_t high_pair_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(high_pair - kMinRankValue);
+    const uint16_t remaining_pairs = static_cast<uint16_t>(pair_mask & static_cast<uint16_t>(~high_pair_bit));
+    const int low_pair = highest_rank_from_mask(remaining_pairs);
+    const uint16_t low_pair_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(low_pair - kMinRankValue);
+    const int kicker = highest_rank_from_mask(
+        static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~(high_pair_bit | low_pair_bit))));
+    tiebreak[0] = high_pair;
+    tiebreak[1] = low_pair;
     tiebreak[2] = kicker;
     return encode_score(2, tiebreak, 3);  // TwoPair
   }
 
-  if (pair1 > 0) {
-    int kick_idx = 1;
-    for (int rank = kMaxRankValue; rank >= kMinRankValue && kick_idx < 4; --rank) {
-      if (rank != pair1 && rank_counts[rank] > 0) {
-        tiebreak[kick_idx++] = rank;
-      }
-    }
-    tiebreak[0] = pair1;
+  if (pair_mask != 0) {
+    const int pair_rank = highest_rank_from_mask(pair_mask);
+    const uint16_t pair_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(pair_rank - kMinRankValue);
+    uint16_t kick_mask = static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~pair_bit));
+    tiebreak[0] = pair_rank;
+    tiebreak[1] = highest_rank_from_mask(kick_mask);
+    kick_mask = static_cast<uint16_t>(
+        kick_mask & static_cast<uint16_t>(~(static_cast<uint16_t>(1) << static_cast<uint16_t>(tiebreak[1] - kMinRankValue))));
+    tiebreak[2] = highest_rank_from_mask(kick_mask);
+    kick_mask = static_cast<uint16_t>(
+        kick_mask & static_cast<uint16_t>(~(static_cast<uint16_t>(1) << static_cast<uint16_t>(tiebreak[2] - kMinRankValue))));
+    tiebreak[3] = highest_rank_from_mask(kick_mask);
     return encode_score(1, tiebreak, 4);  // OnePair
   }
 
-  int idx = 0;
-  for (int rank = kMaxRankValue; rank >= kMinRankValue && idx < 5; --rank) {
-    if (rank_counts[rank] > 0) {
-      tiebreak[idx++] = rank;
-    }
+  uint16_t mask = rank_mask;
+  for (int idx = 0; idx < 5; ++idx) {
+    const int rank = highest_rank_from_mask(mask);
+    tiebreak[idx] = rank;
+    const uint16_t bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(rank - kMinRankValue);
+    mask = static_cast<uint16_t>(mask & static_cast<uint16_t>(~bit));
   }
   return encode_score(0, tiebreak, 5);  // HighCard
+}
+
+HD uint32_t evaluate7_score_rank_only(
+    const uint16_t rank_mask,
+    const uint16_t pair_mask,
+    const uint16_t trip_mask,
+    const uint16_t quad_mask) {
+  int tiebreak[5] = {0, 0, 0, 0, 0};
+
+  if (quad_mask != 0) {
+    const int quad_rank = highest_rank_from_mask(quad_mask);
+    const uint16_t quad_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(quad_rank - kMinRankValue);
+    const int kicker = highest_rank_from_mask(static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~quad_bit)));
+    tiebreak[0] = quad_rank;
+    tiebreak[1] = kicker;
+    return encode_score(7, tiebreak, 2);  // FourOfKind
+  }
+
+  if (trip_mask != 0) {
+    const int top_trip_rank = highest_rank_from_mask(trip_mask);
+    const uint16_t top_trip_bit =
+        static_cast<uint16_t>(1) << static_cast<uint16_t>(top_trip_rank - kMinRankValue);
+    const uint16_t other_trips = static_cast<uint16_t>(trip_mask & static_cast<uint16_t>(~top_trip_bit));
+    const uint16_t full_house_candidates =
+        other_trips != 0 ? other_trips : static_cast<uint16_t>(pair_mask & static_cast<uint16_t>(~top_trip_bit));
+    if (full_house_candidates != 0) {
+      tiebreak[0] = top_trip_rank;
+      tiebreak[1] = highest_rank_from_mask(full_house_candidates);
+      return encode_score(6, tiebreak, 2);  // FullHouse
+    }
+  }
+
+  const int straight_high = straight_high_from_rank_mask(rank_mask);
+  if (straight_high > 0) {
+    tiebreak[0] = straight_high;
+    return encode_score(4, tiebreak, 1);  // Straight
+  }
+
+  if (trip_mask != 0) {
+    const int trip_rank = highest_rank_from_mask(trip_mask);
+    const uint16_t trip_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(trip_rank - kMinRankValue);
+    uint16_t kick_mask = static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~trip_bit));
+    tiebreak[0] = trip_rank;
+    tiebreak[1] = highest_rank_from_mask(kick_mask);
+    kick_mask = static_cast<uint16_t>(
+        kick_mask & static_cast<uint16_t>(~(static_cast<uint16_t>(1) << static_cast<uint16_t>(tiebreak[1] - kMinRankValue))));
+    tiebreak[2] = highest_rank_from_mask(kick_mask);
+    return encode_score(3, tiebreak, 3);  // ThreeOfKind
+  }
+
+  if (popcount_16(pair_mask) >= 2) {
+    const int high_pair = highest_rank_from_mask(pair_mask);
+    const uint16_t high_pair_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(high_pair - kMinRankValue);
+    const uint16_t remaining_pairs = static_cast<uint16_t>(pair_mask & static_cast<uint16_t>(~high_pair_bit));
+    const int low_pair = highest_rank_from_mask(remaining_pairs);
+    const uint16_t low_pair_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(low_pair - kMinRankValue);
+    const int kicker = highest_rank_from_mask(
+        static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~(high_pair_bit | low_pair_bit))));
+    tiebreak[0] = high_pair;
+    tiebreak[1] = low_pair;
+    tiebreak[2] = kicker;
+    return encode_score(2, tiebreak, 3);  // TwoPair
+  }
+
+  if (pair_mask != 0) {
+    const int pair_rank = highest_rank_from_mask(pair_mask);
+    const uint16_t pair_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(pair_rank - kMinRankValue);
+    uint16_t kick_mask = static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~pair_bit));
+    tiebreak[0] = pair_rank;
+    tiebreak[1] = highest_rank_from_mask(kick_mask);
+    kick_mask = static_cast<uint16_t>(
+        kick_mask & static_cast<uint16_t>(~(static_cast<uint16_t>(1) << static_cast<uint16_t>(tiebreak[1] - kMinRankValue))));
+    tiebreak[2] = highest_rank_from_mask(kick_mask);
+    kick_mask = static_cast<uint16_t>(
+        kick_mask & static_cast<uint16_t>(~(static_cast<uint16_t>(1) << static_cast<uint16_t>(tiebreak[2] - kMinRankValue))));
+    tiebreak[3] = highest_rank_from_mask(kick_mask);
+    return encode_score(1, tiebreak, 4);  // OnePair
+  }
+
+  uint16_t mask = rank_mask;
+  for (int idx = 0; idx < 5; ++idx) {
+    const int rank = highest_rank_from_mask(mask);
+    tiebreak[idx] = rank;
+    const uint16_t bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(rank - kMinRankValue);
+    mask = static_cast<uint16_t>(mask & static_cast<uint16_t>(~bit));
+  }
+  return encode_score(0, tiebreak, 5);  // HighCard
+}
+
+HD uint32_t evaluate7_score_from_state(
+    const uint8_t rank_counts[kMaxRankValue + 1],
+    const uint8_t suit_counts[4],
+    const uint16_t rank_mask,
+    const uint16_t suit_rank_mask[4]) {
+  uint16_t pair_mask = 0;
+  uint16_t trip_mask = 0;
+  uint16_t quad_mask = 0;
+  for (int rank = kMinRankValue; rank <= kMaxRankValue; ++rank) {
+    const uint8_t count = rank_counts[rank];
+    const uint16_t bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(rank - kMinRankValue);
+    if (count >= 2) {
+      pair_mask = static_cast<uint16_t>(pair_mask | bit);
+    }
+    if (count >= 3) {
+      trip_mask = static_cast<uint16_t>(trip_mask | bit);
+    }
+    if (count == 4) {
+      quad_mask = static_cast<uint16_t>(quad_mask | bit);
+    }
+  }
+  return evaluate7_score_from_masks(
+      rank_mask,
+      pair_mask,
+      trip_mask,
+      quad_mask,
+      suit_counts,
+      suit_rank_mask);
+}
+
+HD uint32_t evaluate7_score(const int cards[7]) {
+  uint8_t rank_counts[kMaxRankValue + 1];
+  for (int rank = 0; rank <= kMaxRankValue; ++rank) {
+    rank_counts[rank] = static_cast<uint8_t>(0);
+  }
+  uint8_t suit_counts[4] = {0, 0, 0, 0};
+  uint16_t rank_mask = 0;
+  uint16_t suit_rank_mask[4] = {0, 0, 0, 0};
+
+  for (int i = 0; i < 7; ++i) {
+    const int rank = card_rank(cards[i]);
+    const int suit = card_suit(cards[i]);
+    ++rank_counts[rank];
+    ++suit_counts[suit];
+    const uint16_t bit = card_rank_bit(cards[i]);
+    rank_mask |= bit;
+    suit_rank_mask[suit] |= bit;
+  }
+  return evaluate7_score_from_state(rank_counts, suit_counts, rank_mask, suit_rank_mask);
+}
+
+const std::vector<uint32_t>& rank_pattern_rankpair_scores() {
+  static const std::vector<uint32_t> table = [] {
+    std::vector<uint32_t> out(
+        static_cast<size_t>(kRankPatternCount) * static_cast<size_t>(kRankPairCount),
+        0U);
+    std::vector<uint8_t> seen(static_cast<size_t>(kRankPatternCount), static_cast<uint8_t>(0));
+    for (int r0 = 0; r0 < kRanksPerSuit; ++r0) {
+      for (int r1 = r0; r1 < kRanksPerSuit; ++r1) {
+        for (int r2 = r1; r2 < kRanksPerSuit; ++r2) {
+          for (int r3 = r2; r3 < kRanksPerSuit; ++r3) {
+            for (int r4 = r3; r4 < kRanksPerSuit; ++r4) {
+              const int offsets[5] = {r0, r1, r2, r3, r4};
+              const int pattern_id = rank_multiset5_id_from_offsets(offsets);
+              if (pattern_id < 0 || pattern_id >= kRankPatternCount) {
+                continue;
+              }
+              seen[static_cast<size_t>(pattern_id)] = static_cast<uint8_t>(1);
+
+              uint8_t board_rank_counts[kMaxRankValue + 1];
+              for (int rank = 0; rank <= kMaxRankValue; ++rank) {
+                board_rank_counts[rank] = static_cast<uint8_t>(0);
+              }
+              ++board_rank_counts[r0 + kMinRankValue];
+              ++board_rank_counts[r1 + kMinRankValue];
+              ++board_rank_counts[r2 + kMinRankValue];
+              ++board_rank_counts[r3 + kMinRankValue];
+              ++board_rank_counts[r4 + kMinRankValue];
+
+              uint16_t board_rank_mask = 0;
+              uint16_t board_pair_mask = 0;
+              uint16_t board_trip_mask = 0;
+              uint16_t board_quad_mask = 0;
+              for (int rank = kMinRankValue; rank <= kMaxRankValue; ++rank) {
+                const uint8_t count = board_rank_counts[rank];
+                if (count == 0) {
+                  continue;
+                }
+                const uint16_t bit =
+                    static_cast<uint16_t>(1) << static_cast<uint16_t>(rank - kMinRankValue);
+                board_rank_mask = static_cast<uint16_t>(board_rank_mask | bit);
+                if (count >= 2) {
+                  board_pair_mask = static_cast<uint16_t>(board_pair_mask | bit);
+                }
+                if (count >= 3) {
+                  board_trip_mask = static_cast<uint16_t>(board_trip_mask | bit);
+                }
+                if (count == 4) {
+                  board_quad_mask = static_cast<uint16_t>(board_quad_mask | bit);
+                }
+              }
+
+              const size_t base =
+                  static_cast<size_t>(pattern_id) * static_cast<size_t>(kRankPairCount);
+              for (int first_rank_offset = 0; first_rank_offset < kRanksPerSuit; ++first_rank_offset) {
+                for (int second_rank_offset = 0; second_rank_offset < kRanksPerSuit; ++second_rank_offset) {
+                  const int first_rank = first_rank_offset + kMinRankValue;
+                  const int second_rank = second_rank_offset + kMinRankValue;
+                  const uint16_t first_bit =
+                      static_cast<uint16_t>(1) << static_cast<uint16_t>(first_rank_offset);
+                  const uint16_t second_bit =
+                      static_cast<uint16_t>(1) << static_cast<uint16_t>(second_rank_offset);
+                  const uint16_t rank_mask =
+                      static_cast<uint16_t>(board_rank_mask | first_bit | second_bit);
+                  uint16_t pair_mask = board_pair_mask;
+                  uint16_t trip_mask = board_trip_mask;
+                  uint16_t quad_mask = board_quad_mask;
+                  if (first_rank == second_rank) {
+                    const int updated = static_cast<int>(board_rank_counts[first_rank]) + 2;
+                    const uint16_t bit = first_bit;
+                    pair_mask = static_cast<uint16_t>(
+                        (pair_mask & static_cast<uint16_t>(~bit)) | (updated >= 2 ? bit : 0));
+                    trip_mask = static_cast<uint16_t>(
+                        (trip_mask & static_cast<uint16_t>(~bit)) | (updated >= 3 ? bit : 0));
+                    quad_mask = static_cast<uint16_t>(
+                        (quad_mask & static_cast<uint16_t>(~bit)) | (updated == 4 ? bit : 0));
+                  } else {
+                    const int updated_first = static_cast<int>(board_rank_counts[first_rank]) + 1;
+                    pair_mask = static_cast<uint16_t>(
+                        (pair_mask & static_cast<uint16_t>(~first_bit)) | (updated_first >= 2 ? first_bit : 0));
+                    trip_mask = static_cast<uint16_t>(
+                        (trip_mask & static_cast<uint16_t>(~first_bit)) | (updated_first >= 3 ? first_bit : 0));
+                    quad_mask = static_cast<uint16_t>(
+                        (quad_mask & static_cast<uint16_t>(~first_bit)) | (updated_first == 4 ? first_bit : 0));
+
+                    const int updated_second = static_cast<int>(board_rank_counts[second_rank]) + 1;
+                    pair_mask = static_cast<uint16_t>(
+                        (pair_mask & static_cast<uint16_t>(~second_bit)) | (updated_second >= 2 ? second_bit : 0));
+                    trip_mask = static_cast<uint16_t>(
+                        (trip_mask & static_cast<uint16_t>(~second_bit)) | (updated_second >= 3 ? second_bit : 0));
+                    quad_mask = static_cast<uint16_t>(
+                        (quad_mask & static_cast<uint16_t>(~second_bit)) | (updated_second == 4 ? second_bit : 0));
+                  }
+                  out[base + static_cast<size_t>(first_rank_offset * kRanksPerSuit + second_rank_offset)] =
+                      evaluate7_score_rank_only(rank_mask, pair_mask, trip_mask, quad_mask);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return out;
+  }();
+  return table;
+}
+
+bool ensure_cuda_rank_pattern_scores_uploaded_for_device(const int device, const uint32_t** out_device_ptr) {
+  static std::mutex init_mutex;
+  static std::unordered_map<int, uint32_t*> per_device_table;
+
+  std::lock_guard<std::mutex> guard(init_mutex);
+  const auto found = per_device_table.find(device);
+  if (found != per_device_table.end()) {
+    *out_device_ptr = found->second;
+    return true;
+  }
+
+  const auto& host_table = rank_pattern_rankpair_scores();
+  uint32_t* device_table = nullptr;
+  const size_t bytes = host_table.size() * sizeof(uint32_t);
+  cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&device_table), bytes);
+  if (err != cudaSuccess) {
+    return false;
+  }
+  err = cudaMemcpy(device_table, host_table.data(), bytes, cudaMemcpyHostToDevice);
+  if (err != cudaSuccess) {
+    cudaFree(device_table);
+    return false;
+  }
+
+  per_device_table.insert({device, device_table});
+  *out_device_ptr = device_table;
+  return true;
 }
 
 HD void fill_remaining_deck(
@@ -384,30 +961,274 @@ HD void fill_remaining_deck(
   }
 }
 
+HD_FORCE uint32_t evaluate_with_board_state(
+    const uint8_t board_rank_counts[kMaxRankValue + 1],
+    const uint8_t board_suit_counts[4],
+    const uint16_t board_rank_mask,
+    const uint16_t board_suit_rank_mask[4],
+    const uint16_t board_pair_mask,
+    const uint16_t board_trip_mask,
+    const uint16_t board_quad_mask,
+    const int hole_first,
+    const int hole_second) {
+  const int first_rank = card_rank(hole_first);
+  const int first_suit = card_suit(hole_first);
+  const uint16_t first_bit = card_rank_bit(hole_first);
+  const int second_rank = card_rank(hole_second);
+  const int second_suit = card_suit(hole_second);
+  const uint16_t second_bit = card_rank_bit(hole_second);
+
+  uint8_t suit_counts[4] = {
+      board_suit_counts[0],
+      board_suit_counts[1],
+      board_suit_counts[2],
+      board_suit_counts[3],
+  };
+  uint16_t suit_rank_mask[4] = {
+      board_suit_rank_mask[0],
+      board_suit_rank_mask[1],
+      board_suit_rank_mask[2],
+      board_suit_rank_mask[3],
+  };
+  ++suit_counts[first_suit];
+  suit_rank_mask[first_suit] = static_cast<uint16_t>(suit_rank_mask[first_suit] | first_bit);
+  ++suit_counts[second_suit];
+  suit_rank_mask[second_suit] = static_cast<uint16_t>(suit_rank_mask[second_suit] | second_bit);
+
+  const uint16_t rank_mask = static_cast<uint16_t>(board_rank_mask | first_bit | second_bit);
+  uint16_t pair_mask = board_pair_mask;
+  uint16_t trip_mask = board_trip_mask;
+  uint16_t quad_mask = board_quad_mask;
+
+  if (first_rank == second_rank) {
+    const int updated = static_cast<int>(board_rank_counts[first_rank]) + 2;
+    const uint16_t bit = first_bit;
+    pair_mask = static_cast<uint16_t>(
+        (pair_mask & static_cast<uint16_t>(~bit)) | (updated >= 2 ? bit : 0));
+    trip_mask = static_cast<uint16_t>(
+        (trip_mask & static_cast<uint16_t>(~bit)) | (updated >= 3 ? bit : 0));
+    quad_mask = static_cast<uint16_t>(
+        (quad_mask & static_cast<uint16_t>(~bit)) | (updated == 4 ? bit : 0));
+  } else {
+    const int updated_first = static_cast<int>(board_rank_counts[first_rank]) + 1;
+    pair_mask = static_cast<uint16_t>(
+        (pair_mask & static_cast<uint16_t>(~first_bit)) | (updated_first >= 2 ? first_bit : 0));
+    trip_mask = static_cast<uint16_t>(
+        (trip_mask & static_cast<uint16_t>(~first_bit)) | (updated_first >= 3 ? first_bit : 0));
+    quad_mask = static_cast<uint16_t>(
+        (quad_mask & static_cast<uint16_t>(~first_bit)) | (updated_first == 4 ? first_bit : 0));
+
+    const int updated_second = static_cast<int>(board_rank_counts[second_rank]) + 1;
+    pair_mask = static_cast<uint16_t>(
+        (pair_mask & static_cast<uint16_t>(~second_bit)) | (updated_second >= 2 ? second_bit : 0));
+    trip_mask = static_cast<uint16_t>(
+        (trip_mask & static_cast<uint16_t>(~second_bit)) | (updated_second >= 3 ? second_bit : 0));
+    quad_mask = static_cast<uint16_t>(
+        (quad_mask & static_cast<uint16_t>(~second_bit)) | (updated_second == 4 ? second_bit : 0));
+  }
+
+  return evaluate7_score_from_masks(
+      rank_mask,
+      pair_mask,
+      trip_mask,
+      quad_mask,
+      suit_counts,
+      suit_rank_mask);
+}
+
+HD_FORCE uint32_t evaluate_with_board_state_lookup(
+    const uint8_t board_rank_counts[kMaxRankValue + 1],
+    const uint8_t board_suit_counts[4],
+    const uint16_t board_rank_mask,
+    const uint16_t board_suit_rank_mask[4],
+    const uint16_t board_pair_mask,
+    const uint16_t board_trip_mask,
+    const uint16_t board_quad_mask,
+    const int board_max_suit_count,
+    const int board_max_suit_index,
+    const int rank_pattern_id,
+    const uint32_t* rank_pattern_scores,
+    const int hole_first,
+    const int hole_second) {
+  if (rank_pattern_scores != nullptr &&
+      rank_pattern_id >= 0 &&
+      rank_pattern_id < kRankPatternCount) {
+    const int first_rank_offset = card_rank(hole_first) - kMinRankValue;
+    const int second_rank_offset = card_rank(hole_second) - kMinRankValue;
+    const int first_suit = card_suit(hole_first);
+    const int second_suit = card_suit(hole_second);
+    bool flush_possible = false;
+    if (board_max_suit_count >= 5) {
+      flush_possible = true;
+    } else if (board_max_suit_count == 4) {
+      flush_possible = first_suit == board_max_suit_index || second_suit == board_max_suit_index;
+    } else if (board_max_suit_count == 3) {
+      flush_possible = first_suit == board_max_suit_index && second_suit == board_max_suit_index;
+    }
+    if (!flush_possible) {
+      const size_t rank_lookup_base =
+          static_cast<size_t>(rank_pattern_id) * static_cast<size_t>(kRankPairCount);
+      const size_t rank_pair_idx =
+          static_cast<size_t>(first_rank_offset * kRanksPerSuit + second_rank_offset);
+      return rank_pattern_scores[rank_lookup_base + rank_pair_idx];
+    }
+  }
+
+  return evaluate_with_board_state(
+      board_rank_counts,
+      board_suit_counts,
+      board_rank_mask,
+      board_suit_rank_mask,
+      board_pair_mask,
+      board_trip_mask,
+      board_quad_mask,
+      hole_first,
+      hole_second);
+}
+
+HD_FORCE bool flush_possible_for_board_meta(
+    const int board_max_suit_count,
+    const int board_max_suit_index,
+    const int hole_first,
+    const int hole_second) {
+  if (board_max_suit_count >= 5) {
+    return true;
+  }
+  const int first_suit = card_suit(hole_first);
+  const int second_suit = card_suit(hole_second);
+  if (board_max_suit_count == 4) {
+    return first_suit == board_max_suit_index || second_suit == board_max_suit_index;
+  }
+  if (board_max_suit_count == 3) {
+    return first_suit == board_max_suit_index && second_suit == board_max_suit_index;
+  }
+  return false;
+}
+
+HD_FORCE uint32_t rank_lookup_score_for_pattern(
+    const int rank_pattern_id,
+    const int hole_first,
+    const int hole_second,
+    const uint32_t* rank_pattern_scores) {
+  if (rank_pattern_scores == nullptr || rank_pattern_id < 0 || rank_pattern_id >= kRankPatternCount) {
+    return 0;
+  }
+  const int first_rank_offset = card_rank(hole_first) - kMinRankValue;
+  const int second_rank_offset = card_rank(hole_second) - kMinRankValue;
+  const size_t rank_lookup_base =
+      static_cast<size_t>(rank_pattern_id) * static_cast<size_t>(kRankPairCount);
+  const size_t rank_pair_idx =
+      static_cast<size_t>(first_rank_offset * kRanksPerSuit + second_rank_offset);
+  return rank_pattern_scores[rank_lookup_base + rank_pair_idx];
+}
+
+HD_FORCE int compare_showdown_rank_lookup_only(
+    const int hero_first,
+    const int hero_second,
+    const int villain_first,
+    const int villain_second,
+    const int rank_pattern_id,
+    const uint32_t* rank_pattern_scores) {
+  const uint32_t hero_score =
+      rank_lookup_score_for_pattern(rank_pattern_id, hero_first, hero_second, rank_pattern_scores);
+  const uint32_t villain_score =
+      rank_lookup_score_for_pattern(rank_pattern_id, villain_first, villain_second, rank_pattern_scores);
+  if (hero_score > villain_score) {
+    return 1;
+  }
+  if (hero_score < villain_score) {
+    return -1;
+  }
+  return 0;
+}
+
 HD inline int compare_showdown(
     const int hero_first,
     const int hero_second,
     const int villain_first,
     const int villain_second,
-    const uint8_t board[kBoardCardCount]) {
-  int hero_cards[7] = {
+    const uint8_t board[kBoardCardCount],
+    const uint32_t* rank_pattern_scores = nullptr) {
+  uint8_t board_rank_counts[kMaxRankValue + 1];
+  for (int rank = 0; rank <= kMaxRankValue; ++rank) {
+    board_rank_counts[rank] = static_cast<uint8_t>(0);
+  }
+  uint8_t board_suit_counts[4] = {0, 0, 0, 0};
+  uint16_t board_rank_mask = 0;
+  uint16_t board_suit_rank_mask[4] = {0, 0, 0, 0};
+  uint16_t board_pair_mask = 0;
+  uint16_t board_trip_mask = 0;
+  uint16_t board_quad_mask = 0;
+  int board_max_suit_count = 0;
+  int board_max_suit_index = 0;
+  for (int i = 0; i < kBoardCardCount; ++i) {
+    const int card = static_cast<int>(board[i]);
+    const int rank = card_rank(card);
+    const int suit = card_suit(card);
+    const uint8_t updated = static_cast<uint8_t>(board_rank_counts[rank] + 1);
+    board_rank_counts[rank] = updated;
+    ++board_suit_counts[suit];
+    const uint16_t bit = card_rank_bit(card);
+    board_rank_mask = static_cast<uint16_t>(board_rank_mask | bit);
+    board_suit_rank_mask[suit] = static_cast<uint16_t>(board_suit_rank_mask[suit] | bit);
+    if (updated >= 2) {
+      board_pair_mask = static_cast<uint16_t>(board_pair_mask | bit);
+    }
+    if (updated >= 3) {
+      board_trip_mask = static_cast<uint16_t>(board_trip_mask | bit);
+    }
+    if (updated == 4) {
+      board_quad_mask = static_cast<uint16_t>(board_quad_mask | bit);
+    }
+  }
+  for (int suit = 0; suit < 4; ++suit) {
+    const int count = static_cast<int>(board_suit_counts[suit]);
+    if (count > board_max_suit_count) {
+      board_max_suit_count = count;
+      board_max_suit_index = suit;
+    }
+  }
+
+  int sorted_offsets[5] = {0, 0, 0, 0, 0};
+  int sorted_idx = 0;
+  for (int rank_offset = 0; rank_offset < kRanksPerSuit; ++rank_offset) {
+    const int rank = rank_offset + kMinRankValue;
+    const int count = static_cast<int>(board_rank_counts[rank]);
+    for (int copy = 0; copy < count && sorted_idx < 5; ++copy) {
+      sorted_offsets[sorted_idx++] = rank_offset;
+    }
+  }
+  const int rank_pattern_id =
+      sorted_idx == 5 ? rank_multiset5_id_from_offsets(sorted_offsets) : -1;
+
+  const uint32_t hero_score = evaluate_with_board_state_lookup(
+      board_rank_counts,
+      board_suit_counts,
+      board_rank_mask,
+      board_suit_rank_mask,
+      board_pair_mask,
+      board_trip_mask,
+      board_quad_mask,
+      board_max_suit_count,
+      board_max_suit_index,
+      rank_pattern_id,
+      rank_pattern_scores,
       hero_first,
-      hero_second,
-      static_cast<int>(board[0]),
-      static_cast<int>(board[1]),
-      static_cast<int>(board[2]),
-      static_cast<int>(board[3]),
-      static_cast<int>(board[4])};
-  int villain_cards[7] = {
+      hero_second);
+  const uint32_t villain_score = evaluate_with_board_state_lookup(
+      board_rank_counts,
+      board_suit_counts,
+      board_rank_mask,
+      board_suit_rank_mask,
+      board_pair_mask,
+      board_trip_mask,
+      board_quad_mask,
+      board_max_suit_count,
+      board_max_suit_index,
+      rank_pattern_id,
+      rank_pattern_scores,
       villain_first,
-      villain_second,
-      static_cast<int>(board[0]),
-      static_cast<int>(board[1]),
-      static_cast<int>(board[2]),
-      static_cast<int>(board[3]),
-      static_cast<int>(board[4])};
-  const uint32_t hero_score = evaluate7_score(hero_cards);
-  const uint32_t villain_score = evaluate7_score(villain_cards);
+      villain_second);
   if (hero_score > villain_score) {
     return 1;
   }
@@ -460,6 +1281,56 @@ HD inline void sample_board_cards(
       board[filled++] = remaining[deck_idx];
     }
   }
+}
+
+HD inline void sample_board_cards_from_combos(
+    const uint8_t remaining[kRemainingAfterHoleCards],
+    const uint8_t* board_combos,
+    uint64_t& state,
+    uint8_t board[kBoardCardCount]) {
+  const int combo = bounded_rand(state, kExactBoardCount);
+  const int base = combo * kBoardCardCount;
+  board[0] = remaining[board_combos[base + 0]];
+  board[1] = remaining[board_combos[base + 1]];
+  board[2] = remaining[board_combos[base + 2]];
+  board[3] = remaining[board_combos[base + 3]];
+  board[4] = remaining[board_combos[base + 4]];
+}
+
+HD inline int sample_absolute_board_index_non_overlapping(
+    const uint8_t* absolute_boards,
+    uint64_t& state,
+    const uint64_t dead_mask) {
+  while (true) {
+    const int board_idx = bounded_rand(state, kAbsoluteBoardCount);
+    const int base = board_idx * kBoardCardCount;
+    const uint8_t c0 = absolute_boards[base + 0];
+    const uint8_t c1 = absolute_boards[base + 1];
+    const uint8_t c2 = absolute_boards[base + 2];
+    const uint8_t c3 = absolute_boards[base + 3];
+    const uint8_t c4 = absolute_boards[base + 4];
+    const uint64_t board_mask =
+        (static_cast<uint64_t>(1) << static_cast<uint64_t>(c0)) |
+        (static_cast<uint64_t>(1) << static_cast<uint64_t>(c1)) |
+        (static_cast<uint64_t>(1) << static_cast<uint64_t>(c2)) |
+        (static_cast<uint64_t>(1) << static_cast<uint64_t>(c3)) |
+        (static_cast<uint64_t>(1) << static_cast<uint64_t>(c4));
+    if ((board_mask & dead_mask) == 0ULL) {
+      return board_idx;
+    }
+  }
+}
+
+HD inline void load_absolute_board_cards(
+    const uint8_t* absolute_boards,
+    const int board_idx,
+    uint8_t board[kBoardCardCount]) {
+  const int base = board_idx * kBoardCardCount;
+  board[0] = absolute_boards[base + 0];
+  board[1] = absolute_boards[base + 1];
+  board[2] = absolute_boards[base + 2];
+  board[3] = absolute_boards[base + 3];
+  board[4] = absolute_boards[base + 4];
 }
 
 HD inline double monte_carlo_stderr(
@@ -581,6 +1452,21 @@ int parse_positive_env_int(const char* value) {
     return -1;
   }
   return static_cast<int>(parsed);
+}
+
+bool parse_truthy(const char* raw) {
+  if (raw == nullptr || raw[0] == '\0') {
+    return false;
+  }
+  std::string value(raw);
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+bool parse_truthy(const std::string& raw) {
+  return parse_truthy(raw.c_str());
 }
 
 int resolve_worker_count(const int entries) {
@@ -755,6 +1641,50 @@ int resolve_range_cuda_max_chunk_heroes(JNIEnv* env, const int hero_count) {
       kDefaultRangeCudaMaxChunkHeroes);
 }
 
+bool resolve_monte_carlo_use_board_combos(JNIEnv* env) {
+  std::string property_value;
+  if (try_read_system_property(env, "sicfun.gpu.native.monteCarlo.useBoardCombos", property_value)) {
+    return parse_truthy(property_value);
+  }
+  return parse_truthy(std::getenv("sicfun_GPU_NATIVE_MONTE_CARLO_USE_BOARD_COMBOS"));
+}
+
+bool resolve_monte_carlo_use_rank_lookup(JNIEnv* env) {
+  std::string property_value;
+  if (try_read_system_property(env, "sicfun.gpu.native.monteCarlo.useRankLookup", property_value)) {
+    return parse_truthy(property_value);
+  }
+  const char* env_value = std::getenv("sicfun_GPU_NATIVE_MONTE_CARLO_USE_RANK_LOOKUP");
+  if (env_value == nullptr || env_value[0] == '\0') {
+    return true;
+  }
+  return parse_truthy(env_value);
+}
+
+bool resolve_monte_carlo_parallel_trials(JNIEnv* env) {
+  std::string property_value;
+  if (try_read_system_property(env, "sicfun.gpu.native.monteCarlo.parallelTrials", property_value)) {
+    return parse_truthy(property_value);
+  }
+  const char* env_value = std::getenv("sicfun_GPU_NATIVE_MONTE_CARLO_PARALLEL_TRIALS");
+  if (env_value == nullptr || env_value[0] == '\0') {
+    return true;
+  }
+  return parse_truthy(env_value);
+}
+
+bool resolve_monte_carlo_absolute_board_sampling(JNIEnv* env) {
+  std::string property_value;
+  if (try_read_system_property(env, "sicfun.gpu.native.monteCarlo.absoluteBoardSampling", property_value)) {
+    return parse_truthy(property_value);
+  }
+  const char* env_value = std::getenv("sicfun_GPU_NATIVE_MONTE_CARLO_ABSOLUTE_BOARD_SAMPLING");
+  if (env_value == nullptr || env_value[0] == '\0') {
+    return false;
+  }
+  return parse_truthy(env_value);
+}
+
 NativeEngine resolve_engine(JNIEnv* env) {
   std::string property_value;
   if (try_read_system_property(env, "sicfun.gpu.native.engine", property_value)) {
@@ -777,6 +1707,15 @@ RangeMemoryPath resolve_range_memory_path(JNIEnv* env) {
     return RangeMemoryPath::Global;
   }
   return parse_range_memory_path_value(raw);
+}
+
+bool resolve_exact_board_major_enabled(JNIEnv* env) {
+  std::string property_value;
+  if (try_read_system_property(env, "sicfun.gpu.native.exact.boardMajor", property_value)) {
+    return parse_truthy(property_value);
+  }
+  const char* raw = std::getenv("sicfun_GPU_EXACT_BOARD_MAJOR");
+  return parse_truthy(raw);
 }
 
 int compute_batch_cpu(
@@ -1027,6 +1966,11 @@ __global__ void monte_carlo_kernel(
     const int n,
     const int index_offset,
     const int trials,
+    const uint8_t* board_combos,
+    const uint8_t* absolute_boards,
+    const uint16_t* absolute_board_rank_pattern_ids,
+    const uint8_t* absolute_board_flush_meta,
+    const uint32_t* rank_pattern_scores,
     jdouble* wins,
     jdouble* ties,
     jdouble* losses,
@@ -1055,8 +1999,20 @@ __global__ void monte_carlo_kernel(
     return;
   }
 
+  const bool use_absolute_sampling =
+      absolute_boards != nullptr &&
+      absolute_board_rank_pattern_ids != nullptr &&
+      absolute_board_flush_meta != nullptr &&
+      rank_pattern_scores != nullptr;
   uint8_t remaining[kRemainingAfterHoleCards];
-  fill_remaining_deck(hero_first, hero_second, villain_first, villain_second, remaining);
+  if (!use_absolute_sampling) {
+    fill_remaining_deck(hero_first, hero_second, villain_first, villain_second, remaining);
+  }
+  const uint64_t dead_mask =
+      (static_cast<uint64_t>(1) << static_cast<uint64_t>(hero_first)) |
+      (static_cast<uint64_t>(1) << static_cast<uint64_t>(hero_second)) |
+      (static_cast<uint64_t>(1) << static_cast<uint64_t>(villain_first)) |
+      (static_cast<uint64_t>(1) << static_cast<uint64_t>(villain_second));
 
   uint8_t board[kBoardCardCount];
   int win_count = 0;
@@ -1070,9 +2026,69 @@ __global__ void monte_carlo_kernel(
   }
 
   for (int trial = 0; trial < trials; ++trial) {
-    sample_board_cards(remaining, state, board);
-
-    const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
+    int cmp = 0;
+    if (use_absolute_sampling) {
+      const int board_idx = sample_absolute_board_index_non_overlapping(
+          absolute_boards,
+          state,
+          dead_mask);
+      const uint8_t flush_meta = absolute_board_flush_meta[board_idx];
+      const int board_max_suit_index = static_cast<int>(flush_meta & 0x03u);
+      const int board_max_suit_count = static_cast<int>((flush_meta >> 2) & 0x07u);
+      const bool hero_flush_possible = flush_possible_for_board_meta(
+          board_max_suit_count,
+          board_max_suit_index,
+          hero_first,
+          hero_second);
+      const bool villain_flush_possible = flush_possible_for_board_meta(
+          board_max_suit_count,
+          board_max_suit_index,
+          villain_first,
+          villain_second);
+      if (!hero_flush_possible && !villain_flush_possible) {
+        const int rank_pattern_id = static_cast<int>(absolute_board_rank_pattern_ids[board_idx]);
+        if (rank_pattern_id >= 0 && rank_pattern_id < kRankPatternCount) {
+          cmp = compare_showdown_rank_lookup_only(
+              hero_first,
+              hero_second,
+              villain_first,
+              villain_second,
+              rank_pattern_id,
+              rank_pattern_scores);
+        } else {
+          load_absolute_board_cards(absolute_boards, board_idx, board);
+          cmp = compare_showdown(
+              hero_first,
+              hero_second,
+              villain_first,
+              villain_second,
+              board,
+              rank_pattern_scores);
+        }
+      } else {
+        load_absolute_board_cards(absolute_boards, board_idx, board);
+        cmp = compare_showdown(
+            hero_first,
+            hero_second,
+            villain_first,
+            villain_second,
+            board,
+            rank_pattern_scores);
+      }
+    } else {
+      if (board_combos != nullptr) {
+        sample_board_cards_from_combos(remaining, board_combos, state, board);
+      } else {
+        sample_board_cards(remaining, state, board);
+      }
+      cmp = compare_showdown(
+          hero_first,
+          hero_second,
+          villain_first,
+          villain_second,
+          board,
+          rank_pattern_scores);
+    }
     if (cmp > 0) {
       ++win_count;
     } else if (cmp == 0) {
@@ -1089,6 +2105,206 @@ __global__ void monte_carlo_kernel(
   ties[idx] = static_cast<double>(tie_count) / total;
   losses[idx] = static_cast<double>(loss_count) / total;
   stderrs[idx] = std_error;
+}
+
+__global__ void monte_carlo_kernel_parallel_trials(
+    const jint* low_ids,
+    const jint* high_ids,
+    const jlong* seeds,
+    const int n,
+    const int index_offset,
+    const int trials,
+    const uint8_t* board_combos,
+    const uint8_t* absolute_boards,
+    const uint16_t* absolute_board_rank_pattern_ids,
+    const uint8_t* absolute_board_flush_meta,
+    const uint32_t* rank_pattern_scores,
+    jdouble* wins,
+    jdouble* ties,
+    jdouble* losses,
+    jdouble* stderrs,
+    int* status) {
+  const int matchup_idx = static_cast<int>(blockIdx.x);
+  if (matchup_idx >= n) {
+    return;
+  }
+
+  __shared__ int hero_first;
+  __shared__ int hero_second;
+  __shared__ int villain_first;
+  __shared__ int villain_second;
+  __shared__ int valid_matchup;
+  __shared__ int use_absolute_sampling;
+  __shared__ uint8_t remaining[kRemainingAfterHoleCards];
+  __shared__ uint64_t dead_mask;
+
+  if (threadIdx.x == 0) {
+    const int low_id = static_cast<int>(low_ids[matchup_idx]);
+    const int high_id = static_cast<int>(high_ids[matchup_idx]);
+    if (low_id < 0 || low_id >= kHoleCardsCount || high_id < 0 || high_id >= kHoleCardsCount) {
+      set_status_once(status, 125);
+      valid_matchup = 0;
+    } else {
+      hero_first = static_cast<int>(d_hole_first[low_id]);
+      hero_second = static_cast<int>(d_hole_second[low_id]);
+      villain_first = static_cast<int>(d_hole_first[high_id]);
+      villain_second = static_cast<int>(d_hole_second[high_id]);
+      const bool overlap = hero_first == villain_first || hero_first == villain_second ||
+                           hero_second == villain_first || hero_second == villain_second;
+      if (overlap) {
+        set_status_once(status, 127);
+        valid_matchup = 0;
+      } else {
+        use_absolute_sampling =
+            absolute_boards != nullptr &&
+            absolute_board_rank_pattern_ids != nullptr &&
+            absolute_board_flush_meta != nullptr &&
+            rank_pattern_scores != nullptr ? 1 : 0;
+        if (use_absolute_sampling == 0) {
+          fill_remaining_deck(hero_first, hero_second, villain_first, villain_second, remaining);
+        }
+        dead_mask =
+            (static_cast<uint64_t>(1) << static_cast<uint64_t>(hero_first)) |
+            (static_cast<uint64_t>(1) << static_cast<uint64_t>(hero_second)) |
+            (static_cast<uint64_t>(1) << static_cast<uint64_t>(villain_first)) |
+            (static_cast<uint64_t>(1) << static_cast<uint64_t>(villain_second));
+        valid_matchup = 1;
+      }
+    }
+  }
+  __syncthreads();
+  if (valid_matchup == 0) {
+    return;
+  }
+
+  const int global_idx = matchup_idx + index_offset;
+  uint64_t state = mix64(
+      static_cast<uint64_t>(seeds[matchup_idx]) ^
+      static_cast<uint64_t>(global_idx + 1) ^
+      (static_cast<uint64_t>(threadIdx.x + 1) << 32));
+  if (state == 0ULL) {
+    state = 0x9E3779B97F4A7C15ULL;
+  }
+
+  uint32_t local_win = 0;
+  uint32_t local_tie = 0;
+  uint32_t local_loss = 0;
+  uint8_t board[kBoardCardCount];
+  const int hero_first_local = hero_first;
+  const int hero_second_local = hero_second;
+  const int villain_first_local = villain_first;
+  const int villain_second_local = villain_second;
+  const uint64_t dead_mask_local = dead_mask;
+  const bool use_absolute_sampling_local = use_absolute_sampling != 0;
+  for (int trial = static_cast<int>(threadIdx.x); trial < trials; trial += static_cast<int>(blockDim.x)) {
+    int cmp = 0;
+    if (use_absolute_sampling_local) {
+      const int board_idx = sample_absolute_board_index_non_overlapping(
+          absolute_boards,
+          state,
+          dead_mask_local);
+      const uint8_t flush_meta = absolute_board_flush_meta[board_idx];
+      const int board_max_suit_index = static_cast<int>(flush_meta & 0x03u);
+      const int board_max_suit_count = static_cast<int>((flush_meta >> 2) & 0x07u);
+      const bool hero_flush_possible = flush_possible_for_board_meta(
+          board_max_suit_count,
+          board_max_suit_index,
+          hero_first_local,
+          hero_second_local);
+      const bool villain_flush_possible = flush_possible_for_board_meta(
+          board_max_suit_count,
+          board_max_suit_index,
+          villain_first_local,
+          villain_second_local);
+      if (!hero_flush_possible && !villain_flush_possible) {
+        const int rank_pattern_id = static_cast<int>(absolute_board_rank_pattern_ids[board_idx]);
+        if (rank_pattern_id >= 0 && rank_pattern_id < kRankPatternCount) {
+          cmp = compare_showdown_rank_lookup_only(
+              hero_first_local,
+              hero_second_local,
+              villain_first_local,
+              villain_second_local,
+              rank_pattern_id,
+              rank_pattern_scores);
+        } else {
+          load_absolute_board_cards(absolute_boards, board_idx, board);
+          cmp = compare_showdown(
+              hero_first_local,
+              hero_second_local,
+              villain_first_local,
+              villain_second_local,
+              board,
+              rank_pattern_scores);
+        }
+      } else {
+        load_absolute_board_cards(absolute_boards, board_idx, board);
+        cmp = compare_showdown(
+            hero_first_local,
+            hero_second_local,
+            villain_first_local,
+            villain_second_local,
+            board,
+            rank_pattern_scores);
+      }
+    } else {
+      if (board_combos != nullptr) {
+        sample_board_cards_from_combos(remaining, board_combos, state, board);
+      } else {
+        sample_board_cards(remaining, state, board);
+      }
+      cmp = compare_showdown(
+          hero_first_local,
+          hero_second_local,
+          villain_first_local,
+          villain_second_local,
+          board,
+          rank_pattern_scores);
+    }
+    if (cmp > 0) {
+      ++local_win;
+    } else if (cmp == 0) {
+      ++local_tie;
+    } else {
+      ++local_loss;
+    }
+  }
+
+  extern __shared__ unsigned int reduction[];
+  unsigned int* win_counts = reduction;
+  unsigned int* tie_counts = reduction + blockDim.x;
+  unsigned int* loss_counts = reduction + (2 * blockDim.x);
+  const int tid = static_cast<int>(threadIdx.x);
+  win_counts[tid] = local_win;
+  tie_counts[tid] = local_tie;
+  loss_counts[tid] = local_loss;
+  __syncthreads();
+
+  int active = static_cast<int>(blockDim.x);
+  while (active > 1) {
+    const int half = (active + 1) >> 1;
+    if (tid < half) {
+      const int other = tid + half;
+      if (other < active) {
+        win_counts[tid] += win_counts[other];
+        tie_counts[tid] += tie_counts[other];
+        loss_counts[tid] += loss_counts[other];
+      }
+    }
+    __syncthreads();
+    active = half;
+  }
+
+  if (tid == 0) {
+    const int win_count = static_cast<int>(win_counts[0]);
+    const int tie_count = static_cast<int>(tie_counts[0]);
+    const int loss_count = static_cast<int>(loss_counts[0]);
+    const double total = static_cast<double>(trials);
+    const double std_error = monte_carlo_stderr(win_count, tie_count, trials);
+    wins[matchup_idx] = static_cast<double>(win_count) / total;
+    ties[matchup_idx] = static_cast<double>(tie_count) / total;
+    losses[matchup_idx] = static_cast<double>(loss_count) / total;
+    stderrs[matchup_idx] = std_error;
+  }
 }
 
 __global__ void exact_kernel(
@@ -1140,9 +2356,9 @@ __global__ void exact_kernel(
     return;
   }
 
-  uint64_t local_win = 0;
-  uint64_t local_tie = 0;
-  uint64_t local_loss = 0;
+  uint32_t local_win = 0;
+  uint32_t local_tie = 0;
+  uint32_t local_loss = 0;
   uint8_t board[kBoardCardCount];
 
   for (int combo = static_cast<int>(threadIdx.x); combo < kExactBoardCount; combo += static_cast<int>(blockDim.x)) {
@@ -1163,10 +2379,10 @@ __global__ void exact_kernel(
     }
   }
 
-  extern __shared__ unsigned long long reduction[];
-  unsigned long long* win_counts = reduction;
-  unsigned long long* tie_counts = reduction + blockDim.x;
-  unsigned long long* loss_counts = reduction + (2 * blockDim.x);
+  extern __shared__ unsigned int reduction[];
+  unsigned int* win_counts = reduction;
+  unsigned int* tie_counts = reduction + blockDim.x;
+  unsigned int* loss_counts = reduction + (2 * blockDim.x);
   const int tid = static_cast<int>(threadIdx.x);
   win_counts[tid] = local_win;
   tie_counts[tid] = local_tie;
@@ -1204,6 +2420,11 @@ __global__ void monte_carlo_kernel_packed(
     const int index_offset,
     const int trials,
     const jlong monte_carlo_seed_base,
+    const uint8_t* board_combos,
+    const uint8_t* absolute_boards,
+    const uint16_t* absolute_board_rank_pattern_ids,
+    const uint8_t* absolute_board_flush_meta,
+    const uint32_t* rank_pattern_scores,
     jfloat* wins,
     jfloat* ties,
     jfloat* losses,
@@ -1232,8 +2453,20 @@ __global__ void monte_carlo_kernel_packed(
     return;
   }
 
+  const bool use_absolute_sampling =
+      absolute_boards != nullptr &&
+      absolute_board_rank_pattern_ids != nullptr &&
+      absolute_board_flush_meta != nullptr &&
+      rank_pattern_scores != nullptr;
   uint8_t remaining[kRemainingAfterHoleCards];
-  fill_remaining_deck(hero_first, hero_second, villain_first, villain_second, remaining);
+  if (!use_absolute_sampling) {
+    fill_remaining_deck(hero_first, hero_second, villain_first, villain_second, remaining);
+  }
+  const uint64_t dead_mask =
+      (static_cast<uint64_t>(1) << static_cast<uint64_t>(hero_first)) |
+      (static_cast<uint64_t>(1) << static_cast<uint64_t>(hero_second)) |
+      (static_cast<uint64_t>(1) << static_cast<uint64_t>(villain_first)) |
+      (static_cast<uint64_t>(1) << static_cast<uint64_t>(villain_second));
 
   uint8_t board[kBoardCardCount];
   int win_count = 0;
@@ -1249,9 +2482,69 @@ __global__ void monte_carlo_kernel_packed(
   }
 
   for (int trial = 0; trial < trials; ++trial) {
-    sample_board_cards(remaining, state, board);
-
-    const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
+    int cmp = 0;
+    if (use_absolute_sampling) {
+      const int board_idx = sample_absolute_board_index_non_overlapping(
+          absolute_boards,
+          state,
+          dead_mask);
+      const uint8_t flush_meta = absolute_board_flush_meta[board_idx];
+      const int board_max_suit_index = static_cast<int>(flush_meta & 0x03u);
+      const int board_max_suit_count = static_cast<int>((flush_meta >> 2) & 0x07u);
+      const bool hero_flush_possible = flush_possible_for_board_meta(
+          board_max_suit_count,
+          board_max_suit_index,
+          hero_first,
+          hero_second);
+      const bool villain_flush_possible = flush_possible_for_board_meta(
+          board_max_suit_count,
+          board_max_suit_index,
+          villain_first,
+          villain_second);
+      if (!hero_flush_possible && !villain_flush_possible) {
+        const int rank_pattern_id = static_cast<int>(absolute_board_rank_pattern_ids[board_idx]);
+        if (rank_pattern_id >= 0 && rank_pattern_id < kRankPatternCount) {
+          cmp = compare_showdown_rank_lookup_only(
+              hero_first,
+              hero_second,
+              villain_first,
+              villain_second,
+              rank_pattern_id,
+              rank_pattern_scores);
+        } else {
+          load_absolute_board_cards(absolute_boards, board_idx, board);
+          cmp = compare_showdown(
+              hero_first,
+              hero_second,
+              villain_first,
+              villain_second,
+              board,
+              rank_pattern_scores);
+        }
+      } else {
+        load_absolute_board_cards(absolute_boards, board_idx, board);
+        cmp = compare_showdown(
+            hero_first,
+            hero_second,
+            villain_first,
+            villain_second,
+            board,
+            rank_pattern_scores);
+      }
+    } else {
+      if (board_combos != nullptr) {
+        sample_board_cards_from_combos(remaining, board_combos, state, board);
+      } else {
+        sample_board_cards(remaining, state, board);
+      }
+      cmp = compare_showdown(
+          hero_first,
+          hero_second,
+          villain_first,
+          villain_second,
+          board,
+          rank_pattern_scores);
+    }
     if (cmp > 0) {
       ++win_count;
     } else if (cmp == 0) {
@@ -1268,6 +2561,208 @@ __global__ void monte_carlo_kernel_packed(
   ties[idx] = static_cast<jfloat>(static_cast<double>(tie_count) / total);
   losses[idx] = static_cast<jfloat>(static_cast<double>(loss_count) / total);
   stderrs[idx] = static_cast<jfloat>(std_error);
+}
+
+__global__ void monte_carlo_kernel_packed_parallel_trials(
+    const jint* packed_keys,
+    const jlong* key_material,
+    const int n,
+    const int index_offset,
+    const int trials,
+    const jlong monte_carlo_seed_base,
+    const uint8_t* board_combos,
+    const uint8_t* absolute_boards,
+    const uint16_t* absolute_board_rank_pattern_ids,
+    const uint8_t* absolute_board_flush_meta,
+    const uint32_t* rank_pattern_scores,
+    jfloat* wins,
+    jfloat* ties,
+    jfloat* losses,
+    jfloat* stderrs,
+    int* status) {
+  const int matchup_idx = static_cast<int>(blockIdx.x);
+  if (matchup_idx >= n) {
+    return;
+  }
+
+  __shared__ int hero_first;
+  __shared__ int hero_second;
+  __shared__ int villain_first;
+  __shared__ int villain_second;
+  __shared__ int valid_matchup;
+  __shared__ int use_absolute_sampling;
+  __shared__ uint8_t remaining[kRemainingAfterHoleCards];
+  __shared__ uint64_t dead_mask;
+
+  if (threadIdx.x == 0) {
+    const int low_id = unpack_low_id(packed_keys[matchup_idx]);
+    const int high_id = unpack_high_id(packed_keys[matchup_idx]);
+    if (low_id < 0 || low_id >= kHoleCardsCount || high_id < 0 || high_id >= kHoleCardsCount) {
+      set_status_once(status, 125);
+      valid_matchup = 0;
+    } else {
+      hero_first = static_cast<int>(d_hole_first[low_id]);
+      hero_second = static_cast<int>(d_hole_second[low_id]);
+      villain_first = static_cast<int>(d_hole_first[high_id]);
+      villain_second = static_cast<int>(d_hole_second[high_id]);
+      const bool overlap = hero_first == villain_first || hero_first == villain_second ||
+                           hero_second == villain_first || hero_second == villain_second;
+      if (overlap) {
+        set_status_once(status, 127);
+        valid_matchup = 0;
+      } else {
+        use_absolute_sampling =
+            absolute_boards != nullptr &&
+            absolute_board_rank_pattern_ids != nullptr &&
+            absolute_board_flush_meta != nullptr &&
+            rank_pattern_scores != nullptr ? 1 : 0;
+        if (use_absolute_sampling == 0) {
+          fill_remaining_deck(hero_first, hero_second, villain_first, villain_second, remaining);
+        }
+        dead_mask =
+            (static_cast<uint64_t>(1) << static_cast<uint64_t>(hero_first)) |
+            (static_cast<uint64_t>(1) << static_cast<uint64_t>(hero_second)) |
+            (static_cast<uint64_t>(1) << static_cast<uint64_t>(villain_first)) |
+            (static_cast<uint64_t>(1) << static_cast<uint64_t>(villain_second));
+        valid_matchup = 1;
+      }
+    }
+  }
+  __syncthreads();
+  if (valid_matchup == 0) {
+    return;
+  }
+
+  const int global_idx = matchup_idx + index_offset;
+  const uint64_t local_seed = mix64(
+      static_cast<uint64_t>(monte_carlo_seed_base) ^ static_cast<uint64_t>(key_material[matchup_idx]));
+  uint64_t state = mix64(
+      local_seed ^
+      static_cast<uint64_t>(global_idx + 1) ^
+      (static_cast<uint64_t>(threadIdx.x + 1) << 32));
+  if (state == 0ULL) {
+    state = 0x9E3779B97F4A7C15ULL;
+  }
+
+  uint32_t local_win = 0;
+  uint32_t local_tie = 0;
+  uint32_t local_loss = 0;
+  uint8_t board[kBoardCardCount];
+  const int hero_first_local = hero_first;
+  const int hero_second_local = hero_second;
+  const int villain_first_local = villain_first;
+  const int villain_second_local = villain_second;
+  const uint64_t dead_mask_local = dead_mask;
+  const bool use_absolute_sampling_local = use_absolute_sampling != 0;
+  for (int trial = static_cast<int>(threadIdx.x); trial < trials; trial += static_cast<int>(blockDim.x)) {
+    int cmp = 0;
+    if (use_absolute_sampling_local) {
+      const int board_idx = sample_absolute_board_index_non_overlapping(
+          absolute_boards,
+          state,
+          dead_mask_local);
+      const uint8_t flush_meta = absolute_board_flush_meta[board_idx];
+      const int board_max_suit_index = static_cast<int>(flush_meta & 0x03u);
+      const int board_max_suit_count = static_cast<int>((flush_meta >> 2) & 0x07u);
+      const bool hero_flush_possible = flush_possible_for_board_meta(
+          board_max_suit_count,
+          board_max_suit_index,
+          hero_first_local,
+          hero_second_local);
+      const bool villain_flush_possible = flush_possible_for_board_meta(
+          board_max_suit_count,
+          board_max_suit_index,
+          villain_first_local,
+          villain_second_local);
+      if (!hero_flush_possible && !villain_flush_possible) {
+        const int rank_pattern_id = static_cast<int>(absolute_board_rank_pattern_ids[board_idx]);
+        if (rank_pattern_id >= 0 && rank_pattern_id < kRankPatternCount) {
+          cmp = compare_showdown_rank_lookup_only(
+              hero_first_local,
+              hero_second_local,
+              villain_first_local,
+              villain_second_local,
+              rank_pattern_id,
+              rank_pattern_scores);
+        } else {
+          load_absolute_board_cards(absolute_boards, board_idx, board);
+          cmp = compare_showdown(
+              hero_first_local,
+              hero_second_local,
+              villain_first_local,
+              villain_second_local,
+              board,
+              rank_pattern_scores);
+        }
+      } else {
+        load_absolute_board_cards(absolute_boards, board_idx, board);
+        cmp = compare_showdown(
+            hero_first_local,
+            hero_second_local,
+            villain_first_local,
+            villain_second_local,
+            board,
+            rank_pattern_scores);
+      }
+    } else {
+      if (board_combos != nullptr) {
+        sample_board_cards_from_combos(remaining, board_combos, state, board);
+      } else {
+        sample_board_cards(remaining, state, board);
+      }
+      cmp = compare_showdown(
+          hero_first_local,
+          hero_second_local,
+          villain_first_local,
+          villain_second_local,
+          board,
+          rank_pattern_scores);
+    }
+    if (cmp > 0) {
+      ++local_win;
+    } else if (cmp == 0) {
+      ++local_tie;
+    } else {
+      ++local_loss;
+    }
+  }
+
+  extern __shared__ unsigned int reduction[];
+  unsigned int* win_counts = reduction;
+  unsigned int* tie_counts = reduction + blockDim.x;
+  unsigned int* loss_counts = reduction + (2 * blockDim.x);
+  const int tid = static_cast<int>(threadIdx.x);
+  win_counts[tid] = local_win;
+  tie_counts[tid] = local_tie;
+  loss_counts[tid] = local_loss;
+  __syncthreads();
+
+  int active = static_cast<int>(blockDim.x);
+  while (active > 1) {
+    const int half = (active + 1) >> 1;
+    if (tid < half) {
+      const int other = tid + half;
+      if (other < active) {
+        win_counts[tid] += win_counts[other];
+        tie_counts[tid] += tie_counts[other];
+        loss_counts[tid] += loss_counts[other];
+      }
+    }
+    __syncthreads();
+    active = half;
+  }
+
+  if (tid == 0) {
+    const int win_count = static_cast<int>(win_counts[0]);
+    const int tie_count = static_cast<int>(tie_counts[0]);
+    const int loss_count = static_cast<int>(loss_counts[0]);
+    const double total = static_cast<double>(trials);
+    const double std_error = monte_carlo_stderr(win_count, tie_count, trials);
+    wins[matchup_idx] = static_cast<jfloat>(static_cast<double>(win_count) / total);
+    ties[matchup_idx] = static_cast<jfloat>(static_cast<double>(tie_count) / total);
+    losses[matchup_idx] = static_cast<jfloat>(static_cast<double>(loss_count) / total);
+    stderrs[matchup_idx] = static_cast<jfloat>(std_error);
+  }
 }
 
 __global__ void exact_kernel_packed(
@@ -1318,9 +2813,9 @@ __global__ void exact_kernel_packed(
     return;
   }
 
-  uint64_t local_win = 0;
-  uint64_t local_tie = 0;
-  uint64_t local_loss = 0;
+  uint32_t local_win = 0;
+  uint32_t local_tie = 0;
+  uint32_t local_loss = 0;
   uint8_t board[kBoardCardCount];
 
   for (int combo = static_cast<int>(threadIdx.x); combo < kExactBoardCount; combo += static_cast<int>(blockDim.x)) {
@@ -1341,10 +2836,10 @@ __global__ void exact_kernel_packed(
     }
   }
 
-  extern __shared__ unsigned long long reduction[];
-  unsigned long long* win_counts = reduction;
-  unsigned long long* tie_counts = reduction + blockDim.x;
-  unsigned long long* loss_counts = reduction + (2 * blockDim.x);
+  extern __shared__ unsigned int reduction[];
+  unsigned int* win_counts = reduction;
+  unsigned int* tie_counts = reduction + blockDim.x;
+  unsigned int* loss_counts = reduction + (2 * blockDim.x);
   const int tid = static_cast<int>(threadIdx.x);
   win_counts[tid] = local_win;
   tie_counts[tid] = local_tie;
@@ -1373,6 +2868,295 @@ __global__ void exact_kernel_packed(
     losses[matchup_idx] = static_cast<jfloat>(static_cast<double>(loss_counts[0]) / total_d);
     stderrs[matchup_idx] = 0.0f;
   }
+}
+
+__global__ void exact_prepare_endpoint_scores_kernel(
+    const uint8_t* absolute_boards,
+    const int board_start,
+    const int board_count,
+    const int boards_per_block,
+    const uint16_t* endpoint_hole_ids,
+    const uint32_t* hole_cards,
+    const uint32_t* rank_pattern_scores,
+    const int endpoint_count,
+    uint32_t* out_scores,
+    int* status) {
+  const int board_group = static_cast<int>(blockIdx.x);
+  __shared__ uint8_t shared_board_cards[kBoardCardCount];
+  __shared__ uint8_t shared_board_rank_counts[kMaxRankValue + 1];
+  __shared__ uint8_t shared_board_suit_counts[4];
+  __shared__ uint16_t shared_board_rank_mask;
+  __shared__ uint16_t shared_board_suit_rank_mask[4];
+  __shared__ uint16_t shared_board_pair_mask;
+  __shared__ uint16_t shared_board_trip_mask;
+  __shared__ uint16_t shared_board_quad_mask;
+  __shared__ uint64_t shared_board_card_mask;
+  __shared__ uint8_t shared_board_max_suit_count;
+  __shared__ uint8_t shared_board_max_suit_index;
+  __shared__ int shared_rank_pattern_id;
+  __shared__ uint32_t shared_rank_only_lookup[kRanksPerSuit * kRanksPerSuit];
+
+  for (int board_offset = 0; board_offset < boards_per_block; ++board_offset) {
+    const int board_local = board_group * boards_per_block + board_offset;
+    if (board_local >= board_count) {
+      return;
+    }
+    const int board_global = board_start + board_local;
+    if (board_global < 0 || board_global >= kAbsoluteBoardCount) {
+      set_status_once(status, 125);
+      return;
+    }
+
+    if (threadIdx.x == 0) {
+      const int board_base = board_global * kBoardCardCount;
+      shared_board_cards[0] = absolute_boards[board_base + 0];
+      shared_board_cards[1] = absolute_boards[board_base + 1];
+      shared_board_cards[2] = absolute_boards[board_base + 2];
+      shared_board_cards[3] = absolute_boards[board_base + 3];
+      shared_board_cards[4] = absolute_boards[board_base + 4];
+      for (int rank = 0; rank <= kMaxRankValue; ++rank) {
+        shared_board_rank_counts[rank] = static_cast<uint8_t>(0);
+      }
+      shared_board_suit_counts[0] = 0;
+      shared_board_suit_counts[1] = 0;
+      shared_board_suit_counts[2] = 0;
+      shared_board_suit_counts[3] = 0;
+      shared_board_rank_mask = 0;
+      shared_board_suit_rank_mask[0] = 0;
+      shared_board_suit_rank_mask[1] = 0;
+      shared_board_suit_rank_mask[2] = 0;
+      shared_board_suit_rank_mask[3] = 0;
+      shared_board_pair_mask = 0;
+      shared_board_trip_mask = 0;
+      shared_board_quad_mask = 0;
+      shared_board_card_mask = 0ULL;
+      shared_board_max_suit_count = 0;
+      shared_board_max_suit_index = 0;
+      shared_rank_pattern_id = -1;
+      for (int i = 0; i < kBoardCardCount; ++i) {
+        const int card = static_cast<int>(shared_board_cards[i]);
+        const int rank = card_rank(card);
+        const int suit = card_suit(card);
+        const uint16_t bit = card_rank_bit(card);
+        ++shared_board_rank_counts[rank];
+        ++shared_board_suit_counts[suit];
+        shared_board_rank_mask |= bit;
+        shared_board_suit_rank_mask[suit] |= bit;
+        shared_board_card_mask |= static_cast<uint64_t>(1) << static_cast<uint64_t>(card);
+      }
+      for (int rank = kMinRankValue; rank <= kMaxRankValue; ++rank) {
+        const uint8_t count = shared_board_rank_counts[rank];
+        const uint16_t bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(rank - kMinRankValue);
+        if (count >= 2) {
+          shared_board_pair_mask = static_cast<uint16_t>(shared_board_pair_mask | bit);
+        }
+        if (count >= 3) {
+          shared_board_trip_mask = static_cast<uint16_t>(shared_board_trip_mask | bit);
+        }
+        if (count == 4) {
+          shared_board_quad_mask = static_cast<uint16_t>(shared_board_quad_mask | bit);
+        }
+      }
+      for (int suit = 0; suit < 4; ++suit) {
+        const uint8_t count = shared_board_suit_counts[suit];
+        if (count > shared_board_max_suit_count) {
+          shared_board_max_suit_count = count;
+          shared_board_max_suit_index = static_cast<uint8_t>(suit);
+        }
+      }
+      int sorted_offsets[5] = {0, 0, 0, 0, 0};
+      int sorted_idx = 0;
+      for (int rank_offset = 0; rank_offset < kRanksPerSuit; ++rank_offset) {
+        const int rank = rank_offset + kMinRankValue;
+        const int count = static_cast<int>(shared_board_rank_counts[rank]);
+        for (int copy = 0; copy < count && sorted_idx < 5; ++copy) {
+          sorted_offsets[sorted_idx++] = rank_offset;
+        }
+      }
+      if (sorted_idx != 5) {
+        shared_rank_pattern_id = -1;
+      } else {
+        shared_rank_pattern_id = rank_multiset5_id_from_offsets(sorted_offsets);
+      }
+    }
+    __syncthreads();
+    if (shared_rank_pattern_id < 0 || shared_rank_pattern_id >= kRankPatternCount) {
+      set_status_once(status, 125);
+      return;
+    }
+
+    const uint16_t board_rank_mask = shared_board_rank_mask;
+    const uint16_t board_pair_mask = shared_board_pair_mask;
+    const uint16_t board_trip_mask = shared_board_trip_mask;
+    const uint16_t board_quad_mask = shared_board_quad_mask;
+    const uint8_t board_suit_count0 = shared_board_suit_counts[0];
+    const uint8_t board_suit_count1 = shared_board_suit_counts[1];
+    const uint8_t board_suit_count2 = shared_board_suit_counts[2];
+    const uint8_t board_suit_count3 = shared_board_suit_counts[3];
+    const uint16_t board_suit_rank_mask0 = shared_board_suit_rank_mask[0];
+    const uint16_t board_suit_rank_mask1 = shared_board_suit_rank_mask[1];
+    const uint16_t board_suit_rank_mask2 = shared_board_suit_rank_mask[2];
+    const uint16_t board_suit_rank_mask3 = shared_board_suit_rank_mask[3];
+    const uint64_t board_card_mask = shared_board_card_mask;
+    const int board_max_suit_count = static_cast<int>(shared_board_max_suit_count);
+    const int board_max_suit_index = static_cast<int>(shared_board_max_suit_index);
+    const size_t rank_lookup_base =
+        static_cast<size_t>(shared_rank_pattern_id) * static_cast<size_t>(kRankPairCount);
+
+    for (int rank_pair_idx = static_cast<int>(threadIdx.x);
+         rank_pair_idx < kRankPairCount;
+         rank_pair_idx += static_cast<int>(blockDim.x)) {
+      shared_rank_only_lookup[rank_pair_idx] =
+          rank_pattern_scores[rank_lookup_base + static_cast<size_t>(rank_pair_idx)];
+    }
+    __syncthreads();
+
+    for (int endpoint_idx = static_cast<int>(threadIdx.x);
+         endpoint_idx < endpoint_count;
+         endpoint_idx += static_cast<int>(blockDim.x)) {
+      const int hole_id = static_cast<int>(endpoint_hole_ids[endpoint_idx]);
+      if (hole_id < 0 || hole_id >= kHoleCardsCount) {
+        set_status_once(status, 125);
+        return;
+      }
+      const uint32_t packed_hole = hole_cards[hole_id];
+      const int first = static_cast<int>(packed_hole & 0x3Fu);
+      const int second = static_cast<int>((packed_hole >> 6) & 0x3Fu);
+      const uint64_t hole_mask =
+          (static_cast<uint64_t>(1) << static_cast<uint64_t>(first)) |
+          (static_cast<uint64_t>(1) << static_cast<uint64_t>(second));
+      const bool overlap = (hole_mask & board_card_mask) != 0ULL;
+      const size_t out_idx =
+          static_cast<size_t>(board_local) * static_cast<size_t>(endpoint_count) +
+          static_cast<size_t>(endpoint_idx);
+      if (overlap) {
+        out_scores[out_idx] = kInvalidScoreSentinel;
+        continue;
+      }
+
+      const int first_rank_offset = static_cast<int>((packed_hole >> 12) & 0x0Fu);
+      const int second_rank_offset = static_cast<int>((packed_hole >> 16) & 0x0Fu);
+      const int first_rank = first_rank_offset + kMinRankValue;
+      const int second_rank = second_rank_offset + kMinRankValue;
+      const int first_suit = static_cast<int>((packed_hole >> 20) & 0x03u);
+      const int second_suit = static_cast<int>((packed_hole >> 22) & 0x03u);
+      const uint16_t first_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(first_rank_offset);
+      const uint16_t second_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(second_rank_offset);
+      bool flush_possible = false;
+      if (board_max_suit_count >= 5) {
+        flush_possible = true;
+      } else if (board_max_suit_count == 4) {
+        flush_possible = first_suit == board_max_suit_index || second_suit == board_max_suit_index;
+      } else if (board_max_suit_count == 3) {
+        flush_possible = first_suit == board_max_suit_index && second_suit == board_max_suit_index;
+      }
+      if (!flush_possible) {
+        out_scores[out_idx] =
+            shared_rank_only_lookup[first_rank_offset * kRanksPerSuit + second_rank_offset];
+        continue;
+      }
+
+      const uint16_t rank_mask = static_cast<uint16_t>(board_rank_mask | first_bit | second_bit);
+      uint16_t pair_mask = board_pair_mask;
+      uint16_t trip_mask = board_trip_mask;
+      uint16_t quad_mask = board_quad_mask;
+      if (first_rank == second_rank) {
+        const int updated = static_cast<int>(shared_board_rank_counts[first_rank]) + 2;
+        const uint16_t bit = first_bit;
+        pair_mask = static_cast<uint16_t>(
+            (pair_mask & static_cast<uint16_t>(~bit)) | (updated >= 2 ? bit : 0));
+        trip_mask = static_cast<uint16_t>(
+            (trip_mask & static_cast<uint16_t>(~bit)) | (updated >= 3 ? bit : 0));
+        quad_mask = static_cast<uint16_t>(
+            (quad_mask & static_cast<uint16_t>(~bit)) | (updated == 4 ? bit : 0));
+      } else {
+        const int updated_first = static_cast<int>(shared_board_rank_counts[first_rank]) + 1;
+        pair_mask = static_cast<uint16_t>(
+            (pair_mask & static_cast<uint16_t>(~first_bit)) | (updated_first >= 2 ? first_bit : 0));
+        trip_mask = static_cast<uint16_t>(
+            (trip_mask & static_cast<uint16_t>(~first_bit)) | (updated_first >= 3 ? first_bit : 0));
+        quad_mask = static_cast<uint16_t>(
+            (quad_mask & static_cast<uint16_t>(~first_bit)) | (updated_first == 4 ? first_bit : 0));
+
+        const int updated_second = static_cast<int>(shared_board_rank_counts[second_rank]) + 1;
+        pair_mask = static_cast<uint16_t>(
+            (pair_mask & static_cast<uint16_t>(~second_bit)) | (updated_second >= 2 ? second_bit : 0));
+        trip_mask = static_cast<uint16_t>(
+            (trip_mask & static_cast<uint16_t>(~second_bit)) | (updated_second >= 3 ? second_bit : 0));
+        quad_mask = static_cast<uint16_t>(
+            (quad_mask & static_cast<uint16_t>(~second_bit)) | (updated_second == 4 ? second_bit : 0));
+      }
+
+      uint8_t suit_counts[4] = {
+          board_suit_count0,
+          board_suit_count1,
+          board_suit_count2,
+          board_suit_count3,
+      };
+      ++suit_counts[first_suit];
+      ++suit_counts[second_suit];
+
+      uint16_t suit_rank_mask[4] = {
+          board_suit_rank_mask0,
+          board_suit_rank_mask1,
+          board_suit_rank_mask2,
+          board_suit_rank_mask3,
+      };
+      suit_rank_mask[first_suit] = static_cast<uint16_t>(suit_rank_mask[first_suit] | first_bit);
+      suit_rank_mask[second_suit] = static_cast<uint16_t>(suit_rank_mask[second_suit] | second_bit);
+
+      out_scores[out_idx] =
+          evaluate7_score_from_masks(rank_mask, pair_mask, trip_mask, quad_mask, suit_counts, suit_rank_mask);
+    }
+    __syncthreads();
+  }
+}
+
+__global__ void exact_accumulate_from_endpoint_scores_kernel(
+    const uint32_t* board_scores,
+    const int board_count,
+    const int endpoint_count,
+    const uint16_t* hero_endpoint_index,
+    const uint16_t* villain_endpoint_index,
+    const int n,
+    uint32_t* total_wins,
+    uint32_t* total_ties,
+    uint32_t* total_losses,
+    int* status) {
+  const int matchup_idx =
+      static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+  if (matchup_idx >= n) {
+    return;
+  }
+  const int hero_idx = static_cast<int>(hero_endpoint_index[matchup_idx]);
+  const int villain_idx = static_cast<int>(villain_endpoint_index[matchup_idx]);
+  if (hero_idx < 0 || hero_idx >= endpoint_count || villain_idx < 0 || villain_idx >= endpoint_count) {
+    set_status_once(status, 125);
+    return;
+  }
+
+  uint32_t wins = 0;
+  uint32_t ties = 0;
+  uint32_t losses = 0;
+  for (int board_local = 0; board_local < board_count; ++board_local) {
+    const size_t base = static_cast<size_t>(board_local) * static_cast<size_t>(endpoint_count);
+    const uint32_t hero_score = board_scores[base + static_cast<size_t>(hero_idx)];
+    const uint32_t villain_score = board_scores[base + static_cast<size_t>(villain_idx)];
+    if (hero_score == kInvalidScoreSentinel || villain_score == kInvalidScoreSentinel) {
+      continue;
+    }
+    if (hero_score > villain_score) {
+      ++wins;
+    } else if (hero_score < villain_score) {
+      ++losses;
+    } else {
+      ++ties;
+    }
+  }
+
+  total_wins[matchup_idx] += wins;
+  total_ties[matchup_idx] += ties;
+  total_losses[matchup_idx] += losses;
 }
 
 template <bool UseReadOnly>
@@ -1689,12 +3473,41 @@ int compute_batch_cuda(
     std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at lookup upload: cudaMemcpyToSymbol failed\n");
     return 136;
   }
+  const bool use_board_combos_mc = mode_code != 0 && resolve_monte_carlo_use_board_combos(env);
   const uint8_t* d_exact_board_combos = nullptr;
-  if (mode_code == 0 && !ensure_cuda_exact_board_indices_uploaded_for_device(device, &d_exact_board_combos)) {
-    std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at exact-board upload: cudaMalloc/cudaMemcpy failed\n");
-    return 136;
+  if (mode_code == 0 || use_board_combos_mc) {
+    if (!ensure_cuda_exact_board_indices_uploaded_for_device(device, &d_exact_board_combos)) {
+      if (mode_code == 0) {
+        std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at exact-board upload: cudaMalloc/cudaMemcpy failed\n");
+        return 136;
+      }
+      d_exact_board_combos = nullptr;
+    }
   }
-
+  const bool use_rank_lookup_mc = mode_code != 0 && resolve_monte_carlo_use_rank_lookup(env);
+  const uint32_t* d_rank_pattern_scores = nullptr;
+  if (use_rank_lookup_mc && !ensure_cuda_rank_pattern_scores_uploaded_for_device(device, &d_rank_pattern_scores)) {
+    d_rank_pattern_scores = nullptr;
+  }
+  const bool use_absolute_board_sampling_mc =
+      mode_code != 0 &&
+      d_rank_pattern_scores != nullptr &&
+      resolve_monte_carlo_absolute_board_sampling(env);
+  const uint8_t* d_absolute_boards = nullptr;
+  const uint16_t* d_absolute_board_rank_pattern_ids = nullptr;
+  const uint8_t* d_absolute_board_flush_meta = nullptr;
+  if (use_absolute_board_sampling_mc) {
+    const bool has_boards = ensure_cuda_absolute_board_cards_uploaded_for_device(device, &d_absolute_boards);
+    const bool has_metadata = ensure_cuda_absolute_board_metadata_uploaded_for_device(
+        device,
+        &d_absolute_board_rank_pattern_ids,
+        &d_absolute_board_flush_meta);
+    if (!has_boards || !has_metadata) {
+      d_absolute_boards = nullptr;
+      d_absolute_board_rank_pattern_ids = nullptr;
+      d_absolute_board_flush_meta = nullptr;
+    }
+  }
   const int max_chunk_matchups = resolve_cuda_max_chunk_matchups(env, n, mode_code);
 
   jint* d_low = nullptr;
@@ -1748,6 +3561,11 @@ int compute_batch_cuda(
   if (threads_per_block <= 0) {
     threads_per_block = mode_code == 0 ? kDefaultCudaThreadsPerBlockExact : kDefaultCudaThreadsPerBlock;
   }
+  const bool parallel_trials_mc =
+      mode_code != 0 &&
+      resolve_monte_carlo_parallel_trials(env) &&
+      trials >= 64 &&
+      threads_per_block >= 64;
 
   for (int offset = 0; offset < n; offset += max_chunk_matchups) {
     const int chunk = std::min(max_chunk_matchups, n - offset);
@@ -1763,7 +3581,7 @@ int compute_batch_cuda(
     blocks = std::max(1, blocks);
     if (mode_code == 0) {
       const size_t reduction_bytes =
-          static_cast<size_t>(threads_per_block) * 3ULL * sizeof(unsigned long long);
+          static_cast<size_t>(threads_per_block) * 3ULL * sizeof(unsigned int);
       exact_kernel<<<chunk, threads_per_block, reduction_bytes>>>(
           d_low + static_cast<size_t>(offset),
           d_high + static_cast<size_t>(offset),
@@ -1775,18 +3593,45 @@ int compute_batch_cuda(
           d_stderrs + static_cast<size_t>(offset),
           d_status);
     } else {
-      monte_carlo_kernel<<<blocks, threads_per_block>>>(
-          d_low + static_cast<size_t>(offset),
-          d_high + static_cast<size_t>(offset),
-          d_seeds + static_cast<size_t>(offset),
-          chunk,
-          offset,
-          trials,
-          d_wins + static_cast<size_t>(offset),
-          d_ties + static_cast<size_t>(offset),
-          d_losses + static_cast<size_t>(offset),
-          d_stderrs + static_cast<size_t>(offset),
-          d_status);
+      if (parallel_trials_mc) {
+        const size_t reduction_bytes =
+            static_cast<size_t>(threads_per_block) * 3ULL * sizeof(unsigned int);
+        monte_carlo_kernel_parallel_trials<<<chunk, threads_per_block, reduction_bytes>>>(
+            d_low + static_cast<size_t>(offset),
+            d_high + static_cast<size_t>(offset),
+            d_seeds + static_cast<size_t>(offset),
+            chunk,
+            offset,
+            trials,
+            d_exact_board_combos,
+            d_absolute_boards,
+            d_absolute_board_rank_pattern_ids,
+            d_absolute_board_flush_meta,
+            d_rank_pattern_scores,
+            d_wins + static_cast<size_t>(offset),
+            d_ties + static_cast<size_t>(offset),
+            d_losses + static_cast<size_t>(offset),
+            d_stderrs + static_cast<size_t>(offset),
+            d_status);
+      } else {
+        monte_carlo_kernel<<<blocks, threads_per_block>>>(
+            d_low + static_cast<size_t>(offset),
+            d_high + static_cast<size_t>(offset),
+            d_seeds + static_cast<size_t>(offset),
+            chunk,
+            offset,
+            trials,
+            d_exact_board_combos,
+            d_absolute_boards,
+            d_absolute_board_rank_pattern_ids,
+            d_absolute_board_flush_meta,
+            d_rank_pattern_scores,
+            d_wins + static_cast<size_t>(offset),
+            d_ties + static_cast<size_t>(offset),
+            d_losses + static_cast<size_t>(offset),
+            d_stderrs + static_cast<size_t>(offset),
+            d_status);
+      }
     }
     err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -1829,6 +3674,439 @@ int compute_batch_cuda(
   return 0;
 }
 
+int compute_batch_cuda_packed_exact_board_major(
+    JNIEnv* env,
+    const std::vector<jint>& packed_buf,
+    std::vector<jfloat>& win_buf,
+    std::vector<jfloat>& tie_buf,
+    std::vector<jfloat>& loss_buf,
+    std::vector<jfloat>& stderr_buf,
+    const int target_device = -1) {
+  const int n = static_cast<int>(packed_buf.size());
+  if (n <= 0) {
+    return 0;
+  }
+  const auto started_at = std::chrono::steady_clock::now();
+
+  auto report_cuda_error = [&](const int status_code, const cudaError_t error, const char* stage) -> int {
+    std::fprintf(
+        stderr,
+        "[sicfun-gpu-native] CUDA failure at %s: %s (code=%d)\n",
+        stage,
+        cudaGetErrorString(error),
+        static_cast<int>(error));
+    if (error == cudaErrorLaunchTimeout) {
+      return 137;
+    }
+    return status_code;
+  };
+
+  int device_count = 0;
+  cudaError_t err = cudaGetDeviceCount(&device_count);
+  if (err != cudaSuccess) {
+    return report_cuda_error(130, err, "cudaGetDeviceCount");
+  }
+  if (device_count <= 0) {
+    std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at cudaGetDeviceCount: no CUDA devices found\n");
+    return 130;
+  }
+
+  int device = 0;
+  if (target_device >= 0) {
+    if (target_device >= device_count) {
+      std::fprintf(stderr, "[sicfun-gpu-native] invalid CUDA device index %d (count=%d)\n", target_device, device_count);
+      return 138;
+    }
+    err = cudaSetDevice(target_device);
+    if (err != cudaSuccess) {
+      return report_cuda_error(130, err, "cudaSetDevice");
+    }
+    device = target_device;
+  } else {
+    err = cudaGetDevice(&device);
+    if (err != cudaSuccess) {
+      return report_cuda_error(130, err, "cudaGetDevice");
+    }
+  }
+  cudaDeviceProp prop{};
+  err = cudaGetDeviceProperties(&prop, device);
+  if (err != cudaSuccess) {
+    return report_cuda_error(130, err, "cudaGetDeviceProperties");
+  }
+  const uint8_t* d_absolute_boards = nullptr;
+  if (!ensure_cuda_absolute_board_cards_uploaded_for_device(device, &d_absolute_boards)) {
+    std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at absolute-board upload: cudaMalloc/cudaMemcpy failed\n");
+    return 136;
+  }
+  const uint32_t* d_hole_cards = nullptr;
+  if (!ensure_cuda_hole_cards_uploaded_for_device(device, &d_hole_cards)) {
+    std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at hole-card upload: cudaMalloc/cudaMemcpy failed\n");
+    return 136;
+  }
+  const uint32_t* d_rank_pattern_scores = nullptr;
+  if (!ensure_cuda_rank_pattern_scores_uploaded_for_device(device, &d_rank_pattern_scores)) {
+    std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at rank-pattern upload: cudaMalloc/cudaMemcpy failed\n");
+    return 136;
+  }
+
+  std::vector<uint16_t> endpoint_hole_ids;
+  endpoint_hole_ids.reserve(kHoleCardsCount);
+  std::vector<uint16_t> hole_to_endpoint(static_cast<size_t>(kHoleCardsCount), std::numeric_limits<uint16_t>::max());
+  std::vector<uint16_t> hero_endpoint(static_cast<size_t>(n));
+  std::vector<uint16_t> villain_endpoint(static_cast<size_t>(n));
+  const auto& lookup = hole_cards_lookup();
+
+  for (int i = 0; i < n; ++i) {
+    const jint packed = packed_buf[static_cast<size_t>(i)];
+    const int low_id = unpack_low_id(packed);
+    const int high_id = unpack_high_id(packed);
+    if (low_id < 0 || low_id >= kHoleCardsCount || high_id < 0 || high_id >= kHoleCardsCount) {
+      return 125;
+    }
+    const HoleCards hero = lookup[static_cast<size_t>(low_id)];
+    const HoleCards villain = lookup[static_cast<size_t>(high_id)];
+    const int hero_first = static_cast<int>(hero.first);
+    const int hero_second = static_cast<int>(hero.second);
+    const int villain_first = static_cast<int>(villain.first);
+    const int villain_second = static_cast<int>(villain.second);
+    const bool overlap = hero_first == villain_first || hero_first == villain_second ||
+                         hero_second == villain_first || hero_second == villain_second;
+    if (overlap) {
+      return 127;
+    }
+
+    uint16_t low_endpoint = hole_to_endpoint[static_cast<size_t>(low_id)];
+    if (low_endpoint == std::numeric_limits<uint16_t>::max()) {
+      low_endpoint = static_cast<uint16_t>(endpoint_hole_ids.size());
+      endpoint_hole_ids.push_back(static_cast<uint16_t>(low_id));
+      hole_to_endpoint[static_cast<size_t>(low_id)] = low_endpoint;
+    }
+    uint16_t high_endpoint = hole_to_endpoint[static_cast<size_t>(high_id)];
+    if (high_endpoint == std::numeric_limits<uint16_t>::max()) {
+      high_endpoint = static_cast<uint16_t>(endpoint_hole_ids.size());
+      endpoint_hole_ids.push_back(static_cast<uint16_t>(high_id));
+      hole_to_endpoint[static_cast<size_t>(high_id)] = high_endpoint;
+    }
+    hero_endpoint[static_cast<size_t>(i)] = low_endpoint;
+    villain_endpoint[static_cast<size_t>(i)] = high_endpoint;
+  }
+
+  const int endpoint_count = static_cast<int>(endpoint_hole_ids.size());
+  if (endpoint_count <= 0 || endpoint_count > kHoleCardsCount) {
+    return 125;
+  }
+  const auto after_host_endpoint_setup = std::chrono::steady_clock::now();
+
+  uint16_t* d_endpoint_hole_ids = nullptr;
+  uint16_t* d_hero_endpoint = nullptr;
+  uint16_t* d_villain_endpoint = nullptr;
+  uint32_t* d_total_wins = nullptr;
+  uint32_t* d_total_ties = nullptr;
+  uint32_t* d_total_losses = nullptr;
+  uint32_t* d_board_scores = nullptr;
+  int* d_status = nullptr;
+
+  auto free_all = [&]() {
+    if (d_endpoint_hole_ids != nullptr) cudaFree(d_endpoint_hole_ids);
+    if (d_hero_endpoint != nullptr) cudaFree(d_hero_endpoint);
+    if (d_villain_endpoint != nullptr) cudaFree(d_villain_endpoint);
+    if (d_total_wins != nullptr) cudaFree(d_total_wins);
+    if (d_total_ties != nullptr) cudaFree(d_total_ties);
+    if (d_total_losses != nullptr) cudaFree(d_total_losses);
+    if (d_board_scores != nullptr) cudaFree(d_board_scores);
+    if (d_status != nullptr) cudaFree(d_status);
+  };
+
+  if (cudaMalloc(reinterpret_cast<void**>(&d_endpoint_hole_ids),
+                 static_cast<size_t>(endpoint_count) * sizeof(uint16_t)) != cudaSuccess ||
+      cudaMalloc(reinterpret_cast<void**>(&d_hero_endpoint),
+                 static_cast<size_t>(n) * sizeof(uint16_t)) != cudaSuccess ||
+      cudaMalloc(reinterpret_cast<void**>(&d_villain_endpoint),
+                 static_cast<size_t>(n) * sizeof(uint16_t)) != cudaSuccess ||
+      cudaMalloc(reinterpret_cast<void**>(&d_total_wins),
+                 static_cast<size_t>(n) * sizeof(uint32_t)) != cudaSuccess ||
+      cudaMalloc(reinterpret_cast<void**>(&d_total_ties),
+                 static_cast<size_t>(n) * sizeof(uint32_t)) != cudaSuccess ||
+      cudaMalloc(reinterpret_cast<void**>(&d_total_losses),
+                 static_cast<size_t>(n) * sizeof(uint32_t)) != cudaSuccess ||
+      cudaMalloc(reinterpret_cast<void**>(&d_status), sizeof(int)) != cudaSuccess) {
+    free_all();
+    std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at cudaMalloc\n");
+    return 131;
+  }
+
+  err = cudaMemcpy(
+      d_endpoint_hole_ids,
+      endpoint_hole_ids.data(),
+      static_cast<size_t>(endpoint_count) * sizeof(uint16_t),
+      cudaMemcpyHostToDevice);
+  if (err == cudaSuccess) {
+    err = cudaMemcpy(
+        d_hero_endpoint,
+        hero_endpoint.data(),
+        static_cast<size_t>(n) * sizeof(uint16_t),
+        cudaMemcpyHostToDevice);
+  }
+  if (err == cudaSuccess) {
+    err = cudaMemcpy(
+        d_villain_endpoint,
+        villain_endpoint.data(),
+        static_cast<size_t>(n) * sizeof(uint16_t),
+        cudaMemcpyHostToDevice);
+  }
+  if (err != cudaSuccess) {
+    free_all();
+    return report_cuda_error(132, err, "cudaMemcpy host->device");
+  }
+
+  err = cudaMemset(d_total_wins, 0, static_cast<size_t>(n) * sizeof(uint32_t));
+  if (err == cudaSuccess) {
+    err = cudaMemset(d_total_ties, 0, static_cast<size_t>(n) * sizeof(uint32_t));
+  }
+  if (err == cudaSuccess) {
+  err = cudaMemset(d_total_losses, 0, static_cast<size_t>(n) * sizeof(uint32_t));
+  }
+  if (err != cudaSuccess) {
+    free_all();
+    return report_cuda_error(131, err, "cudaMemset");
+  }
+
+  auto resolve_positive_setting = [&](const char* property_name, const char* env_name, const int fallback) -> int {
+    std::string property_value;
+    if (try_read_system_property(env, property_name, property_value)) {
+      const int parsed = parse_positive_env_int(property_value.c_str());
+      if (parsed > 0) {
+        return parsed;
+      }
+    }
+    const int env_value = parse_positive_env_int(std::getenv(env_name));
+    if (env_value > 0) {
+      return env_value;
+    }
+    return fallback;
+  };
+  auto resolve_truthy_setting = [&](const char* property_name, const char* env_name) -> bool {
+    std::string property_value;
+    if (try_read_system_property(env, property_name, property_value)) {
+      return parse_truthy(property_value);
+    }
+    return parse_truthy(std::getenv(env_name));
+  };
+  const bool profile_enabled = resolve_truthy_setting(
+      "sicfun.gpu.native.exact.boardMajor.profile",
+      "sicfun_GPU_EXACT_BOARD_MAJOR_PROFILE");
+
+  int boards_per_chunk = resolve_positive_setting(
+      "sicfun.gpu.native.exact.boardMajor.chunkBoards",
+      "sicfun_GPU_EXACT_BOARD_MAJOR_CHUNK_BOARDS",
+      8192);
+  boards_per_chunk = std::max(128, std::min(kAbsoluteBoardCount, boards_per_chunk));
+  while (boards_per_chunk >= 128 && d_board_scores == nullptr) {
+    const size_t bytes = static_cast<size_t>(boards_per_chunk) *
+                         static_cast<size_t>(endpoint_count) * sizeof(uint32_t);
+    if (cudaMalloc(reinterpret_cast<void**>(&d_board_scores), bytes) != cudaSuccess) {
+      boards_per_chunk /= 2;
+    }
+  }
+  if (d_board_scores == nullptr) {
+    free_all();
+    std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at board-score allocation\n");
+    return 131;
+  }
+
+  int score_threads = resolve_positive_setting(
+      "sicfun.gpu.native.exact.boardMajor.scoreThreads",
+      "sicfun_GPU_EXACT_BOARD_MAJOR_SCORE_THREADS",
+      256);
+  score_threads = std::max(32, std::min(score_threads, prop.maxThreadsPerBlock));
+  score_threads = std::max(32, (score_threads / 32) * 32);
+
+  int match_threads = resolve_positive_setting(
+      "sicfun.gpu.native.exact.boardMajor.matchThreads",
+      "sicfun_GPU_EXACT_BOARD_MAJOR_MATCH_THREADS",
+      256);
+  match_threads = std::max(32, std::min(match_threads, prop.maxThreadsPerBlock));
+  match_threads = std::max(32, (match_threads / 32) * 32);
+
+  int prepare_boards_per_block = resolve_positive_setting(
+      "sicfun.gpu.native.exact.boardMajor.prepareBoardsPerBlock",
+      "sicfun_GPU_EXACT_BOARD_MAJOR_PREPARE_BOARDS_PER_BLOCK",
+      1);
+  prepare_boards_per_block = std::max(1, std::min(prepare_boards_per_block, 8));
+
+  const int zero = 0;
+  err = cudaMemcpy(d_status, &zero, sizeof(int), cudaMemcpyHostToDevice);
+  if (err != cudaSuccess) {
+    free_all();
+    return report_cuda_error(132, err, "cudaMemcpy host->device");
+  }
+  const auto after_device_setup = std::chrono::steady_clock::now();
+
+  const int matchup_blocks = std::max(1, (n + match_threads - 1) / match_threads);
+  const auto kernel_launch_started = std::chrono::steady_clock::now();
+  double profile_prepare_seconds = 0.0;
+  double profile_accumulate_seconds = 0.0;
+  for (int board_start = 0; board_start < kAbsoluteBoardCount; board_start += boards_per_chunk) {
+    const int board_count = std::min(boards_per_chunk, kAbsoluteBoardCount - board_start);
+    const int prepare_blocks =
+        std::max(1, (board_count + prepare_boards_per_block - 1) / prepare_boards_per_block);
+    const auto prepare_started = profile_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    exact_prepare_endpoint_scores_kernel<<<prepare_blocks, score_threads>>>(
+        d_absolute_boards,
+        board_start,
+        board_count,
+        prepare_boards_per_block,
+        d_endpoint_hole_ids,
+        d_hole_cards,
+        d_rank_pattern_scores,
+        endpoint_count,
+        d_board_scores,
+        d_status);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      free_all();
+      return report_cuda_error(133, err, "kernel launch");
+    }
+    if (profile_enabled) {
+      err = cudaDeviceSynchronize();
+      if (err != cudaSuccess) {
+        free_all();
+        return report_cuda_error(134, err, "cudaDeviceSynchronize");
+      }
+      profile_prepare_seconds += std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - prepare_started).count();
+    }
+    const auto accumulate_started = profile_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    exact_accumulate_from_endpoint_scores_kernel<<<matchup_blocks, match_threads>>>(
+        d_board_scores,
+        board_count,
+        endpoint_count,
+        d_hero_endpoint,
+        d_villain_endpoint,
+        n,
+        d_total_wins,
+        d_total_ties,
+        d_total_losses,
+        d_status);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      free_all();
+      return report_cuda_error(133, err, "kernel launch");
+    }
+    if (profile_enabled) {
+      err = cudaDeviceSynchronize();
+      if (err != cudaSuccess) {
+        free_all();
+        return report_cuda_error(134, err, "cudaDeviceSynchronize");
+      }
+      profile_accumulate_seconds += std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - accumulate_started).count();
+    }
+  }
+  const auto kernel_launch_finished = std::chrono::steady_clock::now();
+
+  err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    free_all();
+    return report_cuda_error(134, err, "cudaDeviceSynchronize");
+  }
+  const auto after_kernel_sync = std::chrono::steady_clock::now();
+
+  int status = 0;
+  err = cudaMemcpy(&status, d_status, sizeof(int), cudaMemcpyDeviceToHost);
+  if (err != cudaSuccess) {
+    free_all();
+    return report_cuda_error(135, err, "cudaMemcpy status");
+  }
+  if (status != 0) {
+    free_all();
+    return status;
+  }
+
+  std::vector<uint32_t> wins_count(static_cast<size_t>(n));
+  std::vector<uint32_t> ties_count(static_cast<size_t>(n));
+  std::vector<uint32_t> losses_count(static_cast<size_t>(n));
+  err = cudaMemcpy(
+      wins_count.data(),
+      d_total_wins,
+      static_cast<size_t>(n) * sizeof(uint32_t),
+      cudaMemcpyDeviceToHost);
+  if (err == cudaSuccess) {
+    err = cudaMemcpy(
+        ties_count.data(),
+        d_total_ties,
+        static_cast<size_t>(n) * sizeof(uint32_t),
+        cudaMemcpyDeviceToHost);
+  }
+  if (err == cudaSuccess) {
+    err = cudaMemcpy(
+        losses_count.data(),
+        d_total_losses,
+        static_cast<size_t>(n) * sizeof(uint32_t),
+        cudaMemcpyDeviceToHost);
+  }
+  if (err != cudaSuccess) {
+    free_all();
+    return report_cuda_error(135, err, "cudaMemcpy device->host");
+  }
+  const auto after_device_to_host = std::chrono::steady_clock::now();
+
+  for (int i = 0; i < n; ++i) {
+    const uint32_t wins = wins_count[static_cast<size_t>(i)];
+    const uint32_t ties = ties_count[static_cast<size_t>(i)];
+    const uint32_t losses = losses_count[static_cast<size_t>(i)];
+    const uint32_t total = wins + ties + losses;
+    if (total == 0) {
+      win_buf[static_cast<size_t>(i)] = 0.0f;
+      tie_buf[static_cast<size_t>(i)] = 0.0f;
+      loss_buf[static_cast<size_t>(i)] = 0.0f;
+      stderr_buf[static_cast<size_t>(i)] = 0.0f;
+      continue;
+    }
+    const float inv_total = 1.0f / static_cast<float>(total);
+    win_buf[static_cast<size_t>(i)] = static_cast<float>(wins) * inv_total;
+    tie_buf[static_cast<size_t>(i)] = static_cast<float>(ties) * inv_total;
+    loss_buf[static_cast<size_t>(i)] = static_cast<float>(losses) * inv_total;
+    stderr_buf[static_cast<size_t>(i)] = 0.0f;
+  }
+  const auto finished_at = std::chrono::steady_clock::now();
+  if (profile_enabled) {
+    const auto to_seconds = [](const auto delta) -> double {
+      return std::chrono::duration<double>(delta).count();
+    };
+    const double host_endpoint_setup_s = to_seconds(after_host_endpoint_setup - started_at);
+    const double device_setup_s = to_seconds(after_device_setup - after_host_endpoint_setup);
+    const double kernel_launch_s = to_seconds(kernel_launch_finished - kernel_launch_started);
+    const double kernel_wait_s = to_seconds(after_kernel_sync - kernel_launch_finished);
+    const double status_and_copy_s = to_seconds(after_device_to_host - after_kernel_sync);
+    const double normalize_s = to_seconds(finished_at - after_device_to_host);
+    const double total_s = to_seconds(finished_at - started_at);
+    std::fprintf(
+        stderr,
+        "[sicfun-gpu-native] board-major profile: endpoints=%d n=%d chunk=%d scoreThreads=%d matchThreads=%d "
+        "prepareBoardsPerBlock=%d hostSetup=%.3fs deviceSetup=%.3fs launch=%.3fs wait=%.3fs "
+        "prepareKernel=%.3fs accumulateKernel=%.3fs copy=%.3fs normalize=%.3fs total=%.3fs\n",
+        endpoint_count,
+        n,
+        boards_per_chunk,
+        score_threads,
+        match_threads,
+        prepare_boards_per_block,
+        host_endpoint_setup_s,
+        device_setup_s,
+        kernel_launch_s,
+        kernel_wait_s,
+        profile_prepare_seconds,
+        profile_accumulate_seconds,
+        status_and_copy_s,
+        normalize_s,
+        total_s);
+  }
+
+  free_all();
+  return 0;
+}
+
 int compute_batch_cuda_packed(
     JNIEnv* env,
     const std::vector<jint>& packed_buf,
@@ -1844,6 +4122,16 @@ int compute_batch_cuda_packed(
   const int n = static_cast<int>(packed_buf.size());
   if (n <= 0) {
     return 0;
+  }
+  if (mode_code == 0 && resolve_exact_board_major_enabled(env)) {
+    return compute_batch_cuda_packed_exact_board_major(
+        env,
+        packed_buf,
+        win_buf,
+        tie_buf,
+        loss_buf,
+        stderr_buf,
+        target_device);
   }
 
   auto report_cuda_error = [&](const int status_code, const cudaError_t error, const char* stage) -> int {
@@ -1895,10 +4183,40 @@ int compute_batch_cuda_packed(
     std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at lookup upload: cudaMemcpyToSymbol failed\n");
     return 136;
   }
+  const bool use_board_combos_mc = mode_code != 0 && resolve_monte_carlo_use_board_combos(env);
   const uint8_t* d_exact_board_combos = nullptr;
-  if (mode_code == 0 && !ensure_cuda_exact_board_indices_uploaded_for_device(device, &d_exact_board_combos)) {
-    std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at exact-board upload: cudaMalloc/cudaMemcpy failed\n");
-    return 136;
+  if (mode_code == 0 || use_board_combos_mc) {
+    if (!ensure_cuda_exact_board_indices_uploaded_for_device(device, &d_exact_board_combos)) {
+      if (mode_code == 0) {
+        std::fprintf(stderr, "[sicfun-gpu-native] CUDA failure at exact-board upload: cudaMalloc/cudaMemcpy failed\n");
+        return 136;
+      }
+      d_exact_board_combos = nullptr;
+    }
+  }
+  const bool use_rank_lookup_mc = mode_code != 0 && resolve_monte_carlo_use_rank_lookup(env);
+  const uint32_t* d_rank_pattern_scores = nullptr;
+  if (use_rank_lookup_mc && !ensure_cuda_rank_pattern_scores_uploaded_for_device(device, &d_rank_pattern_scores)) {
+    d_rank_pattern_scores = nullptr;
+  }
+  const bool use_absolute_board_sampling_mc =
+      mode_code != 0 &&
+      d_rank_pattern_scores != nullptr &&
+      resolve_monte_carlo_absolute_board_sampling(env);
+  const uint8_t* d_absolute_boards = nullptr;
+  const uint16_t* d_absolute_board_rank_pattern_ids = nullptr;
+  const uint8_t* d_absolute_board_flush_meta = nullptr;
+  if (use_absolute_board_sampling_mc) {
+    const bool has_boards = ensure_cuda_absolute_board_cards_uploaded_for_device(device, &d_absolute_boards);
+    const bool has_metadata = ensure_cuda_absolute_board_metadata_uploaded_for_device(
+        device,
+        &d_absolute_board_rank_pattern_ids,
+        &d_absolute_board_flush_meta);
+    if (!has_boards || !has_metadata) {
+      d_absolute_boards = nullptr;
+      d_absolute_board_rank_pattern_ids = nullptr;
+      d_absolute_board_flush_meta = nullptr;
+    }
   }
 
   const int max_chunk_matchups = resolve_cuda_max_chunk_matchups(env, n, mode_code);
@@ -1950,6 +4268,11 @@ int compute_batch_cuda_packed(
   if (threads_per_block <= 0) {
     threads_per_block = mode_code == 0 ? kDefaultCudaThreadsPerBlockExact : kDefaultCudaThreadsPerBlock;
   }
+  const bool parallel_trials_mc =
+      mode_code != 0 &&
+      resolve_monte_carlo_parallel_trials(env) &&
+      trials >= 64 &&
+      threads_per_block >= 64;
 
   for (int offset = 0; offset < n; offset += max_chunk_matchups) {
     const int chunk = std::min(max_chunk_matchups, n - offset);
@@ -1965,7 +4288,7 @@ int compute_batch_cuda_packed(
     blocks = std::max(1, blocks);
     if (mode_code == 0) {
       const size_t reduction_bytes =
-          static_cast<size_t>(threads_per_block) * 3ULL * sizeof(unsigned long long);
+          static_cast<size_t>(threads_per_block) * 3ULL * sizeof(unsigned int);
       exact_kernel_packed<<<chunk, threads_per_block, reduction_bytes>>>(
           d_packed + static_cast<size_t>(offset),
           chunk,
@@ -1976,18 +4299,45 @@ int compute_batch_cuda_packed(
           d_stderrs + static_cast<size_t>(offset),
           d_status);
     } else {
-      monte_carlo_kernel_packed<<<blocks, threads_per_block>>>(
-          d_packed + static_cast<size_t>(offset),
-          d_key_material + static_cast<size_t>(offset),
-          chunk,
-          offset,
-          trials,
-          monte_carlo_seed_base,
-          d_wins + static_cast<size_t>(offset),
-          d_ties + static_cast<size_t>(offset),
-          d_losses + static_cast<size_t>(offset),
-          d_stderrs + static_cast<size_t>(offset),
-          d_status);
+      if (parallel_trials_mc) {
+        const size_t reduction_bytes =
+            static_cast<size_t>(threads_per_block) * 3ULL * sizeof(unsigned int);
+        monte_carlo_kernel_packed_parallel_trials<<<chunk, threads_per_block, reduction_bytes>>>(
+            d_packed + static_cast<size_t>(offset),
+            d_key_material + static_cast<size_t>(offset),
+            chunk,
+            offset,
+            trials,
+            monte_carlo_seed_base,
+            d_exact_board_combos,
+            d_absolute_boards,
+            d_absolute_board_rank_pattern_ids,
+            d_absolute_board_flush_meta,
+            d_rank_pattern_scores,
+            d_wins + static_cast<size_t>(offset),
+            d_ties + static_cast<size_t>(offset),
+            d_losses + static_cast<size_t>(offset),
+            d_stderrs + static_cast<size_t>(offset),
+            d_status);
+      } else {
+        monte_carlo_kernel_packed<<<blocks, threads_per_block>>>(
+            d_packed + static_cast<size_t>(offset),
+            d_key_material + static_cast<size_t>(offset),
+            chunk,
+            offset,
+            trials,
+            monte_carlo_seed_base,
+            d_exact_board_combos,
+            d_absolute_boards,
+            d_absolute_board_rank_pattern_ids,
+            d_absolute_board_flush_meta,
+            d_rank_pattern_scores,
+            d_wins + static_cast<size_t>(offset),
+            d_ties + static_cast<size_t>(offset),
+            d_losses + static_cast<size_t>(offset),
+            d_stderrs + static_cast<size_t>(offset),
+            d_status);
+      }
     }
     err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -2453,6 +4803,89 @@ Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatch(
     g_last_engine_code.store(kEngineUnknown, std::memory_order_relaxed);
     return 124;
   }
+  return 0;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatchCpuOnly(
+    JNIEnv* env,
+    jclass,
+    jintArray low_ids,
+    jintArray high_ids,
+    jint mode_code,
+    jint trials,
+    jlongArray seeds,
+    jdoubleArray wins,
+    jdoubleArray ties,
+    jdoubleArray losses,
+    jdoubleArray stderrs) {
+  g_last_engine_code.store(kEngineUnknown, std::memory_order_relaxed);
+
+  if (low_ids == nullptr || high_ids == nullptr || seeds == nullptr ||
+      wins == nullptr || ties == nullptr || losses == nullptr || stderrs == nullptr) {
+    return 100;
+  }
+
+  const jsize n = env->GetArrayLength(low_ids);
+  if (env->GetArrayLength(high_ids) != n || env->GetArrayLength(seeds) != n ||
+      env->GetArrayLength(wins) != n || env->GetArrayLength(ties) != n ||
+      env->GetArrayLength(losses) != n || env->GetArrayLength(stderrs) != n) {
+    return 101;
+  }
+  if (mode_code != 0 && mode_code != 1) {
+    return 111;
+  }
+  if (mode_code == 1 && trials <= 0) {
+    return 126;
+  }
+
+  std::vector<jint> low_buf(static_cast<size_t>(n));
+  std::vector<jint> high_buf(static_cast<size_t>(n));
+  std::vector<jlong> seed_buf(static_cast<size_t>(n));
+  std::vector<jdouble> win_buf(static_cast<size_t>(n));
+  std::vector<jdouble> tie_buf(static_cast<size_t>(n));
+  std::vector<jdouble> loss_buf(static_cast<size_t>(n));
+  std::vector<jdouble> stderr_buf(static_cast<size_t>(n));
+
+  env->GetIntArrayRegion(low_ids, 0, n, low_buf.data());
+  env->GetIntArrayRegion(high_ids, 0, n, high_buf.data());
+  env->GetLongArrayRegion(seeds, 0, n, seed_buf.data());
+  if (check_and_clear_exception(env)) {
+    return 102;
+  }
+
+  for (jsize i = 0; i < n; ++i) {
+    const jint low_id = low_buf[static_cast<size_t>(i)];
+    const jint high_id = high_buf[static_cast<size_t>(i)];
+    if (low_id < 0 || low_id >= kHoleCardsCount || high_id < 0 || high_id >= kHoleCardsCount) {
+      return 125;
+    }
+  }
+
+  const jint status = compute_batch_cpu(
+      low_buf,
+      high_buf,
+      seed_buf,
+      mode_code,
+      trials,
+      win_buf,
+      tie_buf,
+      loss_buf,
+      stderr_buf);
+  if (status != 0) {
+    return status;
+  }
+
+  env->SetDoubleArrayRegion(wins, 0, n, win_buf.data());
+  env->SetDoubleArrayRegion(ties, 0, n, tie_buf.data());
+  env->SetDoubleArrayRegion(losses, 0, n, loss_buf.data());
+  env->SetDoubleArrayRegion(stderrs, 0, n, stderr_buf.data());
+  if (check_and_clear_exception(env)) {
+    g_last_engine_code.store(kEngineUnknown, std::memory_order_relaxed);
+    return 124;
+  }
+
+  g_last_engine_code.store(kEngineCpu, std::memory_order_relaxed);
   return 0;
 }
 

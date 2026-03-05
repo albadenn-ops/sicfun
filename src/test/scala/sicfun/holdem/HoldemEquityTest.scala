@@ -247,6 +247,33 @@ class HoldemEquityTest extends FunSuite:
     }
   }
 
+  test("equityMonteCarlo preflop supports accelerated batch path with cpu-emulated provider") {
+    TestSystemPropertyScope.withSystemProperties(
+      Seq(
+        "sicfun.holdem.preflopEquityBackend" -> Some("batch"),
+        "sicfun.gpu.provider" -> Some("cpu-emulated")
+      )
+    ) {
+      val hero = hole("As", "Ks")
+      val range = DiscreteDistribution(
+        Map(
+          hole("Qh", "Jd") -> 0.4,
+          hole("9c", "8d") -> 0.6
+        )
+      )
+      val estimate = HoldemEquity.equityMonteCarlo(
+        hero = hero,
+        board = Board.empty,
+        villainRange = range,
+        trials = 25,
+        rng = new Random(11)
+      )
+      assert(estimate.mean >= 0.0 && estimate.mean <= 1.0)
+      assert(math.abs((estimate.winRate + estimate.tieRate + estimate.lossRate) - 1.0) < 1e-6)
+      assert(estimate.stderr >= 0.0)
+    }
+  }
+
   test("equityExactMulti rejects preflop boards and empty villain list") {
     val hero = hole("As", "Ks")
     val emptyRanges = Seq.empty[DiscreteDistribution[HoleCards]]

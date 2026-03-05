@@ -1,6 +1,6 @@
 package sicfun.holdem
 
-import sicfun.core.{Card, Rank, Suit}
+
 
 import java.io.{BufferedWriter, File, FileWriter}
 import java.util.Locale
@@ -36,8 +36,8 @@ object HeadsUpCanonicalTableReadableDump:
 
     val inputPath = args(0)
     val outputPath = args(1)
-    val sortBy = if args.length >= 3 then args(2).trim.toLowerCase else "equity"
-    val order = if args.length >= 4 then args(3).trim.toLowerCase else "desc"
+    val sortBy = if args.length >= 3 then args(2).trim.toLowerCase(Locale.ROOT) else "equity"
+    val order = if args.length >= 4 then args(3).trim.toLowerCase(Locale.ROOT) else "desc"
     val limit =
       if args.length >= 5 then
         val value = args(4).toInt
@@ -69,8 +69,8 @@ object HeadsUpCanonicalTableReadableDump:
       val stderr = result.stderr
       Row(
         key = key,
-        hero = handToken(heroHand),
-        villain = handToken(villainHand),
+        hero = heroHand.toToken,
+        villain = villainHand.toToken,
         heroClass = handClass(heroHand),
         villainClass = handClass(villainHand),
         win = win,
@@ -102,11 +102,11 @@ object HeadsUpCanonicalTableReadableDump:
     val out = mutable.HashMap.empty[Int, (HoleCards, HoleCards)]
     HoleCardsIndex.foreachNonOverlappingPair { (_, hero, _, villain) =>
       val key = HeadsUpEquityCanonicalTable.keyFor(hero, villain)
-      if !out.contains(key.value) then
+      if !out.contains(key.value.raw) then
         // Stored canonical-table values are always in canonical hero perspective.
         val canonicalHero = if key.flipped then villain else hero
         val canonicalVillain = if key.flipped then hero else villain
-        out.put(key.value, (canonicalHero, canonicalVillain))
+        out.put(key.value.raw, (canonicalHero, canonicalVillain))
     }
     out.toMap
 
@@ -147,14 +147,11 @@ object HeadsUpCanonicalTableReadableDump:
         idx += 1
     finally writer.close()
 
-  private def handToken(hand: HoleCards): String =
-    s"${cardToken(hand.first)}${cardToken(hand.second)}"
-
   private def handClass(hand: HoleCards): String =
     val r1 = hand.first.rank
     val r2 = hand.second.rank
-    val c1 = rankChar(r1)
-    val c2 = rankChar(r2)
+    val c1 = r1.toChar
+    val c2 = r2.toChar
     if r1 == r2 then
       s"$c1$c2"
     else
@@ -163,32 +160,6 @@ object HeadsUpCanonicalTableReadableDump:
         else (c2, c1)
       val suited = if hand.first.suit == hand.second.suit then "s" else "o"
       s"$high$low$suited"
-
-  private def cardToken(card: Card): String =
-    s"${rankChar(card.rank)}${suitChar(card.suit)}"
-
-  private def rankChar(rank: Rank): Char =
-    rank match
-      case Rank.Two => '2'
-      case Rank.Three => '3'
-      case Rank.Four => '4'
-      case Rank.Five => '5'
-      case Rank.Six => '6'
-      case Rank.Seven => '7'
-      case Rank.Eight => '8'
-      case Rank.Nine => '9'
-      case Rank.Ten => 'T'
-      case Rank.Jack => 'J'
-      case Rank.Queen => 'Q'
-      case Rank.King => 'K'
-      case Rank.Ace => 'A'
-
-  private def suitChar(suit: Suit): Char =
-    suit match
-      case Suit.Clubs => 'c'
-      case Suit.Diamonds => 'd'
-      case Suit.Hearts => 'h'
-      case Suit.Spades => 's'
 
   private def fmt(value: Double): String =
     String.format(Locale.ROOT, "%.12f", java.lang.Double.valueOf(value))

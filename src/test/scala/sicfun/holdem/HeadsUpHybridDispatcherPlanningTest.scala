@@ -3,6 +3,10 @@ package sicfun.holdem
 import munit.FunSuite
 
 class HeadsUpHybridDispatcherPlanningTest extends FunSuite:
+  override def beforeEach(context: BeforeEach): Unit =
+    HeadsUpHybridDispatcher.setCalibratedWeights(Map.empty)
+    sys.props.remove("sicfun.hybrid.minRelativeWeight")
+    super.beforeEach(context)
 
   test("selectDeviceIdsForBatch keeps all devices when batch is large enough") {
     val ids = HeadsUpHybridDispatcher.selectDeviceIdsForBatch(
@@ -78,6 +82,67 @@ class HeadsUpHybridDispatcherPlanningTest extends FunSuite:
       HeadsUpHybridDispatcher.proportionalCounts(10, Vector.empty),
       Vector.empty
     )
+  }
+
+  test("dispatchBatchWithDevices drops low relative-weight devices after calibration") {
+    val minRelativeProp = "sicfun.hybrid.minRelativeWeight"
+    val previousMinRelative = sys.props.get(minRelativeProp)
+    val previousWeights = HeadsUpHybridDispatcher.calibratedWeights
+    try
+      sys.props.update(minRelativeProp, "0.75")
+      HeadsUpHybridDispatcher.setCalibratedWeights(
+        Map(
+          "cpu" -> 1000.0,
+          "gpu" -> 600.0
+        )
+      )
+
+      val n = 256
+      val lowIds = Array.tabulate(n)(i => i + 1)
+      val highIds = Array.tabulate(n)(i => i + 101)
+      val seeds = Array.tabulate(n)(i => i.toLong + 500L)
+
+      val gpu = HeadsUpHybridDispatcher.FunctionalComputeDevice(
+        id = "gpu",
+        kind = "cuda",
+        name = "Filtered GPU",
+        supportsExact = true,
+        estimatedWeight = 10_000.0,
+        computeFn = (_, _, _, _, _, _, _, _, _) =>
+          fail("GPU should be filtered out by minRelativeWeight cutoff")
+          0
+      )
+
+      val cpu = HeadsUpHybridDispatcher.FunctionalComputeDevice(
+        id = "cpu",
+        kind = "cpu",
+        name = "CPU",
+        supportsExact = true,
+        estimatedWeight = 1.0,
+        computeFn = (_, _, _, _, _, wins, ties, losses, stderrs) =>
+          java.util.Arrays.fill(wins, 0.5)
+          java.util.Arrays.fill(ties, 0.0)
+          java.util.Arrays.fill(losses, 0.5)
+          java.util.Arrays.fill(stderrs, 0.01)
+          0
+      )
+
+      val result = HeadsUpHybridDispatcher.dispatchBatchWithDevices(
+        lowIds = lowIds,
+        highIds = highIds,
+        modeCode = 1,
+        trials = 64,
+        seeds = seeds,
+        activeDevices = Vector(gpu, cpu)
+      )
+      assert(result.isRight, clues(result))
+      val perDevice = result.toOption.get.perDevice.map(_.deviceId)
+      assertEquals(perDevice, Vector("cpu"))
+    finally
+      previousMinRelative match
+        case Some(value) => sys.props.update(minRelativeProp, value)
+        case None => sys.props.remove(minRelativeProp)
+      HeadsUpHybridDispatcher.setCalibratedWeights(previousWeights)
   }
 
   test("dispatchBatch validates aligned array lengths") {
@@ -263,4 +328,118 @@ class HeadsUpHybridDispatcherPlanningTest extends FunSuite:
     ).toOption.getOrElse(fail("third dispatch failed"))
 
     assertNotEquals(first.payloadCrc32, third.payloadCrc32)
+  }
+
+  // ── Failover coverage ─────────────────────────────────────────────
+
+  test("failover: exception-throwing device is recovered by CPU") {
+    val n = 8
+    val lowIds = Array.tabulate(n)(i => i)
+    val highIds = Array.tabulate(n)(i => i + 100)
+    val seeds = Array.tabulate(n)(_.toLong)
+
+    val thrower = HeadsUpHybridDispatcher.FunctionalComputeDevice(
+      id = "gpu-crash",
+      kind = "cuda",
+      name = "Crash GPU",
+      supportsExact = true,
+      estimatedWeight = 200.0,
+      computeFn = (_, _, _, _, _, _, _, _, _) =>
+        throw new RuntimeException("simulated CUDA crash")
+    )
+
+    val cpuOk = HeadsUpHybridDispatcher.FunctionalComputeDevice(
+      id = "cpu",
+      kind = "cpu",
+      name = "OK CPU",
+      supportsExact = true,
+      estimatedWeight = 1.0,
+      computeFn = (_, _, _, _, _, wins, ties, losses, stderrs) =>
+        java.util.Arrays.fill(wins, 0.5)
+        java.util.Arrays.fill(ties, 0.0)
+        java.util.Arrays.fill(losses, 0.5)
+        java.util.Arrays.fill(stderrs, 0.01)
+        0
+    )
+
+    val result = HeadsUpHybridDispatcher.dispatchBatchWithDevices(
+      lowIds, highIds, modeCode = 1, trials = 10, seeds = seeds,
+      activeDevices = Vector(thrower, cpuOk)
+    )
+    assert(result.isRight, clues(result))
+    val r = result.toOption.get
+    assertEquals(r.recovery.length, 1)
+    assertEquals(r.recovery.head.failedDeviceId, "gpu-crash")
+    assertEquals(r.recovery.head.recoveredByDeviceId, "cpu")
+    assertEquals(r.results.length, n)
+    r.results.foreach(eq => assertEqualsDouble(eq.win, 0.5, 1e-12))
+  }
+
+  test("failover: sole device failure returns Left (no rescue candidates)") {
+    val lowIds = Array(1, 2, 3)
+    val highIds = Array(10, 20, 30)
+    val seeds = Array(1L, 2L, 3L)
+
+    val soloFail = HeadsUpHybridDispatcher.FunctionalComputeDevice(
+      id = "solo",
+      kind = "cpu",
+      name = "Solo Fail",
+      supportsExact = true,
+      estimatedWeight = 1.0,
+      computeFn = (_, _, _, _, _, _, _, _, _) => 99
+    )
+
+    val result = HeadsUpHybridDispatcher.dispatchBatchWithDevices(
+      lowIds, highIds, modeCode = 0, trials = 0, seeds = seeds,
+      activeDevices = Vector(soloFail)
+    )
+    assert(result.isLeft)
+    assert(result.swap.toOption.get.contains("no rescue candidates"))
+  }
+
+  test("failover: recovery priority prefers CPU over OpenCL over CUDA") {
+    val lowIds = Array(1)
+    val highIds = Array(2)
+    val seeds = Array(42L)
+    var rescuerId = ""
+
+    val primary = HeadsUpHybridDispatcher.FunctionalComputeDevice(
+      id = "primary", kind = "cuda", name = "Primary", supportsExact = true,
+      estimatedWeight = 1000.0,
+      computeFn = (_, _, _, _, _, _, _, _, _) => 1 // fail
+    )
+    val openclRescue = HeadsUpHybridDispatcher.FunctionalComputeDevice(
+      id = "ocl", kind = "opencl", name = "OpenCL", supportsExact = true,
+      estimatedWeight = 500.0,
+      computeFn = (_, _, _, _, _, wins, ties, losses, stderrs) =>
+        rescuerId = "ocl"
+        wins(0) = 0.6; ties(0) = 0.0; losses(0) = 0.4; stderrs(0) = 0.0
+        0
+    )
+    val cpuRescue = HeadsUpHybridDispatcher.FunctionalComputeDevice(
+      id = "cpu", kind = "cpu", name = "CPU", supportsExact = true,
+      estimatedWeight = 10.0,
+      computeFn = (_, _, _, _, _, wins, ties, losses, stderrs) =>
+        rescuerId = "cpu"
+        wins(0) = 0.6; ties(0) = 0.0; losses(0) = 0.4; stderrs(0) = 0.0
+        0
+    )
+
+    val result = HeadsUpHybridDispatcher.dispatchBatchWithDevices(
+      lowIds, highIds, modeCode = 1, trials = 10, seeds = seeds,
+      activeDevices = Vector(primary, openclRescue, cpuRescue)
+    )
+    assert(result.isRight)
+    // CPU has highest recovery priority (0) so it should be tried first
+    assertEquals(rescuerId, "cpu")
+    assertEquals(result.toOption.get.recovery.head.recoveredByDeviceId, "cpu")
+  }
+
+  test("failover: empty device list returns Left") {
+    val result = HeadsUpHybridDispatcher.dispatchBatchWithDevices(
+      lowIds = Array(1), highIds = Array(2), modeCode = 1, trials = 10,
+      seeds = Array(1L), activeDevices = Vector.empty
+    )
+    assert(result.isLeft)
+    assert(result.swap.toOption.get.contains("no compute devices"))
   }

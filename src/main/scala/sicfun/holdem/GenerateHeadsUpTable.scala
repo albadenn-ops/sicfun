@@ -16,6 +16,9 @@ import scala.util.Random
   * Progress is printed to stdout every 50,000 matchups.
   */
 object GenerateHeadsUpTable:
+  private val ProviderProperty = "sicfun.gpu.provider"
+  private val ProviderEnv = "sicfun_GPU_PROVIDER"
+
   def main(args: Array[String]): Unit =
     if args.length < 4 then
       System.err.println(
@@ -31,7 +34,7 @@ object GenerateHeadsUpTable:
     val parallelism = if args.length >= 6 then args(5).toInt else math.max(1, Runtime.getRuntime.availableProcessors())
     val backend =
       if args.length >= 7 then HeadsUpEquityTable.ComputeBackend.parse(args(6))
-      else HeadsUpEquityTable.ComputeBackend.Cpu
+      else preferredDefaultBackend()
 
     val mode =
       modeStr match
@@ -81,3 +84,26 @@ object GenerateHeadsUpTable:
       createdAtMillis = System.currentTimeMillis()
     )
     HeadsUpEquityTableIO.write(outputPath, table, meta)
+
+  private def preferredDefaultBackend(): HeadsUpEquityTable.ComputeBackend =
+    val configuredProvider = GpuRuntimeSupport.resolveNonEmptyLower(ProviderProperty, ProviderEnv)
+    configuredProvider match
+      case Some(provider) =>
+        if providerAvailability(provider).available then HeadsUpEquityTable.ComputeBackend.Gpu
+        else HeadsUpEquityTable.ComputeBackend.Cpu
+      case None =>
+        val nativeAvailability = providerAvailability("native")
+        if nativeAvailability.available then HeadsUpEquityTable.ComputeBackend.Gpu
+        else
+          val hybridAvailability = providerAvailability("hybrid")
+          if hybridAvailability.available then HeadsUpEquityTable.ComputeBackend.Gpu
+          else HeadsUpEquityTable.ComputeBackend.Cpu
+
+  private def providerAvailability(provider: String): HeadsUpGpuRuntime.Availability =
+    val previous = sys.props.get(ProviderProperty)
+    sys.props.update(ProviderProperty, provider)
+    try HeadsUpGpuRuntime.availability
+    finally
+      previous match
+        case Some(value) => sys.props.update(ProviderProperty, value)
+        case None => sys.props.remove(ProviderProperty)

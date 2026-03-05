@@ -15,7 +15,6 @@ object HeadsUpRangeGpuAutoTuner:
   private val NativePathProperty = "sicfun.gpu.native.path"
   private val NativeEngineProperty = "sicfun.gpu.native.engine"
   private val RangeAutoTuneProperty = "sicfun.gpu.range.autotune"
-  private val RangeAutoTuneCachePathProperty = "sicfun.gpu.range.autotune.cachePath"
   private val RangeNativeBlockSizeProperty = "sicfun.gpu.native.range.cuda.blockSize"
   private val RangeNativeMaxChunkHeroesProperty = "sicfun.gpu.native.range.cuda.maxChunkHeroes"
   private val RangeNativeMemoryPathProperty = "sicfun.gpu.native.range.memoryPath"

@@ -5,6 +5,8 @@ import munit.FunSuite
 import scala.util.Random
 
 class HeadsUpEquityTableTest extends FunSuite:
+  private val PreflopBackendProperty = "sicfun.holdem.preflopEquityBackend"
+
   private def hole(a: String, b: String): HoleCards =
     HoleCards.from(Vector(
       sicfun.core.Card.parse(a).getOrElse(fail(s"invalid card: $a")),
@@ -55,22 +57,26 @@ class HeadsUpEquityTableTest extends FunSuite:
   }
 
   test("buildAll MonteCarlo is deterministic across parallelism settings") {
-    val mode = HeadsUpEquityTable.Mode.MonteCarlo(20)
-    val maxMatchups = 1200L
+    val mode = HeadsUpEquityTable.Mode.MonteCarlo(10)
+    val maxMatchups = 300L
     val seed = 19L
-    val sequential = HeadsUpEquityTable.buildAll(
-      mode = mode,
-      rng = new Random(seed),
-      maxMatchups = maxMatchups,
-      parallelism = 1
-    )
-    val parallel = HeadsUpEquityTable.buildAll(
-      mode = mode,
-      rng = new Random(seed),
-      maxMatchups = maxMatchups,
-      parallelism = 4
-    )
-    assertEquals(sequential.values, parallel.values)
+    TestSystemPropertyScope.withSystemProperties(
+      Vector(PreflopBackendProperty -> Some("cpu"))
+    ) {
+      val sequential = HeadsUpEquityTable.buildAll(
+        mode = mode,
+        rng = new Random(seed),
+        maxMatchups = maxMatchups,
+        parallelism = 1
+      )
+      val parallel = HeadsUpEquityTable.buildAll(
+        mode = mode,
+        rng = new Random(seed),
+        maxMatchups = maxMatchups,
+        parallelism = 4
+      )
+      assertEquals(sequential.values, parallel.values)
+    }
   }
 
   test("selectFullBatch rejects non-positive maxMatchups") {

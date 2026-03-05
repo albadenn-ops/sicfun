@@ -66,3 +66,65 @@ if (-not (Test-Path $dll)) {
 }
 
 Write-Host "Built: $dll"
+
+$cfrSrc = Join-Path $PSScriptRoot "jni\HoldemCfrNativeGpuBindings.cu"
+$cfrDll = Join-Path $OutDir "sicfun_cfr_cuda.dll"
+$cfrArgs = @(
+  "-allow-unsupported-compiler"
+  "-std=c++17"
+  "-O3"
+  "-Xcompiler", "/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+  "-Xcompiler", "/EHsc"
+  "-shared"
+  "-gencode", $gencode
+  "-I$jniInclude"
+  "-I$jniWinInclude"
+  "-o", $cfrDll
+  $cfrSrc
+)
+
+$escapedCfrArgs = ($cfrArgs | ForEach-Object {
+  if ($_ -match '\s') { '"' + $_.Replace('"', '""') + '"' } else { $_ }
+}) -join " "
+$cfrCmdLine = "call ""$escapedVcVars"" && ""$escapedNvcc"" $escapedCfrArgs"
+
+cmd.exe /c $cfrCmdLine
+if ($LASTEXITCODE -ne 0) {
+  throw "CUDA CFR native build failed with exit code $LASTEXITCODE"
+}
+if (-not (Test-Path $cfrDll)) {
+  throw "Build did not produce $cfrDll"
+}
+
+Write-Host "Built: $cfrDll"
+
+$bayesSrc = Join-Path $PSScriptRoot "jni\HoldemBayesNativeGpuBindings.cu"
+$bayesDll = Join-Path $OutDir "sicfun_bayes_cuda.dll"
+$bayesArgs = @(
+  "-allow-unsupported-compiler"
+  "-std=c++17"
+  "-O3"
+  "-Xcompiler", "/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+  "-Xcompiler", "/EHsc"
+  "-shared"
+  "-gencode", $gencode
+  "-I$jniInclude"
+  "-I$jniWinInclude"
+  "-o", $bayesDll
+  $bayesSrc
+)
+
+$escapedBayesArgs = ($bayesArgs | ForEach-Object {
+  if ($_ -match '\s') { '"' + $_.Replace('"', '""') + '"' } else { $_ }
+}) -join " "
+$bayesCmdLine = "call ""$escapedVcVars"" && ""$escapedNvcc"" $escapedBayesArgs"
+
+cmd.exe /c $bayesCmdLine
+if ($LASTEXITCODE -ne 0) {
+  throw "CUDA Bayesian native build failed with exit code $LASTEXITCODE"
+}
+if (-not (Test-Path $bayesDll)) {
+  throw "Build did not produce $bayesDll"
+}
+
+Write-Host "Built: $bayesDll"

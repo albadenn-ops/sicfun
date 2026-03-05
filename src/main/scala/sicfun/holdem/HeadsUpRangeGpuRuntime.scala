@@ -177,35 +177,33 @@ object HeadsUpRangeGpuRuntime:
         Left(detail)
 
   private def configuredProvider: String =
-    sys.props
-      .get(ProviderProperty)
-      .orElse(sys.env.get(ProviderEnv))
-      .map(_.trim.toLowerCase)
-      .filter(_.nonEmpty)
-      .getOrElse("native")
+    GpuRuntimeSupport.resolveNonEmptyLower(ProviderProperty, ProviderEnv).getOrElse("native")
 
   private def maybeApplyCachedRangeAutoTune(deviceIndex: Int): Unit =
-    if !rangeAutoTuneEnabled then return
-    if hasExplicitRangeNativeConfig then return
-    val deviceCount = safeCudaDeviceCount()
-    if deviceCount <= 0 then return
-    val boundedDeviceIndex = math.max(0, math.min(deviceIndex, deviceCount - 1))
-    val fingerprint = safeCudaDeviceFingerprint(boundedDeviceIndex)
-    if fingerprint.isEmpty then return
-    val appliedKey = s"$boundedDeviceIndex|$fingerprint"
-    if appliedRangeTuneFingerprintRef.get() == appliedKey then return
-
-    loadRangeAutoTuneDecision(resolvedRangeAutoTuneCacheFile, boundedDeviceIndex, fingerprint) match
-      case Some(decision) =>
-        sys.props.update(RangeNativeBlockSizeProperty, decision.blockSize.toString)
-        sys.props.update(RangeNativeMaxChunkHeroesProperty, decision.maxChunkHeroes.toString)
-        sys.props.update(RangeNativeMemoryPathProperty, decision.memoryPath)
-        appliedRangeTuneFingerprintRef.set(appliedKey)
-        println(
-          s"range-autotune: applied cached config for device=$boundedDeviceIndex " +
-            s"(block=${decision.blockSize}, chunkHeroes=${decision.maxChunkHeroes}, memoryPath=${decision.memoryPath})"
-        )
-      case None => ()
+    if !rangeAutoTuneEnabled then ()
+    else if hasExplicitRangeNativeConfig then ()
+    else
+      val deviceCount = safeCudaDeviceCount()
+      if deviceCount <= 0 then ()
+      else
+        val boundedDeviceIndex = math.max(0, math.min(deviceIndex, deviceCount - 1))
+        val fingerprint = safeCudaDeviceFingerprint(boundedDeviceIndex)
+        if fingerprint.isEmpty then ()
+        else
+          val appliedKey = s"$boundedDeviceIndex|$fingerprint"
+          if appliedRangeTuneFingerprintRef.get() == appliedKey then ()
+          else
+            loadRangeAutoTuneDecision(resolvedRangeAutoTuneCacheFile, boundedDeviceIndex, fingerprint) match
+              case Some(decision) =>
+                sys.props.update(RangeNativeBlockSizeProperty, decision.blockSize.toString)
+                sys.props.update(RangeNativeMaxChunkHeroesProperty, decision.maxChunkHeroes.toString)
+                sys.props.update(RangeNativeMemoryPathProperty, decision.memoryPath)
+                appliedRangeTuneFingerprintRef.set(appliedKey)
+                GpuRuntimeSupport.log(
+                  s"range-autotune: applied cached config for device=$boundedDeviceIndex " +
+                    s"(block=${decision.blockSize}, chunkHeroes=${decision.maxChunkHeroes}, memoryPath=${decision.memoryPath})"
+                )
+              case None => ()
 
   private final case class RangeAutoTuneDecision(
       blockSize: Int,
@@ -218,71 +216,66 @@ object HeadsUpRangeGpuRuntime:
       deviceIndex: Int,
       fingerprint: String
   ): Option[RangeAutoTuneDecision] =
-    if !file.isFile then return None
-    val props = new Properties()
-    val in = new FileInputStream(file)
-    try props.load(in)
-    finally in.close()
+    import scala.util.boundary, boundary.break
+    if !file.isFile then None
+    else
+      val props = new Properties()
+      val in = new FileInputStream(file)
+      try props.load(in)
+      finally in.close()
 
-    val version = Option(props.getProperty("version")).map(_.trim).getOrElse("")
-    if version != RangeAutoTuneCacheVersion then return None
-    val count = parsePositiveIntOpt(props.getProperty("device.count")).getOrElse(0)
-    if count <= 0 then return None
-
-    var idx = 0
-    while idx < count do
-      val prefix = s"device.$idx."
-      val cachedIndex = parseNonNegativeIntOpt(props.getProperty(s"${prefix}index")).getOrElse(-1)
-      val cachedFingerprint = Option(props.getProperty(s"${prefix}fingerprint")).map(_.trim).getOrElse("")
-      if cachedIndex == deviceIndex && cachedFingerprint == fingerprint then
-        val blockSizeOpt = parsePositiveIntOpt(props.getProperty(s"${prefix}blockSize"))
-        val maxChunkOpt = parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunkHeroes"))
-        val memoryPathOpt =
-          Option(props.getProperty(s"${prefix}memoryPath"))
-            .map(_.trim.toLowerCase)
-            .filter(path => path == "global" || path == "readonly" || path == "read-only" || path == "ldg")
-            .map {
-              case "read-only" | "ldg" => "readonly"
-              case other => other
-            }
-        if blockSizeOpt.nonEmpty && maxChunkOpt.nonEmpty && memoryPathOpt.nonEmpty then
-          return Some(
-            RangeAutoTuneDecision(
-              blockSize = blockSizeOpt.get,
-              maxChunkHeroes = maxChunkOpt.get,
-              memoryPath = memoryPathOpt.get
-            )
-          )
-      idx += 1
-    None
+      val version = Option(props.getProperty("version")).map(_.trim).getOrElse("")
+      if version != RangeAutoTuneCacheVersion then None
+      else
+        val count = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("device.count")).getOrElse(0)
+        if count <= 0 then None
+        else
+          boundary:
+            var idx = 0
+            while idx < count do
+              val prefix = s"device.$idx."
+              val cachedIndex =
+                GpuRuntimeSupport.parseNonNegativeIntOpt(props.getProperty(s"${prefix}index")).getOrElse(-1)
+              val cachedFingerprint = Option(props.getProperty(s"${prefix}fingerprint")).map(_.trim).getOrElse("")
+              if cachedIndex == deviceIndex && cachedFingerprint == fingerprint then
+                val blockSizeOpt = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}blockSize"))
+                val maxChunkOpt = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunkHeroes"))
+                val memoryPathOpt =
+                  Option(props.getProperty(s"${prefix}memoryPath"))
+                    .map(_.trim.toLowerCase)
+                    .filter(path => path == "global" || path == "readonly" || path == "read-only" || path == "ldg")
+                    .map {
+                      case "read-only" | "ldg" => "readonly"
+                      case other => other
+                    }
+                if blockSizeOpt.nonEmpty && maxChunkOpt.nonEmpty && memoryPathOpt.nonEmpty then
+                  break(Some(
+                    RangeAutoTuneDecision(
+                      blockSize = blockSizeOpt.get,
+                      maxChunkHeroes = maxChunkOpt.get,
+                      memoryPath = memoryPathOpt.get
+                    )
+                  ))
+              idx += 1
+            None
 
   private def resolvedRangeAutoTuneCacheFile: File =
-    val configured =
-      sys.props
-        .get(RangeAutoTuneCachePathProperty)
-        .orElse(sys.env.get(RangeAutoTuneCachePathEnv))
-        .map(_.trim)
-        .filter(_.nonEmpty)
-        .getOrElse(DefaultRangeAutoTuneCachePath)
-    new File(configured)
+    GpuRuntimeSupport.resolveFile(
+      RangeAutoTuneCachePathProperty,
+      RangeAutoTuneCachePathEnv,
+      DefaultRangeAutoTuneCachePath
+    )
 
   private def rangeAutoTuneEnabled: Boolean =
-    val raw =
-      sys.props
-        .get(RangeAutoTuneProperty)
-        .orElse(sys.env.get(RangeAutoTuneEnv))
-        .map(_.trim.toLowerCase)
+    val raw = GpuRuntimeSupport.resolveNonEmptyLower(RangeAutoTuneProperty, RangeAutoTuneEnv)
     raw match
       case Some("0" | "false" | "no" | "off") => false
       case _ => true
 
   private def hasExplicitRangeNativeConfig: Boolean =
-    isConfigured(RangeNativeBlockSizeProperty, RangeNativeBlockSizeEnv) ||
-    isConfigured(RangeNativeMaxChunkHeroesProperty, RangeNativeMaxChunkHeroesEnv) ||
-    isConfigured(RangeNativeMemoryPathProperty, RangeNativeMemoryPathEnv)
-
-  private def isConfigured(prop: String, env: String): Boolean =
-    sys.props.get(prop).exists(_.trim.nonEmpty) || sys.env.get(env).exists(_.trim.nonEmpty)
+    GpuRuntimeSupport.isConfigured(RangeNativeBlockSizeProperty, RangeNativeBlockSizeEnv) ||
+    GpuRuntimeSupport.isConfigured(RangeNativeMaxChunkHeroesProperty, RangeNativeMaxChunkHeroesEnv) ||
+    GpuRuntimeSupport.isConfigured(RangeNativeMemoryPathProperty, RangeNativeMemoryPathEnv)
 
   private def safeCudaDeviceCount(): Int =
     try HeadsUpGpuNativeBindings.cudaDeviceCount()
@@ -293,20 +286,6 @@ object HeadsUpRangeGpuRuntime:
     try Option(HeadsUpGpuNativeBindings.cudaDeviceInfo(deviceIndex)).map(_.trim).getOrElse("")
     catch
       case _: Throwable => ""
-
-  private def parsePositiveIntOpt(raw: String): Option[Int] =
-    Option(raw)
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .flatMap(text => scala.util.Try(text.toInt).toOption)
-      .filter(_ > 0)
-
-  private def parseNonNegativeIntOpt(raw: String): Option[Int] =
-    Option(raw)
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .flatMap(text => scala.util.Try(text.toInt).toOption)
-      .filter(_ >= 0)
 
   private def fromNativeArrays(
       wins: Array[Float],
@@ -416,25 +395,4 @@ object HeadsUpRangeGpuRuntime:
     out
 
   private def describeNativeStatus(status: Int): String =
-    val detail =
-      status match
-        case 100 => "null JNI input array"
-        case 101 => "JNI input arrays have mismatched lengths"
-        case 102 => "failed reading JNI input arrays"
-        case 111 => "invalid compute mode code"
-        case 112 => "invalid CSR range layout"
-        case 124 => "failed writing JNI output arrays"
-        case 125 => "invalid hole-card id"
-        case 126 => "invalid monte-carlo trial count"
-        case 127 => "overlapping hole cards in matchup"
-        case 130 => "CUDA device/runtime unavailable"
-        case 131 => "CUDA device allocation failed"
-        case 132 => "CUDA host-to-device transfer failed"
-        case 133 => "CUDA kernel launch failed"
-        case 134 => "CUDA synchronize failed"
-        case 135 => "CUDA device-to-host transfer failed"
-        case 136 => "CUDA lookup upload failed"
-        case 137 => "CUDA kernel timed out (Windows WDDM/TDR watchdog)"
-        case 138 => "invalid CUDA device index"
-        case _ => "unknown native status"
-    s"native GPU kernel returned status=$status ($detail)"
+    GpuRuntimeSupport.describeNativeStatus(status)

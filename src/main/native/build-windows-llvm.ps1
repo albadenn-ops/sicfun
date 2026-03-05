@@ -54,3 +54,63 @@ if (-not (Test-Path $dll)) {
 }
 
 Write-Host "Built: $dll"
+
+$cfrSrc = Join-Path $PSScriptRoot "jni\HoldemCfrNativeCpuBindings.cpp"
+$cfrDll = Join-Path $OutDir "sicfun_cfr_native.dll"
+$cfrLib = Join-Path $OutDir "sicfun_cfr_native.lib"
+$cfrExp = Join-Path $OutDir "sicfun_cfr_native.exp"
+
+if (Test-Path $cfrDll) { Remove-Item $cfrDll -Force }
+if (Test-Path $cfrLib) { Remove-Item $cfrLib -Force }
+if (Test-Path $cfrExp) { Remove-Item $cfrExp -Force }
+
+& $clang `
+  -std=c++17 `
+  -O3 `
+  -DNDEBUG `
+  -D_CRT_SECURE_NO_WARNINGS `
+  -shared `
+  "-I$jniInclude" `
+  "-I$jniWinInclude" `
+  -o $cfrDll `
+  $cfrSrc
+
+if ($LASTEXITCODE -ne 0) {
+  throw "Native CFR CPU build failed with exit code $LASTEXITCODE"
+}
+
+if (-not (Test-Path $cfrDll)) {
+  throw "Build did not produce $cfrDll"
+}
+
+Write-Host "Built: $cfrDll"
+
+$bayesSrc = Join-Path $PSScriptRoot "jni\HoldemBayesNativeCpuBindings.cpp"
+$bayesDll = Join-Path $OutDir "sicfun_bayes_native.dll"
+$bayesLib = Join-Path $OutDir "sicfun_bayes_native.lib"
+$bayesExp = Join-Path $OutDir "sicfun_bayes_native.exp"
+
+if (Test-Path $bayesDll) { Remove-Item $bayesDll -Force }
+if (Test-Path $bayesLib) { Remove-Item $bayesLib -Force }
+if (Test-Path $bayesExp) { Remove-Item $bayesExp -Force }
+
+& $clang `
+  -std=c++17 `
+  -O3 `
+  -DNDEBUG `
+  -D_CRT_SECURE_NO_WARNINGS `
+  -shared `
+  "-I$jniInclude" `
+  "-I$jniWinInclude" `
+  -o $bayesDll `
+  $bayesSrc
+
+if ($LASTEXITCODE -ne 0) {
+  throw "Native Bayesian CPU build failed with exit code $LASTEXITCODE"
+}
+
+if (-not (Test-Path $bayesDll)) {
+  throw "Build did not produce $bayesDll"
+}
+
+Write-Host "Built: $bayesDll"

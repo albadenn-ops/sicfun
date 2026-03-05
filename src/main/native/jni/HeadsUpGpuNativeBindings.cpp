@@ -716,6 +716,33 @@ Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatch(
 }
 
 extern "C" JNIEXPORT jint JNICALL
+Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatchCpuOnly(
+    JNIEnv* env,
+    jclass clazz,
+    jintArray low_ids,
+    jintArray high_ids,
+    jint mode_code,
+    jint trials,
+    jlongArray seeds,
+    jdoubleArray wins,
+    jdoubleArray ties,
+    jdoubleArray losses,
+    jdoubleArray stderrs) {
+  return Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatch(
+      env,
+      clazz,
+      low_ids,
+      high_ids,
+      mode_code,
+      trials,
+      seeds,
+      wins,
+      ties,
+      losses,
+      stderrs);
+}
+
+extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatchPacked(
     JNIEnv* env,
     jclass,

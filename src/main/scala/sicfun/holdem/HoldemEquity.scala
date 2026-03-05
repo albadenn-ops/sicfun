@@ -8,6 +8,17 @@ import scala.annotation.targetName
 object HoldemEquity:
   private val deckIndex: Map[Card, Int] = Deck.full.zipWithIndex.toMap
   private val DefaultExactMultiMaxEvaluations: Long = 5_000_000L
+  private val PreflopEquityBackendProperty = "sicfun.holdem.preflopEquityBackend"
+  private val PreflopEquityBackendEnv = "sicfun_HOLDEM_PREFLOP_EQUITY_BACKEND"
+  private val GpuProviderProperty = "sicfun.gpu.provider"
+  private val GpuProviderEnv = "sicfun_GPU_PROVIDER"
+  private val PreflopEquityBackendAuto = "auto"
+  private val PreflopEquityBackendCpu = "cpu"
+  private val PreflopEquityBackendRange = "range"
+  private val PreflopEquityBackendBatch = "batch"
+  // Prevent recursive acceleration when GPU providers call back into HoldemEquity.
+  private val accelerationGuard = new ThreadLocal[java.lang.Boolean]:
+    override def initialValue(): java.lang.Boolean = java.lang.Boolean.FALSE
 
   def equityExact(
       hero: HoleCards,
@@ -160,51 +171,55 @@ object HoldemEquity:
     require(trials > 0, "trials must be positive")
     val dead = hero.asSet ++ board.asSet
     val range = sanitizeRange(villainRange, dead)
-    val sampler = WeightedSampler(sortedWeights(range.weights))
+    maybeAcceleratedPreflopMonteCarlo(hero, board, range, trials, rng) match
+      case Some(estimate) =>
+        estimate
+      case None =>
+        val sampler = WeightedSampler(sortedWeights(range.weights))
 
-    var winCount = 0
-    var tieCount = 0
-    var lossCount = 0
+        var winCount = 0
+        var tieCount = 0
+        var lossCount = 0
 
-    var mean = 0.0
-    var m2 = 0.0
-    var i = 0
+        var mean = 0.0
+        var m2 = 0.0
+        var i = 0
 
-    while i < trials do
-      val villain = sampler.sample(rng)
-      val remaining = Deck.full.filterNot(card => dead.contains(card) || villain.contains(card)).toIndexedSeq
-      val extra = if board.missing == 0 then Vector.empty[Card] else sampleWithoutReplacement(remaining, board.missing, rng)
-      val fullBoard = board.cards ++ extra
-      val heroRank = HandEvaluator.evaluate7Cached(hero.toVector ++ fullBoard)
-      val villainRank = HandEvaluator.evaluate7Cached(villain.toVector ++ fullBoard)
-      val outcome =
-        if heroRank > villainRank then
-          winCount += 1
-          1.0
-        else if heroRank == villainRank then
-          tieCount += 1
-          0.5
-        else
-          lossCount += 1
-          0.0
+        while i < trials do
+          val villain = sampler.sample(rng)
+          val remaining = Deck.full.filterNot(card => dead.contains(card) || villain.contains(card)).toIndexedSeq
+          val extra = if board.missing == 0 then Vector.empty[Card] else sampleWithoutReplacement(remaining, board.missing, rng)
+          val fullBoard = board.cards ++ extra
+          val heroRank = HandEvaluator.evaluate7Cached(hero.toVector ++ fullBoard)
+          val villainRank = HandEvaluator.evaluate7Cached(villain.toVector ++ fullBoard)
+          val outcome =
+            if heroRank > villainRank then
+              winCount += 1
+              1.0
+            else if heroRank == villainRank then
+              tieCount += 1
+              0.5
+            else
+              lossCount += 1
+              0.0
 
-      val delta = outcome - mean
-      mean += delta / (i + 1)
-      val delta2 = outcome - mean
-      m2 += delta * delta2
-      i += 1
+          val delta = outcome - mean
+          mean += delta / (i + 1)
+          val delta2 = outcome - mean
+          m2 += delta * delta2
+          i += 1
 
-    val variance = if trials > 1 then m2 / (trials - 1) else 0.0
-    val stderr = math.sqrt(variance / trials)
-    EquityEstimate(
-      mean = mean,
-      variance = variance,
-      stderr = stderr,
-      trials = trials,
-      winRate = winCount.toDouble / trials,
-      tieRate = tieCount.toDouble / trials,
-      lossRate = lossCount.toDouble / trials
-    )
+        val variance = if trials > 1 then m2 / (trials - 1) else 0.0
+        val stderr = math.sqrt(variance / trials)
+        EquityEstimate(
+          mean = mean,
+          variance = variance,
+          stderr = stderr,
+          trials = trials,
+          winRate = winCount.toDouble / trials,
+          tieRate = tieCount.toDouble / trials,
+          lossRate = lossCount.toDouble / trials
+        )
 
   def equityMonteCarlo(
       hero: HoleCards,
@@ -335,6 +350,195 @@ object HoldemEquity:
       case Right(dist) => dist
       case Left(err) => throw new IllegalArgumentException(s"invalid range: $err")
 
+  /** Optional preflop acceleration path.
+    *
+    * Uses the native CSR range runtime when possible and falls back to the
+    * generic GPU/OpenCL/hybrid batch runtime. Any failure falls back to JVM MC.
+    */
+  private def maybeAcceleratedPreflopMonteCarlo(
+      hero: HoleCards,
+      board: Board,
+      range: DiscreteDistribution[HoleCards],
+      trials: Int,
+      rng: Random
+  ): Option[EquityEstimate] =
+    if board.size != 0 then None
+    else if accelerationGuard.get().booleanValue() then None
+    else
+      val backend = configuredPreflopEquityBackend
+      if backend == PreflopEquityBackendCpu then None
+      else
+        withAccelerationGuard {
+          backend match
+            case PreflopEquityBackendRange =>
+              attemptRangeRuntimePreflop(hero, range, trials, rng)
+            case PreflopEquityBackendBatch =>
+              attemptBatchRuntimePreflop(hero, range, trials, rng)
+            case _ =>
+              configuredGpuProvider match
+                case "native" =>
+                  attemptRangeRuntimePreflop(hero, range, trials, rng)
+                    .orElse(attemptBatchRuntimePreflop(hero, range, trials, rng))
+                case "opencl" | "hybrid" | "cpu-emulated" =>
+                  attemptBatchRuntimePreflop(hero, range, trials, rng)
+                case _ =>
+                  None
+        }
+
+  private def withAccelerationGuard[A](thunk: => Option[A]): Option[A] =
+    accelerationGuard.set(java.lang.Boolean.TRUE)
+    try thunk
+    finally accelerationGuard.set(java.lang.Boolean.FALSE)
+
+  private def attemptRangeRuntimePreflop(
+      hero: HoleCards,
+      range: DiscreteDistribution[HoleCards],
+      trials: Int,
+      rng: Random
+  ): Option[EquityEstimate] =
+    val sorted = sortedWeights(range.weights).filter(_._2 > 0.0)
+    if sorted.isEmpty then None
+    else
+      val heroId = HoleCardsIndex.idOf(hero)
+      val villainIds = new Array[Int](sorted.length)
+      val keyMaterial = new Array[Long](sorted.length)
+      val probabilities = new Array[Float](sorted.length)
+      var i = 0
+      while i < sorted.length do
+        val (villain, probability) = sorted(i)
+        val villainId = HoleCardsIndex.idOf(villain)
+        val low = math.min(heroId, villainId)
+        val high = math.max(heroId, villainId)
+        villainIds(i) = villainId
+        keyMaterial(i) = HeadsUpEquityTable.pack(low, high) ^ (i.toLong << 32)
+        probabilities(i) = probability.toFloat
+        i += 1
+
+      HeadsUpRangeGpuRuntime.computeRangeBatchMonteCarloCsr(
+        heroIds = Array(heroId),
+        offsets = Array(0, sorted.length),
+        villainIds = villainIds,
+        keyMaterial = keyMaterial,
+        probabilities = probabilities,
+        trials = trials,
+        monteCarloSeedBase = rng.nextLong()
+      ) match
+        case Right(values) if values.nonEmpty =>
+          val row = values(0)
+          Some(estimateFromAggregatedRates(row.win, row.tie, row.loss, row.stderr, trials))
+        case Right(_) =>
+          None
+        case Left(reason) =>
+          GpuRuntimeSupport.log(s"preflop range runtime unavailable: $reason")
+          None
+
+  private def attemptBatchRuntimePreflop(
+      hero: HoleCards,
+      range: DiscreteDistribution[HoleCards],
+      trials: Int,
+      rng: Random
+  ): Option[EquityEstimate] =
+    val sorted = sortedWeights(range.weights).filter(_._2 > 0.0)
+    if sorted.isEmpty then None
+    else
+      val heroId = HoleCardsIndex.idOf(hero)
+      val packedKeys = new Array[Long](sorted.length)
+      val keyMaterial = new Array[Long](sorted.length)
+      val weights = new Array[Double](sorted.length)
+      val flipped = new Array[Boolean](sorted.length)
+      var i = 0
+      while i < sorted.length do
+        val (villain, weight) = sorted(i)
+        val villainId = HoleCardsIndex.idOf(villain)
+        val low = math.min(heroId, villainId)
+        val high = math.max(heroId, villainId)
+        packedKeys(i) = HeadsUpEquityTable.pack(low, high)
+        keyMaterial(i) = packedKeys(i) ^ (i.toLong << 33)
+        weights(i) = weight
+        flipped(i) = heroId > villainId
+        i += 1
+
+      HeadsUpGpuRuntime.computeBatch(
+        packedKeys = packedKeys,
+        keyMaterial = keyMaterial,
+        mode = HeadsUpEquityTable.Mode.MonteCarlo(trials),
+        monteCarloSeedBase = rng.nextLong()
+      ) match
+        case Right(values) if values.length == sorted.length =>
+          var weightedWin = 0.0
+          var weightedTie = 0.0
+          var weightedLoss = 0.0
+          var weightedStdErrSq = 0.0
+          var weightSum = 0.0
+          i = 0
+          while i < values.length do
+            val p = weights(i)
+            val row = HeadsUpEquityTable.flipIfNeeded(values(i), flipped(i))
+            weightedWin += p * row.win
+            weightedTie += p * row.tie
+            weightedLoss += p * row.loss
+            val weightedStdErr = p * row.stderr
+            weightedStdErrSq += weightedStdErr * weightedStdErr
+            weightSum += p
+            i += 1
+          if weightSum <= 0.0 then None
+          else
+            Some(
+              estimateFromAggregatedRates(
+                winRate = weightedWin / weightSum,
+                tieRate = weightedTie / weightSum,
+                lossRate = weightedLoss / weightSum,
+                stderr = math.sqrt(weightedStdErrSq) / weightSum,
+                trials = trials
+              )
+            )
+        case Right(_) =>
+          None
+        case Left(reason) =>
+          GpuRuntimeSupport.log(s"preflop batch runtime unavailable: $reason")
+          None
+
+  private def configuredPreflopEquityBackend: String =
+    GpuRuntimeSupport.resolveNonEmptyLower(PreflopEquityBackendProperty, PreflopEquityBackendEnv) match
+      case Some("cpu") => PreflopEquityBackendCpu
+      case Some("range" | "native-range") => PreflopEquityBackendRange
+      case Some("batch" | "gpu-batch") => PreflopEquityBackendBatch
+      case Some("auto") => PreflopEquityBackendAuto
+      case _ => PreflopEquityBackendAuto
+
+  private def configuredGpuProvider: String =
+    GpuRuntimeSupport.resolveNonEmptyLower(GpuProviderProperty, GpuProviderEnv).getOrElse("native")
+
+  private def estimateFromAggregatedRates(
+      winRate: Double,
+      tieRate: Double,
+      lossRate: Double,
+      stderr: Double,
+      trials: Int
+  ): EquityEstimate =
+    val total = winRate + tieRate + lossRate
+    val (normalizedWin, normalizedTie, normalizedLoss) =
+      if total > 0.0 then
+        (
+          winRate / total,
+          tieRate / total,
+          lossRate / total
+        )
+      else
+        (0.0, 0.0, 1.0)
+    val mean = normalizedWin + (normalizedTie / 2.0)
+    val safeStdErr = math.max(0.0, stderr)
+    val variance = safeStdErr * safeStdErr * trials.toDouble
+    EquityEstimate(
+      mean = mean,
+      variance = variance,
+      stderr = safeStdErr,
+      trials = trials,
+      winRate = normalizedWin,
+      tieRate = normalizedTie,
+      lossRate = normalizedLoss
+    )
+
   private def sanitizeRange(
       range: DiscreteDistribution[HoleCards],
       dead: Set[Card]
@@ -378,23 +582,25 @@ object HoldemEquity:
       rng: Random,
       maxAttempts: Int = 1000
   ): Vector[HoleCards] =
+    import scala.util.boundary, boundary.break
     require(samplers.nonEmpty, "samplers must be non-empty")
-    var attempt = 0
-    while attempt < maxAttempts do
-      var used = dead
-      val hands = new Array[HoleCards](samplers.length)
-      var ok = true
-      var i = 0
-      while i < samplers.length && ok do
-        val hand = samplers(i).sample(rng)
-        if hand.asSet.exists(used.contains) then ok = false
-        else
-          hands(i) = hand
-          used = used ++ hand.asSet
-          i += 1
-      if ok then return hands.toVector
-      attempt += 1
-    throw new IllegalArgumentException("unable to sample non-overlapping villain hands; ranges may be too restrictive")
+    boundary:
+      var attempt = 0
+      while attempt < maxAttempts do
+        var used = dead
+        val hands = new Array[HoleCards](samplers.length)
+        var ok = true
+        var i = 0
+        while i < samplers.length && ok do
+          val hand = samplers(i).sample(rng)
+          if hand.asSet.exists(used.contains) then ok = false
+          else
+            hands(i) = hand
+            used = used ++ hand.asSet
+            i += 1
+        if ok then break(hands.toVector)
+        attempt += 1
+      throw new IllegalArgumentException("unable to sample non-overlapping villain hands; ranges may be too restrictive")
 
   private def sortedWeights(weights: Map[HoleCards, Double]): Vector[(HoleCards, Double)] =
     weights.toVector.sortBy { case (hand, _) => handKey(hand) }

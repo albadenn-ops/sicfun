@@ -1,8 +1,6 @@
 package sicfun.holdem
 
-import sicfun.core.Card
-
-import java.util.Locale
+import CliHelpers.{fmt2, fmt5}
 
 /** Compares exact table values against published specific preflop matchup odds.
   *
@@ -12,7 +10,7 @@ import java.util.Locale
   * }}}
   */
 object ComparePublishedSpecificMatchups:
-  private final case class PublishedMatchup(
+  private[holdem] final case class PublishedMatchup(
       label: String,
       hero: String,    // Either exact 4-char token (e.g. AcAs) or range class token (e.g. AA, AQs)
       villain: String, // Either exact 4-char token or range class token
@@ -22,7 +20,7 @@ object ComparePublishedSpecificMatchups:
   ):
     def sourceEqPct: Double = sourceWinPct + (0.5 * sourceTiePct)
 
-  private val Matchups: Vector[PublishedMatchup] = Vector(
+  private[holdem] val Matchups: Vector[PublishedMatchup] = Vector(
     PublishedMatchup(
       label = "AA vs KK",
       hero = "AA",
@@ -57,24 +55,24 @@ object ComparePublishedSpecificMatchups:
     ),
     PublishedMatchup(
       label = "TT vs AKs",
-      hero = "TcTs",
-      villain = "AhKh",
+      hero = "TT",
+      villain = "AKs",
       sourceWinPct = 53.86,
       sourceTiePct = 0.41,
       sourceUrl = "https://www.cardfight.com/TT_AKs.html"
     ),
     PublishedMatchup(
       label = "TT vs AKo",
-      hero = "TcTs",
-      villain = "AhKd",
+      hero = "TT",
+      villain = "AKo",
       sourceWinPct = 56.68,
       sourceTiePct = 0.39,
       sourceUrl = "https://www.cardfight.com/TT_AKo.html"
     ),
     PublishedMatchup(
       label = "TT vs AQo",
-      hero = "TcTs",
-      villain = "AhQd",
+      hero = "TT",
+      villain = "AQo",
       sourceWinPct = 56.76,
       sourceTiePct = 0.38,
       sourceUrl = "https://www.cardfight.com/TT_AQo.html"
@@ -110,7 +108,7 @@ object ComparePublishedSpecificMatchups:
       )
     }
 
-  private def computeWinTiePct(table: HeadsUpEquityCanonicalTable, heroToken: String, villainToken: String): (Double, Double) =
+  private[holdem] def computeWinTiePct(table: HeadsUpEquityCanonicalTable, heroToken: String, villainToken: String): (Double, Double) =
     val heroExact = parseExactHoleCardsOrNone(heroToken)
     val villainExact = parseExactHoleCardsOrNone(villainToken)
 
@@ -119,8 +117,8 @@ object ComparePublishedSpecificMatchups:
         val result = table.equity(hero, villain)
         (result.win * 100.0, result.tie * 100.0)
       case _ =>
-        val heroDist = parseRangeDistribution(heroToken)
-        val villainDist = parseRangeDistribution(villainToken)
+        val heroDist = CliHelpers.parseRangeDistribution(heroToken)
+        val villainDist = CliHelpers.parseRangeDistribution(villainToken)
         var win = 0.0
         var tie = 0.0
         var loss = 0.0
@@ -145,27 +143,6 @@ object ComparePublishedSpecificMatchups:
         require(math.abs(norm - 1.0) <= 1e-10, s"normalization drift for $heroToken vs $villainToken: $norm")
         (ourWin, ourTie)
 
-  private def parseRangeDistribution(token: String) =
-    RangeParser.parse(token.trim) match
-      case Right(dist) => dist
-      case Left(err) => throw new IllegalArgumentException(s"invalid range token '$token': $err")
-
   private def parseExactHoleCardsOrNone(token: String): Option[HoleCards] =
-    if token.trim.length == 4 then Some(parseHoleCards(token.trim))
+    if token.trim.length == 4 then Some(CliHelpers.parseHoleCards(token.trim))
     else None
-
-  private def parseHoleCards(token: String): HoleCards =
-    require(token.length == 4, s"expected 4-char hole cards token like AcAs, got '$token'")
-    val c1 = Card.parse(token.substring(0, 2)).getOrElse(
-      throw new IllegalArgumentException(s"invalid card token in '$token'")
-    )
-    val c2 = Card.parse(token.substring(2, 4)).getOrElse(
-      throw new IllegalArgumentException(s"invalid card token in '$token'")
-    )
-    HoleCards.canonical(c1, c2)
-
-  private def fmt2(value: Double): String =
-    String.format(Locale.ROOT, "%6.2f", java.lang.Double.valueOf(value))
-
-  private def fmt5(value: Double): String =
-    String.format(Locale.ROOT, "%8.5f", java.lang.Double.valueOf(value))

@@ -35,6 +35,13 @@ object HoldemCombinator:
     * @return all possible two-card hands in canonical order
     */
   def holeCardsFrom(remaining: IndexedSeq[Card]): Vector[HoleCards] =
-    combinations(remaining, 2).map { combo =>
-      HoleCards.canonical(combo(0), combo(1))
-    }.toVector
+    val out = Vector.newBuilder[HoleCards]
+    var i = 0
+    while i < remaining.length do
+      val first = remaining(i)
+      var j = i + 1
+      while j < remaining.length do
+        out += HoleCards.canonical(first, remaining(j))
+        j += 1
+      i += 1
+    out.result()

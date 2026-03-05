@@ -14,7 +14,7 @@ import java.util.Locale
   * }}}
   */
 object ComparePublishedPreflopVsRandom:
-  private final case class PublishedRow(
+  private[holdem] final case class PublishedRow(
       rank: Int,
       hand: String,
       winPct: Double,
@@ -22,7 +22,7 @@ object ComparePublishedPreflopVsRandom:
   ):
     def sourceEquityPct: Double = winPct + (0.5 * tiePct)
 
-  private final case class ComputedRow(
+  private[holdem] final case class ComputedRow(
       published: PublishedRow,
       comboWinPct: Double,
       comboTiePct: Double,
@@ -41,7 +41,7 @@ object ComparePublishedPreflopVsRandom:
   // Published values from:
   // https://caniwin.com/texasholdem/preflop/heads-up.php
   // The page states values are truncated (not rounded).
-  private val PublishedTopRows: Vector[PublishedRow] = Vector(
+  private[holdem] val PublishedTopRows: Vector[PublishedRow] = Vector(
     PublishedRow(1, "AAo", 84.93, 0.54),
     PublishedRow(2, "KKo", 82.11, 0.55),
     PublishedRow(3, "QQo", 79.63, 0.58),
@@ -72,7 +72,7 @@ object ComparePublishedPreflopVsRandom:
     if meta.mode != "exact" then
       throw new IllegalArgumentException(s"expected exact table input, got mode=${meta.mode}")
 
-    val villainClassDistributions = allHandClassTokens.map(parseRangeDistribution)
+    val villainClassDistributions = allHandClassTokens.map(CliHelpers.parseRangeDistribution)
     val computed = PublishedTopRows.map(row => computeRow(table, row, villainClassDistributions))
 
     println("Published source: https://caniwin.com/texasholdem/preflop/heads-up.php")
@@ -89,9 +89,9 @@ object ComparePublishedPreflopVsRandom:
     computed.foreach { row =>
       println(
         f"${row.published.rank}%4d ${row.published.hand}%-4s " +
-          f"${fmt2(row.published.winPct)} ${fmt2(row.published.tiePct)} ${fmt2(row.published.sourceEquityPct)} " +
-          f"${fmt5(row.comboWinPct)} ${fmt5(row.comboTiePct)} ${fmt5(row.comboEquityPct)} ${fmt5(row.deltaComboEquityPctPoints)} " +
-          f"${fmt5(row.classWinPct)} ${fmt5(row.classTiePct)} ${fmt5(row.classEquityPct)} ${fmt5(row.deltaClassEquityPctPoints)}"
+          f"${CliHelpers.fmt2(row.published.winPct)} ${CliHelpers.fmt2(row.published.tiePct)} ${CliHelpers.fmt2(row.published.sourceEquityPct)} " +
+          f"${CliHelpers.fmt5(row.comboWinPct)} ${CliHelpers.fmt5(row.comboTiePct)} ${CliHelpers.fmt5(row.comboEquityPct)} ${CliHelpers.fmt5(row.deltaComboEquityPctPoints)} " +
+          f"${CliHelpers.fmt5(row.classWinPct)} ${CliHelpers.fmt5(row.classTiePct)} ${CliHelpers.fmt5(row.classEquityPct)} ${CliHelpers.fmt5(row.deltaClassEquityPctPoints)}"
       )
     }
 
@@ -105,13 +105,13 @@ object ComparePublishedPreflopVsRandom:
     println(f"ModelB maxAbsDeltaEq(pp)=$maxAbsDeltaClassEq%.6f")
     println(f"ModelB meanAbsDeltaEq(pp)=$meanAbsDeltaClassEq%.6f")
 
-  private def computeRow(
+  private[holdem] def computeRow(
       table: HeadsUpEquityCanonicalTable,
       published: PublishedRow,
       villainClassDistributions: Vector[sicfun.core.DiscreteDistribution[HoleCards]]
   ): ComputedRow =
     val token = normalizeHandToken(published.hand)
-    val heroDist = parseRangeDistribution(token)
+    val heroDist = CliHelpers.parseRangeDistribution(token)
 
     val (comboWin, comboTie) = computeAgainstComboUniform(table, heroDist)
     val (classWin, classTie) = computeAgainstClassUniform(table, heroDist, villainClassDistributions)
@@ -124,7 +124,7 @@ object ComparePublishedPreflopVsRandom:
       classTiePct = classTie * 100.0
     )
 
-  private def computeAgainstComboUniform(
+  private[holdem] def computeAgainstComboUniform(
       table: HeadsUpEquityCanonicalTable,
       heroDist: sicfun.core.DiscreteDistribution[HoleCards]
   ): (Double, Double) =
@@ -185,7 +185,7 @@ object ComparePublishedPreflopVsRandom:
 
     (win, tie)
 
-  private def allHandClassTokens: Vector[String] =
+  private[holdem] def allHandClassTokens: Vector[String] =
     val ranks = Vector("A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2")
     val pairs = ranks.map(r => s"$r$r")
     val nonPairs =
@@ -198,19 +198,9 @@ object ComparePublishedPreflopVsRandom:
       yield s"$hi$lo$suitedness"
     pairs ++ nonPairs
 
-  private def parseRangeDistribution(token: String) =
-    RangeParser.parse(token) match
-      case Right(dist) => dist
-      case Left(err) => throw new IllegalArgumentException(s"failed to parse hand token '$token': $err")
-
-  private def normalizeHandToken(raw: String): String =
+  private[holdem] def normalizeHandToken(raw: String): String =
     val token = raw.trim.toUpperCase(Locale.ROOT)
     // Source uses AAo/KKo/... for pairs; our parser expects AA/KK/...
     if token.length == 3 && token(0) == token(1) && token(2) == 'O' then token.substring(0, 2)
     else token
 
-  private def fmt2(value: Double): String =
-    String.format(Locale.ROOT, "%6.2f", java.lang.Double.valueOf(value))
-
-  private def fmt5(value: Double): String =
-    String.format(Locale.ROOT, "%8.5f", java.lang.Double.valueOf(value))

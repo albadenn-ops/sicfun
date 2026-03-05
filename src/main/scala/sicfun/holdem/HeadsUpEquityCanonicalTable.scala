@@ -2,7 +2,8 @@ package sicfun.holdem
 
 import sicfun.core.Card
 
-import java.io.{DataInputStream, DataOutputStream, FileOutputStream}
+import java.io.{BufferedOutputStream, DataInputStream, DataOutputStream, FileOutputStream}
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import scala.util.Random
 
@@ -37,18 +38,29 @@ final case class HeadsUpEquityCanonicalTable(values: Map[Int, EquityResultWithEr
   /** Core lookup with automatic canonical key resolution and perspective flipping. */
   private def lookup(hero: HoleCards, villain: HoleCards): Option[EquityResultWithError] =
     val key = HeadsUpEquityCanonicalTable.keyFor(hero, villain)
-    values.get(key.value).map(base => HeadsUpEquityCanonicalTable.flipIfNeeded(base, key.flipped))
+    values.get(key.value.raw).map(base => HeadsUpEquityCanonicalTable.flipIfNeeded(base, key.flipped))
 
 /** Companion object providing canonical key computation, batch building, factory methods,
   * and I/O for suit-isomorphic heads-up equity tables.
   */
 object HeadsUpEquityCanonicalTable:
+  private val CanonicalProfileProperty = "sicfun.canonical.profile"
+
+  /** Type-safe canonical lookup key represented as a 24-bit packed Int. */
+  opaque type CanonicalKey = Int
+
+  object CanonicalKey:
+    inline def apply(value: Int): CanonicalKey = value
+
+  extension (inline key: CanonicalKey)
+    inline def raw: Int = key
+
   /** A canonical lookup key with a flag indicating whether hero/villain were swapped.
     *
     * @param value   24-bit integer encoding the suit-normalized matchup
     * @param flipped `true` if the original hero maps to the canonical villain (results need swapping)
     */
-  final case class Key(value: Int, flipped: Boolean)
+  final case class Key(value: CanonicalKey, flipped: Boolean)
   /** Internal batch descriptor for parallel computation of canonical matchups. */
   private[holdem] final case class CanonicalBatch(
       keys: Array[Key],
@@ -63,7 +75,7 @@ object HeadsUpEquityCanonicalTable:
     val reps = Vector.newBuilder[(Key, HoleCards, HoleCards)]
     HoleCardsIndex.foreachNonOverlappingPair { (_, hero, _, villain) =>
       val key = keyFor(hero, villain)
-      if seen.add(key.value) then reps += ((key, hero, villain))
+      if seen.add(key.value.raw) then reps += ((key, hero, villain))
     }
     reps.result()
 
@@ -80,7 +92,8 @@ object HeadsUpEquityCanonicalTable:
       throw new IllegalArgumentException("hands must be non-overlapping")
     val key1 = canonicalKey(hero, villain)
     val key2 = canonicalKey(villain, hero)
-    if key1 <= key2 then Key(key1, flipped = false) else Key(key2, flipped = true)
+    if key1 <= key2 then Key(CanonicalKey(key1), flipped = false)
+    else Key(CanonicalKey(key2), flipped = true)
 
   /** Builds the canonical heads-up equity table, computing equity for one representative
     * per suit-isomorphic equivalence class (up to `maxMatchups`).
@@ -102,7 +115,14 @@ object HeadsUpEquityCanonicalTable:
       backend: HeadsUpEquityTable.ComputeBackend = HeadsUpEquityTable.ComputeBackend.Cpu
   ): HeadsUpEquityCanonicalTable =
     require(parallelism > 0, "parallelism must be positive")
+    val profileEnabled =
+      sys.props
+        .get(CanonicalProfileProperty)
+        .map(_.trim.toLowerCase(Locale.ROOT))
+        .exists(v => v == "1" || v == "true" || v == "yes" || v == "on")
+    val startedAt = if profileEnabled then System.nanoTime() else 0L
     val batch = selectCanonicalBatch(maxMatchups)
+    val afterSelectBatch = if profileEnabled then System.nanoTime() else 0L
     val total = totalCanonicalKeys.toLong
     val monteCarloSeedBase = rng.nextLong()
 
@@ -128,14 +148,26 @@ object HeadsUpEquityCanonicalTable:
               gpuResults
             case Left(reason) =>
               if HeadsUpGpuRuntime.allowCpuFallbackOnGpuFailure then
-                System.err.println(s"GPU backend unavailable ($reason); using CPU workers")
+                GpuRuntimeSupport.warn(s"GPU backend unavailable ($reason); using CPU workers")
                 cpuCompute()
               else
                 throw new IllegalStateException(
                   s"GPU backend failed ($reason). CPU fallback is disabled; set sicfun_GPU_FALLBACK_TO_CPU=true to re-enable it."
                 )
+    val afterCompute = if profileEnabled then System.nanoTime() else 0L
 
-    buildFromBatchResults(batch.keys, results)
+    val table = buildFromBatchResults(batch.keys, results)
+    if profileEnabled then
+      val finishedAt = System.nanoTime()
+      val selectBatchSeconds = (afterSelectBatch - startedAt).toDouble / 1_000_000_000.0
+      val computeSeconds = (afterCompute - afterSelectBatch).toDouble / 1_000_000_000.0
+      val mapSeconds = (finishedAt - afterCompute).toDouble / 1_000_000_000.0
+      val totalSeconds = (finishedAt - startedAt).toDouble / 1_000_000_000.0
+      GpuRuntimeSupport.log(
+        f"canonicalProfile selectBatch=$selectBatchSeconds%.3f compute=$computeSeconds%.3f " +
+          f"map=$mapSeconds%.3f total=$totalSeconds%.3f"
+      )
+    table
 
   def cache(mode: HeadsUpEquityTable.Mode, rng: Random = new Random()): HeadsUpEquityCanonicalCache =
     new HeadsUpEquityCanonicalCache(mode, rng.nextLong())
@@ -159,8 +191,8 @@ object HeadsUpEquityCanonicalTable:
     while idx < reps.length do
       val (key, hero, villain) = reps(idx)
       keys(idx) = key
-      packedKeys(idx) = HeadsUpEquityTable.keyFor(hero, villain).value
-      keyMaterial(idx) = key.value.toLong
+      packedKeys(idx) = HeadsUpEquityTable.keyFor(hero, villain).value.raw
+      keyMaterial(idx) = key.value.raw.toLong
       idx += 1
     CanonicalBatch(keys = keys, packedKeys = packedKeys, keyMaterial = keyMaterial)
 
@@ -225,10 +257,11 @@ object HeadsUpEquityCanonicalTable:
       results: Array[EquityResultWithError]
   ): HeadsUpEquityCanonicalTable =
     require(keys.length == results.length, "keys and results must have equal length")
-    val map = scala.collection.mutable.Map.empty[Int, EquityResultWithError]
+    val map = scala.collection.mutable.HashMap.empty[Int, EquityResultWithError]
+    map.sizeHint(keys.length)
     var idx = 0
     while idx < keys.length do
-      map.put(keys(idx).value, flipIfNeeded(results(idx), keys(idx).flipped))
+      map.put(keys(idx).value.raw, flipIfNeeded(results(idx), keys(idx).flipped))
       idx += 1
     HeadsUpEquityCanonicalTable(map.toMap)
 
@@ -247,7 +280,8 @@ final class HeadsUpEquityCanonicalCache(mode: HeadsUpEquityTable.Mode, monteCarl
 
   def equity(hero: HoleCards, villain: HoleCards): EquityResultWithError =
     val key = HeadsUpEquityCanonicalTable.keyFor(hero, villain)
-    val cached = cache.get(key.value)
+    val canonical = key.value.raw
+    val cached = cache.get(canonical)
     val base =
       if cached != null then cached
       else
@@ -257,10 +291,10 @@ final class HeadsUpEquityCanonicalCache(mode: HeadsUpEquityTable.Mode, monteCarl
             villain,
             mode,
             monteCarloSeedBase,
-            key.value.toLong
+            canonical.toLong
           )
         val stored = HeadsUpEquityCanonicalTable.flipIfNeeded(computed, key.flipped)
-        val prev = cache.putIfAbsent(key.value, stored)
+        val prev = cache.putIfAbsent(canonical, stored)
         if prev != null then prev else stored
     HeadsUpEquityCanonicalTable.flipIfNeeded(base, key.flipped)
 
@@ -278,20 +312,59 @@ object HeadsUpEquityCanonicalTableIO:
     */
   def write(path: String, table: HeadsUpEquityCanonicalTable, meta: HeadsUpEquityTableMeta): Unit =
     require(meta.canonical, "meta.canonical must be true for canonical heads-up table")
-    val out = new DataOutputStream(new FileOutputStream(path))
+    val out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(path)))
     try
       HeadsUpEquityTableIOUtil.writeHeader(out, meta)
       HeadsUpEquityTableIOUtil.writeEntries(out, table.values, (o, key: Int) => o.writeInt(key))
     finally out.close()
 
+  /** Writes canonical entries directly from aligned key/result arrays, avoiding intermediate map materialization. */
+  def writeFromBatch(
+      path: String,
+      keys: Array[HeadsUpEquityCanonicalTable.Key],
+      results: Array[EquityResultWithError],
+      meta: HeadsUpEquityTableMeta
+  ): Unit =
+    require(meta.canonical, "meta.canonical must be true for canonical heads-up table")
+    require(keys.length == results.length, "keys and results must have equal length")
+    require(meta.count == keys.length, "meta.count must match keys/results length")
+    val out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(path)))
+    try
+      HeadsUpEquityTableIOUtil.writeHeader(out, meta)
+      var idx = 0
+      while idx < keys.length do
+        val key = keys(idx)
+        val result = HeadsUpEquityCanonicalTable.flipIfNeeded(results(idx), key.flipped)
+        out.writeInt(key.value.raw)
+        out.writeDouble(result.win)
+        out.writeDouble(result.tie)
+        out.writeDouble(result.loss)
+        out.writeDouble(result.stderr)
+        idx += 1
+    finally out.close()
+
   def read(path: String): HeadsUpEquityCanonicalTable =
     readWithMeta(path)._1
+
+  def readMeta(path: String): HeadsUpEquityTableMeta =
+    HeadsUpEquityTableIOUtil.withFileInputStream(path) { in =>
+      val meta = HeadsUpEquityTableIOUtil.readHeader(in)
+      require(meta.canonical, "expected canonical heads-up table")
+      meta
+    }
 
   def readWithMeta(path: String): (HeadsUpEquityCanonicalTable, HeadsUpEquityTableMeta) =
     HeadsUpEquityTableIOUtil.withFileInputStream(path)(readWithMeta)
 
   def readResource(resourcePath: String): HeadsUpEquityCanonicalTable =
     readResourceWithMeta(resourcePath)._1
+
+  def readResourceMeta(resourcePath: String): HeadsUpEquityTableMeta =
+    HeadsUpEquityTableIOUtil.withResourceInputStream(resourcePath, getClass) { in =>
+      val meta = HeadsUpEquityTableIOUtil.readHeader(in)
+      require(meta.canonical, "expected canonical heads-up table")
+      meta
+    }
 
   def readResourceWithMeta(resourcePath: String): (HeadsUpEquityCanonicalTable, HeadsUpEquityTableMeta) =
     HeadsUpEquityTableIOUtil.withResourceInputStream(resourcePath, getClass)(readWithMeta)
