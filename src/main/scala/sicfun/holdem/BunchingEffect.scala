@@ -1,8 +1,7 @@
 package sicfun.holdem
 
-import sicfun.core.{Card, Deck, DiscreteDistribution}
+import sicfun.core.{Card, CardId, Deck, DiscreteDistribution}
 
-import scala.collection.mutable
 import scala.util.Random
 
 /** A preflop fold event for a specific table position. */
@@ -26,6 +25,11 @@ final case class BunchingResult(
   */
 object BunchingEffect:
   private val DefaultMaxAttemptFactor = 3
+  private final case class WeightedHand(hand: HoleCards, weight: Double, mask: Long)
+  private lazy val allHoleCardsWithMasks: Vector[(HoleCards, Long)] =
+    HoldemCombinator.holeCardsFrom(Deck.full).map { hand =>
+      hand -> handMask(hand)
+    }
 
   /** Full bunching analysis: adjusted range, naive range, both equities, and delta. */
   def compute(
@@ -140,9 +144,11 @@ object BunchingEffect:
   ): DiscreteDistribution[HoleCards] =
     val villainBase = tableRanges.rangeFor(villainPos)
     val orderedFolds = orderFolds(folds, tableRanges.format)
-    val deadBase = hero.asSet ++ board.asSet
+    val deadBaseMask = handMask(hero) | cardsMask(board.cards)
+    val villainWeightedHands = weightedVillainHands(villainBase)
+    val orderedFoldCandidates = orderedFolds.map(fold => weightedFoldHands(fold.position, tableRanges))
 
-    val accumulator = mutable.Map.empty[HoleCards, Double].withDefaultValue(0.0)
+    val accumulator = Array.fill[Double](villainWeightedHands.length)(0.0)
     val maxAttempts = math.max(trials * DefaultMaxAttemptFactor, trials)
 
     var successes = 0
@@ -150,15 +156,14 @@ object BunchingEffect:
 
     while successes < trials && attempts < maxAttempts do
       attempts += 1
-      sampleFoldedCards(deadBase, orderedFolds, tableRanges, rng) match
-        case Some(deadAfterFolds) =>
-          val remaining = Deck.full.filterNot(deadAfterFolds.contains).toIndexedSeq
-          val villainCandidates = HoldemCombinator.holeCardsFrom(remaining)
-          villainCandidates.foreach { hand =>
-            val p = villainBase.probabilityOf(hand)
-            if p > 0.0 then
-              accumulator.update(hand, accumulator(hand) + p)
-          }
+      sampleFoldedCardsMask(deadBaseMask, orderedFoldCandidates, rng) match
+        case Some(deadAfterFoldsMask) =>
+          var i = 0
+          while i < villainWeightedHands.length do
+            val weighted = villainWeightedHands(i)
+            if (weighted.mask & deadAfterFoldsMask) == 0L then
+              accumulator(i) = accumulator(i) + weighted.weight
+            i += 1
           successes += 1
         case None =>
           ()
@@ -167,29 +172,32 @@ object BunchingEffect:
       successes > 0,
       "unable to sample any fold-consistent dead-card configuration; ranges may be too restrictive"
     )
-    DiscreteDistribution(accumulator.toMap).normalized
-
-  private def sampleFoldedCards(
-      initialDead: Set[Card],
-      orderedFolds: Vector[PreflopFold],
-      tableRanges: TableRanges,
-      rng: Random
-  ): Option[Set[Card]] =
-    var dead = initialDead
+    val accumulatedWeights = Map.newBuilder[HoleCards, Double]
     var i = 0
-    while i < orderedFolds.length do
-      val fold = orderedFolds(i)
-      val remaining = Deck.full.filterNot(dead.contains).toIndexedSeq
-      val candidates = HoldemCombinator.holeCardsFrom(remaining)
-      val weighted = candidates.flatMap { hand =>
-        val weight = tableRanges.foldProbability(fold.position, hand)
-        if weight > 0.0 then Some(hand -> weight) else None
-      }
-      if weighted.isEmpty then return None
-      val sampled = sampleWeighted(weighted, rng)
-      dead = dead ++ sampled.asSet
+    while i < villainWeightedHands.length do
+      if accumulator(i) > 0.0 then
+        accumulatedWeights += villainWeightedHands(i).hand -> accumulator(i)
       i += 1
-    Some(dead)
+    DiscreteDistribution(accumulatedWeights.result()).normalized
+
+  private def sampleFoldedCardsMask(
+      initialDeadMask: Long,
+      orderedFoldCandidates: Vector[Vector[WeightedHand]],
+      rng: Random
+  ): Option[Long] =
+    import scala.util.boundary, boundary.break
+    boundary:
+      var deadMask = initialDeadMask
+      var i = 0
+      while i < orderedFoldCandidates.length do
+        val candidates = orderedFoldCandidates(i)
+        sampleWeightedCompatible(candidates, deadMask, rng) match
+          case Some(sampled) =>
+            deadMask = deadMask | sampled.mask
+          case None =>
+            break(None)
+        i += 1
+      Some(deadMask)
 
   private def naiveVillainRange(
       hero: HoleCards,
@@ -197,9 +205,9 @@ object BunchingEffect:
       tableRanges: TableRanges,
       villainPos: Position
   ): DiscreteDistribution[HoleCards] =
-    val dead = hero.asSet ++ board.asSet
+    val deadMask = handMask(hero) | cardsMask(board.cards)
     val filtered = tableRanges.rangeFor(villainPos).weights.collect {
-      case (hand, weight) if weight > 0.0 && !hand.asSet.exists(dead.contains) => hand -> weight
+      case (hand, weight) if weight > 0.0 && (handMask(hand) & deadMask) == 0L => hand -> weight
     }
     require(filtered.nonEmpty, "villain range is empty after hero/board filtering")
     DiscreteDistribution(filtered).normalized
@@ -208,14 +216,61 @@ object BunchingEffect:
     val order = format.preflopOrder.zipWithIndex.toMap
     folds.sortBy(f => order(f.position))
 
-  private def sampleWeighted[A](items: IndexedSeq[(A, Double)], rng: Random): A =
-    val total = items.foldLeft(0.0)(_ + _._2)
-    require(total > 0.0, "cannot sample from zero-weight distribution")
-    val r = rng.nextDouble() * total
+  private def weightedVillainHands(
+      villainRange: DiscreteDistribution[HoleCards]
+  ): Vector[WeightedHand] =
+    allHoleCardsWithMasks.flatMap { (hand, mask) =>
+      val weight = villainRange.probabilityOf(hand)
+      if weight > 0.0 then Some(WeightedHand(hand, weight, mask)) else None
+    }
+
+  private def weightedFoldHands(
+      position: Position,
+      tableRanges: TableRanges
+  ): Vector[WeightedHand] =
+    allHoleCardsWithMasks.flatMap { (hand, mask) =>
+      val weight = tableRanges.foldProbability(position, hand)
+      if weight > 0.0 then Some(WeightedHand(hand, weight, mask)) else None
+    }
+
+  private def sampleWeightedCompatible(
+      items: Vector[WeightedHand],
+      deadMask: Long,
+      rng: Random
+  ): Option[WeightedHand] =
+    var total = 0.0
     var acc = 0.0
     var i = 0
     while i < items.length do
-      acc += items(i)._2
-      if r <= acc then return items(i)._1
+      val item = items(i)
+      if (item.mask & deadMask) == 0L then total += item.weight
       i += 1
-    items.last._1
+    if total <= 0.0 then None
+    else
+      import scala.util.boundary, boundary.break
+      val target = rng.nextDouble() * total
+      var fallback: WeightedHand = items.head
+      boundary:
+        i = 0
+        while i < items.length do
+          val item = items(i)
+          if (item.mask & deadMask) == 0L then
+            fallback = item
+            acc += item.weight
+            if target <= acc then break(Some(item))
+          i += 1
+        Some(fallback)
+
+  private inline def handMask(hand: HoleCards): Long =
+    cardMask(hand.first) | cardMask(hand.second)
+
+  private def cardsMask(cards: Seq[Card]): Long =
+    var mask = 0L
+    var i = 0
+    while i < cards.length do
+      mask = mask | cardMask(cards(i))
+      i += 1
+    mask
+
+  private inline def cardMask(card: Card): Long =
+    1L << CardId.toId(card)

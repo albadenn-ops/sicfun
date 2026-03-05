@@ -1,7 +1,7 @@
 package sicfun.holdem
 
 import munit.FunSuite
-import sicfun.core.{Card, DiscreteDistribution, Rank, Suit}
+import sicfun.core.{Card, DiscreteDistribution}
 
 class BehavioralMetricsTest extends FunSuite:
 
@@ -63,11 +63,9 @@ class BehavioralMetricsTest extends FunSuite:
     stackSize = 200.0,
     betHistory = Vector.empty
   )
-  private val model = PokerActionModel.uniform
-
   test("PlayerSignature: all folds yields foldRate = 1") {
     val observations = Seq.fill(10)((baseState, PokerAction.Fold))
-    val sig = PlayerSignature.compute(observations, model)
+    val sig = PlayerSignature.compute(observations)
     assertEqualsDouble(sig.values(0), 1.0, 1e-9) // foldRate
     assertEqualsDouble(sig.values(1), 0.0, 1e-9) // raiseRate
     assertEqualsDouble(sig.values(2), 0.0, 1e-9) // callRate
@@ -80,22 +78,22 @@ class BehavioralMetricsTest extends FunSuite:
       (baseState, PokerAction.Call),
       (baseState, PokerAction.Raise(20.0))
     )
-    val sig = PlayerSignature.compute(observations, model)
+    val sig = PlayerSignature.compute(observations)
     assertEqualsDouble(PlayerSignature.distance(sig, sig), 0.0, 1e-9)
   }
 
   test("PlayerSignature: different profiles have positive distance") {
     val foldObs = Seq.fill(10)((baseState, PokerAction.Fold))
     val raiseObs = Seq.fill(10)((baseState, PokerAction.Raise(20.0)))
-    val sigA = PlayerSignature.compute(foldObs, model)
-    val sigB = PlayerSignature.compute(raiseObs, model)
+    val sigA = PlayerSignature.compute(foldObs)
+    val sigB = PlayerSignature.compute(raiseObs)
     assert(PlayerSignature.distance(sigA, sigB) > 0.0,
       "expected positive distance between different profiles")
   }
 
   test("PlayerSignature: feature count matches featureNames") {
     val observations = Seq((baseState, PokerAction.Call))
-    val sig = PlayerSignature.compute(observations, model)
+    val sig = PlayerSignature.compute(observations)
     assertEquals(sig.values.length, PlayerSignature.featureNames.length)
   }
 
@@ -106,7 +104,7 @@ class BehavioralMetricsTest extends FunSuite:
       (state1, PokerAction.Call),
       (state2, PokerAction.Call)
     )
-    val sig = PlayerSignature.compute(observations, model)
+    val sig = PlayerSignature.compute(observations)
     assertEqualsDouble(sig.values(5), 0.375, 1e-9) // (0.25 + 0.5) / 2
   }
 
@@ -121,9 +119,27 @@ class BehavioralMetricsTest extends FunSuite:
     val obsAce = Seq.fill(3)((stateAce, PokerAction.Fold))
     val obsBoth = Seq.fill(3)((stateBoth, PokerAction.Fold))
 
-    val sigAce = PlayerSignature.compute(obsAce, model)
-    val sigBoth = PlayerSignature.compute(obsBoth, model)
+    val sigAce = PlayerSignature.compute(obsAce)
+    val sigBoth = PlayerSignature.compute(obsBoth)
 
     assertEquals(sigAce.values.length, PlayerSignature.featureNames.length)
     assertEquals(sigBoth.values.length, PlayerSignature.featureNames.length)
+  }
+
+  test("PlayerSignature: entropy of uniform action distribution is log2(4) = 2.0 bits") {
+    val checkState = baseState.copy(toCall = 0.0)
+    val observations = Seq(
+      (baseState, PokerAction.Fold),
+      (checkState, PokerAction.Check),
+      (baseState, PokerAction.Call),
+      (baseState, PokerAction.Raise(20.0))
+    )
+    val sig = PlayerSignature.compute(observations)
+    assertEqualsDouble(sig.values(4), 2.0, 1e-9)
+  }
+
+  test("PlayerSignature: entropy of single-action distribution is 0") {
+    val observations = Seq.fill(10)((baseState, PokerAction.Fold))
+    val sig = PlayerSignature.compute(observations)
+    assertEqualsDouble(sig.values(4), 0.0, 1e-9)
   }

@@ -1,7 +1,7 @@
 package sicfun.holdem
 
 import sicfun.core.Card
-import sicfun.core.Deck
+import sicfun.core.CardId
 
 /** A player's two private hole cards in Texas Hold'em.
   *
@@ -17,19 +17,26 @@ final case class HoleCards(first: Card, second: Card):
   require(first != second, "hole cards must be distinct")
 
   /** Returns both cards as a two-element vector. */
-  def toVector: Vector[Card] = Vector(first, second)
+  inline def toVector: Vector[Card] = Vector(first, second)
+
+  /** Returns the canonical four-character token (e.g., "AhKs"). */
+  inline def toToken: String = s"${first.toToken}${second.toToken}"
 
   /** Returns both cards as a set (useful for dead-card filtering). */
-  def asSet: Set[Card] = Set(first, second)
+  inline def asSet: Set[Card] = Set(first, second)
 
   /** Checks whether this hand contains the given card. */
-  def contains(card: Card): Boolean = first == card || second == card
+  inline def contains(card: Card): Boolean = first == card || second == card
+
+  /** Returns true when the two hands do not share any card. */
+  inline def isDisjointFrom(other: HoleCards): Boolean =
+    first != other.first &&
+      first != other.second &&
+      second != other.first &&
+      second != other.second
 
 /** Factory methods for [[HoleCards]] with canonical ordering. */
 object HoleCards:
-  /** Deck-position lookup used to impose a deterministic card order. */
-  private val deckIndex: Map[Card, Int] = Deck.full.zipWithIndex.toMap
-
   /** Constructs a [[HoleCards]] with the two cards in canonical (deck-index) order.
     *
     * @param a first card (in any order)
@@ -37,7 +44,7 @@ object HoleCards:
     * @return a [[HoleCards]] where `first.deckIndex <= second.deckIndex`
     */
   def canonical(a: Card, b: Card): HoleCards =
-    if deckIndex(a) <= deckIndex(b) then HoleCards(a, b) else HoleCards(b, a)
+    if CardId.toId(a) <= CardId.toId(b) then HoleCards(a, b) else HoleCards(b, a)
 
   /** Constructs canonical [[HoleCards]] from an arbitrary two-card sequence.
     *
@@ -60,18 +67,18 @@ final case class Board(cards: Vector[Card]):
   require(cards.distinct.length == cards.length, "board cards must be distinct")
 
   /** Number of community cards currently dealt. */
-  def size: Int = cards.length
+  inline def size: Int = cards.length
 
   /** Number of board cards still to come (5 minus current size). */
-  def missing: Int = 5 - cards.length
+  inline def missing: Int = 5 - cards.length
 
   /** Returns the board cards as a set (useful for dead-card filtering). */
-  def asSet: Set[Card] = cards.toSet
+  inline def asSet: Set[Card] = cards.toSet
 
 /** Factory methods for [[Board]]. */
 object Board:
   /** An empty preflop board. */
-  def empty: Board = Board(Vector.empty)
+  val empty: Board = Board(Vector.empty)
 
   /** Constructs a board from an arbitrary card sequence. */
   def from(cards: Seq[Card]): Board = Board(cards.toVector)
@@ -86,10 +93,10 @@ object Board:
   */
 final case class EquityResult(win: Double, tie: Double, loss: Double):
   /** Hero's equity: wins count fully, ties count as half. */
-  def equity: Double = win + (tie / 2.0)
+  inline def equity: Double = win + (tie / 2.0)
 
   /** Sum of all outcome probabilities (should be ~1.0 after normalization). */
-  def total: Double = win + tie + loss
+  inline def total: Double = win + tie + loss
 
 /** Win/tie/loss probabilities with an associated standard error, typically
   * produced by Monte Carlo estimation.
@@ -101,10 +108,10 @@ final case class EquityResult(win: Double, tie: Double, loss: Double):
   */
 final case class EquityResultWithError(win: Double, tie: Double, loss: Double, stderr: Double):
   /** Hero's equity: wins count fully, ties count as half. */
-  def equity: Double = win + (tie / 2.0)
+  inline def equity: Double = win + (tie / 2.0)
 
   /** Sum of all outcome probabilities (should be ~1.0). */
-  def total: Double = win + tie + loss
+  inline def total: Double = win + tie + loss
 
   /** Drops the error bound, returning a plain [[EquityResult]]. */
   def toEquityResult: EquityResult = EquityResult(win, tie, loss)
@@ -146,4 +153,4 @@ final case class EquityEstimate(
   */
 final case class EquityShareResult(win: Double, tie: Double, loss: Double, share: Double):
   /** Sum of all outcome probabilities (should be ~1.0 after normalization). */
-  def total: Double = win + tie + loss
+  inline def total: Double = win + tie + loss

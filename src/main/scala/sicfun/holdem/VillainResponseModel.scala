@@ -6,11 +6,13 @@ final case class VillainResponseProfile(
     callProbability: Double,
     raiseProbability: Double
 ):
-  private val total = foldProbability + callProbability + raiseProbability
   require(foldProbability >= 0.0, "foldProbability must be non-negative")
   require(callProbability >= 0.0, "callProbability must be non-negative")
   require(raiseProbability >= 0.0, "raiseProbability must be non-negative")
-  require(math.abs(total - 1.0) < 1e-9, s"response probabilities must sum to 1.0, got $total")
+  require(
+    math.abs(foldProbability + callProbability + raiseProbability - 1.0) < 1e-9,
+    s"response probabilities must sum to 1.0, got ${foldProbability + callProbability + raiseProbability}"
+  )
 
   def continueProbability: Double = callProbability + raiseProbability
 

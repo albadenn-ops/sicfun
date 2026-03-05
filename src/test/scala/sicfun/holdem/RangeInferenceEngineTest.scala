@@ -105,7 +105,7 @@ class RangeInferenceEngineTest extends FunSuite:
     assert(callEv > foldEv)
   }
 
-  test("recommendAction supports custom action value models") {
+  test("high fold-equity ChipEv favors raise over check and fold") {
     val hero = hole("Ah", "Kd")
     val board = Board.from(Seq(card("2c"), card("7h"), card("Jd")))
     val posterior = DiscreteDistribution(Map(hole("Qc", "Qh") -> 1.0))
@@ -119,19 +119,12 @@ class RangeInferenceEngineTest extends FunSuite:
       betHistory = Vector.empty
     )
 
-    val preferRaise = new ActionValueModel:
-      def expectedValue(action: PokerAction, state: GameState, heroEquity: Double): Double = action match
-        case PokerAction.Raise(amount) => 10.0 + amount
-        case PokerAction.Check => 1.0
-        case PokerAction.Call => 0.5
-        case PokerAction.Fold => 0.0
-
     val rec = RangeInferenceEngine.recommendAction(
       hero = hero,
       state = state,
       posterior = posterior,
       candidateActions = Vector(PokerAction.Fold, PokerAction.Check, PokerAction.Raise(15.0)),
-      actionValueModel = preferRaise,
+      actionValueModel = ActionValueModel.ChipEv(raiseFoldProbability = 0.95),
       equityTrials = 1_000,
       rng = new Random(31)
     )
@@ -139,7 +132,9 @@ class RangeInferenceEngineTest extends FunSuite:
     assertEquals(rec.bestAction, PokerAction.Raise(15.0))
     val raiseEv = rec.actionEvaluations.find(_.action == PokerAction.Raise(15.0)).map(_.expectedValue)
       .getOrElse(fail("missing raise EV"))
-    assertEquals(raiseEv, 25.0)
+    val checkEv = rec.actionEvaluations.find(_.action == PokerAction.Check).map(_.expectedValue)
+      .getOrElse(fail("missing check EV"))
+    assert(raiseEv > checkEv, s"raise EV ($raiseEv) should exceed check EV ($checkEv)")
   }
 
   test("SB-vs-BB default response model classifies fold call and raise buckets") {
@@ -216,11 +211,12 @@ class RangeInferenceEngineTest extends FunSuite:
   test("inferAndRecommend composes inference and recommendation end-to-end") {
     val hero = hole("Ac", "Kh")
     val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
+    // High toCall relative to pot makes call -EV, so fold is best with ChipEv
     val state = GameState(
       street = Street.Flop,
       board = board,
-      pot = 24.0,
-      toCall = 8.0,
+      pot = 5.0,
+      toCall = 50.0,
       position = Position.Button,
       stackSize = 150.0,
       betHistory = Vector.empty
@@ -229,11 +225,6 @@ class RangeInferenceEngineTest extends FunSuite:
     val table = TableRanges.defaults(TableFormat.NineMax)
     val folds = TableFormat.NineMax.foldsBeforeOpener(Position.Cutoff).map(PreflopFold(_))
     val model = PokerActionModel.uniform
-
-    val preferFold = new ActionValueModel:
-      def expectedValue(action: PokerAction, state: GameState, heroEquity: Double): Double = action match
-        case PokerAction.Fold => 0.0
-        case _ => -1.0
 
     val result = RangeInferenceEngine.inferAndRecommend(
       hero = hero,
@@ -244,7 +235,7 @@ class RangeInferenceEngineTest extends FunSuite:
       observations = Seq.empty,
       actionModel = model,
       candidateActions = Vector(PokerAction.Fold, PokerAction.Call),
-      actionValueModel = preferFold,
+      actionValueModel = ActionValueModel.ChipEv(),
       bunchingTrials = 300,
       equityTrials = 1_200,
       rng = new Random(41)

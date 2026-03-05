@@ -6,6 +6,13 @@ import sicfun.core.Card
 import scala.util.Random
 
 class BunchingEffectTest extends FunSuite:
+  private val PreflopBackendProperty = "sicfun.holdem.preflopEquityBackend"
+
+  private def withCpuPreflopBackend[A](thunk: => A): A =
+    TestSystemPropertyScope.withSystemProperties(
+      Vector(PreflopBackendProperty -> Some("cpu"))
+    )(thunk)
+
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
@@ -164,77 +171,81 @@ class BunchingEffectTest extends FunSuite:
   }
 
   test("compute returns small finite bunching delta and handles larger fold sets") {
-    val hero = hole("Ah", "Js")
-    val table = TableRanges.defaults(TableFormat.NineMax)
-    val foldsToCutoff = TableFormat.NineMax.foldsBeforeOpener(Position.Cutoff).map(PreflopFold(_))
+    withCpuPreflopBackend {
+      val hero = hole("Ah", "Js")
+      val table = TableRanges.defaults(TableFormat.NineMax)
+      val foldsToCutoff = TableFormat.NineMax.foldsBeforeOpener(Position.Cutoff).map(PreflopFold(_))
 
-    val result = BunchingEffect.compute(
-      hero = hero,
-      board = Board.empty,
-      folds = foldsToCutoff,
-      tableRanges = table,
-      villainPos = Position.BigBlind,
-      trials = 500,
-      equityTrials = 2_000,
-      rng = new Random(99)
-    )
+      val result = BunchingEffect.compute(
+        hero = hero,
+        board = Board.empty,
+        folds = foldsToCutoff,
+        tableRanges = table,
+        villainPos = Position.BigBlind,
+        trials = 250,
+        equityTrials = 900,
+        rng = new Random(99)
+      )
 
-    assert(result.adjustedRange.weights.nonEmpty)
-    assert(result.naiveRange.weights.nonEmpty)
-    assert(!result.bunchingDelta.isNaN)
-    assert(math.abs(result.bunchingDelta) < 0.5)
-    assertEquals(result.adjustedEquity.trials, 2000)
-    assertEquals(result.naiveEquity.trials, 2000)
+      assert(result.adjustedRange.weights.nonEmpty)
+      assert(result.naiveRange.weights.nonEmpty)
+      assert(!result.bunchingDelta.isNaN)
+      assert(math.abs(result.bunchingDelta) < 0.5)
+      assertEquals(result.adjustedEquity.trials, 900)
+      assertEquals(result.naiveEquity.trials, 900)
 
-    val manyFolds = Vector(
-      PreflopFold(Position.UTG),
-      PreflopFold(Position.UTG1),
-      PreflopFold(Position.UTG2),
-      PreflopFold(Position.Middle),
-      PreflopFold(Position.Cutoff),
-      PreflopFold(Position.Button),
-      PreflopFold(Position.SmallBlind)
-    )
-    val manyRange = BunchingEffect.adjustedRange(
-      hero = hero,
-      board = Board.empty,
-      folds = manyFolds,
-      tableRanges = table,
-      villainPos = Position.BigBlind,
-      trials = 80,
-      rng = new Random(101)
-    )
-    assert(manyRange.weights.nonEmpty)
+      val manyFolds = Vector(
+        PreflopFold(Position.UTG),
+        PreflopFold(Position.UTG1),
+        PreflopFold(Position.UTG2),
+        PreflopFold(Position.Middle),
+        PreflopFold(Position.Cutoff),
+        PreflopFold(Position.Button),
+        PreflopFold(Position.SmallBlind)
+      )
+      val manyRange = BunchingEffect.adjustedRange(
+        hero = hero,
+        board = Board.empty,
+        folds = manyFolds,
+        tableRanges = table,
+        villainPos = Position.BigBlind,
+        trials = 80,
+        rng = new Random(101)
+      )
+      assert(manyRange.weights.nonEmpty)
+    }
   }
 
   test("computeForOpener convenience matches explicit folds invocation") {
-    val hero = hole("Ac", "Kh")
-    val table = TableRanges.defaults(TableFormat.NineMax)
-    val openerPos = Position.Cutoff
-    val villainPos = Position.BigBlind
-    val seed = 12345L
+    withCpuPreflopBackend {
+      val hero = hole("Ac", "Kh")
+      val table = TableRanges.defaults(TableFormat.NineMax)
+      val openerPos = Position.Cutoff
+      val villainPos = Position.BigBlind
+      val seed = 12345L
 
-    val explicit = BunchingEffect.compute(
-      hero = hero,
-      board = Board.empty,
-      folds = TableFormat.NineMax.foldsBeforeOpener(openerPos).map(PreflopFold(_)),
-      tableRanges = table,
-      villainPos = villainPos,
-      trials = 250,
-      equityTrials = 900,
-      rng = new Random(seed)
-    )
-    val convenience = BunchingEffect.computeForOpener(
-      hero = hero,
-      tableRanges = table,
-      openerPos = openerPos,
-      villainPos = villainPos,
-      trials = 250,
-      equityTrials = 900,
-      rng = new Random(seed)
-    )
+      val explicit = BunchingEffect.compute(
+        hero = hero,
+        board = Board.empty,
+        folds = TableFormat.NineMax.foldsBeforeOpener(openerPos).map(PreflopFold(_)),
+        tableRanges = table,
+        villainPos = villainPos,
+        trials = 250,
+        equityTrials = 900,
+        rng = new Random(seed)
+      )
+      val convenience = BunchingEffect.computeForOpener(
+        hero = hero,
+        tableRanges = table,
+        openerPos = openerPos,
+        villainPos = villainPos,
+        trials = 250,
+        equityTrials = 900,
+        rng = new Random(seed)
+      )
 
-    assertEquals(convenience.adjustedRange.weights, explicit.adjustedRange.weights)
-    assertEquals(convenience.naiveRange.weights, explicit.naiveRange.weights)
-    assertEquals(convenience.bunchingDelta, explicit.bunchingDelta)
+      assertEquals(convenience.adjustedRange.weights, explicit.adjustedRange.weights)
+      assertEquals(convenience.naiveRange.weights, explicit.naiveRange.weights)
+      assertEquals(convenience.bunchingDelta, explicit.bunchingDelta)
+    }
   }

@@ -10,14 +10,14 @@ class PokerActionTest extends FunSuite:
   private def hole(a: String, b: String): HoleCards =
     HoleCards.from(Vector(card(a), card(b)))
 
-  test("categoryOf maps Raise to Raise category") {
-    assertEquals(PokerAction.categoryOf(PokerAction.Raise(100.0)), PokerAction.Category.Raise)
+  test("category maps Raise to Raise category") {
+    assertEquals(PokerAction.Raise(100.0).category, PokerAction.Category.Raise)
   }
 
-  test("categoryOf maps each simple action correctly") {
-    assertEquals(PokerAction.categoryOf(PokerAction.Fold), PokerAction.Category.Fold)
-    assertEquals(PokerAction.categoryOf(PokerAction.Check), PokerAction.Category.Check)
-    assertEquals(PokerAction.categoryOf(PokerAction.Call), PokerAction.Category.Call)
+  test("category maps each simple action correctly") {
+    assertEquals(PokerAction.Fold.category, PokerAction.Category.Fold)
+    assertEquals(PokerAction.Check.category, PokerAction.Category.Check)
+    assertEquals(PokerAction.Call.category, PokerAction.Category.Call)
   }
 
   test("categories has exactly 4 elements") {

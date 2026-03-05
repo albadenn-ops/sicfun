@@ -65,7 +65,7 @@ object PokerActionModelArtifactIO:
     val bias = readBias(directory.resolve(BiasFileName), classCount)
     val logistic = MultinomialLogistic(weights, bias)
     val categoryIndex = readCategoryIndex(directory.resolve(CategoryIndexFileName))
-    val model = PokerActionModel(logistic, categoryIndex)
+    val model = PokerActionModel(logistic, categoryIndex, featureCount)
 
     val version = ModelVersion(
       id = readRequired(metadata, "model.id"),
@@ -75,7 +75,9 @@ object PokerActionModelArtifactIO:
     )
     val calibration = CalibrationSummary(
       meanBrierScore = readRequired(metadata, "calibration.meanBrierScore").toDouble,
-      sampleCount = readRequired(metadata, "calibration.sampleCount").toInt
+      sampleCount = readRequired(metadata, "calibration.sampleCount").toInt,
+      uniformBaselineBrier = readOptional(metadata, "calibration.uniformBaselineBrier").map(_.toDouble).getOrElse(-1.0),
+      majorityBaselineBrier = readOptional(metadata, "calibration.majorityBaselineBrier").map(_.toDouble).getOrElse(-1.0)
     )
     val gate = CalibrationGate(
       maxMeanBrierScore = readRequired(metadata, "gate.maxMeanBrierScore").toDouble
@@ -104,6 +106,8 @@ object PokerActionModelArtifactIO:
     props.setProperty("model.trainedAtEpochMillis", artifact.version.trainedAtEpochMillis.toString)
     props.setProperty("calibration.meanBrierScore", java.lang.Double.toString(artifact.calibration.meanBrierScore))
     props.setProperty("calibration.sampleCount", artifact.calibration.sampleCount.toString)
+    props.setProperty("calibration.uniformBaselineBrier", java.lang.Double.toString(artifact.calibration.uniformBaselineBrier))
+    props.setProperty("calibration.majorityBaselineBrier", java.lang.Double.toString(artifact.calibration.majorityBaselineBrier))
     props.setProperty("gate.maxMeanBrierScore", java.lang.Double.toString(artifact.gate.maxMeanBrierScore))
     props.setProperty("training.sampleCount", artifact.trainingSampleCount.toString)
     props.setProperty("evaluation.sampleCount", artifact.evaluationSampleCount.toString)

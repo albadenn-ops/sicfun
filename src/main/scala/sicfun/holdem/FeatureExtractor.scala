@@ -40,7 +40,7 @@ object FeatureExtractor:
   )
 
   /** Number of features produced by [[extract]]. */
-  val dimension: Int = featureNames.length
+  inline val dimension = 8
 
   /** Extracts an [[ObservableFeatures]] vector from a single poker event.
     *

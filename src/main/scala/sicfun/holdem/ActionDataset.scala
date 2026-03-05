@@ -19,12 +19,58 @@ final case class DatasetProvenance(
     labelMapping: Map[PokerAction.Category, Int]
 )
 
+final case class FeatureStatistics(
+    name: String,
+    mean: Double,
+    std: Double,
+    min: Double,
+    max: Double
+)
+
+final case class DatasetStatistics(
+    totalExamples: Int,
+    classDistribution: Map[PokerAction.Category, Int],
+    featureStatistics: Vector[FeatureStatistics]
+)
+
 final case class ActionDataset(
     examples: Vector[ActionExample],
     provenance: DatasetProvenance
 ):
   def trainingMatrix: Vector[(Vector[Double], Int)] =
     examples.map(example => (example.features, example.label))
+
+  /** Compute class distribution and feature statistics for this dataset. */
+  def statistics: DatasetStatistics =
+    require(examples.nonEmpty, "cannot compute statistics on empty dataset")
+    val numFeatures = provenance.featureNames.length
+    val reverseLabel = provenance.labelMapping.map { case (cat, idx) => idx -> cat }
+
+    val classCounts = scala.collection.mutable.Map.empty[PokerAction.Category, Int]
+    examples.foreach { ex =>
+      val cat = reverseLabel(ex.label)
+      classCounts(cat) = classCounts.getOrElse(cat, 0) + 1
+    }
+
+    val featureStats = (0 until numFeatures).map { f =>
+      val values = examples.map(_.features(f))
+      val n = values.length
+      val mean = values.sum / n
+      val variance = if n > 1 then values.map(v => math.pow(v - mean, 2)).sum / (n - 1) else 0.0
+      FeatureStatistics(
+        name = provenance.featureNames(f),
+        mean = mean,
+        std = math.sqrt(variance),
+        min = values.min,
+        max = values.max
+      )
+    }.toVector
+
+    DatasetStatistics(
+      totalExamples = examples.length,
+      classDistribution = classCounts.toMap,
+      featureStatistics = featureStats
+    )
 
 object DatasetBuilder:
   def build(
@@ -46,7 +92,7 @@ object DatasetBuilder:
     val ordered = sortEvents(events)
 
     ordered.foreach { event =>
-      val category = PokerAction.categoryOf(event.action)
+      val category = event.action.category
       require(categoryIndex.contains(category), s"missing class index for category $category")
     }
 
@@ -56,7 +102,7 @@ object DatasetBuilder:
         features.dimension == FeatureExtractor.dimension,
         s"feature extractor returned ${features.dimension} features, expected ${FeatureExtractor.dimension}"
       )
-      val category = PokerAction.categoryOf(event.action)
+      val category = event.action.category
       ActionExample(
         handId = event.handId,
         sequenceInHand = event.sequenceInHand,

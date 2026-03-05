@@ -133,3 +133,29 @@ class ActionDatasetContractTest extends FunSuite:
       assertEquals(example.features.length, FeatureExtractor.dimension)
     }
   }
+
+  test("statistics reports correct class distribution and feature ranges") {
+    val events = Seq(
+      event(handId = "h1", sequence = 0L, ts = 1000L, action = PokerAction.Call),
+      event(handId = "h1", sequence = 1L, ts = 1100L, action = PokerAction.Raise(8.0)),
+      event(handId = "h2", sequence = 0L, ts = 2000L, action = PokerAction.Fold),
+      event(handId = "h2", sequence = 1L, ts = 2100L, action = PokerAction.Check, toCall = 0.0)
+    )
+
+    val dataset = DatasetBuilder.build(events, source = "unit-test", generatedAtEpochMillis = 42L)
+    val stats = dataset.statistics
+
+    assertEquals(stats.totalExamples, 4)
+    assertEquals(stats.classDistribution.values.sum, 4)
+    assertEquals(stats.classDistribution(PokerAction.Category.Call), 1)
+    assertEquals(stats.classDistribution(PokerAction.Category.Raise), 1)
+    assertEquals(stats.classDistribution(PokerAction.Category.Fold), 1)
+    assertEquals(stats.classDistribution(PokerAction.Category.Check), 1)
+
+    assertEquals(stats.featureStatistics.length, FeatureExtractor.dimension)
+    stats.featureStatistics.foreach { fs =>
+      assert(fs.min <= fs.max, s"feature ${fs.name}: min (${fs.min}) > max (${fs.max})")
+      assert(fs.min >= 0.0, s"feature ${fs.name}: min (${fs.min}) < 0 (all features should be normalized)")
+      assert(fs.max <= 1.0, s"feature ${fs.name}: max (${fs.max}) > 1 (all features should be normalized)")
+    }
+  }

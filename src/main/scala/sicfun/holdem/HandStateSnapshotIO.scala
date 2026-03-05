@@ -1,6 +1,6 @@
 package sicfun.holdem
 
-import sicfun.core.{Card, Rank, Suit}
+import sicfun.core.Card
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
@@ -218,7 +218,7 @@ object HandStateSnapshotIO:
 
   private def serializeBoard(board: Board): String =
     if board.size == 0 then "-"
-    else board.cards.map(cardToken).mkString(" ")
+    else board.cards.map(_.toToken).mkString(" ")
 
   private def deserializeBoard(raw: String, path: Path, rowNum: Int): Board =
     if raw == "-" || raw.isEmpty then Board.empty
@@ -245,17 +245,3 @@ object HandStateSnapshotIO:
         BetAction(player, deserializeAction(actionRaw, path, rowNum))
       }
 
-  private def cardToken(card: Card): String =
-    val r = card.rank match
-      case Rank.Ace   => "A"
-      case Rank.King  => "K"
-      case Rank.Queen => "Q"
-      case Rank.Jack  => "J"
-      case Rank.Ten   => "T"
-      case r          => r.value.toString
-    val s = card.suit match
-      case Suit.Spades   => "s"
-      case Suit.Hearts   => "h"
-      case Suit.Diamonds => "d"
-      case Suit.Clubs    => "c"
-    r + s

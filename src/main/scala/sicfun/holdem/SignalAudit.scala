@@ -110,9 +110,12 @@ final case class SignalEnvelope(
   * based on configurable thresholds.
   */
 object SignalBuilder:
+  private inline val CommitmentWeight = 0.7
+  private inline val PotOddsWeight = 0.3
+
   /** Builds an `"action-risk"` signal for a single poker event.
     *
-    * The risk score formula is: `min(1.0, toCallOverStack * 0.7 + potOdds * 0.3)`.
+    * The risk score formula is: `min(1.0, toCallOverStack * CommitmentWeight + potOdds * PotOddsWeight)`.
     * The score is classified as:
     *   - [[SignalLevel.Critical]] if `riskScore >= criticalThreshold`
     *   - [[SignalLevel.Warning]]  if `riskScore >= warningThreshold`
@@ -149,7 +152,7 @@ object SignalBuilder:
     val features = FeatureExtractor.featureNames.zip(extracted.values).toMap
     val toCallOverStack = features.getOrElse("toCallOverStack", 0.0)
     val potOdds = features.getOrElse("potOdds", 0.0)
-    val riskScore = math.min(1.0, toCallOverStack * 0.7 + potOdds * 0.3)
+    val riskScore = math.min(1.0, toCallOverStack * CommitmentWeight + potOdds * PotOddsWeight)
     val level =
       if riskScore >= criticalThreshold then SignalLevel.Critical
       else if riskScore >= warningThreshold then SignalLevel.Warning

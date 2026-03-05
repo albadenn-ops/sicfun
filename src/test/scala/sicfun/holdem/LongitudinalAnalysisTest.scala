@@ -32,8 +32,6 @@ class LongitudinalAnalysisTest extends FunSuite:
       action = action
     )
 
-  private val model = PokerActionModel.uniform
-
   test("single window produces no drift and zero aggregates") {
     val events = Vector(
       event("alice", 0L, 0L, PokerAction.Call),
@@ -43,7 +41,6 @@ class LongitudinalAnalysisTest extends FunSuite:
     val report = LongitudinalAnalysis.analyze(
       events,
       playerId = "alice",
-      model = model,
       config = LongitudinalConfig(windowSizeMillis = 1000L, slideStepMillis = 1000L, minEventsPerWindow = 2)
     )
 
@@ -68,7 +65,6 @@ class LongitudinalAnalysisTest extends FunSuite:
     val report = LongitudinalAnalysis.analyze(
       firstWindow ++ secondWindow,
       playerId = "alice",
-      model = model,
       config = LongitudinalConfig(windowSizeMillis = 1000L, slideStepMillis = 1000L, driftThreshold = 0.2, minEventsPerWindow = 3)
     )
 
@@ -93,7 +89,6 @@ class LongitudinalAnalysisTest extends FunSuite:
     val report = LongitudinalAnalysis.analyze(
       aliceEvents ++ bobEvents,
       playerId = "alice",
-      model = model,
       config = LongitudinalConfig(windowSizeMillis = 1000L, slideStepMillis = 1000L, minEventsPerWindow = 2)
     )
 
@@ -116,7 +111,6 @@ class LongitudinalAnalysisTest extends FunSuite:
     val report = LongitudinalAnalysis.analyze(
       events,
       playerId = "alice",
-      model = model,
       config = LongitudinalConfig(windowSizeMillis = 1000L, slideStepMillis = 1000L, minEventsPerWindow = 3)
     )
 
@@ -134,7 +128,6 @@ class LongitudinalAnalysisTest extends FunSuite:
     val report = LongitudinalAnalysis.analyze(
       events,
       playerId = "alice",
-      model = model,
       config = LongitudinalConfig(windowSizeMillis = 1000L, slideStepMillis = 1000L, minEventsPerWindow = 1)
     )
 
@@ -151,7 +144,6 @@ class LongitudinalAnalysisTest extends FunSuite:
       LongitudinalAnalysis.analyze(
         events,
         playerId = "alice",
-        model = model,
         config = LongitudinalConfig(windowSizeMillis = 1000L, slideStepMillis = 1000L, minEventsPerWindow = 1)
       )
     }
@@ -172,7 +164,6 @@ class LongitudinalAnalysisTest extends FunSuite:
     val report = LongitudinalAnalysis.analyze(
       events,
       playerId = "alice",
-      model = model,
       config = LongitudinalConfig(windowSizeMillis = 1000L, slideStepMillis = 1000L, minEventsPerWindow = 3)
     )
     val distances = report.drifts.map(_.distance)

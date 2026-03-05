@@ -37,11 +37,17 @@ object PokerFeatures:
   )
 
   /** Number of features produced by [[extract]]. */
-  val dimension: Int = featureNames.length
+  inline val dimension = 5
 
   /** Thread-safe cache of hand-strength evaluations to avoid recomputing
     * exhaustive equity for the same board+hand combination.
+    *
+    * Bounded to avoid unbounded memory growth in long-running sessions.
+    * When the cache exceeds [[MaxCacheSize]], it is cleared entirely
+    * (simple but effective given the access pattern is typically bursty
+    * within a single hand analysis).
     */
+  private inline val MaxCacheSize = 100_000
   private val strengthCache = new ConcurrentHashMap[(Board, HoleCards), java.lang.Double]()
 
   /** Extracts a normalized feature vector from the given game state and hole cards.
@@ -74,6 +80,7 @@ object PokerFeatures:
       if cached != null then cached.doubleValue
       else
         val computed = computeHandStrength(board, hand)
+        if strengthCache.size() >= MaxCacheSize then strengthCache.clear()
         strengthCache.putIfAbsent(key, java.lang.Double.valueOf(computed))
         computed
 
@@ -81,6 +88,9 @@ object PokerFeatures:
     * combinations from the remaining deck, comparing hero's best 5-card hand to each.
     *
     * Ties count as half a win. Returns 0.5 if no opponent combinations exist.
+    *
+    * Optimization: board cards are pre-allocated into an Array to avoid
+    * repeated Vector concatenation in the inner loop.
     */
   private def computeHandStrength(board: Board, hand: HoleCards): Double =
     val dead = hand.asSet ++ board.asSet
@@ -90,11 +100,12 @@ object PokerFeatures:
     else
       val heroCards = hand.toVector ++ board.cards
       val heroRank = evaluateBest(heroCards)
+      val boardCards = board.cards
       var wins = 0.0
       var ties = 0.0
       var total = 0.0
       opponents.foreach { opp =>
-        val oppCards = opp.toVector ++ board.cards
+        val oppCards = opp.toVector ++ boardCards
         val oppRank = evaluateBest(oppCards)
         val cmp = heroRank.compare(oppRank)
         if cmp > 0 then wins += 1.0

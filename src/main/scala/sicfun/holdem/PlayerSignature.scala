@@ -1,6 +1,6 @@
 package sicfun.holdem
 
-import sicfun.core.{ActionMetrics, ActionModel, DiscreteDistribution}
+import sicfun.core.Metrics
 
 /** A fixed-dimension behavioral profile vector summarizing a player's tendencies.
   *
@@ -32,40 +32,31 @@ object PlayerSignature:
   )
 
   /** Build a fixed-dimension behavioral profile from observed actions.
+    *
+    * Entropy is computed directly from the empirical action frequency distribution
+    * (Shannon entropy in bits). This measures how unpredictable the player's action
+    * choices are without requiring a model or hole-card information.
+    *
     * @param observations sequence of (state, action) pairs
-    * @param model the action model used for entropy computation
     */
   def compute(
-      observations: Seq[(GameState, PokerAction)],
-      model: ActionModel[GameState, PokerAction, HoleCards]
+      observations: Seq[(GameState, PokerAction)]
   ): PlayerSignature =
     require(observations.nonEmpty, "observations must be non-empty")
 
     val n = observations.length.toDouble
-    val categories = observations.map { case (_, action) => PokerAction.categoryOf(action) }
+    val categories = observations.map { case (_, action) => action.category }
 
     val foldRate = categories.count(_ == PokerAction.Category.Fold) / n
     val raiseRate = categories.count(_ == PokerAction.Category.Raise) / n
     val callRate = categories.count(_ == PokerAction.Category.Call) / n
     val checkRate = categories.count(_ == PokerAction.Category.Check) / n
 
-    // Average action entropy across observations.
-    // Use a uniform posterior over a dummy hand set since we measure
-    // marginal action predictability per state.
-    val actionSeq: Seq[PokerAction] = Seq(
-      PokerAction.Fold, PokerAction.Check, PokerAction.Call, PokerAction.Raise(1.0)
-    )
-    val avgActionEntropy =
-      val entropies = observations.map { case (state, _) =>
-        // Pick a dummy hand that doesn't collide with the board so that
-        // PokerFeatures.computeHandStrength never receives duplicate cards.
-        val dummyPosterior = DiscreteDistribution.uniform(Seq(dummyHandFor(state.board)))
-        ActionMetrics.actionEntropy(state, dummyPosterior, model, actionSeq)
-      }
-      entropies.sum / entropies.length
+    // Empirical Shannon entropy (in bits) of the observed action frequency distribution.
+    val avgActionEntropy = Metrics.entropy(Vector(foldRate, raiseRate, callRate, checkRate))
 
     val callObs = observations.filter { case (_, action) =>
-      PokerAction.categoryOf(action) == PokerAction.Category.Call
+      action.category == PokerAction.Category.Call
     }
     val avgPotOddsWhenCalling =
       if callObs.isEmpty then 0.0
@@ -80,10 +71,3 @@ object PlayerSignature:
       (a.values zip b.values).map { case (x, y) => math.pow(x - y, 2) }.sum
     )
 
-  // Pick the first two deck cards not already on the board so that
-  // PokerFeatures.computeHandStrength never sees duplicate cards.
-  private def dummyHandFor(board: Board): HoleCards =
-    import sicfun.core.Deck
-    val boardSet = board.asSet
-    val available = Deck.full.filterNot(boardSet.contains)
-    HoleCards(available(0), available(1))

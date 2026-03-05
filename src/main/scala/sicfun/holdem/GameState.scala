@@ -4,8 +4,11 @@ package sicfun.holdem
   *
   * Ordinal values (0-3) are used as normalized features in ML pipelines.
   */
-enum Street:
-  case Preflop, Flop, Turn, River
+enum Street(val expectedBoardSize: Int):
+  case Preflop extends Street(0)
+  case Flop    extends Street(3)
+  case Turn    extends Street(4)
+  case River   extends Street(5)
 
 /** Table position of a player, ordered from earliest to latest to act.
   *
@@ -57,7 +60,7 @@ final case class GameState(
     * This metric indicates the price being offered by the pot; lower values
     * mean a more favorable call.
     */
-  def potOdds: Double =
+  inline def potOdds: Double =
     if toCall <= 0.0 then 0.0
     else toCall / (pot + toCall)
 
@@ -67,6 +70,6 @@ final case class GameState(
     * (e.g., before blinds are posted). Higher values indicate deeper stacks
     * relative to the pot, allowing more post-flop manoeuvrability.
     */
-  def stackToPot: Double =
+  inline def stackToPot: Double =
     if pot <= 0.0 then Double.PositiveInfinity
     else stackSize / pot

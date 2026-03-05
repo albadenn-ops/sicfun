@@ -1,6 +1,8 @@
 package sicfun.holdem
 
-import sicfun.core.{BayesianRange, CollapseMetrics, DiscreteDistribution}
+import sicfun.core.{CollapseMetrics, DiscreteDistribution, Probability}
+
+import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.mutable
 import scala.util.Random
@@ -77,9 +79,39 @@ object ActionValueModel:
   * 1) bunching-conditioned prior construction
   * 2) Bayesian posterior updates from observed villain actions
   * 3) action EV ranking against the inferred posterior
+  *
+  * ==Performance==
+  * Posterior inference results are cached by observable context (hero, board,
+  * folds, villain position, and observations) to avoid redundant bunching
+  * Monte Carlo and Bayesian update computations when the same decision point
+  * is evaluated multiple times (e.g., across candidate actions in
+  * `inferAndRecommend`). The cache is bounded and automatically cleared
+  * when it exceeds [[MaxPosteriorCacheSize]].
   */
 object RangeInferenceEngine:
-  /** Computes a posterior villain range from folds + observed actions. */
+  private val MaxPosteriorCacheSize = 256
+
+  /** Lightweight key for caching posterior inference results. */
+  private case class PosteriorCacheKey(
+      hero: HoleCards,
+      board: Board,
+      folds: Vector[PreflopFold],
+      villainPos: Position,
+      observations: Seq[VillainObservation]
+  )
+
+  private val posteriorCache =
+    new ConcurrentHashMap[PosteriorCacheKey, PosteriorInferenceResult]()
+
+  def clearPosteriorCache(): Unit =
+    posteriorCache.clear()
+
+  /** Computes a posterior villain range from folds + observed actions.
+    *
+    * Results are cached by `(hero, board, folds, villainPos, observations)` to
+    * avoid redundant computation when called multiple times for the same context.
+    * Pass `useCache = false` to bypass caching (e.g., when deterministic seeding matters).
+    */
   def inferPosterior(
       hero: HoleCards,
       board: Board,
@@ -89,10 +121,37 @@ object RangeInferenceEngine:
       observations: Seq[VillainObservation],
       actionModel: PokerActionModel,
       bunchingTrials: Int = 10_000,
-      rng: Random = new Random()
+      rng: Random = new Random(),
+      useCache: Boolean = true
   ): PosteriorInferenceResult =
     require(bunchingTrials > 0, "bunchingTrials must be positive")
 
+    val cacheKey =
+      if useCache then Some(PosteriorCacheKey(hero, board, folds, villainPos, observations))
+      else None
+
+    cacheKey.flatMap(k => Option(posteriorCache.get(k))) match
+      case Some(cached) => cached
+      case None =>
+        val result = computePosterior(hero, board, folds, tableRanges, villainPos,
+          observations, actionModel, bunchingTrials, rng)
+        cacheKey.foreach { k =>
+          if posteriorCache.size() >= MaxPosteriorCacheSize then posteriorCache.clear()
+          posteriorCache.putIfAbsent(k, result)
+        }
+        result
+
+  private def computePosterior(
+      hero: HoleCards,
+      board: Board,
+      folds: Vector[PreflopFold],
+      tableRanges: TableRanges,
+      villainPos: Position,
+      observations: Seq[VillainObservation],
+      actionModel: PokerActionModel,
+      bunchingTrials: Int,
+      rng: Random
+  ): PosteriorInferenceResult =
     val prior = BunchingEffect.adjustedRange(
       hero = hero,
       board = board,
@@ -103,12 +162,12 @@ object RangeInferenceEngine:
       rng = rng
     )
 
-    val bayes = BayesianRange(prior)
-    val (updated, logEvidence) = bayes.updateAll(
-      observations.map(o => o.action -> o.state),
-      actionModel
+    val bayesUpdate = HoldemBayesProvider.updatePosterior(
+      prior = prior,
+      observations = observations.map(o => o.action -> o.state),
+      actionModel = actionModel
     )
-    val posterior = updated.distribution.normalized
+    val posterior = bayesUpdate.posterior
 
     val collapse = PosteriorCollapse(
       entropyReduction = CollapseMetrics.entropyReduction(prior, posterior),
@@ -117,7 +176,7 @@ object RangeInferenceEngine:
       effectiveSupportPosterior = CollapseMetrics.effectiveSupport(posterior),
       collapseRatio = CollapseMetrics.collapseRatio(prior, posterior)
     )
-    PosteriorInferenceResult(prior, posterior, logEvidence, collapse)
+    PosteriorInferenceResult(prior, posterior, bayesUpdate.logEvidence, collapse)
 
   /** Ranks candidate hero actions by EV vs a posterior villain range. */
   def recommendAction(
@@ -132,11 +191,12 @@ object RangeInferenceEngine:
   ): ActionRecommendation =
     require(candidateActions.nonEmpty, "candidateActions must be non-empty")
     require(equityTrials > 0, "equityTrials must be positive")
+    val normalizedPosterior = posterior.normalized
 
     val heroEquity = HoldemEquity.equityMonteCarlo(
       hero = hero,
       board = state.board,
-      villainRange = posterior,
+      villainRange = normalizedPosterior,
       trials = equityTrials,
       rng = rng
     )
@@ -150,7 +210,7 @@ object RangeInferenceEngine:
                 responseAwareRaiseEv(
                   hero = hero,
                   state = state,
-                  posterior = posterior,
+                  posterior = normalizedPosterior,
                   action = action,
                   responseModel = responseModel,
                   equityTrials = equityTrials,
@@ -171,7 +231,7 @@ object RangeInferenceEngine:
     }
     ActionRecommendation(heroEquity, evaluations, best.action)
 
-  private val Eps = 1e-12
+  private inline val Eps = Probability.Eps
 
   private def responseAwareRaiseEv(
       hero: HoleCards,
@@ -188,13 +248,12 @@ object RangeInferenceEngine:
         amount
       case _ => throw new IllegalArgumentException("responseAwareRaiseEv expects a raise action")
 
-    val (foldProbability, continueWeights) = aggregateResponses(
+    val (foldProbability, continueProbability, continueWeights) = aggregateResponses(
       posterior = posterior,
       state = state,
       action = action,
       responseModel = responseModel
     )
-    val continueProbability = continueWeights.values.sum
 
     if continueProbability <= Eps then state.pot
     else
@@ -218,20 +277,26 @@ object RangeInferenceEngine:
       state: GameState,
       action: PokerAction,
       responseModel: VillainResponseModel
-  ): (Double, Map[HoleCards, Double]) =
-    val normPosterior = posterior.normalized
+  ): (Double, Double, Map[HoleCards, Double]) =
     val continueWeights = mutable.Map.empty[HoleCards, Double].withDefaultValue(0.0)
     var foldProbability = 0.0
+    var continueProbability = 0.0
 
-    normPosterior.weights.foreach { case (hand, priorProb) =>
+    posterior.weights.foreach { case (hand, priorProb) =>
       if priorProb > 0.0 then
         val profile = responseModel.response(hand, state, action)
-        foldProbability += priorProb * profile.foldProbability
-        val continueProb = profile.continueProbability
-        if continueProb > 0.0 then
-          continueWeights.update(hand, continueWeights(hand) + priorProb * continueProb)
+        val weightedFold = priorProb * profile.foldProbability
+        val weightedContinue = priorProb * profile.continueProbability
+        foldProbability += weightedFold
+        continueProbability += weightedContinue
+        if weightedContinue > 0.0 then
+          continueWeights.update(hand, continueWeights(hand) + weightedContinue)
     }
-    (math.max(0.0, math.min(1.0, foldProbability)), continueWeights.toMap)
+    (
+      math.max(0.0, math.min(1.0, foldProbability)),
+      math.max(0.0, math.min(1.0, continueProbability)),
+      continueWeights.toMap
+    )
 
   /** End-to-end helper: infer posterior then recommend best hero action. */
   def inferAndRecommend(

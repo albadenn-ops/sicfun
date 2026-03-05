@@ -89,7 +89,7 @@ object PokerActionTrainingDataIO:
   private def parseBoard(raw: String, street: Street, path: Path, rowNum: Int): Board =
     val cards = parseCardList(raw, "board", path, rowNum)
     val board = Board.from(cards)
-    val expected = PokerEvent.expectedBoardSize(street)
+    val expected = street.expectedBoardSize
     if board.size != expected then
       throw new IllegalArgumentException(
         s"${path.toString}:$rowNum street $street expects board size $expected, got ${board.size}"

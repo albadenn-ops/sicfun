@@ -163,13 +163,15 @@ object PlayerCluster:
         if cmp != 0 then cmp else a._2.compare(b._2)
 
   private def compareVectors(a: Vector[Double], b: Vector[Double]): Int =
+    import scala.util.boundary, boundary.break
     val len = math.min(a.length, b.length)
-    var i = 0
-    while i < len do
-      val cmp = java.lang.Double.compare(a(i), b(i))
-      if cmp != 0 then return cmp
-      i += 1
-    a.length.compare(b.length)
+    boundary:
+      var i = 0
+      while i < len do
+        val cmp = java.lang.Double.compare(a(i), b(i))
+        if cmp != 0 then break(cmp)
+        i += 1
+      a.length.compare(b.length)
 
   /** Computes a SHA-256 hex digest of all centroid values for content-addressable versioning. */
   private def hashCentroids(centroids: Vector[PlayerSignature]): String =

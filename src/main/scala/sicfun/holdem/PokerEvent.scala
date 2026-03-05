@@ -1,23 +1,9 @@
 package sicfun.holdem
 
-/** Companion object for [[PokerEvent]] containing the schema version constant
-  * and board-size validation helpers.
-  */
+/** Companion object for [[PokerEvent]] containing the schema version constant. */
 object PokerEvent:
   /** Current event schema version used for serialization compatibility checks. */
   val SchemaVersion: String = "poker-event-v1"
-
-  /** Returns the number of community cards that should be on the board for the given street.
-    *
-    * @param street the betting round
-    * @return expected board size: 0 (Preflop), 3 (Flop), 4 (Turn), 5 (River)
-    */
-  def expectedBoardSize(street: Street): Int =
-    street match
-      case Street.Preflop => 0
-      case Street.Flop    => 3
-      case Street.Turn    => 4
-      case Street.River   => 5
 
 /** An immutable record of a single player action with full decision-point context.
   *
@@ -71,7 +57,7 @@ final case class PokerEvent(
   }
 
   // Validate board size matches the expected card count for this street
-  private val expectedBoard = PokerEvent.expectedBoardSize(street)
+  private val expectedBoard = street.expectedBoardSize
   require(
     board.size == expectedBoard,
     s"street $street expects board size $expectedBoard, got ${board.size}"

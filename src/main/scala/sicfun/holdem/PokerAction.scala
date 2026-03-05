@@ -15,6 +15,13 @@ enum PokerAction:
   /** Increase the current bet by the specified `amount` (must be positive). */
   case Raise(amount: Double)
 
+  /** Returns the coarsened [[PokerAction.Category]] for this action. */
+  inline def category: PokerAction.Category = this match
+    case Fold     => PokerAction.Category.Fold
+    case Check    => PokerAction.Category.Check
+    case Call     => PokerAction.Category.Call
+    case Raise(_) => PokerAction.Category.Raise
+
 /** Companion utilities for [[PokerAction]], including a coarsened [[Category]]
   * enumeration used as the label space for ML classification.
   */
@@ -25,18 +32,6 @@ object PokerAction:
     */
   enum Category:
     case Fold, Check, Call, Raise
-
-  /** Maps a concrete [[PokerAction]] to its corresponding [[Category]],
-    * discarding the raise amount if present.
-    *
-    * @param action the action to categorize
-    * @return the coarsened category
-    */
-  def categoryOf(action: PokerAction): Category = action match
-    case PokerAction.Fold     => Category.Fold
-    case PokerAction.Check    => Category.Check
-    case PokerAction.Call     => Category.Call
-    case PokerAction.Raise(_) => Category.Raise
 
   /** All categories in ordinal order, used as the canonical label ordering
     * for model training and prediction.

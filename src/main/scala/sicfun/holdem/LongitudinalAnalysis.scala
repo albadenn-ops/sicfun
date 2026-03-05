@@ -1,6 +1,6 @@
 package sicfun.holdem
 
-import sicfun.core.{ActionModel, Metrics}
+import sicfun.core.Metrics
 
 /** A behavioral snapshot for a single time window in a longitudinal analysis.
   *
@@ -91,7 +91,6 @@ object LongitudinalAnalysis:
     *
     * @param events   all poker events (may contain multiple players; filtered internally)
     * @param playerId the player to analyze
-    * @param model    action model required by [[PlayerSignature.compute]] for entropy calculations
     * @param config   window size, stride, drift threshold, and minimum event count
     * @return a [[StabilityReport]] summarizing the player's behavioral consistency
     * @throws IllegalArgumentException if `events` is empty or contains no events for `playerId`
@@ -99,7 +98,6 @@ object LongitudinalAnalysis:
   def analyze(
       events: Seq[PokerEvent],
       playerId: String,
-      model: ActionModel[GameState, PokerAction, HoleCards],
       config: LongitudinalConfig
   ): StabilityReport =
     require(playerId.trim.nonEmpty, "playerId must be non-empty")
@@ -111,25 +109,38 @@ object LongitudinalAnalysis:
     val ordered = filtered.sortBy(event =>
       (event.occurredAtEpochMillis, event.handId, event.sequenceInHand)
     )
+    val orderedVector = ordered.toVector
     val minTs = ordered.head.occurredAtEpochMillis
     val maxTs = ordered.last.occurredAtEpochMillis
 
     val windows = scala.collection.mutable.ArrayBuffer.empty[WindowSnapshot]
     var start = minTs
     var windowIndex = 0
+    var left = 0
+    var right = 0
+    val totalEvents = orderedVector.length
+
     while start <= maxTs do
       val end = start + config.windowSizeMillis
-      val inWindow = ordered.filter(event =>
-        event.occurredAtEpochMillis >= start && event.occurredAtEpochMillis < end
-      )
-      if inWindow.length >= config.minEventsPerWindow then
-        val observations = inWindow.map(eventToObservation)
-        val signature = PlayerSignature.compute(observations, model)
+
+      while left < totalEvents && orderedVector(left).occurredAtEpochMillis < start do
+        left += 1
+      while right < totalEvents && orderedVector(right).occurredAtEpochMillis < end do
+        right += 1
+
+      val count = right - left
+      if count >= config.minEventsPerWindow then
+        val observations = Vector.newBuilder[(GameState, PokerAction)]
+        var idx = left
+        while idx < right do
+          observations += eventToObservation(orderedVector(idx))
+          idx += 1
+        val signature = PlayerSignature.compute(observations.result())
         windows += WindowSnapshot(
           windowIndex = windowIndex,
           startEpochMillis = start,
           endEpochMillis = end,
-          eventCount = inWindow.length,
+          eventCount = count,
           signature = signature
         )
       start += config.slideStepMillis
