@@ -77,6 +77,127 @@ Runtime configuration:
   - env var fallback: `sicfun_GPU_CUDA_MAX_CHUNK_MATCHUPS=<positive-int>`
   - splits large batches into smaller kernel launches to avoid Windows WDDM/TDR watchdog timeouts; default is `4096`
 
+## Holdem CFR native bridge
+
+The Holdem CFR runtime can solve the same game tree via Scala CFR or native JNI providers:
+
+- CPU JNI provider:
+  - class: `sicfun.holdem.HoldemCfrNativeCpuBindings`
+  - library: `sicfun_cfr_native`
+- GPU JNI provider (CUDA build):
+  - class: `sicfun.holdem.HoldemCfrNativeGpuBindings`
+  - library: `sicfun_cfr_cuda`
+  - current implementation uses the shared C++ CFR core compiled with NVCC
+
+Provider selection:
+
+- system property: `-Dsicfun.cfr.provider=auto|scala|native-cpu|native-gpu`
+- env fallback: `sicfun_CFR_PROVIDER`
+- default: `auto`
+
+Auto mode behavior:
+
+- runs a one-time synthetic benchmark (Scala vs available native providers)
+- selects native only when speedup meets threshold
+- caches provider choice for the process
+
+Auto tuning controls:
+
+- benchmark iterations:
+  - property: `-Dsicfun.cfr.auto.benchmarkIterations=<positive-int>`
+  - env: `sicfun_CFR_AUTO_BENCHMARK_ITERATIONS`
+  - default: `240`
+- minimum native speedup:
+  - property: `-Dsicfun.cfr.auto.nativeMinSpeedup=<double>`
+  - env: `sicfun_CFR_AUTO_NATIVE_MIN_SPEEDUP`
+  - default: `1.02`
+
+Native library loading overrides:
+
+- CPU provider:
+  - path: `-Dsicfun.cfr.native.cpu.path=<abs-path>`
+    - env: `sicfun_CFR_NATIVE_CPU_PATH`
+  - loadLibrary name: `-Dsicfun.cfr.native.cpu.lib=<name>`
+    - env: `sicfun_CFR_NATIVE_CPU_LIB`
+    - default: `sicfun_cfr_native`
+- GPU provider:
+  - path: `-Dsicfun.cfr.native.gpu.path=<abs-path>`
+    - env: `sicfun_CFR_NATIVE_GPU_PATH`
+  - loadLibrary name: `-Dsicfun.cfr.native.gpu.lib=<name>`
+    - env: `sicfun_CFR_NATIVE_GPU_LIB`
+    - default: `sicfun_cfr_cuda`
+
+## Holdem Bayesian native bridge
+
+The Bayesian posterior-update runtime supports Scala and native JNI providers:
+
+- CPU JNI provider:
+  - class: `sicfun.holdem.HoldemBayesNativeCpuBindings`
+  - library: `sicfun_bayes_native`
+- GPU JNI provider (CUDA build):
+  - class: `sicfun.holdem.HoldemBayesNativeGpuBindings`
+  - library: `sicfun_bayes_cuda`
+  - current implementation uses the shared C++ Bayesian core compiled with NVCC
+
+Provider selection:
+
+- system property: `-Dsicfun.bayes.provider=auto|scala|native-cpu|native-gpu`
+- env fallback: `sicfun_BAYES_PROVIDER`
+- default: `auto`
+
+Auto tuning controls:
+
+- benchmark repetitions:
+  - property: `-Dsicfun.bayes.auto.benchmarkRepetitions=<positive-int>`
+  - env: `sicfun_BAYES_AUTO_BENCHMARK_REPETITIONS`
+  - default: `20`
+- minimum native speedup:
+  - property: `-Dsicfun.bayes.auto.nativeMinSpeedup=<double>`
+  - env: `sicfun_BAYES_AUTO_NATIVE_MIN_SPEEDUP`
+  - default: `1.02`
+
+Shadow parity controls (optional):
+
+- enable Scala shadow validation for native results:
+  - property: `-Dsicfun.bayes.shadow.enabled=true|false`
+  - env: `sicfun_BAYES_SHADOW_ENABLED`
+  - default: `false`
+- fail-closed behavior on drift:
+  - property: `-Dsicfun.bayes.shadow.failClosed=true|false`
+  - env: `sicfun_BAYES_SHADOW_FAIL_CLOSED`
+  - default: `false`
+  - `true`: return Scala reference result on drift (or throw if shadow reference fails)
+  - `false`: keep native result and emit warning on drift
+- posterior max absolute delta tolerance:
+  - property: `-Dsicfun.bayes.shadow.posteriorMaxAbsDiff=<non-negative-double>`
+  - env: `sicfun_BAYES_SHADOW_POSTERIOR_MAX_ABS_DIFF`
+  - default: `1e-9`
+- log-evidence max absolute delta tolerance:
+  - property: `-Dsicfun.bayes.shadow.logEvidenceMaxAbsDiff=<non-negative-double>`
+  - env: `sicfun_BAYES_SHADOW_LOG_EVIDENCE_MAX_ABS_DIFF`
+  - default: `1e-9`
+
+Native library loading overrides:
+
+- CPU provider:
+  - path: `-Dsicfun.bayes.native.cpu.path=<abs-path>`
+    - env: `sicfun_BAYES_NATIVE_CPU_PATH`
+  - loadLibrary name: `-Dsicfun.bayes.native.cpu.lib=<name>`
+    - env: `sicfun_BAYES_NATIVE_CPU_LIB`
+    - default: `sicfun_bayes_native`
+- GPU provider:
+  - path: `-Dsicfun.bayes.native.gpu.path=<abs-path>`
+    - env: `sicfun_BAYES_NATIVE_GPU_PATH`
+  - loadLibrary name: `-Dsicfun.bayes.native.gpu.lib=<name>`
+    - env: `sicfun_BAYES_NATIVE_GPU_LIB`
+    - default: `sicfun_bayes_cuda`
+
+Bayesian hotspot benchmark:
+
+```bash
+sbt "runMain sicfun.holdem.HoldemBayesBenchmark --warmupRuns=2 --measureRuns=8 --bunchingTrials=1200 --equityTrials=8000 --provider=auto --seed=17"
+```
+
 CUDA 11.8 Windows build (for older GPUs like `sm_50`):
 
 ```powershell
@@ -86,10 +207,24 @@ powershell -ExecutionPolicy Bypass -File src/main/native/build-windows-cuda11.ps
 This produces:
 
 - `src/main/native/build/sicfun_gpu_kernel.dll`
+- `src/main/native/build/sicfun_cfr_cuda.dll`
+- `src/main/native/build/sicfun_bayes_cuda.dll`
+
+LLVM Windows build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File src/main/native/build-windows-llvm.ps1
+```
+
+This produces:
+
+- `src/main/native/build/sicfun_native_cpu.dll`
+- `src/main/native/build/sicfun_cfr_native.dll`
+- `src/main/native/build/sicfun_bayes_native.dll`
 
 Compatibility note:
 
-- CUDA 13.x does not include `sm_50` targets, so Maxwell-era GPUs (e.g. GTX 960M) require CUDA 11.8 for native CUDA builds.
+- CUDA 12.0 and later do not include `sm_50` targets, so Maxwell-era GPUs (e.g. GTX 960M) require CUDA 11.8 for native CUDA builds.
 
 Gate benchmark:
 

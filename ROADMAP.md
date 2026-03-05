@@ -59,3 +59,13 @@ This roadmap maps the whitepaper sections to concrete engineering milestones.
 - [x] Hand evaluator category distribution checks
 - [x] MC convergence tests vs exact
 - [x] Operational regression suite
+
+## M9 Continuous ops + context continuity (new)
+- [x] Runnable simulator entrypoint (`LiveHandSimulator`) with end-to-end proof output
+- [x] Always-on loop entrypoint (`AlwaysOnDecisionLoop`) for feed polling, snapshotting, decision emission, and signal logging
+- [x] Scheduled retraining hook in always-on loop (artifact retrain + hot reload)
+- [x] Playing hall simulator (`TexasHoldemPlayingHall`) for large-volume play + periodic model retraining
+- [x] Append-only AI context archive (`docs/AI_CONTEXT_ARCHIVE.md`) for future bounded-context sessions
+- [x] Context append helper script (`scripts/archive-context.ps1`) with git metadata
+- [ ] True autonomous gameplay integration (real table adapter + action executor)
+- [x] Equilibrium baseline module (CFR/Nash-style reference policy) for exploitability-aware deviations

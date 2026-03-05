@@ -8,6 +8,8 @@ target/
 .idea/jarRepositories.xml
 .idea/compiler.xml
 .idea/libraries/
+.idea/vcs.xml
+.idea/copilot.data.migration.ask2agent.xml
 *.iws
 *.iml
 *.ipr
@@ -45,6 +47,29 @@ build/
 
 ### Scala ###
 .bsp/
+
+### Exploratory / generated data ###
+data/bench/
+data/_probe-*.tbl
+data/_gpu-*.tbl
+data/_nativecpu-*.tbl
+data/_autotune-*.tbl
+data/tmp-*.tbl
+data/cuda-visibility-test.tbl
+data/*-check*.bin
+data/*-smoke*.bin
+data/*-sample*.bin
+data/*-backup*.bin
+data/*-postfix*.bin
+data/*-readable*.tsv
+data/check*.tsv
+
+### Build artifacts ###
+HeadsUpOpenCLBindings.obj
+
+### Generated test/benchmark data ###
+data/playing-hall-*/
+data/benchmarks/
 
 ### Windows reserved names ###
 nul

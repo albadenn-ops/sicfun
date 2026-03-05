@@ -26,7 +26,21 @@
       "Bash(powershell.exe -NoProfile -Command \"Remove-Item ''C:\\\\Users\\\\alexl\\\\code\\\\math\\\\untitled\\\\rename_sifun.ps1''; Remove-Item ''C:\\\\Users\\\\alexl\\\\code\\\\math\\\\untitled\\\\rename_dirs.ps1''; Remove-Item ''C:\\\\Users\\\\alexl\\\\code\\\\math\\\\untitled\\\\rename_dlls.ps1''; Write-Host ''Cleanup done.''\")",
       "Bash(powershell.exe -NoProfile -Command \"Write-Host \"\"JAVA_HOME: $env:JAVA_HOME\"\"; Test-Path ''C:\\\\Program Files\\\\NVIDIA GPU Computing Toolkit\\\\CUDA\\\\v11.8\\\\bin\\\\nvcc.exe''; Test-Path ''C:\\\\Program Files\\\\Java\\\\jdk-22\\\\include\\\\jni.h''\")",
       "Bash(git init:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git -C /c/Users/alexl/code/math/untitled remote -v)",
+      "Bash(gh auth status:*)",
+      "Bash(git config:*)",
+      "Bash(winget install:*)",
+      "Bash(export PATH=\"$PATH:/c/Program Files/GitHub CLI\")",
+      "Bash(gh:*)",
+      "Bash(git push:*)",
+      "Bash(while read f)",
+      "Bash(do wc -l \"$f\")",
+      "Bash(done)",
+      "Bash(find:*)",
+      "Bash(python:*)",
+      "Bash(git rm:*)"
     ]
   }
 }

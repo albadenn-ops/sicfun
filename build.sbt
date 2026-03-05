@@ -5,7 +5,17 @@ ThisBuild / scalaVersion := "3.8.1"
 lazy val root = (project in file("."))
   .settings(
     name := "untitled",
-    libraryDependencies += "org.scalameta" %% "munit" % "1.2.2" % Test
+    libraryDependencies += "org.scalameta" %% "munit" % "1.2.2" % Test,
+    scalacOptions ++= Seq(
+      "-deprecation",
+      "-feature",
+      "-unchecked",
+      "-Wunused:imports,privates,locals",
+      "-Werror",
+      "-new-syntax",
+      "-indent"
+    ),
+    Test / scalacOptions -= "-Xfatal-warnings"
   )
 
 lazy val headsUpTableMode = settingKey[String]("Heads-up equity table mode: exact or mc")
@@ -26,7 +36,7 @@ headsUpTableTrials := 200
 headsUpTableMaxMatchups := 10000
 headsUpTableSeed := 1L
 headsUpTableParallelism := math.max(1, java.lang.Runtime.getRuntime.availableProcessors())
-headsUpTableBackend := "cpu"
+headsUpTableBackend := "gpu"
 headsUpTableAutoGenerate := false
 headsUpCanonicalTableAutoGenerate := false
 
