@@ -23,6 +23,15 @@ from jcodemunch_mcp.tools.search_symbols import search_symbols
 from jcodemunch_mcp.tools.search_text import search_text
 
 DEFAULT_STORAGE = REPO_ROOT / ".jcodemunch-index"
+DEFAULT_INDEX_IGNORES = [
+    ".venv-tools/",
+    ".github-tools/",
+    ".tool-cache/",
+    "data/",
+    "dist/",
+    ".idea/",
+    "third_party/",
+]
 
 
 def default_repo(path_text: str | None = None) -> str:
@@ -48,11 +57,15 @@ def add_shared_repo_args(parser: argparse.ArgumentParser) -> None:
 
 
 def handle_index_folder(args: argparse.Namespace) -> int:
+    ignore_patterns = [*DEFAULT_INDEX_IGNORES]
+    if args.extra_ignore_pattern:
+        ignore_patterns.extend(args.extra_ignore_pattern)
+
     result = index_folder(
         path=args.path,
         use_ai_summaries=args.ai_summaries,
         storage_path=args.storage_path,
-        extra_ignore_patterns=args.extra_ignore_pattern or None,
+        extra_ignore_patterns=ignore_patterns,
         follow_symlinks=args.follow_symlinks,
         incremental=not args.full,
     )

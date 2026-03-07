@@ -14,6 +14,7 @@ The local jCodeMunch index is written under `.jcodemunch-index`.
 
 - `scripts/repomap.ps1`
 - `scripts/jcodemunch.ps1`
+- `scripts/import-ai-nav.ps1`
 
 ## Vendored sources
 
@@ -33,6 +34,34 @@ The local jCodeMunch index is written under `.jcodemunch-index`.
 3. Read only the specific implementation with `get-symbol`.
 4. Use `search-text` for strings, errors, comments, and other non-symbol text.
 
+## PowerShell helpers
+
+Import the repo-local helper functions into the current shell:
+
+```powershell
+. .\scripts\import-ai-nav.ps1
+```
+
+This adds:
+
+- `rmap` -> `RepoMapper` wrapper
+- `jcm` -> raw `jCodeMunch` wrapper
+- `jfindsym` -> symbol search
+- `jgetsym` -> symbol retrieval
+- `jfindtxt` -> text search
+- `jtree` -> file tree
+- `joutline` -> file outline
+
+Examples:
+
+```powershell
+jfindsym runConfig -Language scala
+jgetsym "src/main/scala/sicfun/holdem/TexasHoldemPlayingHall.scala::runConfig#function" -Verify
+jfindtxt "playing hall failed"
+jtree
+joutline build.sbt
+```
+
 ## Useful commands
 
 ```powershell
@@ -51,14 +80,16 @@ The local jCodeMunch index is written under `.jcodemunch-index`.
 
 ## Measured results in this repo
 
-Measured on March 7, 2026 after local Scala support and Windows byte-offset fixes were applied to the vendored `jCodeMunch`.
+Measured on March 7, 2026 after local Scala support, `.sbt` extraction, and Windows byte-offset fixes were applied to the vendored `jCodeMunch`.
 
 - `RepoMapper` produced a useful repo map over 361 files in about 2022 tokens.
-- `jCodeMunch` now indexes 171 files with 2023 symbols.
-- Indexed language counts: 149 Scala, 10 Java, 9 C++, 3 Python.
+- `jCodeMunch` now indexes 172 files with 2044 symbols.
+- Indexed language counts: 150 Scala, 10 Java, 9 C++, 3 Python.
 - `search-symbols runConfig --language scala` returned six candidates in about 820 tokens.
 - `get-symbol "src/main/scala/sicfun/holdem/TexasHoldemPlayingHall.scala::runConfig#function"` returned the full function in about 2589 tokens.
 - Reading the full `TexasHoldemPlayingHall.scala` file costs about 17379 tokens.
+- `build.sbt` now indexes as Scala and exposes task/settings symbols such as `headsUpTableMode`, `generateHeadsUpTable`, and `Compile / resourceGenerators`.
+- Simple key searches such as `headsUpTableMode` resolve to the key declaration instead of returning both the declaration and the plain `:=` assignment.
 
 The practical takeaway is:
 
@@ -69,5 +100,5 @@ The practical takeaway is:
 
 - The vendored `jCodeMunch` includes local patches for Scala support.
 - The vendored `jCodeMunch` also preserves raw file newlines so symbol byte offsets verify correctly on Windows.
-- `build.sbt` is discoverable but currently yields no symbols in the local `jCodeMunch` index.
+- `jCodeMunch index-folder` now applies repo-local default ignores for `.venv-tools/`, `.github-tools/`, `.tool-cache/`, `data/`, `dist/`, `.idea/`, and `third_party/`.
 - `RepoMapper` is vendored with its `queries/` directory because the packaged install omitted those files.

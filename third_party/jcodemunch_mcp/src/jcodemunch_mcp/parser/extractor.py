@@ -36,6 +36,10 @@ def parse_file(content: str, filename: str, language: str) -> list[Symbol]:
         symbols = _parse_vue_symbols(source_bytes, filename)
     elif language == "ejs":
         symbols = _parse_ejs_symbols(source_bytes, filename)
+    elif language == "scala" and filename.lower().endswith(".sbt"):
+        spec = LANGUAGE_REGISTRY[language]
+        symbols = _parse_with_spec(source_bytes, filename, language, spec)
+        symbols.extend(_parse_scala_sbt_symbols(source_bytes, filename))
     else:
         spec = LANGUAGE_REGISTRY[language]
         symbols = _parse_with_spec(source_bytes, filename, language, spec)
@@ -121,6 +125,178 @@ def _parse_cpp_symbols(source_bytes: bytes, filename: str) -> list[Symbol]:
         return c_symbols
 
     return cpp_symbols
+
+
+_SBT_ASSIGNMENT_OPERATORS = frozenset({":=", "+=", "-=", "++=", "/="})
+_SBT_KEY_CALLS = {
+    "settingKey": "sbt setting key",
+    "taskKey": "sbt task key",
+    "inputKey": "sbt input key",
+}
+
+
+def _parse_scala_sbt_symbols(source_bytes: bytes, filename: str) -> list[Symbol]:
+    """Extract useful top-level sbt DSL symbols from `.sbt` files."""
+    try:
+        parser = get_parser("scala")
+        tree = parser.parse(source_bytes)
+    except Exception:
+        return []
+
+    symbols: list[Symbol] = []
+    declared_names: set[str] = set()
+
+    for node in tree.root_node.named_children:
+        if node.type != "val_definition":
+            continue
+        symbol = _extract_scala_sbt_val(node, source_bytes, filename)
+        if not symbol:
+            continue
+        symbols.append(symbol)
+        declared_names.add(symbol.name)
+
+    for node in tree.root_node.named_children:
+        if node.type != "infix_expression":
+            continue
+        symbol = _extract_scala_sbt_assignment(node, source_bytes, filename)
+        if not symbol:
+            continue
+        if _is_simple_sbt_name(symbol.name) and symbol.name in declared_names:
+            continue
+        symbols.append(symbol)
+
+    return symbols
+
+
+def _extract_scala_sbt_val(node, source_bytes: bytes, filename: str) -> Optional[Symbol]:
+    """Extract a top-level `val`/`lazy val` definition from `.sbt`."""
+    name_node = None
+    for child in node.named_children:
+        if child.type == "identifier":
+            name_node = child
+            break
+    if not name_node:
+        return None
+
+    name = source_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8").strip()
+    if not name:
+        return None
+
+    summary = "sbt value definition"
+    for child in node.named_children:
+        if child.type != "call_expression":
+            continue
+        call_name = _extract_sbt_call_name(child, source_bytes)
+        if call_name in _SBT_KEY_CALLS:
+            description = _extract_first_string_arg(child, source_bytes)
+            summary = _SBT_KEY_CALLS[call_name]
+            if description:
+                summary = f"{summary}: {description}"
+            break
+    else:
+        if name == "root":
+            summary = "sbt root project definition"
+
+    sig = _first_line_signature(node, source_bytes)
+    symbol_bytes = source_bytes[node.start_byte:node.end_byte]
+
+    return Symbol(
+        id=make_symbol_id(filename, name, "constant"),
+        file=filename,
+        name=name,
+        qualified_name=name,
+        kind="constant",
+        language="scala",
+        signature=sig,
+        summary=summary,
+        line=node.start_point[0] + 1,
+        end_line=node.end_point[0] + 1,
+        byte_offset=node.start_byte,
+        byte_length=node.end_byte - node.start_byte,
+        content_hash=compute_content_hash(symbol_bytes),
+    )
+
+
+def _extract_scala_sbt_assignment(node, source_bytes: bytes, filename: str) -> Optional[Symbol]:
+    """Extract a top-level sbt DSL assignment such as `foo := ...`."""
+    operator = None
+    for child in node.children:
+        if child.type == "operator_identifier":
+            operator = source_bytes[child.start_byte:child.end_byte].decode("utf-8").strip()
+            break
+    if operator not in _SBT_ASSIGNMENT_OPERATORS:
+        return None
+
+    named_children = list(node.named_children)
+    if len(named_children) < 3:
+        return None
+
+    lhs = named_children[0]
+    lhs_text = source_bytes[lhs.start_byte:lhs.end_byte].decode("utf-8", errors="replace").strip()
+    lhs_text = re.sub(r"\s+", " ", lhs_text)
+    if not lhs_text:
+        return None
+
+    summary = f"sbt assignment ({operator})"
+    signature = _first_line_signature(node, source_bytes)
+    symbol_bytes = source_bytes[node.start_byte:node.end_byte]
+
+    return Symbol(
+        id=make_symbol_id(filename, lhs_text, "constant"),
+        file=filename,
+        name=lhs_text,
+        qualified_name=lhs_text,
+        kind="constant",
+        language="scala",
+        signature=signature,
+        summary=summary,
+        line=node.start_point[0] + 1,
+        end_line=node.end_point[0] + 1,
+        byte_offset=node.start_byte,
+        byte_length=node.end_byte - node.start_byte,
+        content_hash=compute_content_hash(symbol_bytes),
+    )
+
+
+def _is_simple_sbt_name(name: str) -> bool:
+    """Return true for a bare sbt key name without scope or path operators."""
+    return bool(re.fullmatch(r"[A-Za-z_]\w*", name))
+
+
+def _extract_sbt_call_name(node, source_bytes: bytes) -> str:
+    """Return the simple call target name for an sbt key declaration."""
+    target = node.child_by_field_name("function")
+    if not target and node.named_children:
+        target = node.named_children[0]
+    if not target:
+        return ""
+    text = source_bytes[target.start_byte:target.end_byte].decode("utf-8", errors="replace").strip()
+    if "[" in text:
+        text = text.split("[", 1)[0]
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text
+
+
+def _extract_first_string_arg(node, source_bytes: bytes) -> str:
+    """Return the first string argument text for a call expression."""
+    for child in node.named_children:
+        if child.type != "arguments":
+            continue
+        for arg in child.named_children:
+            if arg.type == "string":
+                raw = source_bytes[arg.start_byte:arg.end_byte].decode("utf-8", errors="replace").strip()
+                return raw.strip('"')
+    return ""
+
+
+def _first_line_signature(node, source_bytes: bytes, max_chars: int = 200) -> str:
+    """Compact single-line signature for display/search."""
+    text = source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace").strip()
+    first_line = text.splitlines()[0].strip()
+    if len(first_line) > max_chars:
+        return first_line[: max_chars - 3].rstrip() + "..."
+    return first_line
 
 
 def _walk_tree(
