@@ -1,0 +1,7 @@
+vendored_from: https://github.com/pdavis68/RepoMapper
+upstream_branch: main
+upstream_commit: 3ef8914b3a2271695ac9e4b07ce1e8bf5a4c9be6
+license: MIT
+notes:
+  - vendored runtime files plus queries directory
+  - local wrapper uses vendored source first and keeps cache outside the tracked vendor tree

@@ -73,3 +73,12 @@ data/benchmarks/
 
 ### Windows reserved names ###
 nul
+
+### Local AI/code tools ###
+.venv-tools/
+.github-tools/
+.tool-cache/
+.repomap.tags.cache.v1/
+.jcodemunch-index/
+third_party/**/__pycache__/
+third_party/**/*.pyc
