@@ -53,6 +53,15 @@ object CfrSolver:
   ):
     require(iterations > 0, "iterations must be positive")
 
+  final case class RootPolicyResult[A](
+      iterations: Int,
+      actions: Vector[A],
+      strategy: Vector[Double]
+  ):
+    require(iterations > 0, "iterations must be positive")
+    require(actions.nonEmpty, "actions must be non-empty")
+    require(strategy.length == actions.length, "strategy/actions length mismatch")
+
   private final case class InfoSetState[A](
       actions: Vector[A],
       cumulativeRegret: Array[Double],
@@ -111,20 +120,7 @@ object CfrSolver:
       game: ExtensiveFormGame[S, A],
       config: Config = Config()
   ): TrainingResult[A] =
-    val infosets = mutable.HashMap.empty[String, InfoSetState[A]]
-
-    var iteration = 1
-    while iteration <= config.iterations do
-      cfr(
-        game = game,
-        state = game.root,
-        reachPlayer0 = 1.0,
-        reachPlayer1 = 1.0,
-        iteration = iteration,
-        infosets = infosets,
-        config = config
-      )
-      iteration += 1
+    val infosets = runIterations(game = game, config = config)
 
     val snapshots = infosets.iterator.map { case (key, state) =>
       val avg = state.averageStrategy(config.cfrPlus).toVector
@@ -143,6 +139,50 @@ object CfrSolver:
       expectedValuePlayer0 = expectedValue,
       infosets = snapshots
     )
+
+  def solveRootPolicy[S, A](
+      game: ExtensiveFormGame[S, A],
+      rootInfoSetKey: String,
+      rootActions: Vector[A],
+      config: Config = Config()
+  ): RootPolicyResult[A] =
+    require(rootActions.nonEmpty, "rootActions must be non-empty")
+    val infosets = runIterations(game = game, config = config)
+    val strategy =
+      infosets.get(rootInfoSetKey) match
+        case Some(state) =>
+          require(
+            state.actions == rootActions,
+            s"inconsistent legal action set for root infoset '$rootInfoSetKey'"
+          )
+          state.averageStrategy(config.cfrPlus).toVector
+        case None =>
+          val uniform = 1.0 / rootActions.length.toDouble
+          Vector.fill(rootActions.length)(uniform)
+    RootPolicyResult(
+      iterations = config.iterations,
+      actions = rootActions,
+      strategy = strategy
+    )
+
+  private def runIterations[S, A](
+      game: ExtensiveFormGame[S, A],
+      config: Config
+  ): mutable.HashMap[String, InfoSetState[A]] =
+    val infosets = mutable.HashMap.empty[String, InfoSetState[A]]
+    var iteration = 1
+    while iteration <= config.iterations do
+      cfr(
+        game = game,
+        state = game.root,
+        reachPlayer0 = 1.0,
+        reachPlayer1 = 1.0,
+        iteration = iteration,
+        infosets = infosets,
+        config = config
+      )
+      iteration += 1
+    infosets
 
   private def cfr[S, A](
       game: ExtensiveFormGame[S, A],

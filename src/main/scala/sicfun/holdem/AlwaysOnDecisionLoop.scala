@@ -19,6 +19,23 @@ import scala.util.Random
 object AlwaysOnDecisionLoop:
   private val IsoFormatter = DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC)
 
+  private[holdem] final class PendingHeroRaiseTracker:
+    private val pendingByHand = mutable.Map.empty[String, Boolean]
+
+    def onHeroAction(handId: String, action: PokerAction): Unit =
+      action match
+        case PokerAction.Raise(_) => pendingByHand.update(handId, true)
+        case _ => pendingByHand.remove(handId)
+
+    def onVillainAction(handId: String, action: PokerAction): Option[PokerAction] =
+      val response =
+        action match
+          case PokerAction.Fold | PokerAction.Call | PokerAction.Raise(_) =>
+            if pendingByHand.getOrElse(handId, false) then Some(action) else None
+          case _ => None
+      pendingByHand.remove(handId)
+      response
+
   private final case class CliConfig(
       feedPath: Path,
       modelArtifactDir: Path,
@@ -100,19 +117,19 @@ object AlwaysOnDecisionLoop:
 
       val states = mutable.Map.empty[String, HandState]
       val observedVillainResponses = mutable.ArrayBuffer.empty[PokerAction]
-      var processedOffset = readOffset(offsetFile)
+      var byteOffset = readByteOffset(offsetFile)
       var processedEvents = 0
       var decisionsEmitted = 0
       var retrainCount = 0
       var poll = 0
+      val pendingRaiseTracker = new PendingHeroRaiseTracker()
 
       val folds = config.tableFormat.foldsBeforeOpener(config.openerPosition).map(PreflopFold(_))
       val seedRng = new Random(config.seed)
 
       while config.maxPolls < 0 || poll < config.maxPolls do
-        val feed = DecisionLoopEventFeedIO.read(config.feedPath)
-        if processedOffset < feed.length then
-          val pending = feed.drop(processedOffset)
+        val (pending, newByteOffset) = DecisionLoopEventFeedIO.readIncremental(config.feedPath, byteOffset)
+        if pending.nonEmpty then
           pending.foreach { entry =>
             val event = entry.event
             val current = states.getOrElse(
@@ -125,13 +142,13 @@ object AlwaysOnDecisionLoop:
             processedEvents += 1
 
             if event.playerId == config.villainPlayerId then
-              event.action match
-                case PokerAction.Fold | PokerAction.Call | PokerAction.Raise(_) =>
-                  observedVillainResponses += event.action
-                  engine.observeVillainResponseToRaise(event.action)
-                case _ => ()
+              pendingRaiseTracker.onVillainAction(event.handId, event.action).foreach { response =>
+                observedVillainResponses += response
+                engine.observeVillainResponseToRaise(response)
+              }
 
             if event.playerId == config.heroPlayerId then
+              pendingRaiseTracker.onHeroAction(event.handId, event.action)
               HandEngine.toGameState(updated, config.heroPlayerId).foreach { heroState =>
                 val observations = updated.events
                   .filter(_.playerId == config.villainPlayerId)
@@ -222,8 +239,8 @@ object AlwaysOnDecisionLoop:
                       ()
               }
           }
-          processedOffset = feed.length
-          writeOffset(offsetFile, processedOffset)
+          byteOffset = newByteOffset
+          writeByteOffset(offsetFile, byteOffset)
 
         poll += 1
         if config.maxPolls < 0 || poll < config.maxPolls then
@@ -354,13 +371,13 @@ object AlwaysOnDecisionLoop:
     )
     Files.write(path, lines.asJava, StandardCharsets.UTF_8, StandardOpenOption.APPEND)
 
-  private def readOffset(path: Path): Int =
-    if !Files.exists(path) then 0
+  private def readByteOffset(path: Path): Long =
+    if !Files.exists(path) then 0L
     else
       val raw = Files.readString(path, StandardCharsets.UTF_8).trim
-      if raw.isEmpty then 0 else raw.toIntOption.getOrElse(0)
+      if raw.isEmpty then 0L else raw.toLongOption.getOrElse(0L)
 
-  private def writeOffset(path: Path, offset: Int): Unit =
+  private def writeByteOffset(path: Path, offset: Long): Unit =
     Files.writeString(path, offset.toString, StandardCharsets.UTF_8)
 
   private def parseArgs(args: Array[String]): Either[String, CliConfig] =

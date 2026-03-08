@@ -7,8 +7,65 @@ package sicfun.core
   * All entropy-based quantities are computed in bits (log base 2) unless noted otherwise.
   */
 object CollapseMetrics:
+  final case class CollapseSummary(
+      entropyReduction: Double,
+      klDivergence: Double,
+      effectiveSupportPrior: Double,
+      effectiveSupportPosterior: Double,
+      collapseRatio: Double
+  )
+
   private inline val Eps = Probability.Eps
   private inline val Ln2 = 0.6931471805599453 // math.log(2.0), precomputed to avoid runtime call
+
+  /** Computes all collapse metrics in one pass over normalized distributions.
+    *
+    * This avoids repeatedly normalizing/scanning the same distributions when
+    * callers need the full collapse summary.
+    */
+  def summary[A](
+      prior: DiscreteDistribution[A],
+      posterior: DiscreteDistribution[A]
+  ): CollapseSummary =
+    val normalizedPrior = prior.normalized
+    val normalizedPosterior = posterior.normalized
+
+    val priorEntropyNats = entropyNats(normalizedPrior.weights.values)
+    var posteriorEntropyNats = 0.0
+    var kl = 0.0
+
+    normalizedPosterior.weights.foreach { case (a, qProb) =>
+      if qProb > 0.0 then
+        val logQ = math.log(qProb)
+        posteriorEntropyNats -= qProb * logQ
+        if qProb > Eps then
+          val pProb = normalizedPrior.probabilityOf(a)
+          require(pProb > Eps, s"posterior has support outside prior for element $a")
+          kl += qProb * ((logQ - math.log(pProb)) / Ln2)
+    }
+
+    val priorEntropyBits = priorEntropyNats / Ln2
+    val posteriorEntropyBits = posteriorEntropyNats / Ln2
+    val priorSupport = math.exp(priorEntropyNats)
+    val posteriorSupport = math.exp(posteriorEntropyNats)
+    val ratio =
+      if priorSupport <= Eps then 0.0
+      else math.max(0.0, 1.0 - posteriorSupport / priorSupport)
+
+    CollapseSummary(
+      entropyReduction = priorEntropyBits - posteriorEntropyBits,
+      klDivergence = math.max(kl, 0.0),
+      effectiveSupportPrior = priorSupport,
+      effectiveSupportPosterior = posteriorSupport,
+      collapseRatio = ratio
+    )
+
+  private def entropyNats(probabilities: Iterable[Double]): Double =
+    var entropy = 0.0
+    probabilities.foreach { p =>
+      if p > 0.0 then entropy -= p * math.log(p)
+    }
+    entropy
 
   /** Computes the entropy reduction (information gain) from prior to posterior.
     *
@@ -23,9 +80,9 @@ object CollapseMetrics:
       prior: DiscreteDistribution[A],
       posterior: DiscreteDistribution[A]
   ): Double =
-    val priorEntropy = Metrics.entropy(prior.normalized.weights.values)
-    val posteriorEntropy = Metrics.entropy(posterior.normalized.weights.values)
-    priorEntropy - posteriorEntropy
+    val priorEntropyNats = entropyNats(prior.normalized.weights.values)
+    val posteriorEntropyNats = entropyNats(posterior.normalized.weights.values)
+    (priorEntropyNats - posteriorEntropyNats) / Ln2
 
   /** Computes the Kullback-Leibler divergence KL(posterior || prior) in bits.
     *
@@ -62,11 +119,7 @@ object CollapseMetrics:
     */
   def effectiveSupport[A](distribution: DiscreteDistribution[A]): Double =
     val d = distribution.normalized
-    // Compute entropy in nats (natural log) so that exp(H_nats) gives effective support.
-    val entropyNats = d.weights.values.foldLeft(0.0) { (acc, p) =>
-      if p <= 0.0 then acc else acc - p * math.log(p)
-    }
-    math.exp(entropyNats)
+    math.exp(entropyNats(d.weights.values))
 
   /** Computes the collapse ratio: the fraction of effective support eliminated by evidence.
     *

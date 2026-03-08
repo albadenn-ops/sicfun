@@ -40,7 +40,11 @@
       "Bash(done)",
       "Bash(find:*)",
       "Bash(python:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(tee:*)",
+      "Bash(powershell.exe:*)"
     ]
-  }
+  },
+  "outputStyle": "default",
+  "prefersReducedMotion": true
 }

@@ -11,6 +11,37 @@ class HandHistoryAnalyzerTest extends FunSuite:
   private def card(t: String): Card =
     Card.parse(t).getOrElse(throw new IllegalArgumentException(s"bad card: $t"))
 
+  private def seedModelArtifact(modelDir: java.nio.file.Path): Unit =
+    val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
+    val state = GameState(
+      street = Street.Flop,
+      board = board,
+      pot = 20.0,
+      toCall = 10.0,
+      position = Position.BigBlind,
+      stackSize = 180.0,
+      betHistory = Vector.empty
+    )
+    val checkState = state.copy(toCall = 0.0)
+    val training = Vector.fill(16)((state, CliHelpers.parseHoleCards("AhAd"), PokerAction.Raise(25.0))) ++
+      Vector.fill(16)((state, CliHelpers.parseHoleCards("QcJc"), PokerAction.Call)) ++
+      Vector.fill(16)((state, CliHelpers.parseHoleCards("7c2d"), PokerAction.Fold)) ++
+      Vector.fill(8)((checkState, CliHelpers.parseHoleCards("AsKs"), PokerAction.Check))
+    val artifact = PokerActionModel.trainVersioned(
+      trainingData = training,
+      learningRate = 0.1,
+      iterations = 150,
+      l2Lambda = 0.001,
+      validationFraction = 0.25,
+      splitSeed = 7L,
+      maxMeanBrierScore = 2.0,
+      failOnGate = false,
+      modelId = "analyzer-test-model",
+      source = "hand-history-analyzer-test",
+      trainedAtEpochMillis = 1_800_000_000_000L
+    )
+    PokerActionModelArtifactIO.save(modelDir, artifact)
+
   test("analyzeWithHeroCards produces decisions for a single hand".tag(munit.Slow)) {
     // Build a minimal set of events for one hand
     val heroCards = CliHelpers.parseHoleCards("AcKh")
@@ -91,8 +122,10 @@ class HandHistoryAnalyzerTest extends FunSuite:
   test("run with a temp feed file produces summary".tag(munit.Slow)) {
     val tempDir = Files.createTempDirectory("analyzer-test-")
     val feedPath = tempDir.resolve("feed.tsv")
+    val modelDir = tempDir.resolve("model")
 
     try
+      seedModelArtifact(modelDir)
       // Write header + 2 events
       val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
       val villainEvent = PokerEvent(
@@ -116,6 +149,8 @@ class HandHistoryAnalyzerTest extends FunSuite:
       val result = HandHistoryAnalyzer.run(Array(
         feedPath.toString,
         "--hero=hero",
+        "--heroCards=AcKh",
+        s"--model=${modelDir}",
         "--seed=42",
         "--bunchingTrials=50",
         "--equityTrials=200"
@@ -125,6 +160,42 @@ class HandHistoryAnalyzerTest extends FunSuite:
       val summary = result.toOption.get
       assertEquals(summary.handsAnalyzed, 1)
       assertEquals(summary.decisionsAnalyzed, 1)
+      assert(summary.decisions.head.heroCards.nonEmpty)
+      assert(summary.decisions.head.heroEquityMean >= 0.0 && summary.decisions.head.heroEquityMean <= 1.0)
+    finally
+      Files.walk(tempDir).sorted(java.util.Comparator.reverseOrder()).forEach(Files.deleteIfExists)
+  }
+
+  test("run without heroCards does not emit placeholder zero decisions".tag(munit.Slow)) {
+    val tempDir = Files.createTempDirectory("analyzer-test-no-herocards-")
+    val feedPath = tempDir.resolve("feed.tsv")
+
+    try
+      val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
+      val villainEvent = PokerEvent(
+        handId = "h1", sequenceInHand = 0L, playerId = "villain",
+        occurredAtEpochMillis = 1000L, street = Street.Flop,
+        position = Position.BigBlind, board = board,
+        potBefore = 12.0, toCall = 0.0, stackBefore = 194.0,
+        action = PokerAction.Raise(8.0), betHistory = Vector.empty
+      )
+      val heroEvent = PokerEvent(
+        handId = "h1", sequenceInHand = 1L, playerId = "hero",
+        occurredAtEpochMillis = 1500L, street = Street.Flop,
+        position = Position.SmallBlind, board = board,
+        potBefore = 20.0, toCall = 8.0, stackBefore = 194.0,
+        action = PokerAction.Call,
+        betHistory = Vector(BetAction(1, PokerAction.Raise(8.0)))
+      )
+      DecisionLoopEventFeedIO.append(feedPath, villainEvent)
+      DecisionLoopEventFeedIO.append(feedPath, heroEvent)
+
+      val result = HandHistoryAnalyzer.run(Array(feedPath.toString, "--hero=hero"))
+      assert(result.isRight, s"analysis failed: $result")
+      val summary = result.toOption.get
+      assertEquals(summary.handsAnalyzed, 1)
+      assertEquals(summary.decisionsAnalyzed, 0)
+      assertEquals(summary.decisions, Vector.empty)
     finally
       Files.walk(tempDir).sorted(java.util.Comparator.reverseOrder()).forEach(Files.deleteIfExists)
   }

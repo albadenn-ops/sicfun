@@ -2,6 +2,7 @@ package sicfun.holdem
 
 import sicfun.core.{DiscreteDistribution, Metrics, Probability}
 
+import java.util.concurrent.atomic.AtomicBoolean
 import scala.util.control.NonFatal
 
 /** Phase-1 DDRE provider facade.
@@ -19,6 +20,9 @@ private[holdem] object HoldemDdreProvider:
   enum Provider:
     case Disabled
     case Synthetic
+    case NativeCpu
+    case NativeGpu
+    case Onnx
 
   final case class Config(
       mode: Mode,
@@ -56,6 +60,7 @@ private[holdem] object HoldemDdreProvider:
 
   private val DefaultAlpha = 0.20
   private val DefaultMinEntropyBits = 0.0
+  private val SyntheticWarningEmitted = new AtomicBoolean(false)
 
   private inline val Eps = Probability.Eps
   private inline val MinLikelihood = 1e-6
@@ -71,6 +76,9 @@ private[holdem] object HoldemDdreProvider:
     provider match
       case Provider.Disabled => "disabled"
       case Provider.Synthetic => "synthetic"
+      case Provider.NativeCpu => "native-cpu"
+      case Provider.NativeGpu => "native-gpu"
+      case Provider.Onnx => "onnx"
 
   def configuredConfig(): Config =
     Config(
@@ -102,7 +110,66 @@ private[holdem] object HoldemDdreProvider:
               )
             )
           case Provider.Synthetic =>
+            warnSyntheticProviderOnce()
             syntheticPosterior(prior, observations, actionModel)
+          case Provider.NativeCpu | Provider.NativeGpu =>
+            nativePosterior(
+              provider = config.provider,
+              prior = prior,
+              observations = observations,
+              actionModel = actionModel
+            ) match
+              case Right(value) => value
+              case Left(detail) =>
+                return Left(
+                  InferenceFailure(
+                    reasonCategory = "native_error",
+                    detail = detail,
+                    latencyMillis = elapsedMillis(startedAt)
+                  )
+                )
+          case Provider.Onnx =>
+            HoldemDdreOnnxRuntime.configuredConfig() match
+              case Left(detail) =>
+                return Left(
+                  InferenceFailure(
+                    reasonCategory = "onnx_error",
+                    detail = detail,
+                    latencyMillis = elapsedMillis(startedAt)
+                  )
+                )
+              case Right(onnxConfig) =>
+                if isDecisionDrivingMode(config.mode) &&
+                  !onnxConfig.decisionDrivingAllowed &&
+                  !onnxConfig.allowExperimental
+                then
+                  val artifactLabel =
+                    onnxConfig.artifactId
+                      .orElse(onnxConfig.artifactDir.map(_.toString))
+                      .getOrElse(onnxConfig.modelPath)
+                  return Left(
+                    InferenceFailure(
+                      reasonCategory = "artifact_not_validated",
+                      detail =
+                        s"onnx artifact '$artifactLabel' is not validated for decision driving (status=${onnxConfig.validationStatus})",
+                      latencyMillis = elapsedMillis(startedAt)
+                    )
+                  )
+                onnxPosterior(
+                  prior = prior,
+                  observations = observations,
+                  actionModel = actionModel,
+                  onnxConfig = onnxConfig
+                ) match
+                  case Right(value) => value
+                  case Left(detail) =>
+                    return Left(
+                      InferenceFailure(
+                        reasonCategory = "onnx_error",
+                        detail = detail,
+                        latencyMillis = elapsedMillis(startedAt)
+                      )
+                    )
 
       val masked = applyLegalMask(rawPosterior, hero, board) match
         case Right(value) => value
@@ -158,7 +225,7 @@ private[holdem] object HoldemDdreProvider:
       observations: Seq[(PokerAction, GameState)],
       actionModel: PokerActionModel
   ): DiscreteDistribution[HoleCards] =
-    val hypotheses = prior.weights.keysIterator.toVector.sortBy(_.toToken)
+    val hypotheses = prior.weights.keysIterator.toVector
     require(hypotheses.nonEmpty, "prior support must be non-empty")
     val obsCount = math.max(1, observations.length)
     val invObsCount = 1.0 / obsCount.toDouble
@@ -177,7 +244,124 @@ private[holdem] object HoldemDdreProvider:
       idx += 1
     DiscreteDistribution(weights.result()).normalized
 
-  private def applyLegalMask(
+  private def warnSyntheticProviderOnce(): Unit =
+    if SyntheticWarningEmitted.compareAndSet(false, true) then
+      GpuRuntimeSupport.warn(
+        "DDRE provider 'synthetic' is a heuristic scaffold, not a trained diffusion model; use it only for plumbing or fallback checks"
+      )
+
+  private def nativePosterior(
+      provider: Provider,
+      prior: DiscreteDistribution[HoleCards],
+      observations: Seq[(PokerAction, GameState)],
+      actionModel: PokerActionModel
+  ): Either[String, DiscreteDistribution[HoleCards]] =
+    val hypotheses = prior.weights.keysIterator.toVector
+    if hypotheses.isEmpty then Left("prior_support_empty")
+    else
+      val priorArray = hypotheses.map(prior.probabilityOf).toArray
+      val likelihoods = buildLikelihoodMatrix(observations, actionModel, hypotheses)
+      val backendEither: Either[String, HoldemDdreNativeRuntime.Backend] =
+        provider match
+          case Provider.NativeCpu => Right(HoldemDdreNativeRuntime.Backend.Cpu)
+          case Provider.NativeGpu => Right(HoldemDdreNativeRuntime.Backend.Gpu)
+          case other => Left(s"unsupported_native_provider_${providerLabel(other)}")
+
+      backendEither.flatMap { backend =>
+        HoldemDdreNativeRuntime
+          .inferPosterior(
+            backend = backend,
+            observationCount = observations.length,
+            hypothesisCount = hypotheses.length,
+            prior = priorArray,
+            likelihoods = likelihoods
+          )
+          .flatMap { native =>
+            distributionFromPosteriorArray(
+              hypotheses = hypotheses,
+              posterior = native.posterior,
+              label = "native"
+            )
+          }
+      }
+
+  private def onnxPosterior(
+      prior: DiscreteDistribution[HoleCards],
+      observations: Seq[(PokerAction, GameState)],
+      actionModel: PokerActionModel,
+      onnxConfig: HoldemDdreOnnxRuntime.Config
+  ): Either[String, DiscreteDistribution[HoleCards]] =
+    val hypotheses = prior.weights.keysIterator.toVector
+    if hypotheses.isEmpty then Left("prior_support_empty")
+    else
+      val priorArray = hypotheses.map(prior.probabilityOf).toArray
+      val likelihoods = buildLikelihoodMatrix(observations, actionModel, hypotheses)
+      HoldemDdreOnnxRuntime
+        .inferPosterior(
+          prior = priorArray,
+          likelihoods = likelihoods,
+          observationCount = observations.length,
+          hypothesisCount = hypotheses.length,
+          config = onnxConfig
+        )
+        .flatMap { posteriorRaw =>
+          distributionFromPosteriorArray(
+            hypotheses = hypotheses,
+            posterior = posteriorRaw,
+            label = "onnx"
+          )
+        }
+
+  private[holdem] def buildLikelihoodMatrix(
+      observations: Seq[(PokerAction, GameState)],
+      actionModel: PokerActionModel,
+      hypotheses: Vector[HoleCards]
+  ): Array[Double] =
+    if observations.isEmpty then Array.emptyDoubleArray
+    else
+      val observationCount = observations.length
+      val hypothesisCount = hypotheses.length
+      val matrix = new Array[Double](observationCount * hypothesisCount)
+      var obsIdx = 0
+      while obsIdx < observationCount do
+        val (action, state) = observations(obsIdx)
+        val rowOffset = obsIdx * hypothesisCount
+        var hypIdx = 0
+        while hypIdx < hypothesisCount do
+          val likelihoodRaw = actionModel.likelihood(action, state, hypotheses(hypIdx))
+          val likelihood =
+            if likelihoodRaw.isFinite && likelihoodRaw > 0.0 then likelihoodRaw
+            else MinLikelihood
+          matrix(rowOffset + hypIdx) = likelihood
+          hypIdx += 1
+        obsIdx += 1
+      matrix
+
+  private[holdem] def distributionFromPosteriorArray(
+      hypotheses: Vector[HoleCards],
+      posterior: Array[Double],
+      label: String
+  ): Either[String, DiscreteDistribution[HoleCards]] =
+    if posterior.length != hypotheses.length then
+      Left(s"${label}_posterior_length_mismatch_expected_${hypotheses.length}_got_${posterior.length}")
+    else
+      val weights = Map.newBuilder[HoleCards, Double]
+      var total = 0.0
+      var idx = 0
+      var invalidReason: String | Null = null
+      while idx < hypotheses.length && invalidReason == null do
+        val probability = posterior(idx)
+        if !probability.isFinite || probability < 0.0 then
+          invalidReason = s"${label}_invalid_probability_at_index_$idx"
+        else if probability > 0.0 then
+          weights += hypotheses(idx) -> probability
+          total += probability
+        idx += 1
+      if invalidReason != null then Left(invalidReason.nn)
+      else if total <= Eps then Left(s"${label}_zero_mass")
+      else Right(DiscreteDistribution(weights.result()).normalized)
+
+  private[holdem] def applyLegalMask(
       posterior: DiscreteDistribution[HoleCards],
       hero: HoleCards,
       board: Board
@@ -191,12 +375,20 @@ private[holdem] object HoldemDdreProvider:
       val (hand, probability) = entries(idx)
       if !probability.isFinite || probability < 0.0 then
         return Left(s"invalid_probability_for_${hand.toToken}")
-      if !hand.asSet.exists(dead.contains) && probability > 0.0 then
+      if !dead.contains(hand.first) &&
+        !dead.contains(hand.second) &&
+        probability > 0.0
+      then
         weights += hand -> probability
         total += probability
       idx += 1
     if total <= Eps then Left("zero_legal_mass_after_mask")
     else Right(DiscreteDistribution(weights.result()).normalized)
+
+  private def isDecisionDrivingMode(mode: Mode): Boolean =
+    mode match
+      case Mode.BlendCanary | Mode.BlendPrimary => true
+      case _ => false
 
   private def configuredMode: Mode =
     GpuRuntimeSupport.resolveNonEmptyLower(ModeProperty, ModeEnv) match
@@ -213,6 +405,9 @@ private[holdem] object HoldemDdreProvider:
     GpuRuntimeSupport.resolveNonEmptyLower(ProviderProperty, ProviderEnv) match
       case Some("disabled" | "off" | "none") => Provider.Disabled
       case Some("synthetic" | "mock" | "heuristic") => Provider.Synthetic
+      case Some("native-cpu" | "native_cpu" | "cpu") => Provider.NativeCpu
+      case Some("native-gpu" | "native_gpu" | "gpu" | "cuda") => Provider.NativeGpu
+      case Some("onnx" | "onnx-runtime" | "onnxruntime") => Provider.Onnx
       case Some(other) =>
         GpuRuntimeSupport.warn(s"unknown DDRE provider '$other'; using disabled")
         Provider.Disabled

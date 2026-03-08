@@ -1,6 +1,7 @@
 package sicfun.holdem
 
 import munit.FunSuite
+import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 
 class HeadsUpHybridDispatcherPlanningTest extends FunSuite:
   override def beforeEach(context: BeforeEach): Unit =
@@ -442,4 +443,62 @@ class HeadsUpHybridDispatcherPlanningTest extends FunSuite:
     )
     assert(result.isLeft)
     assert(result.swap.toOption.get.contains("no compute devices"))
+  }
+
+  test("adaptive calibrated weight updates remain lossless under concurrency") {
+    val adaptiveProp = "sicfun.hybrid.adaptiveWeights"
+    val alphaProp = "sicfun.hybrid.adaptiveAlpha"
+    val minSliceProp = "sicfun.hybrid.minSliceMatchups"
+    val prevAdaptive = sys.props.get(adaptiveProp)
+    val prevAlpha = sys.props.get(alphaProp)
+    val prevMinSlice = sys.props.get(minSliceProp)
+    val prevWeights = HeadsUpHybridDispatcher.calibratedWeights
+    val workers = 16
+    val started = new CountDownLatch(1)
+    val finished = new CountDownLatch(workers)
+    val pool = Executors.newFixedThreadPool(workers)
+    try
+      sys.props.update(adaptiveProp, "true")
+      sys.props.update(alphaProp, "0.5")
+      sys.props.update(minSliceProp, "1")
+      HeadsUpHybridDispatcher.setCalibratedWeights(Map.empty)
+
+      (0 until workers).foreach { idx =>
+        pool.submit(new Runnable {
+          override def run(): Unit =
+            try
+              started.await(10, TimeUnit.SECONDS)
+              HeadsUpHybridDispatcher.maybeUpdateCalibratedWeights(
+                Vector(
+                  HeadsUpHybridDispatcher.DeviceTelemetry(
+                    deviceId = s"dev-$idx",
+                    deviceName = s"Device-$idx",
+                    matchups = 512,
+                    elapsedMs = 0L,
+                    elapsedNanos = 10_000_000L
+                  )
+                )
+              )
+            finally
+              finished.countDown()
+        })
+      }
+
+      started.countDown()
+      assert(finished.await(10, TimeUnit.SECONDS), "timed out waiting for concurrent calibration updates")
+      val weights = HeadsUpHybridDispatcher.calibratedWeights
+      val missing = (0 until workers).map(idx => s"dev-$idx").filterNot(weights.contains)
+      assertEquals(missing, Vector.empty)
+    finally
+      pool.shutdownNow()
+      prevAdaptive match
+        case Some(value) => sys.props.update(adaptiveProp, value)
+        case None => sys.props.remove(adaptiveProp)
+      prevAlpha match
+        case Some(value) => sys.props.update(alphaProp, value)
+        case None => sys.props.remove(alphaProp)
+      prevMinSlice match
+        case Some(value) => sys.props.update(minSliceProp, value)
+        case None => sys.props.remove(minSliceProp)
+      HeadsUpHybridDispatcher.setCalibratedWeights(prevWeights)
   }

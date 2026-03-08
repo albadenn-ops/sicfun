@@ -80,7 +80,7 @@ private[holdem] object HoldemBayesProvider:
         provider = Provider.Scala
       )
     else
-      val hypotheses = prior.weights.keysIterator.toVector.sortBy(_.toToken)
+      val hypotheses = prior.weights.keysIterator.toVector
       val priorArray = hypotheses.map(prior.probabilityOf).toArray
       val likelihoods = buildLikelihoodMatrix(observations, actionModel, hypotheses)
       val observationCount = observations.length

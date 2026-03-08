@@ -27,6 +27,11 @@ final case class PokerFeatures(values: Vector[Double]):
   * on `(Board, HoleCards)` to avoid redundant exhaustive evaluations.
   */
 object PokerFeatures:
+  private val HandStrengthModeProperty = "sicfun.poker.handStrength.mode"
+  private val HandStrengthModeEnv = "sicfun_POKER_HAND_STRENGTH_MODE"
+  private val HandStrengthModeHeuristic = "heuristic"
+  private val HandStrengthModeExact = "exact"
+
   /** Human-readable names for each feature dimension, in order. */
   val featureNames: Vector[String] = Vector(
     "potOdds",
@@ -79,7 +84,9 @@ object PokerFeatures:
       val cached = strengthCache.get(key)
       if cached != null then cached.doubleValue
       else
-        val computed = computeHandStrength(board, hand)
+        val computed =
+          if configuredHandStrengthMode == HandStrengthModeExact then computeHandStrengthExact(board, hand)
+          else computeHandStrengthHeuristic(board, hand)
         if strengthCache.size() >= MaxCacheSize then strengthCache.clear()
         strengthCache.putIfAbsent(key, java.lang.Double.valueOf(computed))
         computed
@@ -92,7 +99,7 @@ object PokerFeatures:
     * Optimization: board cards are pre-allocated into an Array to avoid
     * repeated Vector concatenation in the inner loop.
     */
-  private def computeHandStrength(board: Board, hand: HoleCards): Double =
+  private def computeHandStrengthExact(board: Board, hand: HoleCards): Double =
     val dead = hand.asSet ++ board.asSet
     val remaining = Deck.full.filterNot(dead.contains).toIndexedSeq
     val opponents = HoldemCombinator.holeCardsFrom(remaining)
@@ -113,6 +120,45 @@ object PokerFeatures:
         total += 1.0
       }
       (wins + ties * 0.5) / total  // ties count as half a win
+
+  /** Fast rank-based proxy for postflop hand strength.
+    *
+    * Uses current best hand category plus tiebreak ranks to avoid exhaustive
+    * opponent enumeration in real-time loops.
+    */
+  private def computeHandStrengthHeuristic(board: Board, hand: HoleCards): Double =
+    val rank = evaluateBest(hand.toVector ++ board.cards)
+    val categoryScore = rank.category.strength.toDouble / 8.0
+    val tieScore = normalizedTieScore(rank)
+    clamp01((0.82 * categoryScore) + (0.18 * tieScore))
+
+  private def normalizedTieScore(rank: HandRank): Double =
+    val len = rank.tiebreakLength
+    if len == 0 then 0.0
+    else
+      var weightedSum = 0.0
+      var weight = 1.0
+      var normalizer = 0.0
+      var idx = 0
+      while idx < len && idx < 5 do
+        val value = rank.tiebreak(idx)
+        val normalized = (math.max(2, math.min(14, value)).toDouble - 2.0) / 12.0
+        weightedSum += weight * normalized
+        normalizer += weight
+        weight *= 0.5
+        idx += 1
+      if normalizer > 0.0 then weightedSum / normalizer else 0.0
+
+  private def clamp01(value: Double): Double =
+    math.max(0.0, math.min(1.0, value))
+
+  private def configuredHandStrengthMode: String =
+    configuredHandStrengthModeCached
+
+  private lazy val configuredHandStrengthModeCached: String =
+    GpuRuntimeSupport
+      .resolveNonEmptyLower(HandStrengthModeProperty, HandStrengthModeEnv)
+      .getOrElse(HandStrengthModeHeuristic)
 
   /** Selects the best 5-card hand rank from 5, 6, or 7 cards. */
   private def evaluateBest(cards: Vector[Card]): HandRank =

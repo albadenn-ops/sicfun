@@ -20,6 +20,21 @@ final case class VillainResponseProfile(
 trait VillainResponseModel:
   def response(villainHand: HoleCards, state: GameState, heroAction: PokerAction): VillainResponseProfile
 
+/** Hand-independent villain response model.
+  *
+  * Implementations define one profile per `(state, heroAction)`, shared across all
+  * villain hands. This enables fast-path EV evaluation without per-hand aggregation.
+  */
+trait UniformVillainResponseModel extends VillainResponseModel:
+  def responseProfile(state: GameState, heroAction: PokerAction): VillainResponseProfile
+
+  final override def response(
+      villainHand: HoleCards,
+      state: GameState,
+      heroAction: PokerAction
+  ): VillainResponseProfile =
+    responseProfile(state, heroAction)
+
 object VillainResponseModel:
   /** Binary hand-range response model:
     * - hands in raiseRange always raise

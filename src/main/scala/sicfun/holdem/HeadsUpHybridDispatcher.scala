@@ -397,14 +397,14 @@ object HeadsUpHybridDispatcher:
               measuredThroughput.update(device.id, throughput)
           }
           if configuredAdaptiveWeightsEnabled && measuredThroughput.nonEmpty then
-            val current = calibratedWeightsRef.get()
-            calibratedWeightsRef.set(current ++ measuredThroughput.toMap)
+            val warmupMeasured = measuredThroughput.toMap
+            calibratedWeightsRef.updateAndGet(current => current ++ warmupMeasured)
       catch
         case ex: Throwable =>
           val detail = Option(ex.getMessage).filter(_.nonEmpty).getOrElse(ex.getClass.getSimpleName)
           GpuRuntimeSupport.log(s"hybrid warmup skipped: $detail")
 
-  private def maybeUpdateCalibratedWeights(perDevice: Vector[DeviceTelemetry]): Unit =
+  private[holdem] def maybeUpdateCalibratedWeights(perDevice: Vector[DeviceTelemetry]): Unit =
     if !configuredAdaptiveWeightsEnabled || perDevice.isEmpty then
       ()
     else
@@ -423,8 +423,7 @@ object HeadsUpHybridDispatcher:
           }
           .map(t => t.deviceId -> t.throughput)
       if measured.nonEmpty then
-        val current = calibratedWeightsRef.get()
-        val updated =
+        calibratedWeightsRef.updateAndGet { current =>
           measured.foldLeft(current) { case (acc, (deviceId, throughput)) =>
             acc.get(deviceId) match
               case Some(baseline) =>
@@ -437,7 +436,7 @@ object HeadsUpHybridDispatcher:
                 // First observation switches this device into throughput-calibrated space.
                 acc.updated(deviceId, throughput)
           }
-        calibratedWeightsRef.set(updated)
+        }
 
   // ------ Device discovery ------------------------------------------------------------------------------------------------------------------------------------
 

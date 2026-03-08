@@ -2,6 +2,7 @@ package sicfun.holdem
 
 import sicfun.core.{Card, CardId, Deck, DiscreteDistribution}
 
+import java.util.concurrent.ConcurrentHashMap
 import scala.util.Random
 
 /** A preflop fold event for a specific table position. */
@@ -25,11 +26,31 @@ final case class BunchingResult(
   */
 object BunchingEffect:
   private val DefaultMaxAttemptFactor = 3
+  private val MaxWeightedHandsCacheSize = 128
   private final case class WeightedHand(hand: HoleCards, weight: Double, mask: Long)
+  private final class WeightedHandsCacheKey private (
+      val tableRangesRef: TableRanges,
+      val position: Position
+  ):
+    override def hashCode(): Int =
+      (System.identityHashCode(tableRangesRef) * 31) + position.hashCode()
+
+    override def equals(obj: Any): Boolean =
+      obj match
+        case that: WeightedHandsCacheKey =>
+          (this.position == that.position) && (this.tableRangesRef eq that.tableRangesRef)
+        case _ => false
+
+  private object WeightedHandsCacheKey:
+    def apply(tableRanges: TableRanges, position: Position): WeightedHandsCacheKey =
+      new WeightedHandsCacheKey(tableRanges, position)
+
   private lazy val allHoleCardsWithMasks: Vector[(HoleCards, Long)] =
     HoldemCombinator.holeCardsFrom(Deck.full).map { hand =>
       hand -> handMask(hand)
     }
+  private val foldHandsCache = new ConcurrentHashMap[WeightedHandsCacheKey, Vector[WeightedHand]]()
+  private val villainHandsCache = new ConcurrentHashMap[WeightedHandsCacheKey, Vector[WeightedHand]]()
 
   /** Full bunching analysis: adjusted range, naive range, both equities, and delta. */
   def compute(
@@ -142,11 +163,10 @@ object BunchingEffect:
       trials: Int,
       rng: Random
   ): DiscreteDistribution[HoleCards] =
-    val villainBase = tableRanges.rangeFor(villainPos)
     val orderedFolds = orderFolds(folds, tableRanges.format)
     val deadBaseMask = handMask(hero) | cardsMask(board.cards)
-    val villainWeightedHands = weightedVillainHands(villainBase)
-    val orderedFoldCandidates = orderedFolds.map(fold => weightedFoldHands(fold.position, tableRanges))
+    val villainWeightedHands = cachedVillainHands(tableRanges, villainPos)
+    val orderedFoldCandidates = orderedFolds.map(fold => cachedFoldHands(tableRanges, fold.position))
 
     val accumulator = Array.fill[Double](villainWeightedHands.length)(0.0)
     val maxAttempts = math.max(trials * DefaultMaxAttemptFactor, trials)
@@ -219,19 +239,55 @@ object BunchingEffect:
   private def weightedVillainHands(
       villainRange: DiscreteDistribution[HoleCards]
   ): Vector[WeightedHand] =
-    allHoleCardsWithMasks.flatMap { (hand, mask) =>
+    val builder = Vector.newBuilder[WeightedHand]
+    var idx = 0
+    while idx < allHoleCardsWithMasks.length do
+      val (hand, mask) = allHoleCardsWithMasks(idx)
       val weight = villainRange.probabilityOf(hand)
-      if weight > 0.0 then Some(WeightedHand(hand, weight, mask)) else None
-    }
+      if weight > 0.0 then builder += WeightedHand(hand, weight, mask)
+      idx += 1
+    builder.result()
 
   private def weightedFoldHands(
       position: Position,
       tableRanges: TableRanges
   ): Vector[WeightedHand] =
-    allHoleCardsWithMasks.flatMap { (hand, mask) =>
+    val builder = Vector.newBuilder[WeightedHand]
+    var idx = 0
+    while idx < allHoleCardsWithMasks.length do
+      val (hand, mask) = allHoleCardsWithMasks(idx)
       val weight = tableRanges.foldProbability(position, hand)
-      if weight > 0.0 then Some(WeightedHand(hand, weight, mask)) else None
-    }
+      if weight > 0.0 then builder += WeightedHand(hand, weight, mask)
+      idx += 1
+    builder.result()
+
+  private def cachedVillainHands(
+      tableRanges: TableRanges,
+      villainPos: Position
+  ): Vector[WeightedHand] =
+    val key = WeightedHandsCacheKey(tableRanges, villainPos)
+    val cached = villainHandsCache.get(key)
+    if cached != null then cached
+    else
+      val computed = weightedVillainHands(tableRanges.rangeFor(villainPos))
+      if villainHandsCache.size() >= MaxWeightedHandsCacheSize then villainHandsCache.clear()
+      villainHandsCache.putIfAbsent(key, computed)
+      val published = villainHandsCache.get(key)
+      if published != null then published else computed
+
+  private def cachedFoldHands(
+      tableRanges: TableRanges,
+      position: Position
+  ): Vector[WeightedHand] =
+    val key = WeightedHandsCacheKey(tableRanges, position)
+    val cached = foldHandsCache.get(key)
+    if cached != null then cached
+    else
+      val computed = weightedFoldHands(position, tableRanges)
+      if foldHandsCache.size() >= MaxWeightedHandsCacheSize then foldHandsCache.clear()
+      foldHandsCache.putIfAbsent(key, computed)
+      val published = foldHandsCache.get(key)
+      if published != null then published else computed
 
   private def sampleWeightedCompatible(
       items: Vector[WeightedHand],

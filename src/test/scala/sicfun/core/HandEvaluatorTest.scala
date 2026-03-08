@@ -1,5 +1,7 @@
 package sicfun.core
 
+import sicfun.holdem.TestSystemPropertyScope
+
 class HandEvaluatorTest extends munit.FunSuite:
   private def cards(tokens: String*): Vector[Card] =
     Card.parseAll(tokens).getOrElse(fail(s"invalid cards: ${tokens.mkString(" ")}"))
@@ -8,49 +10,49 @@ class HandEvaluatorTest extends munit.FunSuite:
     val hand = cards("As", "Ks", "Qs", "Js", "Ts")
     val rank = HandEvaluator.evaluate5(hand)
     assertEquals(rank.category, HandCategory.StraightFlush)
-    assertEquals(rank.tiebreak, Vector(14))
+    assertEquals(rank.tiebreakVector, Vector(14))
   }
 
   test("evaluate5 handles wheel straight") {
     val hand = cards("Ah", "2d", "3s", "4c", "5h")
     val rank = HandEvaluator.evaluate5(hand)
     assertEquals(rank.category, HandCategory.Straight)
-    assertEquals(rank.tiebreak, Vector(5))
+    assertEquals(rank.tiebreakVector, Vector(5))
   }
 
   test("evaluate5 detects four of a kind") {
     val hand = cards("Ah", "Ad", "Ac", "As", "Kd")
     val rank = HandEvaluator.evaluate5(hand)
     assertEquals(rank.category, HandCategory.FourOfKind)
-    assertEquals(rank.tiebreak, Vector(14, 13))
+    assertEquals(rank.tiebreakVector, Vector(14, 13))
   }
 
   test("evaluate5 detects full house") {
     val hand = cards("7s", "7d", "7c", "2h", "2d")
     val rank = HandEvaluator.evaluate5(hand)
     assertEquals(rank.category, HandCategory.FullHouse)
-    assertEquals(rank.tiebreak, Vector(7, 2))
+    assertEquals(rank.tiebreakVector, Vector(7, 2))
   }
 
   test("evaluate5 detects flush") {
     val hand = cards("As", "Js", "8s", "4s", "2s")
     val rank = HandEvaluator.evaluate5(hand)
     assertEquals(rank.category, HandCategory.Flush)
-    assertEquals(rank.tiebreak, Vector(14, 11, 8, 4, 2))
+    assertEquals(rank.tiebreakVector, Vector(14, 11, 8, 4, 2))
   }
 
   test("evaluate5 detects two pair") {
     val hand = cards("Kc", "Kh", "4d", "4s", "9h")
     val rank = HandEvaluator.evaluate5(hand)
     assertEquals(rank.category, HandCategory.TwoPair)
-    assertEquals(rank.tiebreak, Vector(13, 4, 9))
+    assertEquals(rank.tiebreakVector, Vector(13, 4, 9))
   }
 
   test("evaluate7 picks the best 5-card hand") {
     val seven = cards("As", "2d", "Ks", "Qs", "Js", "Ts", "3c")
     val rank = HandEvaluator.evaluate7(seven)
     assertEquals(rank.category, HandCategory.StraightFlush)
-    assertEquals(rank.tiebreak, Vector(14))
+    assertEquals(rank.tiebreakVector, Vector(14))
   }
 
   test("hand ordering prefers stronger categories") {
@@ -131,5 +133,25 @@ class HandEvaluatorTest extends munit.FunSuite:
     }
     intercept[IllegalArgumentException] {
       HandEvaluator.evaluate7Cached(seven.take(6))
+    }
+  }
+
+  test("cached evaluators can be disabled via system properties") {
+    val five = cards("As", "Ks", "Qs", "Js", "Ts")
+    val seven = cards("As", "2d", "Ks", "Qs", "Js", "Ts", "3c")
+    HandEvaluator.clearCaches()
+
+    TestSystemPropertyScope.withSystemProperties(
+      Seq(
+        "sicfun.handEvaluator.cache5.maxSize" -> Some("0"),
+        "sicfun.handEvaluator.cache7.maxSize" -> Some("0")
+      )
+    ) {
+      HandEvaluator.clearCaches()
+      val before = HandEvaluator.cacheSizes
+      assertEquals(before, (0, 0))
+      HandEvaluator.evaluate5Cached(five)
+      HandEvaluator.evaluate7Cached(seven)
+      assertEquals(HandEvaluator.cacheSizes, (0, 0))
     }
   }

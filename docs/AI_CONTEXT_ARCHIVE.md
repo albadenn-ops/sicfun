@@ -2,6 +2,8 @@
 
 This file is an append-only operational memory layer for future AI sessions.
 Use it when commit history or local git context is too large/noisy for limited context windows.
+It is internal working memory, not a release note, product spec, or reviewer-facing source of truth.
+For externally readable project status, start with `README.md`, `ROADMAP.md`, and `docs/OPERATOR_RUNBOOK.md`.
 
 ## Current Status
 - The project has matured past roadmap-driven milestones into a multi-surface platform:
@@ -38,6 +40,9 @@ event feed -> `HandEngine` state -> posterior inference (`RangeInferenceEngine`)
 `PokerAdvisor`/`AdvisorSession` -> interactive CLI for live decision advice with equilibrium baseline blending.
 
 ## Operator Commands
+- Primary runbook:
+`docs/OPERATOR_RUNBOOK.md`
+
 - Quick proof:
 `powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1 -Quick`
 
@@ -154,3 +159,130 @@ Validation: sbt "runMain sicfun.holdem.HoldemBayesBenchmark --provider=scala --w
 Risks: Bayesian auto-provider benchmark is still synthetic and may not match every production spot; shadow mode adds compute cost because Scala reference is also executed when enabled; fail-closed is opt-in (default false); Bayesian GPU provider remains NVCC-compiled host core, not a fully device-parallel kernel.
 Signature: /s/ Codex (GPT-5), 2026-03-05T03:18:15Z
 GitHead: ad8ff8d
+
+## 2026-03-05T09:11:46Z - Postflop native CPU/CUDA runtime in progress + validation baseline refreshed
+Agent: Codex (GPT-5)
+Summary: Added/updated dedicated postflop native bridge surfaces (CPU + CUDA), runtime selection/fallback/autotune handling, benchmark/tuner entrypoints, and parity tests; refreshed branch-health validation on the current dirty worktree.
+Why: Keep the postflop acceleration path first-class alongside existing heads-up/CFR/Bayesian native runtimes and capture the true current validation state before further work.
+Files: src/main/java/sicfun/holdem/HoldemPostflopNativeBindings.java,src/main/java/sicfun/holdem/HoldemPostflopNativeGpuBindings.java,src/main/native/jni/HoldemPostflopNativeBindings.cpp,src/main/native/jni/HoldemPostflopNativeBindingsCuda.cu,src/main/native/build-windows-llvm.ps1,src/main/native/build-windows-cuda11.ps1,src/main/scala/sicfun/holdem/HoldemPostflopNativeRuntime.scala,src/main/scala/sicfun/holdem/HoldemPostflopNativeBenchmark.scala,src/main/scala/sicfun/holdem/HoldemPostflopGpuAutoTuner.scala,src/main/scala/sicfun/holdem/HoldemEquity.scala,src/test/scala/sicfun/holdem/HoldemPostflopNativeParityTest.scala,src/main/native/README.md
+Validation: sbt compile; sbt "testOnly sicfun.holdem.RangeInferenceEngineTest sicfun.holdem.RealTimeAdaptiveEngineTest sicfun.holdem.HoldemBayesProviderTest sicfun.holdem.HoldemPostflopNativeParityTest"; sbt test (observed 3 suite failures when run aggregated: HoldemBayesProviderTest, HeadsUpEquityCanonicalTableTest, TexasHoldemPlayingHallTest); sbt "testOnly sicfun.holdem.HoldemBayesProviderTest"; sbt "testOnly sicfun.holdem.HeadsUpEquityCanonicalTableTest"; sbt "testOnly sicfun.holdem.TexasHoldemPlayingHallTest"; sbt "runMain sicfun.holdem.HoldemBayesBenchmark --provider=scala --warmupRuns=1 --measureRuns=5 --bunchingTrials=800 --equityTrials=2000 --seed=17"; sbt "runMain sicfun.holdem.HoldemBayesBenchmark --provider=native-cpu --warmupRuns=1 --measureRuns=5 --bunchingTrials=800 --equityTrials=2000 --seed=17"; sbt "runMain sicfun.holdem.HoldemBayesBenchmark --provider=auto --warmupRuns=1 --measureRuns=5 --bunchingTrials=800 --equityTrials=2000 --seed=17"; sbt "runMain sicfun.holdem.HoldemBayesBenchmark --provider=native-gpu --warmupRuns=1 --measureRuns=3 --bunchingTrials=800 --equityTrials=2000 --seed=17"
+Risks: Full-suite execution is currently order/timing sensitive on this machine despite individual passing reruns; do not treat a single `sbt test` failure as a definitive regression without isolating suites. Infer-posterior latency still heavily depends on bunching trial budget.
+GitHead: d6b5866
+
+## 2026-03-05T09:11:46Z - DDRE Phase 1 feasibility review + spec rewrite draft
+Agent: Codex (GPT-5)
+Summary: Performed implementation-feasibility review against `SICFUN_Phase1_DDRE_Spec.docx`, extracted full spec content, identified internal contradictions, and produced an implementation-ready v2 draft that now reflects cooperative Bayesian+DDRE fusion semantics.
+Why: Engineering start was blocked by spec inconsistencies (model/output mismatch, blocker math contradiction, non-operational primary metric, and rollout mode conflict), and user requested spec-first correction before build-out.
+Files: SICFUN_Phase1_DDRE_Spec.docx,docs/_phase1_spec_extracted.txt,docs/_phase1_spec_extracted_allp.txt,docs/SICFUN_Phase1_DDRE_Spec_v2.md
+Validation: Manual architecture/code/spec cross-check against current inference/runtime surfaces (RangeInferenceEngine, HoldemBayesProvider, RealTimeAdaptiveEngine, HoldemPostflopNativeRuntime); no production code path switched to DDRE.
+Risks: v2 spec remains draft-only and not yet wired into runtime. Any future DDRE implementation should preserve Bayesian path as active fusion component plus kill-switch fallback.
+GitHead: d6b5866
+
+## 2026-03-05T09:14:32Z - Roadmap synchronization correction (README -> ROADMAP)
+Agent: Codex (GPT-5)
+Summary: Synced `ROADMAP.md` to current implementation status by adding native acceleration progress tracking (M10) and DDRE spec-first preparation tracking (M11).
+Why: User clarified roadmap upkeep was required (not README), and the existing roadmap did not reflect current postflop-native and DDRE-prep progress.
+Files: ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: Documentation update only (no runtime code changes).
+Risks: M10 still includes one open stability item for aggregated full-suite runs that can fail while isolated reruns pass.
+GitHead: d6b5866
+
+## 2026-03-05T09:33:26Z - M10 aggregate-suite stability fix (Bayes cache + canonical preflop backend isolation)
+Agent: Codex (GPT-5)
+Summary: Resolved reproducible aggregate-only test instability by hardening property-scoped tests and native-provider cache resets. Full `sbt test` now passes in one aggregated run (319/319).
+Why: Continuing from the open M10 stability item, aggregated execution was failing while isolated reruns passed due cross-suite global-state interference.
+Files: src/test/scala/sicfun/holdem/HoldemBayesProviderTest.scala,src/test/scala/sicfun/holdem/HeadsUpEquityCanonicalTableTest.scala,ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: sbt "testOnly sicfun.holdem.HoldemBayesProviderTest sicfun.holdem.HeadsUpEquityCanonicalTableTest"; sbt test
+Risks: Stability verified on this machine/run; if future suites add unsynchronized system-property mutations, aggregate flakiness can reappear.
+GitHead: d6b5866
+
+## 2026-03-05T10:04:04Z - M11 DDRE phase-1 kickoff implemented (safe default off + fusion modes)
+Agent: Codex (GPT-5)
+Summary: Added DDRE phase-1 runtime scaffolding with explicit `off/shadow/blend-canary/blend-primary` modes, provider/config parsing, synthetic DDRE inference stub, blend/fallback logic, and degraded-mode telemetry while preserving Bayesian default behavior.
+Why: Continue workflow by moving the roadmap’s remaining M11 kickoff item from spec-only into executable integration without changing existing decision behavior when DDRE is not enabled.
+Files: src/main/scala/sicfun/holdem/HoldemDdreProvider.scala,src/main/scala/sicfun/holdem/RangeInferenceEngine.scala,src/test/scala/sicfun/holdem/HoldemDdreIntegrationTest.scala,src/test/scala/sicfun/holdem/TexasHoldemPlayingHallTest.scala,ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: sbt "testOnly sicfun.holdem.RangeInferenceEngineTest sicfun.holdem.HoldemDdreIntegrationTest"; sbt "testOnly sicfun.holdem.TexasHoldemPlayingHallTest"; sbt test (323 passed, 0 failed)
+Risks: DDRE provider is currently synthetic scaffolding (not ONNX/runtime model yet); blend-primary can change posterior only when DDRE mode/provider are explicitly enabled; production model quality gates (NLL/KL/latency) still require Phase-1 model/export pipeline completion.
+GitHead: d6b5866
+
+## 2026-03-06T20:45:00Z - Reliability hardening pass (DDRE fallback, always-on gating, analyzer correctness, hybrid concurrency guard)
+Agent: Codex (GPT-5)
+Summary: Completed a targeted reliability pass across runtime-critical paths: fixed DDRE fallback/shadow numerical drift behavior, corrected always-on villain-response attribution for interleaved hands, replaced placeholder analyzer output with model-backed evaluation flow, and added a concurrent regression guard for hybrid adaptive calibration updates.
+Why: You asked to continue stabilizing `sicfun` high-impact issues and then register the outcomes in roadmap/context records.
+Files: src/main/scala/sicfun/holdem/RangeInferenceEngine.scala,src/test/scala/sicfun/holdem/HoldemDdreIntegrationTest.scala,src/main/scala/sicfun/holdem/AlwaysOnDecisionLoop.scala,src/test/scala/sicfun/holdem/AlwaysOnDecisionLoopTest.scala,src/main/scala/sicfun/holdem/HandHistoryAnalyzer.scala,src/test/scala/sicfun/holdem/HandHistoryAnalyzerTest.scala,src/main/scala/sicfun/holdem/HeadsUpHybridDispatcher.scala,src/test/scala/sicfun/holdem/HeadsUpHybridDispatcherPlanningTest.scala,ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: sbt "testOnly sicfun.holdem.HoldemDdreIntegrationTest sicfun.holdem.HoldemPostflopNativeParityTest"; sbt "testOnly sicfun.holdem.RangeInferenceEngineTest"; sbt "testOnly sicfun.holdem.AlwaysOnDecisionLoopTest"; sbt "testOnly sicfun.holdem.HandHistoryAnalyzerTest"; sbt "testOnly sicfun.holdem.HeadsUpHybridDispatcherPlanningTest"
+Risks: Hand-history CLI still requires explicit `--heroCards` to compute EV/recommendations from feed events; without hero cards, summary remains count-only by design. DDRE provider remains synthetic scaffolding until ONNX/runtime model integration.
+GitHead: d6b5866
+
+## 2026-03-06T20:53:00Z - DDRE Phase-1 self-play data export added to playing hall
+Agent: Codex (GPT-5)
+Summary: Extended `TexasHoldemPlayingHall` with an optional DDRE training export (`ddre-training-selfplay.tsv`) that records decision context, sparse Bayesian baseline posterior labels, and realized villain hole cards for each hero decision point.
+Why: The DDRE v2 plan required a concrete Phase-1 data pipeline extension (context + baseline posterior + realized villain hand) before ONNX/runtime model training integration.
+Files: src/main/scala/sicfun/holdem/TexasHoldemPlayingHall.scala,src/test/scala/sicfun/holdem/TexasHoldemPlayingHallTest.scala,scripts/run-playing-hall.ps1,ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: sbt "testOnly sicfun.holdem.TexasHoldemPlayingHallTest"; sbt "testOnly sicfun.holdem.HoldemDdreIntegrationTest"
+Risks: DDRE export can become large on long runs because sparse posterior columns may contain many entries per decision; export stays opt-in via `--saveDdreTrainingTsv=false` default.
+GitHead: d6b5866
+
+## 2026-03-06T21:45:00Z - DDRE native runtime scaffolding (CPU/CUDA JNI + provider routing)
+Agent: Codex (GPT-5)
+Summary: Added native DDRE CPU/CUDA JNI bindings, a Scala native runtime wrapper, and provider routing in `HoldemDdreProvider` (`native-cpu` / `native-gpu`) with safe degradation to Bayesian fallback when native load/inference fails.
+Why: You called out native-side progress gap; DDRE Phase-1 required an executable runtime bridge path beyond Scala-only scaffolding.
+Files: src/main/scala/sicfun/holdem/HoldemDdreProvider.scala,src/main/scala/sicfun/holdem/HoldemDdreNativeRuntime.scala,src/main/java/sicfun/holdem/HoldemDdreNativeCpuBindings.java,src/main/java/sicfun/holdem/HoldemDdreNativeGpuBindings.java,src/main/native/jni/DdreNativeInferenceCore.hpp,src/main/native/jni/HoldemDdreNativeCpuBindings.cpp,src/main/native/jni/HoldemDdreNativeGpuBindings.cu,src/main/native/build-windows-llvm.ps1,src/main/native/build-windows-cuda11.ps1,src/main/native/README.md,src/test/scala/sicfun/holdem/HoldemDdreIntegrationTest.scala,ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: sbt "testOnly sicfun.holdem.HoldemDdreIntegrationTest"; sbt "testOnly sicfun.holdem.TexasHoldemPlayingHallTest"
+Risks: Native DDRE path currently accelerates the existing synthetic DDRE math core (not ONNX diffusion inference yet); production-quality DDRE model runtime integration remains a follow-up (exported model loader + parity/perf gates).
+GitHead: d6b5866
+
+## 2026-03-06T22:50:00Z - DDRE ONNX adapter path wired (safe fallback semantics)
+Agent: Codex (GPT-5)
+Summary: Added a configurable ONNX DDRE provider path (`provider=onnx`) via `HoldemDdreOnnxRuntime` with model-path/input-output/execution-provider controls, reflection-based runtime detection, and safe degradation to Bayesian on ONNX errors.
+Why: Continue DDRE execution beyond native synthetic scaffolding and establish an integration path for exported ONNX DDRE models without breaking current runtime when ONNX runtime/model artifacts are missing.
+Files: src/main/scala/sicfun/holdem/HoldemDdreOnnxRuntime.scala,src/main/scala/sicfun/holdem/HoldemDdreProvider.scala,src/test/scala/sicfun/holdem/HoldemDdreIntegrationTest.scala,src/main/native/README.md,ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: sbt "testOnly sicfun.holdem.HoldemDdreIntegrationTest"
+Risks: ONNX adapter currently depends on runtime class availability (`ai.onnxruntime`) at execution time and does not include project-level dependency pinning yet; model I/O contract is currently expected as prior/likelihood tensors with posterior output and may require alignment with future training export conventions.
+GitHead: d6b5866
+
+## 2026-03-06T22:15:00Z - DDRE ONNX smoke-path completion + parity benchmark gate CLI
+Agent: Codex (GPT-5)
+Summary: Completed DDRE ONNX smoke-path hardening with pinned ONNX runtime dependency, generated a tiny reproducible ONNX smoke model artifact, added a successful ONNX integration test path (not just fallback), and introduced a DDRE parity/benchmark gate CLI with configurable parity/speed thresholds across synthetic/native/onnx providers.
+Why: You asked to proceed in order on (1) ONNX dependency pinning + real smoke success path and then (2) DDRE parity/benchmark CLI with gating thresholds.
+Files: build.sbt,scripts/generate-ddre-smoke-onnx.py,src/test/resources/sicfun/ddre/ddre-smoke-sqrt.onnx,src/test/scala/sicfun/holdem/HoldemDdreIntegrationTest.scala,src/main/scala/sicfun/holdem/HoldemDdreParityBenchmark.scala,src/main/native/README.md,ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: sbt "testOnly sicfun.holdem.HoldemDdreIntegrationTest"; sbt "testOnly sicfun.holdem.TexasHoldemPlayingHallTest"; sbt "runMain sicfun.holdem.HoldemDdreParityBenchmark --modes=synthetic,onnx --referenceMode=synthetic --onnxModelPath=src/test/resources/sicfun/ddre/ddre-smoke-sqrt.onnx --warmupRuns=0 --measureRuns=2 --hypothesisCount=128 --maxL1Diff=1e-4 --maxAbsDiff=1e-5"
+Risks: DDRE parity benchmark skips unavailable modes unless `--requireAllModes=true`; onnx parity thresholds are model-dependent (smoke model parity uses `sqrt(prior)` semantics and float precision), so production models may need stricter/relaxed thresholds by run profile.
+GitHead: d6b5866
+
+## 2026-03-07T03:15:25Z - Playing hall hardware saturation: multi-table + parallel runner + autotuner
+Agent: Codex (GPT-5)
+Summary: Extended `TexasHoldemPlayingHall` with a `--tableCount` scale axis and per-table traceability in outputs, then added a new parallel orchestration script (`run-playing-hall-max.ps1`) that launches multiple JVM workers and optionally auto-tunes profile/worker-count combinations before the full run.
+Why: You required exhausting hardware utilization for SICFUN load simulation (online-poker-hall style) rather than single-process throughput only.
+Files: src/main/scala/sicfun/holdem/TexasHoldemPlayingHall.scala,src/test/scala/sicfun/holdem/TexasHoldemPlayingHallTest.scala,scripts/run-playing-hall.ps1,scripts/run-playing-hall-max.ps1,ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: sbt "testOnly sicfun.holdem.TexasHoldemPlayingHallTest"; powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall.ps1 -Hands 4 -TableCount 2 -ReportEvery 2 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -OutDir data/playing-hall-smoke-tablecount-autopackage2; powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall.ps1 -Hands 2 -TableCount 1 -ReportEvery 1 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -OutDir data/playing-hall-smoke-postfix -RefreshClasspath; powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 -Hands 40 -Workers 2 -TableCountPerWorker 2 -ReportEvery 20 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -NativeProfile auto -OutDir data/bench-hall-max-smoke -RefreshClasspath; powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 -AutoTune -AutoTuneHands 20 -AutoTuneProfiles auto,cpu -AutoTuneWorkerCandidates 1,2 -Hands 30 -TableCountPerWorker 1 -ReportEvery 15 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -OutDir data/bench-hall-max-autotune-smoke -ProgressSeconds 2 -RefreshClasspath
+Risks: Auto-tune selections are machine-state dependent (thermal throttling/background load can shift the winner); profile `gpu` with high worker counts can oversubscribe GPU resources and may underperform `auto`/`cpu` on some systems.
+GitHead: d6b5866
+
+## 2026-03-07T03:17:11Z - Exact GTO hall throughput uplift (decision-only CFR + batched postflop equity)
+Agent: Codex (GPT-5)
+Summary: Added a lightweight decision-time CFR path that computes only root mixed policy (no exploitability/action-evaluation diagnostics), wired `TexasHoldemPlayingHall` exact-mode GTO decisions to this path, and removed a major hotspot by batching postflop villain equity in one native call per solve.
+Why: You requested large throughput gains for long-run `gto-vs-gto` simulation while preserving correctness (not using heuristic fast-mode approximations).
+Files: src/main/scala/sicfun/holdem/CfrSolver.scala,src/main/scala/sicfun/holdem/HoldemCfrSolver.scala,src/main/scala/sicfun/holdem/TexasHoldemPlayingHall.scala,src/test/scala/sicfun/holdem/HoldemCfrSolverTest.scala,ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: sbt "testOnly sicfun.holdem.HoldemCfrSolverTest"; sbt "testOnly sicfun.holdem.TexasHoldemPlayingHallTest"; powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall.ps1 -Runner java -RefreshClasspath -Hands 20 -ReportEvery 20 -LearnEveryHands 0 -LearningWindowSamples 0 -HeroStyle gto -VillainStyle gto -GtoMode exact -SaveTrainingTsv false -SaveDdreTrainingTsv false -OutDir data/bench-refresh-smoke2; powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall.ps1 -Runner java -Hands 400 -ReportEvery 400 -LearnEveryHands 0 -LearningWindowSamples 0 -HeroStyle gto -VillainStyle gto -GtoMode exact -SaveTrainingTsv false -SaveDdreTrainingTsv false -OutDir data/bench-postflop-batch-400-auto
+Performance: same exact-mode 400-hand benchmark moved from ~197.5s (~2.0 hands/s) before postflop batching to ~61.9s (~6.46 hands/s) after changes (~3.2x faster on this machine/config).
+Risks: Fixed-seed run trajectories can differ versus prior builds because postflop MC sampling is now batched (different RNG stream composition), though solver logic/trial budgets remain non-heuristic and policy parity between full and decision-only CFR is regression-tested.
+GitHead: d6b5866
+
+## 2026-03-07T03:20:08Z - Operator runbook consolidated
+Agent: Codex (GPT-5)
+Summary: Added a single operator-focused runbook (`docs/OPERATOR_RUNBOOK.md`) with copy-paste command presets for proof gates, hall load generation (single + max + autotune), DDRE checks, native builds, and common troubleshooting.
+Why: You flagged that command surfaces were getting lost across multiple scripts/docs and requested a canonical operational entry point.
+Files: docs/OPERATOR_RUNBOOK.md,ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: Documentation update only (content derived from currently implemented scripts and validated commands already in archive).
+Risks: Runbook commands assume Windows/PowerShell environment and current script parameters; update this document when CLI flags or script defaults change.
+GitHead: d6b5866
+
+## 2026-03-07T03:24:56Z - Interactive runbook launcher added
+Agent: Codex (GPT-5)
+Summary: Added `scripts/runbook.ps1`, an interactive/one-shot launcher for the five highest-frequency operator actions (quick proof, full proof, hall max autotune, hall max gpu, hall single) with `-WhatIf` preview mode and heavy-run confirmation.
+Why: You requested to proceed with a simpler operator surface so commands stop getting lost across tools and docs.
+Files: scripts/runbook.ps1,docs/OPERATOR_RUNBOOK.md,ROADMAP.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: powershell -ExecutionPolicy Bypass -File scripts/runbook.ps1 -Action quick-proof -WhatIf; powershell -ExecutionPolicy Bypass -File scripts/runbook.ps1 -Action hall-max-autotune -WhatIf; powershell -ExecutionPolicy Bypass -File scripts/runbook.ps1 -Action hall-single -WhatIf; powershell -ExecutionPolicy Bypass -File scripts/runbook.ps1 -Action quick-proof
+Risks: Menu mode is interactive and intended for human terminal usage (non-interactive CI should use one-shot `-Action` mode). Heavy run presets are intentionally aggressive and require explicit YES confirmation unless `-WhatIf` is used.
+GitHead: d6b5866

@@ -2,7 +2,9 @@
 #include <cuda_runtime.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -28,6 +30,7 @@ constexpr int kCombos7Of5Count = 21;
 constexpr int kMaxRemainingDeck = 50;
 constexpr int kDefaultCudaThreadsPerBlock = 128;
 constexpr int kDefaultCudaMaxChunkMatchups = 4096;
+constexpr int kDefaultCudaMaxTrialsPerLaunch = 4096;
 constexpr int kStatusInvalidBoardSize = 128;
 constexpr uint64_t kRngMul = 2685821657736338717ULL;
 constexpr jint kEngineUnknown = 0;
@@ -189,6 +192,38 @@ int resolve_cuda_max_chunk_matchups(JNIEnv* env, const int entries) {
     return normalize_cuda_max_chunk(env_value, entries);
   }
   return normalize_cuda_max_chunk(kDefaultCudaMaxChunkMatchups, entries);
+}
+
+int normalize_cuda_max_trials_per_launch(const int raw, const int trials) {
+  if (trials <= 0) {
+    return 1;
+  }
+  int chunk_trials = raw;
+  if (chunk_trials <= 0) {
+    chunk_trials = kDefaultCudaMaxTrialsPerLaunch;
+  }
+  if (chunk_trials > trials) {
+    chunk_trials = trials;
+  }
+  if (chunk_trials < 1) {
+    chunk_trials = 1;
+  }
+  return chunk_trials;
+}
+
+int resolve_cuda_max_trials_per_launch(JNIEnv* env, const int trials) {
+  std::string property_value;
+  if (try_read_system_property(env, "sicfun.postflop.native.cuda.maxTrialsPerLaunch", property_value)) {
+    const int parsed = parse_positive_text_int(property_value);
+    if (parsed > 0) {
+      return normalize_cuda_max_trials_per_launch(parsed, trials);
+    }
+  }
+  const int env_value = parse_positive_env_int(std::getenv("sicfun_POSTFLOP_CUDA_MAX_TRIALS_PER_LAUNCH"));
+  if (env_value > 0) {
+    return normalize_cuda_max_trials_per_launch(env_value, trials);
+  }
+  return normalize_cuda_max_trials_per_launch(kDefaultCudaMaxTrialsPerLaunch, trials);
 }
 
 HD_FORCE int card_rank(const int card_id) {
@@ -466,17 +501,17 @@ __global__ void postflop_monte_carlo_kernel(
   if (cards_needed == 0) {
     const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
     if (cmp > 0) {
-      wins[idx] = 1.0;
+      wins[idx] = static_cast<double>(trials);
       ties[idx] = 0.0;
       losses[idx] = 0.0;
     } else if (cmp == 0) {
       wins[idx] = 0.0;
-      ties[idx] = 1.0;
+      ties[idx] = static_cast<double>(trials);
       losses[idx] = 0.0;
     } else {
       wins[idx] = 0.0;
       ties[idx] = 0.0;
-      losses[idx] = 1.0;
+      losses[idx] = static_cast<double>(trials);
     }
     stderrs[idx] = 0.0;
     return;
@@ -490,8 +525,6 @@ __global__ void postflop_monte_carlo_kernel(
   int win_count = 0;
   int tie_count = 0;
   int loss_count = 0;
-  double mean = 0.0;
-  double m2 = 0.0;
   for (int t = 0; t < trials; ++t) {
     uint64_t used = 0ULL;
     int filled = 0;
@@ -505,29 +538,18 @@ __global__ void postflop_monte_carlo_kernel(
       }
     }
     const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-    double outcome = 0.0;
     if (cmp > 0) {
       ++win_count;
-      outcome = 1.0;
     } else if (cmp == 0) {
       ++tie_count;
-      outcome = 0.5;
     } else {
       ++loss_count;
-      outcome = 0.0;
     }
-    const double delta = outcome - mean;
-    mean += delta / static_cast<double>(t + 1);
-    const double delta2 = outcome - mean;
-    m2 += delta * delta2;
   }
-
-  const double total = static_cast<double>(trials);
-  const double variance = trials > 1 ? (m2 / static_cast<double>(trials - 1)) : 0.0;
-  wins[idx] = static_cast<double>(win_count) / total;
-  ties[idx] = static_cast<double>(tie_count) / total;
-  losses[idx] = static_cast<double>(loss_count) / total;
-  stderrs[idx] = sqrt(variance / total);
+  wins[idx] = static_cast<double>(win_count);
+  ties[idx] = static_cast<double>(tie_count);
+  losses[idx] = static_cast<double>(loss_count);
+  stderrs[idx] = 0.0;
 }
 
 }  // namespace
@@ -581,6 +603,9 @@ Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_computePostflopBatchMonteCarl
   std::vector<jdouble> tie_buf(static_cast<size_t>(n));
   std::vector<jdouble> loss_buf(static_cast<size_t>(n));
   std::vector<jdouble> stderr_buf(static_cast<size_t>(n));
+  std::vector<jdouble> total_win_count(static_cast<size_t>(n), 0.0);
+  std::vector<jdouble> total_tie_count(static_cast<size_t>(n), 0.0);
+  std::vector<jdouble> total_loss_count(static_cast<size_t>(n), 0.0);
 
   env->GetIntArrayRegion(board_cards, 0, board_size, board_buf.data());
   env->GetIntArrayRegion(villain_first_cards, 0, n, villain_first_buf.data());
@@ -637,6 +662,7 @@ Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_computePostflopBatchMonteCarl
   const int threads_per_block = resolve_cuda_threads_per_block(env);
   const int max_chunk_matchups = resolve_cuda_max_chunk_matchups(env, static_cast<int>(n));
   const int chunk_size = normalize_cuda_max_chunk(max_chunk_matchups, static_cast<int>(n));
+  const int max_trials_per_launch = resolve_cuda_max_trials_per_launch(env, static_cast<int>(trials));
 
   int* d_board = nullptr;
   int* d_villain_first = nullptr;
@@ -719,6 +745,10 @@ Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_computePostflopBatchMonteCarl
     const size_t chunk_int_bytes = sizeof(int) * static_cast<size_t>(chunk);
     const size_t chunk_seed_bytes = sizeof(uint64_t) * static_cast<size_t>(chunk);
     const size_t chunk_double_bytes = sizeof(double) * static_cast<size_t>(chunk);
+    std::vector<uint64_t> seed_chunk(static_cast<size_t>(chunk));
+    std::vector<double> chunk_win(static_cast<size_t>(chunk));
+    std::vector<double> chunk_tie(static_cast<size_t>(chunk));
+    std::vector<double> chunk_loss(static_cast<size_t>(chunk));
 
     err = cudaMemcpy(d_villain_first, villain_first_buf.data() + offset, chunk_int_bytes, cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
@@ -730,60 +760,92 @@ Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_computePostflopBatchMonteCarl
       cleanup();
       return 132;
     }
-    err = cudaMemcpy(d_seed, seed_u64.data() + offset, chunk_seed_bytes, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) {
-      cleanup();
-      return 132;
-    }
 
-    const int blocks = (chunk + threads_per_block - 1) / threads_per_block;
-    postflop_monte_carlo_kernel<<<blocks, threads_per_block>>>(
-        static_cast<int>(hero_first),
-        static_cast<int>(hero_second),
-        d_board,
-        static_cast<int>(board_size),
-        d_villain_first,
-        d_villain_second,
-        static_cast<int>(trials),
-        d_seed,
-        d_win,
-        d_tie,
-        d_loss,
-        d_stderr,
-        chunk);
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-      cleanup();
-      return 133;
-    }
-    err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-      cleanup();
-      return err == cudaErrorLaunchTimeout ? 137 : 134;
-    }
+    int trial_offset = 0;
+    while (trial_offset < trials) {
+      const int launch_trials = std::min(max_trials_per_launch, static_cast<int>(trials - trial_offset));
+      const uint64_t launch_mix =
+          static_cast<uint64_t>(static_cast<uint32_t>(trial_offset + 1)) * 0x9E3779B97F4A7C15ULL;
+      for (int i = 0; i < chunk; ++i) {
+        const uint64_t base_seed = seed_u64[static_cast<size_t>(offset + i)];
+        seed_chunk[static_cast<size_t>(i)] = mix64(base_seed ^ launch_mix);
+      }
 
-    err = cudaMemcpy(win_buf.data() + offset, d_win, chunk_double_bytes, cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-      cleanup();
-      return 135;
-    }
-    err = cudaMemcpy(tie_buf.data() + offset, d_tie, chunk_double_bytes, cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-      cleanup();
-      return 135;
-    }
-    err = cudaMemcpy(loss_buf.data() + offset, d_loss, chunk_double_bytes, cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-      cleanup();
-      return 135;
-    }
-    err = cudaMemcpy(stderr_buf.data() + offset, d_stderr, chunk_double_bytes, cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-      cleanup();
-      return 135;
+      err = cudaMemcpy(d_seed, seed_chunk.data(), chunk_seed_bytes, cudaMemcpyHostToDevice);
+      if (err != cudaSuccess) {
+        cleanup();
+        return 132;
+      }
+
+      const int blocks = (chunk + threads_per_block - 1) / threads_per_block;
+      postflop_monte_carlo_kernel<<<blocks, threads_per_block>>>(
+          static_cast<int>(hero_first),
+          static_cast<int>(hero_second),
+          d_board,
+          static_cast<int>(board_size),
+          d_villain_first,
+          d_villain_second,
+          launch_trials,
+          d_seed,
+          d_win,
+          d_tie,
+          d_loss,
+          d_stderr,
+          chunk);
+      err = cudaGetLastError();
+      if (err != cudaSuccess) {
+        cleanup();
+        return 133;
+      }
+      err = cudaDeviceSynchronize();
+      if (err != cudaSuccess) {
+        cleanup();
+        return err == cudaErrorLaunchTimeout ? 137 : 134;
+      }
+
+      err = cudaMemcpy(chunk_win.data(), d_win, chunk_double_bytes, cudaMemcpyDeviceToHost);
+      if (err != cudaSuccess) {
+        cleanup();
+        return 135;
+      }
+      err = cudaMemcpy(chunk_tie.data(), d_tie, chunk_double_bytes, cudaMemcpyDeviceToHost);
+      if (err != cudaSuccess) {
+        cleanup();
+        return 135;
+      }
+      err = cudaMemcpy(chunk_loss.data(), d_loss, chunk_double_bytes, cudaMemcpyDeviceToHost);
+      if (err != cudaSuccess) {
+        cleanup();
+        return 135;
+      }
+
+      for (int i = 0; i < chunk; ++i) {
+        const size_t global_idx = static_cast<size_t>(offset + i);
+        total_win_count[global_idx] += chunk_win[static_cast<size_t>(i)];
+        total_tie_count[global_idx] += chunk_tie[static_cast<size_t>(i)];
+        total_loss_count[global_idx] += chunk_loss[static_cast<size_t>(i)];
+      }
+      trial_offset += launch_trials;
     }
 
     offset += chunk;
+  }
+
+  const double total_trials = static_cast<double>(trials);
+  for (jsize i = 0; i < n; ++i) {
+    const size_t idx = static_cast<size_t>(i);
+    const double win_count = total_win_count[idx];
+    const double tie_count = total_tie_count[idx];
+    const double loss_count = total_loss_count[idx];
+    win_buf[idx] = win_count / total_trials;
+    tie_buf[idx] = tie_count / total_trials;
+    loss_buf[idx] = loss_count / total_trials;
+    const double mean = (win_count + (0.5 * tie_count)) / total_trials;
+    const double ex2 = (win_count + (0.25 * tie_count)) / total_trials;
+    const double variance_population = std::max(0.0, ex2 - (mean * mean));
+    const double variance_sample =
+        trials > 1 ? (variance_population * total_trials / static_cast<double>(trials - 1)) : 0.0;
+    stderr_buf[idx] = sqrt(variance_sample / total_trials);
   }
 
   cleanup();
@@ -817,4 +879,34 @@ Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_cudaDeviceCount(
     return 0;
   }
   return static_cast<jint>(count);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_cudaDeviceInfo(
+    JNIEnv* env,
+    jclass,
+    jint device_index) {
+  int count = 0;
+  cudaError_t err = cudaGetDeviceCount(&count);
+  if (err != cudaSuccess || device_index < 0 || device_index >= count) {
+    return env->NewStringUTF("");
+  }
+  cudaDeviceProp prop{};
+  err = cudaGetDeviceProperties(&prop, static_cast<int>(device_index));
+  if (err != cudaSuccess) {
+    return env->NewStringUTF("");
+  }
+  const int memory_mb = static_cast<int>(prop.totalGlobalMem / (1024ULL * 1024ULL));
+  char buf[512];
+  std::snprintf(
+      buf,
+      sizeof(buf),
+      "%s|%d|%d|%d|%d.%d",
+      prop.name,
+      prop.multiProcessorCount,
+      prop.clockRate / 1000,
+      memory_mb,
+      prop.major,
+      prop.minor);
+  return env->NewStringUTF(buf);
 }

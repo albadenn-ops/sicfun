@@ -25,9 +25,10 @@ class ActionMetricsTest extends FunSuite:
     PokerAction.Fold, PokerAction.Check, PokerAction.Call, PokerAction.Raise(20.0)
   )
 
-  private val hand1 = hole("Ah", "Kh")
+  // On this flop, QJ is already a made straight, giving a strong separation signal.
+  private val hand1 = hole("Qs", "Jd")
   private val hand2 = hole("7c", "2d")
-  private val hand3 = hole("Qs", "Jd")
+  private val hand3 = hole("Ah", "Kh")
   private val hand4 = hole("9c", "8c")
 
   private val uniformPosterior = DiscreteDistribution.uniform(Seq(hand1, hand2, hand3, hand4))
@@ -41,7 +42,7 @@ class ActionMetricsTest extends FunSuite:
       (state, hand1, PokerAction.Raise(20.0)),
       (state, hand2, PokerAction.Fold)
     )).flatten
-    PokerActionModel.train(data, learningRate = 0.1, iterations = 1000)
+    PokerActionModel.train(data, learningRate = 0.1, iterations = 1500, l2Lambda = 0.0)
 
   private val trainedPosterior = DiscreteDistribution.uniform(Seq(hand1, hand2))
 

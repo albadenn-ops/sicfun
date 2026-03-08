@@ -163,3 +163,256 @@ class HoldemCfrSolverTest extends FunSuite:
       assertEquals(solution.provider, "scala")
     }
   }
+
+  test("decision-only solve matches full solve root policy") {
+    withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
+      val hero = hole("Ac", "Kd")
+      val state = GameState(
+        street = Street.Turn,
+        board = Board.from(Vector(card("2c"), card("7d"), card("Jh"), card("Qc"))),
+        pot = 18.0,
+        toCall = 4.0,
+        position = Position.Button,
+        stackSize = 82.0,
+        betHistory = Vector(BetAction(1, PokerAction.Raise(4.0)))
+      )
+      val posterior = DiscreteDistribution(
+        Map(
+          hole("As", "Qd") -> 0.35,
+          hole("Ts", "9s") -> 0.30,
+          hole("Qh", "Js") -> 0.20,
+          hole("7c", "7s") -> 0.15
+        )
+      )
+      val candidateActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
+      val config = HoldemCfrConfig(
+        iterations = 700,
+        averagingDelay = 100,
+        maxVillainHands = 32,
+        equityTrials = 700,
+        preferNativeBatch = true,
+        rngSeed = 23L
+      )
+
+      val full = HoldemCfrSolver.solve(
+        hero = hero,
+        state = state,
+        villainPosterior = posterior,
+        candidateActions = candidateActions,
+        config = config
+      )
+      val decision = HoldemCfrSolver.solveDecisionPolicy(
+        hero = hero,
+        state = state,
+        villainPosterior = posterior,
+        candidateActions = candidateActions,
+        config = config
+      )
+
+      candidateActions.foreach { action =>
+        val pFull = full.actionProbabilities.getOrElse(action, 0.0)
+        val pDecision = decision.actionProbabilities.getOrElse(action, 0.0)
+        assert(
+          math.abs(pFull - pDecision) < 1e-9,
+          s"policy mismatch for $action: full=$pFull decision=$pDecision"
+        )
+      }
+    }
+  }
+
+  test("decision-only solve uses direct shortcut when root has no raise branch") {
+    val hero = hole("Ac", "Kd")
+    val state = GameState(
+      street = Street.Turn,
+      board = Board.from(Vector(card("2c"), card("7d"), card("Jh"), card("Qc"))),
+      pot = 18.0,
+      toCall = 4.0,
+      position = Position.Button,
+      stackSize = 82.0,
+      betHistory = Vector(BetAction(1, PokerAction.Raise(4.0)))
+    )
+    val posterior = DiscreteDistribution(
+      Map(
+        hole("As", "Qd") -> 0.35,
+        hole("Ts", "9s") -> 0.30,
+        hole("Qh", "Js") -> 0.20,
+        hole("7c", "7s") -> 0.15
+      )
+    )
+    val decision = HoldemCfrSolver.solveDecisionPolicy(
+      hero = hero,
+      state = state,
+      villainPosterior = posterior,
+      candidateActions = Vector(PokerAction.Fold, PokerAction.Call),
+      config = HoldemCfrConfig(
+        iterations = 700,
+        averagingDelay = 100,
+        maxVillainHands = 32,
+        equityTrials = 700,
+        preferNativeBatch = true,
+        rngSeed = 23L
+      )
+    )
+
+    assertEquals(decision.provider, "direct")
+    val probabilitySum = decision.actionProbabilities.values.sum
+    assert(math.abs(probabilitySum - 1.0) < 1e-9, s"policy must sum to 1, got $probabilitySum")
+    assert(
+      decision.actionProbabilities.keySet == Set(PokerAction.Fold, PokerAction.Call),
+      s"unexpected actions in direct policy: ${decision.actionProbabilities.keySet}"
+    )
+  }
+
+  test("shallow decision solver bypasses CFR on one-reraise hall tree") {
+    val hero = hole("Ac", "Kd")
+    val state = GameState(
+      street = Street.Turn,
+      board = Board.from(Vector(card("2c"), card("7d"), card("Jh"), card("Qc"))),
+      pot = 18.0,
+      toCall = 4.0,
+      position = Position.Button,
+      stackSize = 82.0,
+      betHistory = Vector(BetAction(1, PokerAction.Raise(4.0)))
+    )
+    val posterior = DiscreteDistribution(
+      Map(
+        hole("As", "Qd") -> 0.35,
+        hole("Ts", "9s") -> 0.30,
+        hole("Qh", "Js") -> 0.20,
+        hole("7c", "7s") -> 0.15
+      )
+    )
+    val candidateActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
+    val config = HoldemCfrConfig(
+      iterations = 2_000,
+      averagingDelay = 100,
+      maxVillainHands = 32,
+      equityTrials = 700,
+      preferNativeBatch = true,
+      rngSeed = 23L
+    )
+
+    val full = HoldemCfrSolver.solve(
+      hero = hero,
+      state = state,
+      villainPosterior = posterior,
+      candidateActions = candidateActions,
+      config = config
+    )
+    val direct = HoldemCfrSolver.solveShallowDecisionPolicy(
+      hero = hero,
+      state = state,
+      villainPosterior = posterior,
+      candidateActions = candidateActions,
+      config = config
+    )
+
+    assertEquals(direct.provider, "direct-shallow")
+    val probabilitySum = direct.actionProbabilities.values.sum
+    assert(math.abs(probabilitySum - 1.0) < 1e-9, s"policy must sum to 1, got $probabilitySum")
+    assertEquals(direct.bestAction, full.bestAction)
+  }
+
+  test("shallow decision solver supports multiple reraises without CFR fallback") {
+    withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
+      val hero = hole("Ac", "Kd")
+      val state = GameState(
+        street = Street.Turn,
+        board = Board.from(Vector(card("2c"), card("7d"), card("Jh"), card("Qc"))),
+        pot = 18.0,
+        toCall = 4.0,
+        position = Position.Button,
+        stackSize = 82.0,
+        betHistory = Vector(BetAction(1, PokerAction.Raise(4.0)))
+      )
+      val posterior = DiscreteDistribution(
+        Map(
+          hole("As", "Qd") -> 0.35,
+          hole("Ts", "9s") -> 0.30,
+          hole("Qh", "Js") -> 0.20,
+          hole("7c", "7s") -> 0.15
+        )
+      )
+      val candidateActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
+      val config = HoldemCfrConfig(
+        iterations = 3_000,
+        averagingDelay = 100,
+        maxVillainHands = 32,
+        equityTrials = 700,
+        includeVillainReraises = true,
+        villainReraiseMultipliers = Vector(1.5, 2.0, 2.5),
+        preferNativeBatch = true,
+        rngSeed = 29L
+      )
+
+      val full = HoldemCfrSolver.solve(
+        hero = hero,
+        state = state,
+        villainPosterior = posterior,
+        candidateActions = candidateActions,
+        config = config
+      )
+      val direct = HoldemCfrSolver.solveShallowDecisionPolicy(
+        hero = hero,
+        state = state,
+        villainPosterior = posterior,
+        candidateActions = candidateActions,
+        config = config
+      )
+
+      assertEquals(direct.provider, "direct-shallow")
+      val probabilitySum = direct.actionProbabilities.values.sum
+      assert(math.abs(probabilitySum - 1.0) < 1e-9, s"policy must sum to 1, got $probabilitySum")
+      assertEquals(direct.bestAction, full.bestAction)
+    }
+  }
+
+  test("exact postflop equity falls back on turn") {
+    val hero = hole("Ac", "Kd")
+    val board = Board.from(Vector(card("2c"), card("7d"), card("Jh"), card("Qc")))
+    val villains = Vector(
+      hole("As", "Qd"),
+      hole("Ts", "9s"),
+      hole("Qh", "Js")
+    )
+
+    assertEquals(HoldemCfrSolver.exactPostflopEquity(hero, board, villains), None)
+  }
+
+  test("exact postflop equity falls back on flop") {
+    val hero = hole("Ac", "Kd")
+    val board = Board.from(Vector(card("2c"), card("7d"), card("Jh")))
+    val villains = Vector(
+      hole("As", "Qd"),
+      hole("Ts", "9s"),
+      hole("Qh", "Js")
+    )
+
+    assertEquals(HoldemCfrSolver.exactPostflopEquity(hero, board, villains), None)
+  }
+
+  test("exact postflop equity matches exact evaluator on river") {
+    val hero = hole("Ac", "Kd")
+    val board = Board.from(Vector(card("2c"), card("7d"), card("Jh"), card("Qc"), card("3s")))
+    val villains = Vector(
+      hole("As", "Qd"),
+      hole("Ts", "9s"),
+      hole("Qh", "Js")
+    )
+
+    val lookup = HoldemCfrSolver.exactPostflopEquity(hero, board, villains)
+      .getOrElse(fail("expected exact river lookup"))
+
+    villains.foreach { villain =>
+      val exact = HoldemEquity.equityExact(
+        hero = hero,
+        board = board,
+        villainRange = DiscreteDistribution(Map(villain -> 1.0))
+      ).equity
+      val observed = lookup.getOrElse(villain, fail(s"missing lookup for ${villain.toToken}"))
+      assert(
+        math.abs(observed - exact) < 1e-12,
+        s"river exact equity mismatch for ${villain.toToken}: observed=$observed exact=$exact"
+      )
+    }
+  }

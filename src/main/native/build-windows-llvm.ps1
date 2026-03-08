@@ -114,3 +114,63 @@ if (-not (Test-Path $bayesDll)) {
 }
 
 Write-Host "Built: $bayesDll"
+
+$ddreSrc = Join-Path $PSScriptRoot "jni\HoldemDdreNativeCpuBindings.cpp"
+$ddreDll = Join-Path $OutDir "sicfun_ddre_native.dll"
+$ddreLib = Join-Path $OutDir "sicfun_ddre_native.lib"
+$ddreExp = Join-Path $OutDir "sicfun_ddre_native.exp"
+
+if (Test-Path $ddreDll) { Remove-Item $ddreDll -Force }
+if (Test-Path $ddreLib) { Remove-Item $ddreLib -Force }
+if (Test-Path $ddreExp) { Remove-Item $ddreExp -Force }
+
+& $clang `
+  -std=c++17 `
+  -O3 `
+  -DNDEBUG `
+  -D_CRT_SECURE_NO_WARNINGS `
+  -shared `
+  "-I$jniInclude" `
+  "-I$jniWinInclude" `
+  -o $ddreDll `
+  $ddreSrc
+
+if ($LASTEXITCODE -ne 0) {
+  throw "Native DDRE CPU build failed with exit code $LASTEXITCODE"
+}
+
+if (-not (Test-Path $ddreDll)) {
+  throw "Build did not produce $ddreDll"
+}
+
+Write-Host "Built: $ddreDll"
+
+$postflopSrc = Join-Path $PSScriptRoot "jni\HoldemPostflopNativeBindings.cpp"
+$postflopDll = Join-Path $OutDir "sicfun_postflop_native.dll"
+$postflopLib = Join-Path $OutDir "sicfun_postflop_native.lib"
+$postflopExp = Join-Path $OutDir "sicfun_postflop_native.exp"
+
+if (Test-Path $postflopDll) { Remove-Item $postflopDll -Force }
+if (Test-Path $postflopLib) { Remove-Item $postflopLib -Force }
+if (Test-Path $postflopExp) { Remove-Item $postflopExp -Force }
+
+& $clang `
+  -std=c++17 `
+  -O3 `
+  -DNDEBUG `
+  -D_CRT_SECURE_NO_WARNINGS `
+  -shared `
+  "-I$jniInclude" `
+  "-I$jniWinInclude" `
+  -o $postflopDll `
+  $postflopSrc
+
+if ($LASTEXITCODE -ne 0) {
+  throw "Native postflop CPU build failed with exit code $LASTEXITCODE"
+}
+
+if (-not (Test-Path $postflopDll)) {
+  throw "Build did not produce $postflopDll"
+}
+
+Write-Host "Built: $postflopDll"

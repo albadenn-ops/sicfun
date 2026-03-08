@@ -14,7 +14,8 @@ import scala.util.Random
   *
   * Options:
   *   --hero=<playerId>       Hero player ID (default "hero")
-  *   --model=<dir>           Model artifact directory (bootstraps synthetic if absent)
+  *   --heroCards=<token>     Hero hole cards (e.g. AcKh) for EV/recommendation analysis
+  *   --model=<dir>           Model artifact directory (defaults to uniform model if omitted)
   *   --seed=42               RNG seed
   *   --bunchingTrials=400    Bunching Monte Carlo trials
   *   --equityTrials=4000     Equity Monte Carlo trials
@@ -62,6 +63,7 @@ object HandHistoryAnalyzer:
   private final case class CliConfig(
       feedPath: Path,
       heroPlayerId: String,
+      heroCards: Option[HoleCards],
       modelDir: Option[Path],
       seed: Long,
       bunchingTrials: Int,
@@ -79,37 +81,44 @@ object HandHistoryAnalyzer:
       config: CliConfig
   ): Either[String, AnalysisSummary] =
     try
+      val maybeModel = config.modelDir.map(path => PokerActionModelArtifactIO.load(path).model)
+      val tableRanges = TableRanges.defaults(TableFormat.NineMax)
+      val engine = new RealTimeAdaptiveEngine(
+        tableRanges = tableRanges,
+        actionModel = maybeModel.getOrElse(PokerActionModel.uniform),
+        bunchingTrials = config.bunchingTrials,
+        defaultEquityTrials = config.equityTrials,
+        minEquityTrials = math.max(200, config.equityTrials / 10)
+      )
+      val seedRng = new Random(config.seed)
+
       // Group events by hand
       val handGroups = events
         .map(_.event)
         .groupBy(_.handId)
         .toVector
-        .sortBy { case (handId, _) => handId }
+        .sortBy { case (_, groupedEvents) =>
+          groupedEvents.map(_.occurredAtEpochMillis).min
+        }
 
       val analyzed = Vector.newBuilder[AnalyzedDecision]
       var handsAnalyzed = 0
 
-      handGroups.foreach { case (handId, handEvents) =>
+      handGroups.foreach { case (_, handEvents) =>
         val sorted = handEvents.sortBy(_.sequenceInHand)
         val heroEvents = sorted.filter(_.playerId == config.heroPlayerId)
 
         if heroEvents.nonEmpty then
           handsAnalyzed += 1
-
-          // Without hero hole cards from the feed, we record decisions
-          // but cannot compute equity or recommendations.
-          // Use analyzeWithHeroCards() for full analysis when cards are known.
-          heroEvents.foreach { heroEvent =>
-            analyzed += AnalyzedDecision(
-              handId = handId,
-              street = heroEvent.street,
-              heroCards = None,
-              actualAction = heroEvent.action,
-              recommendedAction = heroEvent.action,
-              actualEv = 0.0,
-              recommendedEv = 0.0,
-              evDifference = 0.0,
-              heroEquityMean = 0.0
+          config.heroCards.foreach { cards =>
+            analyzed ++= analyzeWithHeroCards(
+              events = sorted,
+              heroPlayerId = config.heroPlayerId,
+              heroCards = cards,
+              engine = engine,
+              tableRanges = tableRanges,
+              budgetMs = config.budgetMs,
+              rng = new Random(seedRng.nextLong())
             )
           }
       }
@@ -125,7 +134,7 @@ object HandHistoryAnalyzer:
         mistakes = mistakes,
         totalEvLost = evLost,
         biggestMistakeEv = biggestMistake,
-        decisions = allDecisions
+        decisions = allDecisions.sortBy(d => (d.handId, d.street.toString))
       ))
     catch
       case e: Exception => Left(s"Analysis failed: ${e.getMessage}")
@@ -264,13 +273,24 @@ object HandHistoryAnalyzer:
         for
           options <- parseOptions(optArgs)
           heroId = options.getOrElse("hero", "hero")
+          heroCards <- parseOptionalHoleCards(options, "heroCards")
           modelDir <- parseOptionalPath(options, "model")
           seed <- parseLongOption(options, "seed", 42L)
           bunchingTrials <- parseIntOption(options, "bunchingTrials", 400)
           equityTrials <- parseIntOption(options, "equityTrials", 4000)
           budgetMs <- parseLongOption(options, "budgetMs", 2000L)
           topN <- parseIntOption(options, "topN", 10)
-        yield CliConfig(feedPath, heroId, modelDir, seed, bunchingTrials, equityTrials, budgetMs, topN)
+        yield CliConfig(
+          feedPath = feedPath,
+          heroPlayerId = heroId,
+          heroCards = heroCards,
+          modelDir = modelDir,
+          seed = seed,
+          bunchingTrials = bunchingTrials,
+          equityTrials = equityTrials,
+          budgetMs = budgetMs,
+          topN = topN
+        )
 
   private def parseOptions(args: Array[String]): Either[String, Map[String, String]] =
     val pairs = args.toVector.map { token =>
@@ -304,12 +324,21 @@ object HandHistoryAnalyzer:
         val path = Paths.get(raw)
         if Files.isDirectory(path) then Right(Some(path)) else Left(s"--$key: directory '$raw' not found")
 
+  private def parseOptionalHoleCards(options: Map[String, String], key: String): Either[String, Option[HoleCards]] =
+    options.get(key) match
+      case None => Right(None)
+      case Some(raw) =>
+        try Right(Some(CliHelpers.parseHoleCards(raw)))
+        catch
+          case e: IllegalArgumentException => Left(s"--$key: ${e.getMessage}")
+
   private val usage =
     """Usage:
       |  runMain sicfun.holdem.HandHistoryAnalyzer <feedFile> [--key=value ...]
       |
       |Options:
       |  --hero=<playerId>       Hero player ID (default "hero")
+      |  --heroCards=<token>     Hero hole cards (e.g. AcKh) for EV/recommendation analysis
       |  --model=<dir>           Model artifact directory
       |  --seed=42               RNG seed
       |  --bunchingTrials=400    Bunching Monte Carlo trials

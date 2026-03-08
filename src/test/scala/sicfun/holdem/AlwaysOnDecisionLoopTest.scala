@@ -239,6 +239,17 @@ class AlwaysOnDecisionLoopTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  test("pending hero-raise tracking is scoped per hand id") {
+    val tracker = new AlwaysOnDecisionLoop.PendingHeroRaiseTracker()
+    tracker.onHeroAction("hand-a", PokerAction.Raise(15.0))
+
+    val crossHandResponse = tracker.onVillainAction("hand-b", PokerAction.Call)
+    assertEquals(crossHandResponse, None)
+
+    val sameHandResponse = tracker.onVillainAction("hand-a", PokerAction.Fold)
+    assertEquals(sameHandResponse, Some(PokerAction.Fold))
+  }
+
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)

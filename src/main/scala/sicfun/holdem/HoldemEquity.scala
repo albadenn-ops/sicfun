@@ -4,9 +4,9 @@ import sicfun.core.{Card, Deck, DiscreteDistribution, HandEvaluator}
 
 import scala.util.Random
 import scala.annotation.targetName
+import scala.collection.mutable
 
 object HoldemEquity:
-  private val deckIndex: Map[Card, Int] = Deck.full.zipWithIndex.toMap
   private val DefaultExactMultiMaxEvaluations: Long = 5_000_000L
   private val PreflopEquityBackendProperty = "sicfun.holdem.preflopEquityBackend"
   private val PreflopEquityBackendEnv = "sicfun_HOLDEM_PREFLOP_EQUITY_BACKEND"
@@ -132,8 +132,16 @@ object HoldemEquity:
             throw new IllegalArgumentException("equityExactMulti supports only flop, turn, or river")
       else
         ranges(index).foreach { case (hand, w) =>
-          if w > 0.0 && !hand.asSet.exists(used.contains) then
-            loop(index + 1, used ++ hand.asSet, weight * w, villains :+ hand)
+          if w > 0.0 &&
+            !used.contains(hand.first) &&
+            !used.contains(hand.second)
+          then
+            loop(
+              index + 1,
+              used + hand.first + hand.second,
+              weight * w,
+              villains :+ hand
+            )
         }
 
     loop(0, dead, 1.0, Vector.empty)
@@ -171,7 +179,7 @@ object HoldemEquity:
     require(trials > 0, "trials must be positive")
     val dead = hero.asSet ++ board.asSet
     val range = sanitizeRange(villainRange, dead)
-    maybeAcceleratedPreflopMonteCarlo(hero, board, range, trials, rng) match
+    maybeAcceleratedMonteCarlo(hero, board, range, trials, rng) match
       case Some(estimate) =>
         estimate
       case None =>
@@ -350,6 +358,21 @@ object HoldemEquity:
       case Right(dist) => dist
       case Left(err) => throw new IllegalArgumentException(s"invalid range: $err")
 
+  /** Optional native acceleration path.
+    *
+    * Preflop routes to the existing preflop engines, while postflop uses the
+    * dedicated native postflop Monte Carlo bridge.
+    */
+  private def maybeAcceleratedMonteCarlo(
+      hero: HoleCards,
+      board: Board,
+      range: DiscreteDistribution[HoleCards],
+      trials: Int,
+      rng: Random
+  ): Option[EquityEstimate] =
+    if board.size == 0 then maybeAcceleratedPreflopMonteCarlo(hero, board, range, trials, rng)
+    else maybeAcceleratedPostflopMonteCarlo(hero, board, range, trials, rng)
+
   /** Optional preflop acceleration path.
     *
     * Uses the native CSR range runtime when possible and falls back to the
@@ -383,6 +406,70 @@ object HoldemEquity:
                   attemptBatchRuntimePreflop(hero, range, trials, rng)
                 case _ =>
                   None
+        }
+
+  private def maybeAcceleratedPostflopMonteCarlo(
+      hero: HoleCards,
+      board: Board,
+      range: DiscreteDistribution[HoleCards],
+      trials: Int,
+      rng: Random
+  ): Option[EquityEstimate] =
+    if board.size == 0 then None
+    else if accelerationGuard.get().booleanValue() then None
+    else
+      val sorted = sortedWeights(range.weights).filter(_._2 > 0.0)
+      if sorted.isEmpty then None
+      else
+        withAccelerationGuard {
+          val villains = new Array[HoleCards](sorted.length)
+          val weights = new Array[Double](sorted.length)
+          var i = 0
+          while i < sorted.length do
+            villains(i) = sorted(i)._1
+            weights(i) = sorted(i)._2
+            i += 1
+
+          HoldemPostflopNativeRuntime.computePostflopBatch(
+            hero = hero,
+            board = board,
+            villains = villains,
+            trials = trials,
+            seedBase = rng.nextLong()
+          ) match
+            case Right(values) if values.length == sorted.length =>
+              var weightedWin = 0.0
+              var weightedTie = 0.0
+              var weightedLoss = 0.0
+              var weightedStdErrSq = 0.0
+              var weightSum = 0.0
+              i = 0
+              while i < values.length do
+                val p = weights(i)
+                val row = values(i)
+                weightedWin += p * row.win
+                weightedTie += p * row.tie
+                weightedLoss += p * row.loss
+                val weightedStdErr = p * row.stderr
+                weightedStdErrSq += weightedStdErr * weightedStdErr
+                weightSum += p
+                i += 1
+              if weightSum <= 0.0 then None
+              else
+                Some(
+                  estimateFromAggregatedRates(
+                    winRate = weightedWin / weightSum,
+                    tieRate = weightedTie / weightSum,
+                    lossRate = weightedLoss / weightSum,
+                    stderr = math.sqrt(weightedStdErrSq) / weightSum,
+                    trials = trials
+                  )
+                )
+            case Right(_) =>
+              None
+            case Left(reason) =>
+              GpuRuntimeSupport.log(s"postflop native runtime unavailable: $reason")
+              None
         }
 
   private def withAccelerationGuard[A](thunk: => Option[A]): Option[A] =
@@ -499,6 +586,9 @@ object HoldemEquity:
           None
 
   private def configuredPreflopEquityBackend: String =
+    configuredPreflopEquityBackendCached
+
+  private lazy val configuredPreflopEquityBackendCached: String =
     GpuRuntimeSupport.resolveNonEmptyLower(PreflopEquityBackendProperty, PreflopEquityBackendEnv) match
       case Some("cpu") => PreflopEquityBackendCpu
       case Some("range" | "native-range") => PreflopEquityBackendRange
@@ -507,6 +597,9 @@ object HoldemEquity:
       case _ => PreflopEquityBackendAuto
 
   private def configuredGpuProvider: String =
+    configuredGpuProviderCached
+
+  private lazy val configuredGpuProviderCached: String =
     GpuRuntimeSupport.resolveNonEmptyLower(GpuProviderProperty, GpuProviderEnv).getOrElse("native")
 
   private def estimateFromAggregatedRates(
@@ -543,16 +636,17 @@ object HoldemEquity:
       range: DiscreteDistribution[HoleCards],
       dead: Set[Card]
   ): DiscreteDistribution[HoleCards] =
-    val collapsed = range.weights.foldLeft(Map.empty[HoleCards, Double]) {
-      case (acc, (hand, weight)) =>
-        if weight <= 0.0 then acc
-        else if hand.asSet.exists(dead.contains) then acc
-        else
-          val canonical = HoleCards.canonical(hand.first, hand.second)
-          acc.updated(canonical, acc.getOrElse(canonical, 0.0) + weight)
+    val collapsed = mutable.HashMap.empty[HoleCards, Double]
+    range.weights.foreach { case (hand, weight) =>
+      if weight > 0.0 &&
+        !dead.contains(hand.first) &&
+        !dead.contains(hand.second)
+      then
+        val canonical = HoleCards.canonical(hand.first, hand.second)
+        collapsed.update(canonical, collapsed.getOrElse(canonical, 0.0) + weight)
     }
     require(collapsed.nonEmpty, "villain range is empty after filtering")
-    DiscreteDistribution(collapsed).normalized
+    DiscreteDistribution(collapsed.toMap).normalized
 
   private def ensureExactFeasible(
       board: Board,
@@ -593,22 +687,27 @@ object HoldemEquity:
         var i = 0
         while i < samplers.length && ok do
           val hand = samplers(i).sample(rng)
-          if hand.asSet.exists(used.contains) then ok = false
+          if used.contains(hand.first) || used.contains(hand.second) then ok = false
           else
             hands(i) = hand
-            used = used ++ hand.asSet
+            used = used + hand.first + hand.second
             i += 1
         if ok then break(hands.toVector)
         attempt += 1
       throw new IllegalArgumentException("unable to sample non-overlapping villain hands; ranges may be too restrictive")
 
   private def sortedWeights(weights: Map[HoleCards, Double]): Vector[(HoleCards, Double)] =
-    weights.toVector.sortBy { case (hand, _) => handKey(hand) }
-
-  private def handKey(hand: HoleCards): (Int, Int) =
-    val a = deckIndex(hand.first)
-    val b = deckIndex(hand.second)
-    if a <= b then (a, b) else (b, a)
+    if weights.isEmpty then Vector.empty
+    else
+      val builder = Vector.newBuilder[(HoleCards, Double)]
+      var id = 0
+      while id < HoleCardsIndex.size do
+        val hand = HoleCardsIndex.byIdUnchecked(id)
+        weights.get(hand).foreach { weight =>
+          builder += hand -> weight
+        }
+        id += 1
+      builder.result()
 
   private def allHoleCardsExcluding(dead: Set[Card]): Vector[HoleCards] =
     val remaining = Deck.full.filterNot(dead.contains).toIndexedSeq

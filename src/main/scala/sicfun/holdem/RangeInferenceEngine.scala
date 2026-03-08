@@ -1,6 +1,6 @@
 package sicfun.holdem
 
-import sicfun.core.{CollapseMetrics, DiscreteDistribution, Probability}
+import sicfun.core.{Card, CardId, CollapseMetrics, DiscreteDistribution, Probability}
 
 import java.util.concurrent.ConcurrentHashMap
 
@@ -90,6 +90,22 @@ object ActionValueModel:
   */
 object RangeInferenceEngine:
   private val MaxPosteriorCacheSize = 256
+  private val MaxPriorCacheSize = 512
+  private inline val ProfileEps = 1e-12
+  private val EquityPosteriorMaxHandsProperty = "sicfun.range.equityPosterior.maxHands"
+  private val EquityPosteriorMaxHandsEnv = "sicfun_RANGE_EQUITY_POSTERIOR_MAX_HANDS"
+  private val EquityPosteriorMinMassProperty = "sicfun.range.equityPosterior.minMass"
+  private val EquityPosteriorMinMassEnv = "sicfun_RANGE_EQUITY_POSTERIOR_MIN_MASS"
+  private val DefaultEquityPosteriorMaxHands = 256
+  private val DefaultEquityPosteriorMinMass = 0.995
+  private val DefaultEquityPosteriorMinHands = 64
+
+  private final case class AggregatedResponses(
+      foldProbability: Double,
+      continueProbability: Double,
+      continueWeights: Map[HoleCards, Double],
+      continuationMatchesPosterior: Boolean
+  )
 
   /** Lightweight key for caching posterior inference results. */
   private case class PosteriorCacheKey(
@@ -97,14 +113,31 @@ object RangeInferenceEngine:
       board: Board,
       folds: Vector[PreflopFold],
       villainPos: Position,
-      observations: Seq[VillainObservation]
+      observations: Seq[VillainObservation],
+      ddreMode: HoldemDdreProvider.Mode,
+      ddreProvider: HoldemDdreProvider.Provider,
+      ddreAlpha: Double,
+      ddreMinEntropyBits: Double,
+      ddreTimeoutMillis: Int
+  )
+
+  private case class PriorCacheKey(
+      hero: HoleCards,
+      board: Board,
+      folds: Vector[PreflopFold],
+      villainPos: Position,
+      tableRangesIdentity: Int,
+      bunchingTrials: Int
   )
 
   private val posteriorCache =
     new ConcurrentHashMap[PosteriorCacheKey, PosteriorInferenceResult]()
+  private val priorCache =
+    new ConcurrentHashMap[PriorCacheKey, DiscreteDistribution[HoleCards]]()
 
   def clearPosteriorCache(): Unit =
     posteriorCache.clear()
+    priorCache.clear()
 
   /** Computes a posterior villain range from folds + observed actions.
     *
@@ -125,16 +158,31 @@ object RangeInferenceEngine:
       useCache: Boolean = true
   ): PosteriorInferenceResult =
     require(bunchingTrials > 0, "bunchingTrials must be positive")
+    val ddreConfig = HoldemDdreProvider.configuredConfig()
 
     val cacheKey =
-      if useCache then Some(PosteriorCacheKey(hero, board, folds, villainPos, observations))
+      if useCache then
+        Some(
+          PosteriorCacheKey(
+            hero = hero,
+            board = board,
+            folds = folds,
+            villainPos = villainPos,
+            observations = observations,
+            ddreMode = ddreConfig.mode,
+            ddreProvider = ddreConfig.provider,
+            ddreAlpha = ddreConfig.alpha,
+            ddreMinEntropyBits = ddreConfig.minEntropyBits,
+            ddreTimeoutMillis = ddreConfig.timeoutMillis
+          )
+        )
       else None
 
     cacheKey.flatMap(k => Option(posteriorCache.get(k))) match
       case Some(cached) => cached
       case None =>
         val result = computePosterior(hero, board, folds, tableRanges, villainPos,
-          observations, actionModel, bunchingTrials, rng)
+          observations, actionModel, bunchingTrials, rng, ddreConfig)
         cacheKey.foreach { k =>
           if posteriorCache.size() >= MaxPosteriorCacheSize then posteriorCache.clear()
           posteriorCache.putIfAbsent(k, result)
@@ -150,33 +198,333 @@ object RangeInferenceEngine:
       observations: Seq[VillainObservation],
       actionModel: PokerActionModel,
       bunchingTrials: Int,
-      rng: Random
+      rng: Random,
+      ddreConfig: HoldemDdreProvider.Config
   ): PosteriorInferenceResult =
-    val prior = BunchingEffect.adjustedRange(
+    val prior = priorForContext(
       hero = hero,
       board = board,
       folds = folds,
       tableRanges = tableRanges,
       villainPos = villainPos,
-      trials = bunchingTrials,
+      bunchingTrials = bunchingTrials,
       rng = rng
     )
+    val normalizedPrior = prior.normalized
+    val observationsForBayes = observations.map(o => o.action -> o.state).toVector
+    val canSkipBayesUpdate =
+      observationsForBayes.nonEmpty &&
+        actionModel.isEffectivelyUniform
 
-    val bayesUpdate = HoldemBayesProvider.updatePosterior(
-      prior = prior,
-      observations = observations.map(o => o.action -> o.state),
-      actionModel = actionModel
-    )
-    val posterior = bayesUpdate.posterior
+    def resolveDecisionPosteriorFor(
+        bayesPosterior: DiscreteDistribution[HoleCards]
+    ): DiscreteDistribution[HoleCards] =
+      if ddreConfig.mode == HoldemDdreProvider.Mode.Off then bayesPosterior
+      else
+        resolveDecisionPosterior(
+          hero = hero,
+          board = board,
+          prior = normalizedPrior,
+          bayesPosterior = bayesPosterior,
+          observations = observationsForBayes,
+          actionModel = actionModel,
+          ddreConfig = ddreConfig
+        )
 
+    val (posterior, logEvidence) =
+      if observationsForBayes.isEmpty then
+        (resolveDecisionPosteriorFor(normalizedPrior), 0.0)
+      else if canSkipBayesUpdate then
+        (resolveDecisionPosteriorFor(normalizedPrior), 0.0)
+      else
+        val bayesUpdate = HoldemBayesProvider.updatePosterior(
+          prior = normalizedPrior,
+          observations = observationsForBayes,
+          actionModel = actionModel
+        )
+        val resolved = resolveDecisionPosteriorFor(bayesUpdate.posterior)
+        (resolved, bayesUpdate.logEvidence)
+
+    val collapseSummary = CollapseMetrics.summary(normalizedPrior, posterior)
     val collapse = PosteriorCollapse(
-      entropyReduction = CollapseMetrics.entropyReduction(prior, posterior),
-      klDivergence = CollapseMetrics.klDivergence(prior, posterior),
-      effectiveSupportPrior = CollapseMetrics.effectiveSupport(prior),
-      effectiveSupportPosterior = CollapseMetrics.effectiveSupport(posterior),
-      collapseRatio = CollapseMetrics.collapseRatio(prior, posterior)
+      entropyReduction = collapseSummary.entropyReduction,
+      klDivergence = collapseSummary.klDivergence,
+      effectiveSupportPrior = collapseSummary.effectiveSupportPrior,
+      effectiveSupportPosterior = collapseSummary.effectiveSupportPosterior,
+      collapseRatio = collapseSummary.collapseRatio
     )
-    PosteriorInferenceResult(prior, posterior, bayesUpdate.logEvidence, collapse)
+    PosteriorInferenceResult(normalizedPrior, posterior, logEvidence, collapse)
+
+  private def priorForContext(
+      hero: HoleCards,
+      board: Board,
+      folds: Vector[PreflopFold],
+      tableRanges: TableRanges,
+      villainPos: Position,
+      bunchingTrials: Int,
+      rng: Random
+  ): DiscreteDistribution[HoleCards] =
+    val key = PriorCacheKey(
+      hero = hero,
+      board = board,
+      folds = folds,
+      villainPos = villainPos,
+      tableRangesIdentity = System.identityHashCode(tableRanges),
+      bunchingTrials = bunchingTrials
+    )
+    val cached = priorCache.get(key)
+    if cached != null then cached
+    else
+      val computed =
+        if bunchingTrials <= 1 then
+          naiveVillainRange(hero, board, tableRanges, villainPos)
+        else
+          BunchingEffect.adjustedRange(
+            hero = hero,
+            board = board,
+            folds = folds,
+            tableRanges = tableRanges,
+            villainPos = villainPos,
+            trials = bunchingTrials,
+            rng = rng
+          )
+      if priorCache.size() >= MaxPriorCacheSize then priorCache.clear()
+      priorCache.putIfAbsent(key, computed)
+      val published = priorCache.get(key)
+      if published != null then published else computed
+
+  private def naiveVillainRange(
+      hero: HoleCards,
+      board: Board,
+      tableRanges: TableRanges,
+      villainPos: Position
+  ): DiscreteDistribution[HoleCards] =
+    val dead = hero.asSet ++ board.asSet
+    val filtered = tableRanges.rangeFor(villainPos).weights.collect {
+      case (hand, weight)
+          if weight > 0.0 &&
+            !dead.contains(hand.first) &&
+            !dead.contains(hand.second) =>
+        hand -> weight
+    }
+    require(filtered.nonEmpty, "villain range is empty after hero/board filtering")
+    DiscreteDistribution(filtered).normalized
+
+  private def resolveDecisionPosterior(
+      hero: HoleCards,
+      board: Board,
+      prior: DiscreteDistribution[HoleCards],
+      bayesPosterior: DiscreteDistribution[HoleCards],
+      observations: Seq[(PokerAction, GameState)],
+      actionModel: PokerActionModel,
+      ddreConfig: HoldemDdreProvider.Config
+  ): DiscreteDistribution[HoleCards] =
+    val support = prior.weights.keysIterator.map(hand => hand -> handMask(hand)).toVector
+    val deadMask = handMask(hero) | cardsMask(board.cards)
+    val bayesValidated = validatePosteriorForDecision(
+      name = "bayes",
+      distribution = bayesPosterior,
+      support = support,
+      deadMask = deadMask
+    )
+    def ddreValidated: Either[HoldemDdreProvider.InferenceFailure, DiscreteDistribution[HoleCards]] =
+      HoldemDdreProvider
+        .inferPosterior(
+          prior = prior,
+          observations = observations,
+          actionModel = actionModel,
+          hero = hero,
+          board = board,
+          config = ddreConfig
+        )
+        .flatMap { result =>
+          validatePosteriorForDecision(
+            name = "ddre",
+            distribution = result.posterior,
+            support = support,
+            deadMask = deadMask
+          ) match
+            case Right(_) => Right(result.posterior)
+            case Left(reason) =>
+              Left(
+                HoldemDdreProvider.InferenceFailure(
+                  reasonCategory = "invalid_output",
+                  detail = reason,
+                  latencyMillis = result.latencyMillis
+                )
+              )
+        }
+
+    ddreConfig.mode match
+      case HoldemDdreProvider.Mode.Off =>
+        bayesValidated match
+          case Right(_) => bayesPosterior
+          case Left(reason) =>
+            throw new IllegalStateException(s"Bayesian posterior invalid in DDRE off mode: $reason")
+
+      case HoldemDdreProvider.Mode.Shadow =>
+        ddreValidated.left.foreach { failure =>
+          logDdreDegraded(
+            mode = ddreConfig.mode,
+            reasonCategory = failure.reasonCategory,
+            detail = failure.detail,
+            latencyMillis = failure.latencyMillis,
+            bayesOk = bayesValidated.isRight,
+            ddreOk = false,
+            alphaApplied = 0.0
+          )
+        }
+        bayesValidated match
+          case Right(_) => bayesPosterior
+          case Left(reason) =>
+            throw new IllegalStateException(s"Bayesian posterior invalid in DDRE shadow mode: $reason")
+
+      case HoldemDdreProvider.Mode.BlendCanary | HoldemDdreProvider.Mode.BlendPrimary =>
+        val ddreCandidate = ddreValidated
+        (bayesValidated, ddreCandidate) match
+          case (Right(_), Right(ddre)) =>
+            fusePosteriors(
+              bayes = bayesPosterior,
+              ddre = ddre,
+              alpha = ddreConfig.alpha,
+              support = support,
+              deadMask = deadMask
+            ) match
+              case Right(fused) => fused
+              case Left(reason) =>
+                logDdreDegraded(
+                  mode = ddreConfig.mode,
+                  reasonCategory = "invalid_output",
+                  detail = reason,
+                  latencyMillis = 0L,
+                  bayesOk = true,
+                  ddreOk = true,
+                  alphaApplied = 0.0
+                )
+                bayesPosterior
+
+          case (Right(_), Left(failure)) =>
+            logDdreDegraded(
+              mode = ddreConfig.mode,
+              reasonCategory = failure.reasonCategory,
+              detail = failure.detail,
+              latencyMillis = failure.latencyMillis,
+              bayesOk = true,
+              ddreOk = false,
+              alphaApplied = 0.0
+            )
+            bayesPosterior
+
+          case (Left(bayesReason), Right(ddre)) =>
+            logDdreDegraded(
+              mode = ddreConfig.mode,
+              reasonCategory = "bayes_invalid",
+              detail = bayesReason,
+              latencyMillis = 0L,
+              bayesOk = false,
+              ddreOk = true,
+              alphaApplied = 1.0
+            )
+            ddre
+
+          case (Left(bayesReason), Left(ddreFailure)) =>
+            logDdreDegraded(
+              mode = ddreConfig.mode,
+              reasonCategory = "fail_closed",
+              detail = s"bayes=$bayesReason;ddre=${ddreFailure.reasonCategory}:${ddreFailure.detail}",
+              latencyMillis = ddreFailure.latencyMillis,
+              bayesOk = false,
+              ddreOk = false,
+              alphaApplied = 0.0
+            )
+            throw new IllegalStateException(
+              s"Bayesian and DDRE posteriors are invalid (bayes=$bayesReason, ddre=${ddreFailure.reasonCategory})"
+            )
+
+  private def validatePosteriorForDecision(
+      name: String,
+      distribution: DiscreteDistribution[HoleCards],
+      support: Vector[(HoleCards, Long)],
+      deadMask: Long
+  ): Either[String, Unit] =
+    var idx = 0
+    var legalMass = 0.0
+    while idx < support.length do
+      val (hand, mask) = support(idx)
+      if (mask & deadMask) == 0L then
+        val probability = distribution.probabilityOf(hand)
+        if !probability.isFinite || probability < 0.0 then
+          return Left(s"${name}_invalid_probability_for_${hand.toToken}")
+        legalMass += probability
+      idx += 1
+    if legalMass <= Eps then Left(s"${name}_zero_legal_mass")
+    else Right(())
+
+  private def fusePosteriors(
+      bayes: DiscreteDistribution[HoleCards],
+      ddre: DiscreteDistribution[HoleCards],
+      alpha: Double,
+      support: Vector[(HoleCards, Long)],
+      deadMask: Long
+  ): Either[String, DiscreteDistribution[HoleCards]] =
+    val clampedAlpha = math.max(0.0, math.min(1.0, alpha))
+    if clampedAlpha <= Eps then return Right(bayes)
+    if clampedAlpha >= 1.0 - Eps then return Right(ddre)
+    val weights = Map.newBuilder[HoleCards, Double]
+    var idx = 0
+    var total = 0.0
+    while idx < support.length do
+      val (hand, mask) = support(idx)
+      if (mask & deadMask) == 0L then
+        val bayesP = bayes.probabilityOf(hand)
+        val ddreP = ddre.probabilityOf(hand)
+        if !bayesP.isFinite || !ddreP.isFinite || bayesP < 0.0 || ddreP < 0.0 then
+          return Left(s"fused_invalid_probability_for_${hand.toToken}")
+        val probability = ((1.0 - clampedAlpha) * bayesP) + (clampedAlpha * ddreP)
+        if !probability.isFinite || probability < 0.0 then
+          return Left(s"fused_invalid_probability_for_${hand.toToken}")
+        if probability > 0.0 then
+          weights += hand -> probability
+          total += probability
+      idx += 1
+    if total <= Eps then Left("fused_zero_legal_mass")
+    else Right(DiscreteDistribution(weights.result()).normalized)
+
+  private def logDdreDegraded(
+      mode: HoldemDdreProvider.Mode,
+      reasonCategory: String,
+      detail: String,
+      latencyMillis: Long,
+      bayesOk: Boolean,
+      ddreOk: Boolean,
+      alphaApplied: Double
+  ): Unit =
+    val alphaLabel = java.lang.String.format(java.util.Locale.ROOT, "%.6f", Double.box(alphaApplied))
+    GpuRuntimeSupport.warn(
+      s"ddre_degraded reason=${sanitizeLogToken(reasonCategory)} " +
+        s"detail=${sanitizeLogToken(detail)} latencyMs=$latencyMillis " +
+        s"mode=${HoldemDdreProvider.modeLabel(mode)} " +
+        s"bayes_ok=$bayesOk ddre_ok=$ddreOk alpha_applied=$alphaLabel"
+    )
+
+  private def sanitizeLogToken(raw: String): String =
+    raw.trim
+      .replaceAll("\\s+", "_")
+      .replaceAll("[^A-Za-z0-9_\\-.:=]", "_")
+
+  private inline def handMask(hand: HoleCards): Long =
+    cardMask(hand.first) | cardMask(hand.second)
+
+  private def cardsMask(cards: Seq[Card]): Long =
+    var mask = 0L
+    var idx = 0
+    while idx < cards.length do
+      mask = mask | cardMask(cards(idx))
+      idx += 1
+    mask
+
+  private inline def cardMask(card: Card): Long =
+    1L << CardId.toId(card)
 
   /** Ranks candidate hero actions by EV vs a posterior villain range. */
   def recommendAction(
@@ -192,11 +540,12 @@ object RangeInferenceEngine:
     require(candidateActions.nonEmpty, "candidateActions must be non-empty")
     require(equityTrials > 0, "equityTrials must be positive")
     val normalizedPosterior = posterior.normalized
+    val equityPosterior = compactPosteriorForEquity(normalizedPosterior)
 
     val heroEquity = HoldemEquity.equityMonteCarlo(
       hero = hero,
       board = state.board,
-      villainRange = normalizedPosterior,
+      villainRange = equityPosterior,
       trials = equityTrials,
       rng = rng
     )
@@ -207,14 +556,19 @@ object RangeInferenceEngine:
           case Some(responseModel) =>
             action match
               case PokerAction.Raise(_) =>
+                val raiseRng =
+                  responseModel match
+                    case _: UniformVillainResponseModel => rng
+                    case _ => new Random(rng.nextLong())
                 responseAwareRaiseEv(
                   hero = hero,
                   state = state,
-                  posterior = normalizedPosterior,
+                  posterior = equityPosterior,
+                  heroEquityMean = heroEquity.mean,
                   action = action,
                   responseModel = responseModel,
                   equityTrials = equityTrials,
-                  rng = new Random(rng.nextLong())
+                  rng = raiseRng
                 )
               case _ =>
                 actionValueModel.expectedValue(action, state, heroEquity.mean)
@@ -231,12 +585,61 @@ object RangeInferenceEngine:
     }
     ActionRecommendation(heroEquity, evaluations, best.action)
 
+  private def compactPosteriorForEquity(
+      posterior: DiscreteDistribution[HoleCards]
+  ): DiscreteDistribution[HoleCards] =
+    val maxHands = configuredEquityPosteriorMaxHands
+    if maxHands <= 0 || posterior.weights.size <= maxHands then posterior
+    else
+      val minMass = configuredEquityPosteriorMinMass
+      val minHands = math.max(1, math.min(maxHands, DefaultEquityPosteriorMinHands))
+      val sorted = posterior.weights.toVector.sortBy { case (_, probability) => -probability }
+      val kept = Map.newBuilder[HoleCards, Double]
+      var keptCount = 0
+      var mass = 0.0
+      var idx = 0
+      while idx < sorted.length &&
+        keptCount < maxHands &&
+        (keptCount < minHands || mass < minMass)
+      do
+        val (hand, probability) = sorted(idx)
+        if probability > 0.0 then
+          kept += hand -> probability
+          mass += probability
+          keptCount += 1
+        idx += 1
+      val compacted = kept.result()
+      if compacted.isEmpty then posterior
+      else DiscreteDistribution(compacted).normalized
+
+  private def configuredEquityPosteriorMaxHands: Int =
+    configuredEquityPosteriorMaxHandsCached
+
+  private def configuredEquityPosteriorMinMass: Double =
+    configuredEquityPosteriorMinMassCached
+
+  private lazy val configuredEquityPosteriorMaxHandsCached: Int =
+    GpuRuntimeSupport
+      .resolveNonEmpty(EquityPosteriorMaxHandsProperty, EquityPosteriorMaxHandsEnv)
+      .flatMap(_.toIntOption)
+      .map(value => math.max(0, value))
+      .getOrElse(DefaultEquityPosteriorMaxHands)
+
+  private lazy val configuredEquityPosteriorMinMassCached: Double =
+    GpuRuntimeSupport
+      .resolveNonEmpty(EquityPosteriorMinMassProperty, EquityPosteriorMinMassEnv)
+      .flatMap(_.toDoubleOption)
+      .filter(value => value.isFinite && value > 0.0)
+      .map(value => math.min(1.0, value))
+      .getOrElse(DefaultEquityPosteriorMinMass)
+
   private inline val Eps = Probability.Eps
 
   private def responseAwareRaiseEv(
       hero: HoleCards,
       state: GameState,
       posterior: DiscreteDistribution[HoleCards],
+      heroEquityMean: Double,
       action: PokerAction,
       responseModel: VillainResponseModel,
       equityTrials: Int,
@@ -248,28 +651,62 @@ object RangeInferenceEngine:
         amount
       case _ => throw new IllegalArgumentException("responseAwareRaiseEv expects a raise action")
 
-    val (foldProbability, continueProbability, continueWeights) = aggregateResponses(
-      posterior = posterior,
-      state = state,
-      action = action,
-      responseModel = responseModel
-    )
+    responseModel match
+      case uniform: UniformVillainResponseModel =>
+        val profile = uniform.responseProfile(state, action)
+        val foldProbability = math.max(0.0, math.min(1.0, profile.foldProbability))
+        val continueProbability = math.max(0.0, math.min(1.0, profile.continueProbability))
+        raiseEvFromContinuation(
+          state = state,
+          raiseAmount = raiseAmount,
+          foldProbability = foldProbability,
+          continueProbability = continueProbability,
+          continuationEquityMean = heroEquityMean
+        )
+      case _ =>
+        val aggregated = aggregateResponses(
+          posterior = posterior,
+          state = state,
+          action = action,
+          responseModel = responseModel
+        )
+        val foldProbability = aggregated.foldProbability
+        val continueProbability = aggregated.continueProbability
+        if continueProbability <= Eps then state.pot
+        else
+          val continuationEquityMean =
+            if aggregated.continuationMatchesPosterior then heroEquityMean
+            else
+              val continuationRange = DiscreteDistribution(aggregated.continueWeights).normalized
+              HoldemEquity.equityMonteCarlo(
+                hero = hero,
+                board = state.board,
+                villainRange = continuationRange,
+                trials = equityTrials,
+                rng = rng
+              ).mean
+          raiseEvFromContinuation(
+            state = state,
+            raiseAmount = raiseAmount,
+            foldProbability = foldProbability,
+            continueProbability = continueProbability,
+            continuationEquityMean = continuationEquityMean
+          )
 
+  private def raiseEvFromContinuation(
+      state: GameState,
+      raiseAmount: Double,
+      foldProbability: Double,
+      continueProbability: Double,
+      continuationEquityMean: Double
+  ): Double =
     if continueProbability <= Eps then state.pot
     else
-      val continuationRange = DiscreteDistribution(continueWeights).normalized
-      val continuationEquity = HoldemEquity.equityMonteCarlo(
-        hero = hero,
-        board = state.board,
-        villainRange = continuationRange,
-        trials = equityTrials,
-        rng = rng
-      )
       // Approximate one-street raise EV: win current pot on folds,
       // otherwise equity realization in a called pot where both players
       // contribute the raise amount.
       val continuePot = state.pot + 2.0 * raiseAmount
-      val continueEv = (continuationEquity.mean * continuePot) - raiseAmount
+      val continueEv = (continuationEquityMean * continuePot) - raiseAmount
       (foldProbability * state.pot) + (continueProbability * continueEv)
 
   private def aggregateResponses(
@@ -277,14 +714,30 @@ object RangeInferenceEngine:
       state: GameState,
       action: PokerAction,
       responseModel: VillainResponseModel
-  ): (Double, Double, Map[HoleCards, Double]) =
+  ): AggregatedResponses =
     val continueWeights = mutable.Map.empty[HoleCards, Double].withDefaultValue(0.0)
     var foldProbability = 0.0
     var continueProbability = 0.0
+    var hasBaselineProfile = false
+    var baselineFold = 0.0
+    var baselineContinue = 0.0
+    var baselineRaise = 0.0
+    var continuationMatchesPosterior = true
 
     posterior.weights.foreach { case (hand, priorProb) =>
       if priorProb > 0.0 then
         val profile = responseModel.response(hand, state, action)
+        if !hasBaselineProfile then
+          hasBaselineProfile = true
+          baselineFold = profile.foldProbability
+          baselineContinue = profile.continueProbability
+          baselineRaise = profile.raiseProbability
+        else if continuationMatchesPosterior then
+          val foldDiff = math.abs(profile.foldProbability - baselineFold)
+          val continueDiff = math.abs(profile.continueProbability - baselineContinue)
+          val raiseDiff = math.abs(profile.raiseProbability - baselineRaise)
+          if foldDiff > ProfileEps || continueDiff > ProfileEps || raiseDiff > ProfileEps then
+            continuationMatchesPosterior = false
         val weightedFold = priorProb * profile.foldProbability
         val weightedContinue = priorProb * profile.continueProbability
         foldProbability += weightedFold
@@ -292,10 +745,11 @@ object RangeInferenceEngine:
         if weightedContinue > 0.0 then
           continueWeights.update(hand, continueWeights(hand) + weightedContinue)
     }
-    (
-      math.max(0.0, math.min(1.0, foldProbability)),
-      math.max(0.0, math.min(1.0, continueProbability)),
-      continueWeights.toMap
+    AggregatedResponses(
+      foldProbability = math.max(0.0, math.min(1.0, foldProbability)),
+      continueProbability = math.max(0.0, math.min(1.0, continueProbability)),
+      continueWeights = continueWeights.toMap,
+      continuationMatchesPosterior = continuationMatchesPosterior
     )
 
   /** End-to-end helper: infer posterior then recommend best hero action. */

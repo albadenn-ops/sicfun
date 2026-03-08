@@ -24,4 +24,14 @@ public final class HoldemPostflopNativeGpuBindings {
 
   /** Returns detected CUDA device count (0 when CUDA runtime/device unavailable). */
   public static native int cudaDeviceCount();
+
+  /**
+   * Returns a pipe-delimited descriptor string for the given CUDA device.
+   *
+   * <p>Format: {@code "name|smCount|clockMHz|memoryMB|computeMajor.computeMinor"}
+   *
+   * @param deviceIndex zero-based CUDA device ordinal
+   * @return device descriptor string, or empty string when unavailable
+   */
+  public static native String cudaDeviceInfo(int deviceIndex);
 }

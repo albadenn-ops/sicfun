@@ -2,6 +2,8 @@ package sicfun.holdem
 
 import sicfun.core.CardId
 
+import java.io.{File, FileInputStream}
+import java.util.Properties
 import java.util.concurrent.atomic.AtomicReference
 
 /** Runtime wrapper for postflop native Monte Carlo batch evaluation. */
@@ -17,6 +19,19 @@ private[holdem] object HoldemPostflopNativeRuntime:
   private val ProviderEnv = "sicfun_POSTFLOP_PROVIDER"
   private val NativeEngineProperty = "sicfun.postflop.native.engine"
   private val NativeEngineEnv = "sicfun_POSTFLOP_NATIVE_ENGINE"
+  private val AutoMinGpuWorkProperty = "sicfun.postflop.native.auto.minGpuWork"
+  private val AutoMinGpuWorkEnv = "sicfun_POSTFLOP_NATIVE_AUTO_MIN_GPU_WORK"
+  private val DefaultAutoMinGpuWork = 300000L
+  private val PostflopAutoTuneProperty = "sicfun.postflop.autotune"
+  private val PostflopAutoTuneEnv = "sicfun_POSTFLOP_AUTOTUNE"
+  private val PostflopAutoTuneCachePathProperty = "sicfun.postflop.autotune.cachePath"
+  private val PostflopAutoTuneCachePathEnv = "sicfun_POSTFLOP_AUTOTUNE_CACHE_PATH"
+  private val PostflopCudaBlockSizeProperty = "sicfun.postflop.native.cuda.blockSize"
+  private val PostflopCudaBlockSizeEnv = "sicfun_POSTFLOP_CUDA_BLOCK_SIZE"
+  private val PostflopCudaMaxChunkMatchupsProperty = "sicfun.postflop.native.cuda.maxChunkMatchups"
+  private val PostflopCudaMaxChunkMatchupsEnv = "sicfun_POSTFLOP_CUDA_MAX_CHUNK_MATCHUPS"
+  private val PostflopAutoTuneCacheVersion = "1"
+  private val DefaultPostflopAutoTuneCachePath = "data/postflop-autotune.properties"
 
   private val LegacyPathProperty = "sicfun.postflop.native.path"
   private val LegacyPathEnv = "sicfun_POSTFLOP_NATIVE_PATH"
@@ -37,10 +52,12 @@ private[holdem] object HoldemPostflopNativeRuntime:
 
   private val cpuLoadResultRef = new AtomicReference[Either[String, String]](null)
   private val gpuLoadResultRef = new AtomicReference[Either[String, String]](null)
+  private val appliedPostflopTuneFingerprintRef = new AtomicReference[String](null)
 
   private[holdem] def resetLoadCacheForTests(): Unit =
     cpuLoadResultRef.set(null)
     gpuLoadResultRef.set(null)
+    appliedPostflopTuneFingerprintRef.set(null)
 
   def isAvailable: Boolean =
     availability.available
@@ -112,8 +129,28 @@ private[holdem] object HoldemPostflopNativeRuntime:
               seeds(i) = HeadsUpEquityTable.monteCarloSeed(seedBase, keyMaterial)
               i += 1
 
+            if resolved.backend == Backend.Gpu then
+              maybeApplyCachedPostflopAutoTune(deviceIndex = 0)
+
+            val requestedWork = n.toLong * trials.toLong
+            val executionBackend =
+              if resolved.backend == Backend.Gpu &&
+                configuredNativeEngine == "auto" &&
+                requestedWork < configuredAutoMinGpuWork then
+                cpuLoadResult() match
+                  case Right(_) =>
+                    GpuRuntimeSupport.log(
+                      s"postflop native auto-engine: routing to CPU for small workload " +
+                        s"(work=$requestedWork < minGpuWork=$configuredAutoMinGpuWork)"
+                    )
+                    Backend.Cpu
+                  case Left(_) =>
+                    Backend.Gpu
+              else
+                resolved.backend
+
             val status =
-              resolved.backend match
+              executionBackend match
                 case Backend.Cpu =>
                   HoldemPostflopNativeBindings.computePostflopBatchMonteCarlo(
                     heroFirst,
@@ -146,7 +183,7 @@ private[holdem] object HoldemPostflopNativeRuntime:
                   )
 
             if status != 0 then
-              resolved.backend match
+              executionBackend match
                 case Backend.Gpu if configuredNativeEngine == "auto" =>
                   tryCpuFallbackAfterGpuFailure(
                     gpuStatus = status,
@@ -275,6 +312,117 @@ private[holdem] object HoldemPostflopNativeRuntime:
       case Some("cpu") => "cpu"
       case Some("cuda") => "cuda"
       case _ => "auto"
+
+  private def configuredAutoMinGpuWork: Long =
+    GpuRuntimeSupport
+      .resolveNonEmpty(AutoMinGpuWorkProperty, AutoMinGpuWorkEnv)
+      .flatMap(GpuRuntimeSupport.parsePositiveIntOpt)
+      .map(_.toLong)
+      .getOrElse(DefaultAutoMinGpuWork)
+
+  private def maybeApplyCachedPostflopAutoTune(deviceIndex: Int): Unit =
+    if !postflopAutoTuneEnabled then ()
+    else if hasExplicitPostflopCudaConfig then ()
+    else
+      val deviceCount = safeCudaDeviceCount()
+      if deviceCount <= 0 then ()
+      else
+        val boundedDeviceIndex = math.max(0, math.min(deviceIndex, deviceCount - 1))
+        val fingerprint = safeCudaDeviceFingerprint(boundedDeviceIndex)
+        if fingerprint.isEmpty then ()
+        else
+          val appliedKey = s"$boundedDeviceIndex|$fingerprint"
+          if appliedPostflopTuneFingerprintRef.get() == appliedKey then ()
+          else
+            loadPostflopAutoTuneDecision(resolvedPostflopAutoTuneCacheFile, boundedDeviceIndex, fingerprint) match
+              case Some(decision) =>
+                sys.props.update(PostflopCudaBlockSizeProperty, decision.blockSize.toString)
+                sys.props.update(PostflopCudaMaxChunkMatchupsProperty, decision.maxChunkMatchups.toString)
+                appliedPostflopTuneFingerprintRef.set(appliedKey)
+                GpuRuntimeSupport.log(
+                  s"postflop-autotune: applied cached config for device=$boundedDeviceIndex " +
+                    s"(block=${decision.blockSize}, chunkMatchups=${decision.maxChunkMatchups})"
+                )
+              case None => ()
+
+  private final case class PostflopAutoTuneDecision(
+      blockSize: Int,
+      maxChunkMatchups: Int
+  )
+
+  private def loadPostflopAutoTuneDecision(
+      file: File,
+      deviceIndex: Int,
+      fingerprint: String
+  ): Option[PostflopAutoTuneDecision] =
+    import scala.util.boundary, boundary.break
+    try
+      if !file.isFile then None
+      else
+        val props = new Properties()
+        val in = new FileInputStream(file)
+        try props.load(in)
+        finally in.close()
+
+        val version = Option(props.getProperty("version")).map(_.trim).getOrElse("")
+        if version != PostflopAutoTuneCacheVersion then None
+        else
+          val count = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("device.count")).getOrElse(0)
+          if count <= 0 then None
+          else
+            boundary:
+              var idx = 0
+              while idx < count do
+                val prefix = s"device.$idx."
+                val cachedIndex =
+                  GpuRuntimeSupport.parseNonNegativeIntOpt(props.getProperty(s"${prefix}index")).getOrElse(-1)
+                val cachedFingerprint = Option(props.getProperty(s"${prefix}fingerprint")).map(_.trim).getOrElse("")
+                if cachedIndex == deviceIndex && cachedFingerprint == fingerprint then
+                  val blockSizeOpt = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}blockSize"))
+                  val maxChunkOpt =
+                    GpuRuntimeSupport
+                      .parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunkMatchups"))
+                      .orElse(GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunk")))
+                  if blockSizeOpt.nonEmpty && maxChunkOpt.nonEmpty then
+                    break(
+                      Some(
+                        PostflopAutoTuneDecision(
+                          blockSize = blockSizeOpt.get,
+                          maxChunkMatchups = maxChunkOpt.get
+                        )
+                      )
+                    )
+                idx += 1
+              None
+    catch
+      case _: Throwable => None
+
+  private def resolvedPostflopAutoTuneCacheFile: File =
+    GpuRuntimeSupport.resolveFile(
+      PostflopAutoTuneCachePathProperty,
+      PostflopAutoTuneCachePathEnv,
+      DefaultPostflopAutoTuneCachePath
+    )
+
+  private def postflopAutoTuneEnabled: Boolean =
+    val raw = GpuRuntimeSupport.resolveNonEmptyLower(PostflopAutoTuneProperty, PostflopAutoTuneEnv)
+    raw match
+      case Some("0" | "false" | "no" | "off") => false
+      case _ => true
+
+  private def hasExplicitPostflopCudaConfig: Boolean =
+    GpuRuntimeSupport.isConfigured(PostflopCudaBlockSizeProperty, PostflopCudaBlockSizeEnv) ||
+    GpuRuntimeSupport.isConfigured(PostflopCudaMaxChunkMatchupsProperty, PostflopCudaMaxChunkMatchupsEnv)
+
+  private def safeCudaDeviceCount(): Int =
+    try HoldemPostflopNativeGpuBindings.cudaDeviceCount()
+    catch
+      case _: Throwable => 0
+
+  private def safeCudaDeviceFingerprint(deviceIndex: Int): String =
+    try Option(HoldemPostflopNativeGpuBindings.cudaDeviceInfo(deviceIndex)).map(_.trim).getOrElse("")
+    catch
+      case _: Throwable => ""
 
   private def safeEngineLabel(backend: Backend): String =
     try

@@ -2,8 +2,8 @@
 <project version="4">
   <component name="ScalaCompilerConfiguration">
     <option name="separateProdTestSources" value="true" />
-    <profile name="sbt 1" modules="untitled" />
-    <profile name="sbt 2" modules="untitled.main,untitled.test">
+    <profile name="sbt 1" modules="sicfun,untitled" />
+    <profile name="sbt 2" modules="sicfun.main,sicfun.test,untitled.main,untitled.test">
       <option name="deprecationWarnings" value="true" />
       <option name="uncheckedWarnings" value="true" />
       <option name="featureWarnings" value="true" />

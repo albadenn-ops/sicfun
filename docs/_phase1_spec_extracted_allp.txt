@@ -1,0 +1,255 @@
+SICFUN
+Phase 1 Architectural Spec
+Discrete Diffusion Range Estimation Module
+Status
+DRAFT — for review
+System
+SICFUN v.next
+Component
+OpponentRangeEstimator
+Replaces
+BayesianRangeUpdater (inferPosterior)
+Scope
+Phase 1 of 3
+Risk level
+LOW — CFR backbone untouched
+Confidential — Internal Engineering Document
+1. Purpose and scope
+This document specifies the design, training pipeline, inference integration, and validation strategy for the Discrete Diffusion Range Estimation (DDRE) module — the Phase 1 augmentation of SICFUN's existing opponent modelling stack.
+The DDRE module targets one precise bottleneck in SICFUN's current architecture: the Bayesian posterior update performed inside inferPosterior(...). That function currently applies hand-action likelihoods drawn from the CFR blueprint to sequentially update a 1,326-entry probability vector. The fundamental limitation is that sequential Bayesian updates treat each action observation independently and cannot model non-local correlations across streets or capture multi-street bet-sizing patterns that jointly constrain the opponent's range.
+CAUTION
+Assumption: range representation is a 1,326-entry probability vector over all canonical two-card hold'em combinations. If SICFUN uses an abstracted or bucketed representation instead, the output dimensionality in Section 4 must be revised accordingly.
+The CFR blueprint, subgame solver, action abstraction framework, and all components that depend on game-theoretic guarantees are explicitly out of scope. The DDRE module slots in as a drop-in replacement for the posterior update step only, preserving the strategic backbone entirely.
+2. Current architecture context
+2.1  The inferPosterior / updateAll pipeline
+The existing Bayesian range updater operates as follows:
+inferPosterior(...) is called with villain observations (the sequence of observed actions and current game state).
+It delegates to updateAll(...), which iterates over each (action, gameState) pair in the observation sequence.
+For each pair, it multiplies the current range vector by the action-likelihood P(action | hand, gameState) derived from the CFR blueprint strategy.
+The result is normalised to produce a valid posterior probability distribution.
+If the cache key has not changed since the last call, the cached posterior is returned without recomputation.
+The adaptive layer introduces a secondary update path: archetype posterior probabilities are adjusted specifically when the opponent responds (fold/call/raise) to a hero raise. This provides a lightweight exploitative signal layered on top of the GTO-derived posterior.
+2.2  Structural weaknesses of sequential Bayesian updating
+Three limitations motivate the DDRE replacement:
+Independence assumption. Multiplying likelihoods independently across actions assumes each action is conditionally independent of all others given the hand. This breaks on polarised lines where a turn bet and river overbet are jointly indicative of a specific range segment, not independently informative.
+Independence assumption. Multiplying likelihoods across actions treats each observation as conditionally independent given the hand. This fails on polarised multi-street lines where a turn barrel and river overbet are jointly diagnostic of a specific range segment.
+Blueprint coupling. Action likelihoods are anchored to the CFR blueprint. Opponents who deviate significantly from GTO — the very players SICFUN most wants to exploit — produce the highest posterior error.
+No structural dependency modelling. Bayesian updates do not encode physical constraints such as card removal (a community card eliminates the corresponding combo from all opponent ranges) or suit-correlation effects that become load-bearing post-flop.
+SOLID
+Confirmed: the 169-category representation is a projection of the full 1,326-combo vector used internally. The 169 abstraction is a rendering convenience for pre-flop displays. All DDRE design targets the 1,326-combo vector directly.
+3. Design philosophy
+The DDRE module treats range inference as a conditional generation problem: given a context encoding of the observed game trajectory, generate a probability distribution over the 1,326 canonical hole-card combinations. This is a natural fit for discrete masked diffusion, where each of the 1,326 combo slots begins as a masked token and the model learns to denoise them jointly, conditioned on context.
+Three principles govern the design:
+Non-regression safety. The module is an additive layer. It replaces only inferPosterior's internal computation. It cannot degrade CFR blueprint quality, subgame solve correctness, or action abstraction logic. If DDRE inference fails or times out, the system falls back to the existing Bayesian updater with zero degradation.
+Fit to the existing call signature. The replacement must accept the same inputs as inferPosterior and return a 1,326-entry float array. No changes to callers, downstream subgame solvers, or the adaptive archetype layer are required.
+Exploit the existing cache contract. SICFUN already has a cache-key mechanism that skips recomputation when game state is unchanged. DDRE adopts the same contract, adding RADD-style output caching at the model level when the noisy input tensor is unchanged between denoising steps.
+4. Module architecture
+4.1  Input encoding
+The context encoder transforms the raw game state into a fixed-length embedding that conditions the diffusion model. It operates on four input streams:
+Stream
+Raw form
+Encoding
+Dim
+Action history
+Sequence of (player, action, amount) tuples
+Transformer encoder over tokenised actions; street boundary tokens injected
+256
+Board cards
+0–5 community cards (rank + suit)
+One-hot over 52 slots, zero-padded to 5
+260
+Stack / pot
+Effective stack, pot size, SPR
+Log-normalised scalars
+16
+Position / meta
+Hero position, num players, street index
+Integer embeddings
+32
+The four streams are concatenated and passed through two feed-forward layers (hidden dim 512, GELU activation) to produce a single context vector c of dimension 512.
+4.2  Discrete masked diffusion core
+The diffusion model operates over a sequence of 1,326 discrete slots — one per canonical two-card combo. Each slot takes one of 1,327 values: the combo index (0–1,325) or a MASK token.
+Forward process: during training, each slot is independently masked with probability t ? [0, 1] drawn uniformly, producing a partially masked sequence x_t from the clean one-hot sequence x_0. The model learns to predict x_0 from x_t and context c.
+Reverse process (inference): the model starts from a fully masked sequence and iteratively unmasks slots over T denoising steps, conditioned on c. A latent variable z (drawn once before unmasking begins, as in the VMD formulation) coordinates joint predictions across slots, preventing physically impossible combos from being sampled simultaneously.
+NOTE
+The latent variable z is the mechanism that encodes physical constraints: card removal (a board card masks its combo slots to probability zero), suit dependencies, and range correlation across streets. It serves the same coordination role that VMD's ELBO formulation describes, but applied here to a genuine poker inference problem rather than the synthetic language toy used in that paper.
+4.3  Output layer
+After the final denoising step the model outputs a 1,326-dimensional logit vector. A softmax over unblocked slots (slots corresponding to board-card combos are hard-zeroed before softmax) produces the posterior probability distribution p(hand | context). This is a direct drop-in for the normalised vector that inferPosterior currently returns.
+4.4  Model size and hardware fit
+Parameter
+Value
+Rationale
+Context encoder params
+~18M
+Transformer with 4 layers, 256 hidden, 4 heads
+Diffusion denoiser params
+~85M
+6-layer transformer over 1,326-slot sequence + c conditioning
+Total params
+~103M
+Fits comfortably in 4GB VRAM; inference on RTX 3060 or better
+Denoising steps (full)
+16
+Used during offline training evaluation
+Denoising steps (distilled)
+2–4
+Consistency distillation target for live inference
+Inference latency (GPU, distilled)
+8–30ms
+Per inferPosterior call on RTX-class GPU via CUDA/JNI
+Inference latency (CPU fallback)
+80–200ms
+Via C++ native engine; acceptable for non-critical paths
+Training data requirement
+~5M hands
+Self-play hands with known hole cards from CFR blueprint
+SOLID
+The CUDA/JNI pathway already used for equity compute backends is the primary inference target. The model weights are loaded once at engine startup and kept resident in GPU memory. OpenCL fallback is available via the existing C++ CPU native engine for environments without CUDA.
+5. Training pipeline
+5.1  Data generation
+Training data is generated by running SICFUN's CFR blueprint in self-play mode with both players' hole cards logged. Each hand produces one or more training examples: one per street boundary and one per significant bet-sizing action.
+Each example is a tuple of:
+context — the full (action_history, board, stack, meta) encoding at the point of the update
+target_range — the 1,326-entry ground-truth posterior computed by the existing Bayesian updater at the same point (bootstrapped label)
+true_hands — the actual hole cards of both players, used to compute a secondary loss against the empirical hand distribution
+NOTE
+The Bayesian updater is used to generate bootstrapped labels during Phase 1. This means the DDRE model initially learns to match — and then exceed — the existing updater. A secondary empirical loss against true_hands prevents the model from overfitting to Bayesian label noise.
+5.2  Loss function
+The training objective combines three terms:
+L_total = ?1 · L_diffusion + ?2 · L_kl + ?3 · L_blocker
+L_diffusion  — standard masked diffusion cross-entropy loss over denoised slots
+L_kl         — KL divergence between model output and Bayesian bootstrapped label
+(annealed to zero after epoch 10 to allow the model to surpass labels)
+L_blocker    — hard penalty: log-prob mass assigned to any combo containing a board card
+(must converge to zero; enforces physical card-removal constraint)
+?1 = 1.0,  ?2 = 0.3 (annealed),  ?3 = 5.0 (constant)
+5.3  Consistency distillation
+After the base model converges (~20 epochs), consistency distillation reduces the denoising steps from 16 to 2–4 while preserving output quality. The distilled model is the one deployed in the live inference path. The full 16-step model is retained for offline evaluation and as a quality reference.
+5.4  Training infrastructure
+Given SICFUN's existing CUDA/JNI stack, training is most efficiently run in Python (PyTorch) on the same GPU, with the trained weights exported to ONNX or TorchScript for JNI-friendly loading. The C++ native engine loads the exported model via a thin inference wrapper.
+Phase
+Duration estimate
+Compute
+Self-play data generation (5M hands)
+3–7 days
+CPU-heavy; parallelise across cores
+Base model training (20 epochs)
+4–8 days
+Single RTX 3080/4080 or equivalent
+Consistency distillation
+1–2 days
+Same GPU
+ONNX export + JNI integration test
+1–3 days
+Engineering effort
+Total end-to-end
+~2–3 weeks
+6. Integration specification
+6.1  Drop-in interface contract
+The DDRE module must satisfy the following interface contract to be a true drop-in for the existing Bayesian updater:
+// Existing interface (must be preserved exactly)
+float[] inferPosterior(VillainObservations obs);
+// Internal delegation (new)
+float[] inferPosterior(VillainObservations obs) {
+String cacheKey = buildCacheKey(obs);
+if (cache.contains(cacheKey)) return cache.get(cacheKey);
+float[] context = contextEncoder.encode(obs);          // new
+float[] posterior = ddreModel.denoise(context);        // new
+posterior = applyBoardBlockers(posterior, obs.board);  // hard zero + renorm
+cache.put(cacheKey, posterior);
+return posterior;   // same 1326-float contract as before
+}
+CAUTION
+The applyBoardBlockers step is a mandatory post-processing pass that hard-zeros any combo containing a card present on the board, then renormalises. This enforces physical card-removal constraints as a deterministic guardrail independent of whether the model's L_blocker loss has fully converged.
+6.2  Adaptive archetype layer
+The adaptive layer that updates archetype posteriors on observed fold/call/raise responses to a hero raise operates downstream of inferPosterior. It receives the output of the DDRE module as its input range, exactly as it previously received the Bayesian posterior. No changes to the adaptive layer are required.
+One optional enhancement: the archetype layer could condition on the DDRE model's uncertainty estimate (the entropy of the output distribution) to gate whether the archetype signal is strong enough to override the diffusion posterior. This is a Phase 1.5 consideration, not required for initial deployment.
+6.3  Fallback mechanism
+The existing Bayesian updater is retained in the codebase, gated behind a feature flag. If DDRE inference throws, times out (configurable threshold, default 50ms on GPU / 250ms on CPU), or produces a degenerate distribution (entropy below a minimum threshold), the system logs the failure and falls back to the Bayesian updater transparently. This ensures zero regression risk during the rollout period.
+// Fallback logic (pseudocode)
+try {
+result = ddreModel.denoise(context, timeoutMs=50);
+if (entropy(result) < MIN_ENTROPY_THRESHOLD) throw DegenerateDistributionException();
+return result;
+} catch (Exception e) {
+metrics.recordFallback(e);
+return bayesianUpdater.updateAll(obs);  // existing path, unchanged
+}
+7. Validation strategy
+7.1  Offline metrics
+Before any live deployment, the DDRE module must pass the following offline benchmarks against a held-out set of 100,000 hands not seen during training:
+Metric
+Target
+Failure threshold
+Notes
+KL divergence vs. true posterior (known hands)
+< 0.15
+> 0.40
+Primary accuracy metric
+KL divergence vs. Bayesian updater
+< 0.20
+> 0.50
+Must not regress vs. baseline
+Blocker violation rate
+0.00%
+> 0.01%
+Any mass on board-card combos is a hard fail
+Inference latency p50 (GPU)
+< 15ms
+> 50ms
+Per inferPosterior call, distilled model
+Inference latency p99 (GPU)
+< 40ms
+> 100ms
+Tail latency matters for time-pressure spots
+Fallback rate (live)
+< 2%
+> 10%
+Monitored post-deployment
+Distribution entropy collapse rate
+< 0.5%
+> 2%
+Degenerate outputs with entropy near zero
+7.2  A/B validation protocol
+Initial live deployment runs DDRE and the Bayesian updater in parallel, with DDRE's output used for the actual decision and the Bayesian output logged for comparison. Win-rate delta is measured using SICFUN's existing advantage sum estimator (which isolates skill value from luck value) over a minimum of 50,000 hands before DDRE is declared the sole path.
+7.3  Regression tests
+The following scenarios must be covered by automated regression tests before any deployment:
+Flop: hero holds As, board shows Ah 2h 3h. All combos containing Ah must have posterior = 0.
+River: opponent checked back flop and turn, then overbets river. Range must concentrate on the polarised tails (nutted hands and air), not linear hands.
+Pre-flop 3-bet: opponent 3-bets from BTN over hero CO open. Range must tighten relative to a flat-call line with appropriate value/bluff ratio.
+Full board run-out (5 community cards): only 1,081 combos remain unblocked (52 cards minus 5 board cards minus 2 hero cards = 45 remaining; C(45,2) = 990). Posterior must sum to exactly 1.0 over those combos.
+8. Phased rollout
+Milestone
+Deliverable
+Gate condition
+M1 — Data pipeline
+Self-play logging infrastructure; 5M hand dataset with context + labels
+Dataset coverage across all streets and stack depths confirmed
+M2 — Base model
+Trained 103M-param DDRE model; offline metric suite passing
+KL < 0.15, blocker violations = 0
+M3 — Distillation
+2–4 step distilled model; latency benchmarks passing
+p99 GPU latency < 40ms
+M4 — JNI integration
+ONNX export, C++ inference wrapper, JNI bridge tested
+Drop-in interface contract satisfied; fallback mechanism verified
+M5 — Shadow mode
+DDRE running in parallel with Bayesian updater; outputs logged
+Fallback rate < 2%; no degenerate distributions in 10K live hands
+M6 — Live deployment
+Bayesian updater demoted to fallback-only; DDRE is primary path
+A/B win-rate delta positive over 50K hands by advantage sum estimator
+9. What is explicitly out of scope for Phase 1
+The following items are deferred to later phases and must not creep into Phase 1 implementation:
+FK Steering / particle-based strategy generation (Phase 2). The DDRE module estimates ranges; it does not generate action recommendations.
+Multi-agent trajectory prediction (Phase 3). Opponent betting-sequence forecasting is architecturally separate from range estimation.
+Modifications to subgame solver — the DDRE posterior feeds in as-is; no changes to how the solver consumes it.
+Replacing the CFR blueprint — the blueprint is still the source of training signal and the strategic backbone.
+Multi-player (>2) range estimation — Phase 1 targets heads-up and 6-max with one active opponent model at a time.
+10. Open questions requiring confirmation
+Does the VillainObservations object passed to inferPosterior include the full action history back to pre-flop, or only the current street? This determines the maximum sequence length for the context encoder transformer.
+Is the adaptive archetype layer's output ever fed back into inferPosterior as a prior, or does it operate strictly as a downstream consumer? A feedback loop would require careful design to avoid distribution shift.
+What is the current updateAll latency in production on representative hardware? This sets the baseline against which DDRE latency improvements are measured.
+Are there any existing unit tests for inferPosterior that assert specific posterior values? These must be preserved (or updated with equivalent assertions) to qualify as passing regression tests for Phase 1.
+End of Phase 1 Specification — SICFUN DDRE Module

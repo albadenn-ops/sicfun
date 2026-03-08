@@ -12,6 +12,7 @@ private[holdem] object HoldemCfrNativeRuntime:
 
   final case class NativeTreeSpec(
       rootNodeId: Int,
+      rootInfoSetIndex: Int,
       nodeTypes: Array[Int],
       nodeStarts: Array[Int],
       nodeCounts: Array[Int],
@@ -25,6 +26,7 @@ private[holdem] object HoldemCfrNativeRuntime:
       infosetActionCounts: Array[Int]
   ):
     require(rootNodeId >= 0, "rootNodeId must be non-negative")
+    require(rootInfoSetIndex >= 0, "rootInfoSetIndex must be non-negative")
     require(nodeTypes.length == nodeStarts.length, "nodeTypes/nodeStarts length mismatch")
     require(nodeTypes.length == nodeCounts.length, "nodeTypes/nodeCounts length mismatch")
     require(nodeTypes.length == nodeInfosets.length, "nodeTypes/nodeInfosets length mismatch")

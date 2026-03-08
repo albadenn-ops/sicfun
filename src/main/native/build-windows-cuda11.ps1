@@ -128,3 +128,65 @@ if (-not (Test-Path $bayesDll)) {
 }
 
 Write-Host "Built: $bayesDll"
+
+$ddreSrc = Join-Path $PSScriptRoot "jni\HoldemDdreNativeGpuBindings.cu"
+$ddreDll = Join-Path $OutDir "sicfun_ddre_cuda.dll"
+$ddreArgs = @(
+  "-allow-unsupported-compiler"
+  "-std=c++17"
+  "-O3"
+  "-Xcompiler", "/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+  "-Xcompiler", "/EHsc"
+  "-shared"
+  "-gencode", $gencode
+  "-I$jniInclude"
+  "-I$jniWinInclude"
+  "-o", $ddreDll
+  $ddreSrc
+)
+
+$escapedDdreArgs = ($ddreArgs | ForEach-Object {
+  if ($_ -match '\s') { '"' + $_.Replace('"', '""') + '"' } else { $_ }
+}) -join " "
+$ddreCmdLine = "call ""$escapedVcVars"" && ""$escapedNvcc"" $escapedDdreArgs"
+
+cmd.exe /c $ddreCmdLine
+if ($LASTEXITCODE -ne 0) {
+  throw "CUDA DDRE native build failed with exit code $LASTEXITCODE"
+}
+if (-not (Test-Path $ddreDll)) {
+  throw "Build did not produce $ddreDll"
+}
+
+Write-Host "Built: $ddreDll"
+
+$postflopSrc = Join-Path $PSScriptRoot "jni\HoldemPostflopNativeBindingsCuda.cu"
+$postflopDll = Join-Path $OutDir "sicfun_postflop_cuda.dll"
+$postflopArgs = @(
+  "-allow-unsupported-compiler"
+  "-std=c++17"
+  "-O3"
+  "-Xcompiler", "/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+  "-Xcompiler", "/EHsc"
+  "-shared"
+  "-gencode", $gencode
+  "-I$jniInclude"
+  "-I$jniWinInclude"
+  "-o", $postflopDll
+  $postflopSrc
+)
+
+$escapedPostflopArgs = ($postflopArgs | ForEach-Object {
+  if ($_ -match '\s') { '"' + $_.Replace('"', '""') + '"' } else { $_ }
+}) -join " "
+$postflopCmdLine = "call ""$escapedVcVars"" && ""$escapedNvcc"" $escapedPostflopArgs"
+
+cmd.exe /c $postflopCmdLine
+if ($LASTEXITCODE -ne 0) {
+  throw "CUDA postflop native build failed with exit code $LASTEXITCODE"
+}
+if (-not (Test-Path $postflopDll)) {
+  throw "Build did not produce $postflopDll"
+}
+
+Write-Host "Built: $postflopDll"

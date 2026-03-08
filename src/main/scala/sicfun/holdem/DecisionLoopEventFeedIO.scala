@@ -2,6 +2,7 @@ package sicfun.holdem
 
 import sicfun.core.Card
 
+import java.io.RandomAccessFile
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import scala.jdk.CollectionConverters.*
@@ -18,6 +19,7 @@ object DecisionLoopEventFeedIO:
       "\tpotBefore\ttoCall\tstackBefore\taction\tdecisionTimeMillis\tbetHistory"
 
   private val ExpectedColumns = Header.split("\t", -1).map(_.trim.toLowerCase).toVector
+  private val appendLock = new AnyRef
 
   final case class FeedEvent(lineNumber: Int, event: PokerEvent)
 
@@ -38,6 +40,52 @@ object DecisionLoopEventFeedIO:
       if line.trim.isEmpty then None
       else Some(FeedEvent(rowNum, deserializeEvent(path, rowNum, line)))
     }
+
+  /** Reads only new lines appended after `byteOffset`.
+    *
+    * Returns the parsed events and the new byte offset (end of the data read).
+    * A `byteOffset` of 0 skips the header line automatically.
+    *
+    * @param path       the feed file path
+    * @param byteOffset the byte position to start reading from (0 = beginning of file)
+    * @return (new events, updated byte offset)
+    */
+  def readIncremental(path: Path, byteOffset: Long): (Vector[FeedEvent], Long) =
+    require(Files.exists(path), s"event feed file not found: $path")
+    val raf = new RandomAccessFile(path.toFile, "r")
+    try
+      val fileLength = raf.length()
+      if fileLength <= byteOffset then
+        return (Vector.empty, byteOffset)
+      val effectiveOffset =
+        if byteOffset == 0L then
+          raf.seek(0L)
+          val headerRaw = raf.readLine()
+          require(headerRaw != null, s"event feed file is empty: $path")
+          val header = new String(headerRaw.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8)
+            .split("\t", -1)
+            .map(_.trim.toLowerCase)
+            .toVector
+          require(
+            header == ExpectedColumns,
+            s"event feed header mismatch. expected: ${ExpectedColumns.mkString(",")} got: ${header.mkString(",")}"
+          )
+          raf.getFilePointer
+        else
+          byteOffset
+      raf.seek(effectiveOffset)
+      val builder = Vector.newBuilder[FeedEvent]
+      var line = raf.readLine()
+      var lineNum = 0
+      while line != null do
+        lineNum += 1
+        val decoded = new String(line.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8)
+        if decoded.trim.nonEmpty then
+          builder += FeedEvent(lineNum, deserializeEvent(path, lineNum, decoded))
+        line = raf.readLine()
+      (builder.result(), raf.getFilePointer)
+    finally
+      raf.close()
 
   private def deserializeEvent(path: Path, rowNum: Int, line: String): PokerEvent =
     val cols = line.split("\t", -1).toVector
@@ -120,28 +168,37 @@ object DecisionLoopEventFeedIO:
       }
 
   def append(path: Path, event: PokerEvent): Unit =
-    if !Files.exists(path) then
+    appendLock.synchronized {
       Option(path.getParent).foreach(parent => Files.createDirectories(parent))
-      Files.write(path, Vector(Header).asJava, StandardCharsets.UTF_8)
-    val row = Vector(
-      event.handId,
-      event.sequenceInHand.toString,
-      event.playerId,
-      event.occurredAtEpochMillis.toString,
-      event.street.toString,
-      event.position.toString,
-      if event.board.cards.isEmpty then "-" else event.board.cards.map(_.toToken).mkString(" "),
-      event.potBefore.toString,
-      event.toCall.toString,
-      event.stackBefore.toString,
-      serializeAction(event.action),
-      event.decisionTimeMillis.map(_.toString).getOrElse("-"),
-      if event.betHistory.isEmpty then "-"
-      else event.betHistory.map(ba => s"${ba.player}:${serializeAction(ba.action)}").mkString("|")
-    ).mkString("\t")
-    Files.write(
-      path,
-      Vector(row).asJava,
-      StandardCharsets.UTF_8,
-      java.nio.file.StandardOpenOption.APPEND
-    )
+      if !Files.exists(path) || Files.size(path) == 0L then
+        Files.write(
+          path,
+          Vector(Header).asJava,
+          StandardCharsets.UTF_8,
+          java.nio.file.StandardOpenOption.CREATE,
+          java.nio.file.StandardOpenOption.TRUNCATE_EXISTING
+        )
+      val row = Vector(
+        event.handId,
+        event.sequenceInHand.toString,
+        event.playerId,
+        event.occurredAtEpochMillis.toString,
+        event.street.toString,
+        event.position.toString,
+        if event.board.cards.isEmpty then "-" else event.board.cards.map(_.toToken).mkString(" "),
+        event.potBefore.toString,
+        event.toCall.toString,
+        event.stackBefore.toString,
+        serializeAction(event.action),
+        event.decisionTimeMillis.map(_.toString).getOrElse("-"),
+        if event.betHistory.isEmpty then "-"
+        else event.betHistory.map(ba => s"${ba.player}:${serializeAction(ba.action)}").mkString("|")
+      ).mkString("\t")
+      Files.write(
+        path,
+        Vector(row).asJava,
+        StandardCharsets.UTF_8,
+        java.nio.file.StandardOpenOption.CREATE,
+        java.nio.file.StandardOpenOption.APPEND
+      )
+    }

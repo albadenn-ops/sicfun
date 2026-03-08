@@ -3,6 +3,7 @@ package sicfun.holdem
 import munit.FunSuite
 import sicfun.core.{Card, DiscreteDistribution}
 
+import java.util.concurrent.CountDownLatch
 import scala.util.Random
 
 class RealTimeAdaptiveEngineTest extends FunSuite:
@@ -248,4 +249,40 @@ class RealTimeAdaptiveEngineTest extends FunSuite:
     val baseline = result.equilibriumBaseline.getOrElse(fail("expected CFR baseline to be present"))
     assert(baseline.actionProbabilities.nonEmpty)
     assert(baseline.actionEvaluations.nonEmpty)
+  }
+
+  test("adaptive engine keeps archetype posterior normalized under concurrent updates") {
+    val engine = new RealTimeAdaptiveEngine(
+      tableRanges = table,
+      actionModel = model,
+      bunchingTrials = 1,
+      defaultEquityTrials = 120,
+      minEquityTrials = 40
+    )
+
+    val responseCycle = Array(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(8.0))
+
+    val done = new CountDownLatch(4)
+    val threads =
+      Vector.tabulate(4) { workerId =>
+        Thread(() =>
+          try
+            var i = 0
+            while i < 100 do
+              engine.observeVillainResponseToRaise(responseCycle((workerId + i) % responseCycle.length))
+              engine.archetypePosterior
+              i += 1
+          finally
+            done.countDown()
+        )
+      }
+    try
+      threads.foreach(_.start())
+      threads.foreach(_.join(10_000L))
+      assertEquals(done.getCount, 0L)
+      val archetypePosterior = engine.archetypePosterior
+      val total = PlayerArchetype.values.map(archetypePosterior.probabilityOf).sum
+      assert(math.abs(total - 1.0) < 1e-9, s"posterior must stay normalized, got $total")
+    finally
+      threads.foreach(_.interrupt())
   }

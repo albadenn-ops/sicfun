@@ -192,6 +192,158 @@ Native library loading overrides:
     - env: `sicfun_BAYES_NATIVE_GPU_LIB`
     - default: `sicfun_bayes_cuda`
 
+## Holdem DDRE native bridge
+
+The DDRE provider now supports Scala synthetic mode plus native JNI CPU/CUDA providers:
+
+- CPU JNI provider:
+  - class: `sicfun.holdem.HoldemDdreNativeCpuBindings`
+  - library: `sicfun_ddre_native`
+- GPU JNI provider (CUDA build):
+  - class: `sicfun.holdem.HoldemDdreNativeGpuBindings`
+  - library: `sicfun_ddre_cuda`
+  - current implementation uses the shared DDRE synthetic inference core compiled with NVCC
+
+Provider selection:
+
+- system property: `-Dsicfun.ddre.provider=disabled|synthetic|native-cpu|native-gpu|onnx`
+- env fallback: `sicfun_DDRE_PROVIDER`
+- default: `disabled`
+
+ONNX runtime option:
+
+- provider value: `onnx`
+- requires model path:
+  - property: `-Dsicfun.ddre.onnx.modelPath=<path-to-model.onnx>`
+  - env: `sicfun_DDRE_ONNX_MODEL_PATH`
+- optional input/output names:
+  - `-Dsicfun.ddre.onnx.input.prior=<name>` (default `prior`)
+  - `-Dsicfun.ddre.onnx.input.likelihoods=<name>` (default `likelihoods`)
+  - `-Dsicfun.ddre.onnx.output.posterior=<name>` (default `posterior`)
+- optional execution controls:
+  - `-Dsicfun.ddre.onnx.executionProvider=cpu|cuda` (default `cpu`)
+  - `-Dsicfun.ddre.onnx.cuda.device=<non-negative-int>` (default `0`)
+  - `-Dsicfun.ddre.onnx.intraOpThreads=<positive-int>`
+  - `-Dsicfun.ddre.onnx.interOpThreads=<positive-int>`
+- note: DDRE ONNX adapter uses reflection against `ai.onnxruntime`; if runtime classes are missing it degrades safely to Bayesian fallback through existing DDRE error handling.
+- project dependency pinning:
+  - `build.sbt` pins `com.microsoft.onnxruntime:onnxruntime:1.19.2` for reproducible JVM runtime behavior.
+
+DDRE ONNX smoke artifact generation:
+
+```bash
+python scripts/generate-ddre-smoke-onnx.py
+```
+
+This writes `src/test/resources/sicfun/ddre/ddre-smoke-sqrt.onnx` (`posterior = sqrt(prior)`), used by DDRE ONNX integration smoke tests.
+
+Native library loading overrides:
+
+- CPU provider:
+  - path: `-Dsicfun.ddre.native.cpu.path=<abs-path>`
+    - env: `sicfun_DDRE_NATIVE_CPU_PATH`
+  - loadLibrary name: `-Dsicfun.ddre.native.cpu.lib=<name>`
+    - env: `sicfun_DDRE_NATIVE_CPU_LIB`
+    - default: `sicfun_ddre_native`
+- GPU provider:
+  - path: `-Dsicfun.ddre.native.gpu.path=<abs-path>`
+    - env: `sicfun_DDRE_NATIVE_GPU_PATH`
+  - loadLibrary name: `-Dsicfun.ddre.native.gpu.lib=<name>`
+    - env: `sicfun_DDRE_NATIVE_GPU_LIB`
+    - default: `sicfun_ddre_cuda`
+
+DDRE parity/benchmark gate (synthetic vs native CPU/GPU):
+
+```bash
+sbt "runMain sicfun.holdem.HoldemDdreParityBenchmark --modes=synthetic,native-cpu,native-gpu --referenceMode=synthetic --maxL1Diff=1e-6 --maxAbsDiff=1e-7 --requireAllModes=true"
+```
+
+DDRE parity/benchmark with ONNX smoke model:
+
+```bash
+sbt "runMain sicfun.holdem.HoldemDdreParityBenchmark --modes=synthetic,onnx --referenceMode=synthetic --onnxModelPath=src/test/resources/sicfun/ddre/ddre-smoke-sqrt.onnx --maxL1Diff=1e-4 --maxAbsDiff=1e-5 --warmupRuns=0 --measureRuns=2"
+```
+
+## Holdem postflop native bridge
+
+Postflop Monte Carlo (flop/turn/river) can route through a dedicated native JNI bridge:
+
+- CPU class/library:
+  - class: `sicfun.holdem.HoldemPostflopNativeBindings`
+  - library: `sicfun_postflop_native`
+- GPU class/library:
+  - class: `sicfun.holdem.HoldemPostflopNativeGpuBindings`
+  - library: `sicfun_postflop_cuda`
+- entrypoint:
+  - `computePostflopBatchMonteCarlo(heroFirst, heroSecond, boardCards, boardSize, villainFirstCards, villainSecondCards, trials, seeds, wins, ties, losses, stderrs)`
+- native telemetry helpers:
+  - `queryNativeEngine()`:
+    - CPU bridge: `0=unknown, 1=cpu, 2=cuda`
+    - CUDA bridge: `0=unknown, 1=cpu, 2=cuda, 3=cpu-fallback-after-cuda-failure`
+  - `cudaDeviceCount()` (CUDA bridge)
+  - `cudaDeviceInfo(deviceIndex)` (CUDA bridge, used by auto-tune cache fingerprinting)
+
+Runtime controls:
+
+- provider selection:
+  - property: `-Dsicfun.postflop.provider=auto|native|disabled`
+  - env: `sicfun_POSTFLOP_PROVIDER`
+  - default: `auto`
+- native library loading:
+  - absolute path: `-Dsicfun.postflop.native.path=<abs-path>`
+    - env: `sicfun_POSTFLOP_NATIVE_PATH`
+  - loadLibrary name: `-Dsicfun.postflop.native.lib=<name>`
+    - env: `sicfun_POSTFLOP_NATIVE_LIB`
+    - default: `sicfun_postflop_native`
+- CPU-specific overrides:
+  - path: `-Dsicfun.postflop.native.cpu.path=<abs-path>`
+    - env: `sicfun_POSTFLOP_NATIVE_CPU_PATH`
+  - loadLibrary name: `-Dsicfun.postflop.native.cpu.lib=<name>`
+    - env: `sicfun_POSTFLOP_NATIVE_CPU_LIB`
+    - default: `sicfun_postflop_native`
+- GPU-specific overrides:
+  - path: `-Dsicfun.postflop.native.gpu.path=<abs-path>`
+    - env: `sicfun_POSTFLOP_NATIVE_GPU_PATH`
+  - loadLibrary name: `-Dsicfun.postflop.native.gpu.lib=<name>`
+    - env: `sicfun_POSTFLOP_NATIVE_GPU_LIB`
+    - default: `sicfun_postflop_cuda`
+- engine hint:
+  - property: `-Dsicfun.postflop.native.engine=auto|cpu|cuda`
+  - env: `sicfun_POSTFLOP_NATIVE_ENGINE`
+  - `auto` attempts GPU first, then falls back to CPU if GPU execution fails
+  - `auto` also prefers CPU for small workloads (`villains * trials`) below:
+    - property: `-Dsicfun.postflop.native.auto.minGpuWork=<positive-int>`
+    - env: `sicfun_POSTFLOP_NATIVE_AUTO_MIN_GPU_WORK`
+    - default: `300000`
+- native worker threads:
+  - env: `sicfun_POSTFLOP_NATIVE_THREADS=<positive-int>`
+  - default: hardware concurrency capped to batch size
+- CUDA launch controls (GPU library):
+  - property: `-Dsicfun.postflop.native.cuda.blockSize=<positive-int>`
+  - env: `sicfun_POSTFLOP_CUDA_BLOCK_SIZE=<positive-int>`
+  - default: `128`, normalized to warp-size multiples
+- CUDA chunking controls (GPU library):
+  - property: `-Dsicfun.postflop.native.cuda.maxChunkMatchups=<positive-int>`
+  - env: `sicfun_POSTFLOP_CUDA_MAX_CHUNK_MATCHUPS=<positive-int>`
+  - default: `4096`
+- CUDA trial chunking controls (GPU library):
+  - property: `-Dsicfun.postflop.native.cuda.maxTrialsPerLaunch=<positive-int>`
+  - env: `sicfun_POSTFLOP_CUDA_MAX_TRIALS_PER_LAUNCH=<positive-int>`
+  - splits large trial counts into multiple launches to reduce WDDM/TDR risk
+  - default: `4096`
+- postflop CUDA auto-tune cache (runtime apply-only):
+  - enable/disable:
+    - property: `-Dsicfun.postflop.autotune=true|false`
+    - env: `sicfun_POSTFLOP_AUTOTUNE`
+    - default: enabled
+  - cache file:
+    - property: `-Dsicfun.postflop.autotune.cachePath=<file>`
+    - env: `sicfun_POSTFLOP_AUTOTUNE_CACHE_PATH`
+    - default: `data/postflop-autotune.properties`
+  - cache is skipped when either CUDA override is explicitly set:
+    - `sicfun.postflop.native.cuda.blockSize`
+    - `sicfun.postflop.native.cuda.maxChunkMatchups`
+
 Bayesian hotspot benchmark:
 
 ```bash
@@ -209,6 +361,8 @@ This produces:
 - `src/main/native/build/sicfun_gpu_kernel.dll`
 - `src/main/native/build/sicfun_cfr_cuda.dll`
 - `src/main/native/build/sicfun_bayes_cuda.dll`
+- `src/main/native/build/sicfun_ddre_cuda.dll`
+- `src/main/native/build/sicfun_postflop_cuda.dll`
 
 LLVM Windows build:
 
@@ -221,10 +375,37 @@ This produces:
 - `src/main/native/build/sicfun_native_cpu.dll`
 - `src/main/native/build/sicfun_cfr_native.dll`
 - `src/main/native/build/sicfun_bayes_native.dll`
+- `src/main/native/build/sicfun_ddre_native.dll`
+- `src/main/native/build/sicfun_postflop_native.dll`
 
 Compatibility note:
 
 - CUDA 12.0 and later do not include `sm_50` targets, so Maxwell-era GPUs (e.g. GTX 960M) require CUDA 11.8 for native CUDA builds.
+
+Postflop backend benchmark (Scala vs native CPU/CUDA):
+
+```bash
+sbt "runMain sicfun.holdem.HoldemPostflopNativeBenchmark --warmupRuns=2 --measureRuns=8 --trials=12000 --modes=scala,native-cpu,native-cuda,native-auto --seed=31"
+```
+
+Postflop CUDA auto-tuner (writes `data/postflop-autotune.properties` by default):
+
+```bash
+sbt "runMain sicfun.holdem.HoldemPostflopGpuAutoTuner --villains=1024 --trials=2000 --warmupRuns=1 --runs=3 --cachePath=data/postflop-autotune.properties"
+```
+
+Optional tuning argument overrides:
+
+- `--nativeGpuPath=<abs-path>`
+- `--blockCandidates=64,96,128,160,192,256`
+- `--chunkCandidates=256,512,1024,2048,4096`
+- `--villains=<positive-int>` (benchmark only; default `8`, use larger values like `512`/`1024` for throughput stress)
+
+Postflop parity/behavior tests:
+
+```bash
+sbt "testOnly sicfun.holdem.HoldemPostflopNativeParityTest"
+```
 
 Gate benchmark:
 

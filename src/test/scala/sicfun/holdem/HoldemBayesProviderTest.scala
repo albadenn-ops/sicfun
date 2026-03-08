@@ -6,6 +6,9 @@ import sicfun.core.{Card, DiscreteDistribution}
 import java.nio.file.Paths
 
 class HoldemBayesProviderTest extends FunSuite:
+  private val CpuProviderProperty = "sicfun.bayes.provider"
+  private val CpuPathProperty = "sicfun.bayes.native.cpu.path"
+
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card token: $token"))
 
@@ -13,17 +16,16 @@ class HoldemBayesProviderTest extends FunSuite:
     HoleCards.from(Vector(card(a), card(b)))
 
   private def withSystemProperties(properties: Map[String, String])(thunk: => Unit): Unit =
-    val previous = properties.keysIterator.map(key => key -> sys.props.get(key)).toVector
-    properties.foreach { case (key, value) => System.setProperty(key, value) }
-    try thunk
-    finally
-      previous.foreach { case (key, oldValue) =>
-        oldValue match
-          case Some(value) => System.setProperty(key, value)
-          case None => System.clearProperty(key)
-      }
+    TestSystemPropertyScope.withSystemProperties(
+      properties.toVector.map { case (key, value) => key -> Some(value) }
+    ) {
       HoldemBayesNativeRuntime.resetLoadCacheForTests()
       HoldemBayesProvider.resetAutoProviderForTests()
+      try thunk
+      finally
+        HoldemBayesNativeRuntime.resetLoadCacheForTests()
+        HoldemBayesProvider.resetAutoProviderForTests()
+    }
 
   test("forced native CPU falls back to scala when native path is invalid") {
     val missingPath = Paths
@@ -32,8 +34,8 @@ class HoldemBayesProviderTest extends FunSuite:
 
     withSystemProperties(
       Map(
-        "sicfun.bayes.provider" -> "native-cpu",
-        "sicfun.bayes.native.cpu.path" -> missingPath
+        CpuProviderProperty -> "native-cpu",
+        CpuPathProperty -> missingPath
       )
     ) {
       val prior = DiscreteDistribution(
@@ -64,7 +66,7 @@ class HoldemBayesProviderTest extends FunSuite:
   }
 
   test("explicit scala provider keeps scala backend") {
-    withSystemProperties(Map("sicfun.bayes.provider" -> "scala")) {
+    withSystemProperties(Map(CpuProviderProperty -> "scala")) {
       val prior = DiscreteDistribution(
         Map(
           hole("As", "Ah") -> 0.5,

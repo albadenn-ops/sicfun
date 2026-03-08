@@ -1,7 +1,8 @@
 package sicfun.holdem
 
-import sicfun.core.{Card, DiscreteDistribution}
+import sicfun.core.{Card, CardId, DiscreteDistribution}
 
+import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 
 /** Benchmark harness for postflop Monte Carlo runtime backends. */
@@ -10,6 +11,7 @@ object HoldemPostflopNativeBenchmark:
       warmupRuns: Int = 2,
       measureRuns: Int = 8,
       trials: Int = 12_000,
+      villains: Int = 8,
       seed: Long = 23L,
       modes: Vector[String] = Vector("scala", "native-cpu", "native-cuda"),
       nativeCpuPath: Option[String] = None,
@@ -43,18 +45,20 @@ object HoldemPostflopNativeBenchmark:
     require(config.warmupRuns >= 0, "warmupRuns must be non-negative")
     require(config.measureRuns > 0, "measureRuns must be positive")
     require(config.trials > 0, "trials must be positive")
+    require(config.villains > 0, "villains must be positive")
     require(config.modes.nonEmpty, "at least one benchmark mode is required")
 
     val runSeeds = {
       val rng = new Random(config.seed)
       Vector.fill(config.warmupRuns + config.measureRuns)(rng.nextLong())
     }
-    val spot = benchmarkSpot(config.seed ^ 0xD6E8FEB86659FD93L)
+    val spot = benchmarkSpot(config.seed ^ 0xD6E8FEB86659FD93L, config.villains)
 
     println("=== Holdem Postflop Native Benchmark ===")
     println(
       s"config: warmupRuns=${config.warmupRuns}, measureRuns=${config.measureRuns}, " +
-        s"trials=${config.trials}, seed=${config.seed}, modes=${config.modes.mkString(",")}"
+        s"trials=${config.trials}, villains=${config.villains}, seed=${config.seed}, " +
+        s"modes=${config.modes.mkString(",")}"
     )
 
     val modeRuns = config.modes.map { mode =>
@@ -258,13 +262,14 @@ object HoldemPostflopNativeBenchmark:
       warmupRuns = options.get("warmupRuns").flatMap(_.toIntOption).getOrElse(2),
       measureRuns = options.get("measureRuns").flatMap(_.toIntOption).getOrElse(8),
       trials = options.get("trials").flatMap(_.toIntOption).getOrElse(12_000),
+      villains = options.get("villains").flatMap(_.toIntOption).getOrElse(8),
       seed = options.get("seed").flatMap(_.toLongOption).getOrElse(23L),
       modes = modes,
       nativeCpuPath = options.get("nativeCpuPath"),
       nativeGpuPath = options.get("nativeGpuPath")
     )
 
-  private def benchmarkSpot(seed: Long): BenchmarkSpot =
+  private def benchmarkSpot(seed: Long, villainCount: Int): BenchmarkSpot =
     def card(token: String): Card =
       Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card token: $token"))
 
@@ -274,7 +279,7 @@ object HoldemPostflopNativeBenchmark:
     val hero = hole("Ac", "Kh")
     val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
     val rng = new Random(seed)
-    val villains = Vector(
+    val baseVillains = Vector(
       hole("Ah", "Qh") -> 0.12,
       hole("As", "Kd") -> 0.09,
       hole("Jc", "Td") -> 0.16,
@@ -284,7 +289,33 @@ object HoldemPostflopNativeBenchmark:
       hole("Ad", "5d") -> 0.14,
       hole("Kc", "Qc") -> 0.16
     )
-    val jittered = villains.map { case (hand, w) =>
+
+    val selected = ArrayBuffer.empty[(HoleCards, Double)]
+    val seen = scala.collection.mutable.HashSet.empty[HoleCards]
+    baseVillains.foreach { case (hand, w) =>
+      if selected.length < villainCount then
+        selected += ((hand, w))
+        seen += hand
+    }
+
+    val deadIds = (hero.toVector ++ board.cards).map(CardId.toId).toSet
+    var cursor = (math.abs((seed ^ (seed >>> 32)).toInt) % HoleCardsIndex.size + HoleCardsIndex.size) % HoleCardsIndex.size
+    val step = 37 // coprime with 1326
+    var guard = 0
+    while selected.length < villainCount && guard < HoleCardsIndex.size * 2 do
+      val hand = HoleCardsIndex.byId(cursor)
+      val firstId = CardId.toId(hand.first)
+      val secondId = CardId.toId(hand.second)
+      if !deadIds.contains(firstId) && !deadIds.contains(secondId) && !seen.contains(hand) then
+        val w = 0.05 + rng.nextDouble()
+        selected += ((hand, w))
+        seen += hand
+      cursor = (cursor + step) % HoleCardsIndex.size
+      guard += 1
+
+    require(selected.length == villainCount, s"unable to build villain batch size=$villainCount")
+
+    val jittered = selected.toVector.map { case (hand, w) =>
       hand -> (w * (0.9 + 0.2 * rng.nextDouble()))
     }
     val sorted = jittered.sortBy(_._1.toToken)

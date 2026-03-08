@@ -4,6 +4,8 @@ import munit.FunSuite
 import scala.util.Random
 
 class HeadsUpEquityCanonicalTableTest extends FunSuite:
+  private val PreflopBackendProperty = "sicfun.holdem.preflopEquityBackend"
+
   private def hole(a: String, b: String): HoleCards =
     HoleCards.from(Vector(
       sicfun.core.Card.parse(a).getOrElse(fail(s"invalid card: $a")),
@@ -31,30 +33,38 @@ class HeadsUpEquityCanonicalTableTest extends FunSuite:
   }
 
   test("buildAll limit is applied to canonical key count") {
-    val table = HeadsUpEquityCanonicalTable.buildAll(
-      mode = HeadsUpEquityTable.Mode.MonteCarlo(8),
-      rng = new Random(11L),
-      maxMatchups = 50L,
-      parallelism = 1
-    )
-    assertEquals(table.size, 50)
+    TestSystemPropertyScope.withSystemProperties(
+      Vector(PreflopBackendProperty -> Some("cpu"))
+    ) {
+      val table = HeadsUpEquityCanonicalTable.buildAll(
+        mode = HeadsUpEquityTable.Mode.MonteCarlo(8),
+        rng = new Random(11L),
+        maxMatchups = 50L,
+        parallelism = 1
+      )
+      assertEquals(table.size, 50)
+    }
   }
 
   test("buildAll MonteCarlo is deterministic across parallelism settings") {
-    val mode = HeadsUpEquityTable.Mode.MonteCarlo(12)
-    val maxMatchups = 400L
-    val seed = 23L
-    val sequential = HeadsUpEquityCanonicalTable.buildAll(
-      mode = mode,
-      rng = new Random(seed),
-      maxMatchups = maxMatchups,
-      parallelism = 1
-    )
-    val parallel = HeadsUpEquityCanonicalTable.buildAll(
-      mode = mode,
-      rng = new Random(seed),
-      maxMatchups = maxMatchups,
-      parallelism = 4
-    )
-    assertEquals(sequential.values, parallel.values)
+    TestSystemPropertyScope.withSystemProperties(
+      Vector(PreflopBackendProperty -> Some("cpu"))
+    ) {
+      val mode = HeadsUpEquityTable.Mode.MonteCarlo(12)
+      val maxMatchups = 400L
+      val seed = 23L
+      val sequential = HeadsUpEquityCanonicalTable.buildAll(
+        mode = mode,
+        rng = new Random(seed),
+        maxMatchups = maxMatchups,
+        parallelism = 1
+      )
+      val parallel = HeadsUpEquityCanonicalTable.buildAll(
+        mode = mode,
+        rng = new Random(seed),
+        maxMatchups = maxMatchups,
+        parallelism = 4
+      )
+      assertEquals(sequential.values, parallel.values)
+    }
   }

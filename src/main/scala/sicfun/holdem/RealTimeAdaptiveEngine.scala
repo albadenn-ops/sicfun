@@ -1,7 +1,9 @@
 package sicfun.holdem
 
-import sicfun.core.DiscreteDistribution
+import sicfun.core.{CollapseMetrics, DiscreteDistribution}
 
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 import scala.util.Random
 import scala.util.control.NonFatal
 import scala.util.hashing.MurmurHash3
@@ -125,29 +127,48 @@ final class RealTimeAdaptiveEngine(
   )
 
   private val Eps = 1e-12
+  private val MaxInferenceCacheSize = 64
+  private val LowLatencyMaxPosteriorHands = 192
   private val tableRangesIdentity = System.identityHashCode(tableRanges)
-  private var archetypePosteriorState: ArchetypePosterior = ArchetypePosterior.uniform
-  private var cachedInference: Option[(InferenceCacheKey, PosteriorInferenceResult)] = None
-  private var inferenceHits = 0L
-  private var inferenceMisses = 0L
+  private val archetypePosteriorRef = new AtomicReference[ArchetypePosterior](ArchetypePosterior.uniform)
+  private val inferenceCache = new ConcurrentHashMap[InferenceCacheKey, PosteriorInferenceResult]()
+  private val inferenceHitsCounter = new AtomicLong(0L)
+  private val inferenceMissesCounter = new AtomicLong(0L)
+  private val lowLatencyPosteriorByPosition: Map[Position, PosteriorInferenceResult] =
+    tableRanges.format.preflopOrder.map { position =>
+      val compacted = compactRange(tableRanges.rangeFor(position).normalized, LowLatencyMaxPosteriorHands)
+      val support = CollapseMetrics.effectiveSupport(compacted)
+      position ->
+        PosteriorInferenceResult(
+          prior = compacted,
+          posterior = compacted,
+          logEvidence = 0.0,
+          collapse = PosteriorCollapse(
+            entropyReduction = 0.0,
+            klDivergence = 0.0,
+            effectiveSupportPrior = support,
+            effectiveSupportPosterior = support,
+            collapseRatio = 0.0
+          )
+        )
+    }.toMap
 
-  private val adaptiveResponseModel = new VillainResponseModel:
-    override def response(
-        villainHand: HoleCards,
+  private val adaptiveResponseModel = new UniformVillainResponseModel:
+    override def responseProfile(
         state: GameState,
         heroAction: PokerAction
     ): VillainResponseProfile =
       heroAction match
-        case PokerAction.Raise(_) => blendedRaiseResponse(archetypePosteriorState)
+        case PokerAction.Raise(_) => blendedRaiseResponse(archetypePosteriorRef.get())
         case _ => VillainResponseProfile(0.0, 1.0, 0.0)
 
-  def archetypePosterior: ArchetypePosterior = archetypePosteriorState
+  def archetypePosterior: ArchetypePosterior = archetypePosteriorRef.get()
 
   def cacheStats: AdaptiveCacheStats =
-    AdaptiveCacheStats(inferenceHits, inferenceMisses)
+    AdaptiveCacheStats(inferenceHitsCounter.get(), inferenceMissesCounter.get())
 
   def clearInferenceCache(): Unit =
-    cachedInference = None
+    inferenceCache.clear()
 
   /** Online Bayesian update of villain archetype from observed response to a hero raise.
     *
@@ -155,26 +176,27 @@ final class RealTimeAdaptiveEngine(
     */
   def observeVillainResponseToRaise(villainAction: PokerAction): ArchetypePosterior =
     responseOutcome(villainAction) match
-      case None => archetypePosteriorState
+      case None => archetypePosteriorRef.get()
       case Some(outcome) =>
-        val updated = Map.newBuilder[PlayerArchetype, Double]
-        var total = 0.0
-        PlayerArchetype.values.foreach { archetype =>
-          val prior = archetypePosteriorState.probabilityOf(archetype)
-          val likelihood = responseLikelihood(archetype, outcome)
-          val posteriorUnnormalized = prior * likelihood
-          updated += archetype -> posteriorUnnormalized
-          total += posteriorUnnormalized
+        archetypePosteriorRef.updateAndGet { current =>
+          val updated = Map.newBuilder[PlayerArchetype, Double]
+          var total = 0.0
+          PlayerArchetype.values.foreach { archetype =>
+            val prior = current.probabilityOf(archetype)
+            val likelihood = responseLikelihood(archetype, outcome)
+            val posteriorUnnormalized = prior * likelihood
+            updated += archetype -> posteriorUnnormalized
+            total += posteriorUnnormalized
+          }
+          val normalized =
+            if total <= Eps then ArchetypePosterior.uniform.weights
+            else
+              val inv = 1.0 / total
+              updated.result().map { case (archetype, value) =>
+                archetype -> (value * inv)
+              }
+          ArchetypePosterior(normalized)
         }
-        val normalized =
-          if total <= Eps then ArchetypePosterior.uniform.weights
-          else
-            val inv = 1.0 / total
-            updated.result().map { case (archetype, value) =>
-              archetype -> (value * inv)
-            }
-        archetypePosteriorState = ArchetypePosterior(normalized)
-        archetypePosteriorState
 
   /** Low-latency adaptive recommendation against a provided posterior range. */
   def recommendAgainstPosterior(
@@ -197,18 +219,22 @@ final class RealTimeAdaptiveEngine(
       equityTrials = trials,
       rng = rng
     )
-    val (recommendation, equilibriumBaseline) = maybeBlendWithEquilibriumBaseline(
-      hero = hero,
-      state = state,
-      posterior = posterior,
-      candidateActions = candidateActions,
-      baseRecommendation = baseRecommendation,
-      rng = new Random(rng.nextLong())
-    )
+    val (recommendation, equilibriumBaseline) =
+      if equilibriumBaselineConfig.isEmpty then (baseRecommendation, None)
+      else
+        maybeBlendWithEquilibriumBaseline(
+          hero = hero,
+          state = state,
+          posterior = posterior,
+          candidateActions = candidateActions,
+          baseRecommendation = baseRecommendation,
+          rng = new Random(rng.nextLong())
+        )
+    val currentPosterior = archetypePosteriorRef.get()
     AdaptiveRecommendationResult(
       recommendation = recommendation,
-      archetypePosterior = archetypePosteriorState,
-      archetypeMap = archetypePosteriorState.mapEstimate,
+      archetypePosterior = currentPosterior,
+      archetypeMap = currentPosterior.mapEstimate,
       equityTrialsUsed = trials,
       equilibriumBaseline = equilibriumBaseline
     )
@@ -226,35 +252,49 @@ final class RealTimeAdaptiveEngine(
       rng: Random = new Random()
   ): AdaptiveDecisionResult =
     val startedAt = System.nanoTime()
+    val effectiveBunching = effectiveBunchingTrials(decisionBudgetMillis)
+    val useLowLatencyPosterior =
+      effectiveBunching <= 1 &&
+        actionModel.isEffectivelyUniform &&
+        HoldemDdreProvider.configuredConfig().mode == HoldemDdreProvider.Mode.Off
+    val observationsHash =
+      if useLowLatencyPosterior then 0 else MurmurHash3.seqHash(observations)
     val key = InferenceCacheKey(
       hero = hero,
       board = state.board,
       folds = folds,
       villainPos = villainPos,
-      observationsHash = MurmurHash3.seqHash(observations),
+      observationsHash = observationsHash,
       tableRangesIdentity = tableRangesIdentity,
-      bunchingTrials = bunchingTrials
+      bunchingTrials = effectiveBunching
     )
 
-    val posteriorInference = cachedInference match
-      case Some((cachedKey, cachedValue)) if cachedKey == key =>
-        inferenceHits += 1L
-        cachedValue
-      case _ =>
-        inferenceMisses += 1L
-        val inferred = RangeInferenceEngine.inferPosterior(
-          hero = hero,
-          board = state.board,
-          folds = folds,
-          tableRanges = tableRanges,
-          villainPos = villainPos,
-          observations = observations,
-          actionModel = actionModel,
-          bunchingTrials = bunchingTrials,
-          rng = new Random(rng.nextLong())
-        )
-        cachedInference = Some(key -> inferred)
-        inferred
+    val cachedInference = inferenceCache.get(key)
+    val posteriorInference =
+      if cachedInference != null then
+        inferenceHitsCounter.incrementAndGet()
+        cachedInference
+      else
+        inferenceMissesCounter.incrementAndGet()
+        val inferred =
+          if useLowLatencyPosterior then
+            lowLatencyPosteriorInference(villainPos)
+          else
+            RangeInferenceEngine.inferPosterior(
+              hero = hero,
+              board = state.board,
+              folds = folds,
+              tableRanges = tableRanges,
+              villainPos = villainPos,
+              observations = observations,
+              actionModel = actionModel,
+              bunchingTrials = effectiveBunching,
+              rng = new Random(rng.nextLong())
+            )
+        if inferenceCache.size() >= MaxInferenceCacheSize then inferenceCache.clear()
+        inferenceCache.putIfAbsent(key, inferred)
+        val published = inferenceCache.get(key)
+        if published != null then published else inferred
 
     val inferenceElapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
     val trials = effectiveEquityTrials(decisionBudgetMillis, inferenceElapsedMs)
@@ -268,19 +308,23 @@ final class RealTimeAdaptiveEngine(
       equityTrials = trials,
       rng = new Random(rng.nextLong())
     )
-    val (recommendation, equilibriumBaseline) = maybeBlendWithEquilibriumBaseline(
-      hero = hero,
-      state = state,
-      posterior = posteriorInference.posterior,
-      candidateActions = candidateActions,
-      baseRecommendation = baseRecommendation,
-      rng = new Random(rng.nextLong())
-    )
+    val (recommendation, equilibriumBaseline) =
+      if equilibriumBaselineConfig.isEmpty then (baseRecommendation, None)
+      else
+        maybeBlendWithEquilibriumBaseline(
+          hero = hero,
+          state = state,
+          posterior = posteriorInference.posterior,
+          candidateActions = candidateActions,
+          baseRecommendation = baseRecommendation,
+          rng = new Random(rng.nextLong())
+        )
 
+    val currentPosterior = archetypePosteriorRef.get()
     AdaptiveDecisionResult(
       decision = InferenceDecisionResult(posteriorInference, recommendation),
-      archetypePosterior = archetypePosteriorState,
-      archetypeMap = archetypePosteriorState.mapEstimate,
+      archetypePosterior = currentPosterior,
+      archetypeMap = currentPosterior.mapEstimate,
       equityTrialsUsed = trials,
       cacheStats = cacheStats,
       equilibriumBaseline = equilibriumBaseline
@@ -331,7 +375,7 @@ final class RealTimeAdaptiveEngine(
   ): Int =
     decisionBudgetMillis match
       case None => defaultEquityTrials
-      case Some(budget) if budget <= 0L => minEquityTrials
+      case Some(budget) if budget <= 1L => minEquityTrials
       case Some(budget) =>
         val remaining = budget - inferenceElapsedMs
         if remaining <= 0L then minEquityTrials
@@ -339,6 +383,34 @@ final class RealTimeAdaptiveEngine(
           val scale = remaining.toDouble / budget.toDouble
           val scaled = math.round(defaultEquityTrials.toDouble * scale).toInt
           math.max(minEquityTrials, math.min(defaultEquityTrials, scaled))
+
+  private def effectiveBunchingTrials(decisionBudgetMillis: Option[Long]): Int =
+    decisionBudgetMillis match
+      case Some(budget) if budget <= 1L => 1
+      case _ => bunchingTrials
+
+  private def lowLatencyPosteriorInference(
+      villainPos: Position
+  ): PosteriorInferenceResult =
+    lowLatencyPosteriorByPosition.getOrElse(
+      villainPos,
+      throw new IllegalArgumentException(s"villain position $villainPos is not part of table format")
+    )
+
+  private def compactRange(
+      range: DiscreteDistribution[HoleCards],
+      maxHands: Int
+  ): DiscreteDistribution[HoleCards] =
+    if maxHands <= 0 || range.weights.size <= maxHands then range
+    else
+      val sorted = range.weights.toVector.sortBy { case (_, probability) => -probability }
+      val kept = Map.newBuilder[HoleCards, Double]
+      var i = 0
+      while i < sorted.length && i < maxHands do
+        val (hand, probability) = sorted(i)
+        if probability > 0.0 then kept += hand -> probability
+        i += 1
+      DiscreteDistribution(kept.result()).normalized
 
   private def maybeBlendWithEquilibriumBaseline(
       hero: HoleCards,

@@ -21,7 +21,8 @@ class BayesianTest extends FunSuite:
     betHistory = Vector.empty
   )
 
-  private val strongHand = hole("Ah", "Kh")
+  // On this flop, QJ is a made straight and should dominate raise likelihood.
+  private val strongHand = hole("Qs", "Jd")
   private val weakHand = hole("7c", "2d")
 
   // Real production trained model: strongHand → Raise, weakHand → Fold
@@ -30,7 +31,7 @@ class BayesianTest extends FunSuite:
       (state, strongHand, PokerAction.Raise(20.0)),
       (state, weakHand, PokerAction.Fold)
     )).flatten
-    PokerActionModel.train(data, learningRate = 0.1, iterations = 500)
+    PokerActionModel.train(data, learningRate = 0.1, iterations = 1000, l2Lambda = 0.0)
 
   test("single update shifts probability toward hypothesis consistent with action") {
     val prior = BayesianRange(DiscreteDistribution(Map(strongHand -> 0.5, weakHand -> 0.5)))
@@ -66,7 +67,7 @@ class BayesianTest extends FunSuite:
   }
 
   test("BayesianRange.uniform creates equal weights") {
-    val range = BayesianRange.uniform(Seq(strongHand, weakHand, hole("Qs", "Jd")))
+    val range = BayesianRange.uniform(Seq(strongHand, weakHand, hole("Ah", "Kh")))
     val probs = range.distribution.weights.values.toSeq
     probs.foreach(p => assert(math.abs(p - 1.0 / 3.0) < 1e-9))
   }

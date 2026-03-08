@@ -15,6 +15,7 @@ final case class PokerActionModel(
     s"featureDimension ($featureDimension) must match logistic feature dimension (${logistic.weights.headOption.map(_.length).getOrElse(0)})")
 
   private inline val MinLikelihood = 1e-6
+  private inline val UniformTolerance = 1e-12
 
   /** Predict action probabilities from a pre-computed feature vector.
     * Works with any feature dimension matching this model's `featureDimension`.
@@ -39,6 +40,13 @@ final case class PokerActionModel(
     val idx = categoryIndex.getOrElse(category,
       throw new IllegalArgumentException(s"unknown action category: $category"))
     math.max(probs(idx), MinLikelihood)
+
+  /** True when this model is effectively the bootstrap-uniform model
+    * (all weights and biases are numerically zero).
+    */
+  def isEffectivelyUniform: Boolean =
+    logistic.bias.forall(b => math.abs(b) <= UniformTolerance) &&
+      logistic.weights.forall(row => row.forall(w => math.abs(w) <= UniformTolerance))
 
 final case class CalibrationSummary(
     meanBrierScore: Double,

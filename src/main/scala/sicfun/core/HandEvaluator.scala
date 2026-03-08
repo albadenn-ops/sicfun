@@ -1,7 +1,6 @@
 package sicfun.core
 
 import java.util.concurrent.ConcurrentHashMap
-import java.util.Arrays
 
 /** Poker hand categories ordered by strength from weakest to strongest.
   *
@@ -19,32 +18,46 @@ enum HandCategory(val strength: Int):
   case FourOfKind extends HandCategory(7)
   case StraightFlush extends HandCategory(8)
 
-/** A fully ordered poker hand ranking consisting of a category and tiebreak ranks.
+/** A fully ordered poker hand ranking packed into a single Int for zero-allocation comparison.
   *
-  * Comparison first checks [[HandCategory.strength]]; if equal, the `tiebreak`
-  * vector is compared lexicographically. Tiebreak entries are rank values ordered
-  * by descending significance (e.g., for TwoPair: high pair, low pair, kicker).
+  * Encoding: `(categoryStrength << 20) | (tb0 << 16) | (tb1 << 12) | (tb2 << 8) | (tb3 << 4) | tb4`
   *
-  * @param category the hand category (e.g., Flush, FullHouse)
-  * @param tiebreak rank values used to break ties within the same category
+  * 4 bits per tiebreak rank (values 0-14), 4 bits for category (values 0-8).
+  * Natural Int ordering matches hand strength ordering (higher packed value = better hand).
+  *
+  * @param packed the packed integer encoding category and tiebreak ranks
   */
-final case class HandRank(category: HandCategory, tiebreak: Vector[Int]) extends Ordered[HandRank]:
+final case class HandRank(packed: Int) extends Ordered[HandRank]:
   override def compare(that: HandRank): Int =
-    val catCmp = this.category.strength.compare(that.category.strength)
-    if catCmp != 0 then catCmp
-    else lexicographicCompare(this.tiebreak, that.tiebreak)
+    Integer.compare(this.packed, that.packed)
 
-  /** Element-wise comparison; shorter vectors are "less than" longer ones if all shared elements match. */
-  private def lexicographicCompare(a: Vector[Int], b: Vector[Int]): Int =
-    import scala.util.boundary, boundary.break
-    val len = math.min(a.length, b.length)
-    boundary:
-      var i = 0
-      while i < len do
-        val cmp = a(i).compare(b(i))
-        if cmp != 0 then break(cmp)
-        i += 1
-      a.length.compare(b.length)
+  def category: HandCategory =
+    HandCategory.fromOrdinal((packed >>> 20) & 0x0f)
+
+  /** Number of significant tiebreak entries for this hand's category. */
+  def tiebreakLength: Int =
+    ((packed >>> 20) & 0x0f) match
+      case 0 | 5 => 5 // HighCard, Flush
+      case 1     => 4 // OnePair
+      case 2 | 3 => 3 // TwoPair, ThreeOfKind
+      case 4 | 8 => 1 // Straight, StraightFlush
+      case 6 | 7 => 2 // FullHouse, FourOfKind
+      case _     => 0
+
+  /** Returns the i-th tiebreak rank (0-indexed, most significant first). */
+  def tiebreak(i: Int): Int =
+    (packed >>> (16 - i * 4)) & 0x0f
+
+  /** Returns the tiebreak ranks as a Vector (for backward compatibility / tests). */
+  def tiebreakVector: Vector[Int] =
+    val len = tiebreakLength
+    val builder = Vector.newBuilder[Int]
+    builder.sizeHint(len)
+    var i = 0
+    while i < len do
+      builder += tiebreak(i)
+      i += 1
+    builder.result()
 
 /** Companion providing a given [[Ordering]] instance so HandRank can be used
   * with standard library sort and collection operations.
@@ -57,7 +70,7 @@ object HandRank:
   *
   * Provides three evaluation strategies:
   *  - '''evaluate5 / evaluate7''': canonical evaluation returning a full [[HandRank]]
-  *    (category + tiebreakers). Allocates intermediate collections.
+  *    (category + tiebreakers).
   *  - '''evaluate5Cached / evaluate7Cached''': memoized variants backed by
   *    [[java.util.concurrent.ConcurrentHashMap]] for thread-safe, lock-free caching.
   *    Useful when the same hand may be evaluated repeatedly (e.g., equity simulations).
@@ -69,15 +82,21 @@ object HandEvaluator:
   // ConcurrentHashMap is chosen over a synchronized HashMap because hand evaluation
   // is a hot path in Monte Carlo simulations running across multiple threads.
   // ConcurrentHashMap provides lock-free reads and fine-grained locking on writes.
+  private val Cache5MaxSizeProperty = "sicfun.handEvaluator.cache5.maxSize"
+  private val Cache5MaxSizeEnv = "sicfun_HAND_EVALUATOR_CACHE5_MAX_SIZE"
+  private val Cache7MaxSizeProperty = "sicfun.handEvaluator.cache7.maxSize"
+  private val Cache7MaxSizeEnv = "sicfun_HAND_EVALUATOR_CACHE7_MAX_SIZE"
+  private val DefaultMaxCache5Size = 250_000
+  private val DefaultMaxCache7Size = 750_000
   private val cache5 = new ConcurrentHashMap[Long, HandRank]()
   private val cache7 = new ConcurrentHashMap[Long, HandRank]()
-  // Pre-computed C(7,5) = 21 index combinations for selecting 5 cards from 7.
-  private val combos7of5: Array[Array[Int]] = LookupTables.combos7of5
+  private val rankCountScratch = new ThreadLocal[Array[Int]]:
+    override def initialValue(): Array[Int] = new Array[Int](15)
+  private val uniqueRankScratch = new ThreadLocal[Array[Int]]:
+    override def initialValue(): Array[Int] = new Array[Int](5)
 
   /** Evaluates a 5-card poker hand, returning a full [[HandRank]] with tiebreakers.
     *
-    * The evaluation groups cards by rank to determine the frequency pattern
-    * (e.g., List(3,2) = FullHouse), then checks for flushes and straights.
     * Tiebreaker ranks are ordered so that the most significant group comes first.
     *
     * @param cards exactly 5 distinct cards
@@ -85,54 +104,17 @@ object HandEvaluator:
     * @throws IllegalArgumentException if not exactly 5 distinct cards
     */
   def evaluate5(cards: Seq[Card]): HandRank =
-    require(cards.length == 5, s"evaluate5 expects 5 cards, got ${cards.length}")
-    require(cards.distinct.length == 5, "evaluate5 requires 5 distinct cards")
-
-    val ranks = cards.map(_.rank.value)
-    val suits = cards.map(_.suit)
-
-    val isFlush = suits.distinct.length == 1
-    val straightHighOpt = straightHigh(ranks)
-
-    // Group ranks by frequency. Sort by (-count, -rank) so the dominant group
-    // (and highest rank within equal counts) appears first.
-    val groups = ranks.groupBy(identity).view.mapValues(_.size).toMap
-    val countRank = groups.toList
-      .map { case (rank, count) => (count, rank) }
-      .sortBy { case (count, rank) => (-count, -rank) }
-
-    // Extract just the counts to match against known frequency patterns.
-    val pattern = countRank.map(_._1)
-
-    (isFlush, straightHighOpt, pattern) match
-      case (true, Some(high), _) =>
-        HandRank(HandCategory.StraightFlush, Vector(high))
-      case (_, _, List(4, 1)) =>
-        val quad = countRank.head._2
-        val kicker = countRank(1)._2
-        HandRank(HandCategory.FourOfKind, Vector(quad, kicker))
-      case (_, _, List(3, 2)) =>
-        val trip = countRank.head._2
-        val pair = countRank(1)._2
-        HandRank(HandCategory.FullHouse, Vector(trip, pair))
-      case (true, None, _) =>
-        HandRank(HandCategory.Flush, ranks.sorted(using Ordering.Int.reverse).toVector)
-      case (false, Some(high), _) =>
-        HandRank(HandCategory.Straight, Vector(high))
-      case (_, _, List(3, 1, 1)) =>
-        val trip = countRank.head._2
-        val kickers = countRank.tail.map(_._2).sorted(using Ordering.Int.reverse)
-        HandRank(HandCategory.ThreeOfKind, (trip +: kickers).toVector)
-      case (_, _, List(2, 2, 1)) =>
-        val pairRanks = countRank.filter(_._1 == 2).map(_._2).sorted(using Ordering.Int.reverse)
-        val kicker = countRank.find(_._1 == 1).get._2
-        HandRank(HandCategory.TwoPair, (pairRanks :+ kicker).toVector)
-      case (_, _, List(2, 1, 1, 1)) =>
-        val pair = countRank.head._2
-        val kickers = countRank.tail.map(_._2).sorted(using Ordering.Int.reverse)
-        HandRank(HandCategory.OnePair, (pair +: kickers).toVector)
-      case _ =>
-        HandRank(HandCategory.HighCard, ranks.sorted(using Ordering.Int.reverse).toVector)
+    val size = cards.length
+    require(size == 5, s"evaluate5 expects 5 cards, got $size")
+    val iterator = cards.iterator
+    val c0 = iterator.next()
+    val c1 = iterator.next()
+    val c2 = iterator.next()
+    val c3 = iterator.next()
+    val c4 = iterator.next()
+    require(!iterator.hasNext, s"evaluate5 expects 5 cards, got $size")
+    require(allDistinct5(c0, c1, c2, c3, c4), "evaluate5 requires 5 distinct cards")
+    unpackRank(evaluate5Packed(c0, c1, c2, c3, c4))
 
   /** Evaluates the best 5-card hand from 7 cards (Texas Hold'em style).
     *
@@ -144,19 +126,20 @@ object HandEvaluator:
     * @throws IllegalArgumentException if not exactly 7 distinct cards
     */
   def evaluate7(cards: Seq[Card]): HandRank =
-    require(cards.length == 7, s"evaluate7 expects 7 cards, got ${cards.length}")
-    require(cards.distinct.length == 7, "evaluate7 requires 7 distinct cards")
+    val size = cards.length
+    require(size == 7, s"evaluate7 expects 7 cards, got $size")
+    val iterator = cards.iterator
+    val c0 = iterator.next()
+    val c1 = iterator.next()
+    val c2 = iterator.next()
+    val c3 = iterator.next()
+    val c4 = iterator.next()
+    val c5 = iterator.next()
+    val c6 = iterator.next()
+    require(!iterator.hasNext, s"evaluate7 expects 7 cards, got $size")
+    require(allDistinct7(c0, c1, c2, c3, c4, c5, c6), "evaluate7 requires 7 distinct cards")
 
-    val indexed = cards.toIndexedSeq
-    val first = combos7of5(0)
-    var best = evaluate5(Vector(indexed(first(0)), indexed(first(1)), indexed(first(2)), indexed(first(3)), indexed(first(4))))
-    var i = 1
-    while i < combos7of5.length do
-      val combo = combos7of5(i)
-      val rank = evaluate5(Vector(indexed(combo(0)), indexed(combo(1)), indexed(combo(2)), indexed(combo(3)), indexed(combo(4))))
-      if rank > best then best = rank
-      i += 1
-    best
+    unpackRank(evaluate7PackedDirect(c0, c1, c2, c3, c4, c5, c6))
 
   /** Cached variant of [[evaluate5]]. Returns a memoized result if available,
     * otherwise computes, caches, and returns the result.
@@ -174,7 +157,10 @@ object HandEvaluator:
     if cached != null then cached
     else
       val computed = evaluate5(cards)
-      cache5.putIfAbsent(key, computed)
+      val maxEntries = configuredCacheLimit(Cache5MaxSizeProperty, Cache5MaxSizeEnv, DefaultMaxCache5Size)
+      if maxEntries > 0 then
+        if cache5.size() >= maxEntries then cache5.clear()
+        cache5.putIfAbsent(key, computed)
       computed
 
   /** Cached variant of [[evaluate7]]. Uses a 42-bit Long key (7 sorted card IDs x 6 bits). */
@@ -186,8 +172,257 @@ object HandEvaluator:
     if cached != null then cached
     else
       val computed = evaluate7(cards)
-      cache7.putIfAbsent(key, computed)
+      val maxEntries = configuredCacheLimit(Cache7MaxSizeProperty, Cache7MaxSizeEnv, DefaultMaxCache7Size)
+      if maxEntries > 0 then
+        if cache7.size() >= maxEntries then cache7.clear()
+        cache7.putIfAbsent(key, computed)
       computed
+
+  /** Fast packed 7-card evaluation for callers that already guarantee distinct cards.
+    *
+    * This bypasses Seq validation, cache lookup, and HandRank allocation.
+    */
+  private[sicfun] def evaluate7PackedDirect(
+      c0: Card,
+      c1: Card,
+      c2: Card,
+      c3: Card,
+      c4: Card,
+      c5: Card,
+      c6: Card
+  ): Int =
+    var bestPacked = evaluate5Packed(c0, c1, c2, c3, c4)
+
+    inline def update(packed: Int): Unit =
+      if packed > bestPacked then bestPacked = packed
+
+    update(evaluate5Packed(c0, c1, c2, c3, c5))
+    update(evaluate5Packed(c0, c1, c2, c3, c6))
+    update(evaluate5Packed(c0, c1, c2, c4, c5))
+    update(evaluate5Packed(c0, c1, c2, c4, c6))
+    update(evaluate5Packed(c0, c1, c2, c5, c6))
+    update(evaluate5Packed(c0, c1, c3, c4, c5))
+    update(evaluate5Packed(c0, c1, c3, c4, c6))
+    update(evaluate5Packed(c0, c1, c3, c5, c6))
+    update(evaluate5Packed(c0, c1, c4, c5, c6))
+    update(evaluate5Packed(c0, c2, c3, c4, c5))
+    update(evaluate5Packed(c0, c2, c3, c4, c6))
+    update(evaluate5Packed(c0, c2, c3, c5, c6))
+    update(evaluate5Packed(c0, c2, c4, c5, c6))
+    update(evaluate5Packed(c0, c3, c4, c5, c6))
+    update(evaluate5Packed(c1, c2, c3, c4, c5))
+    update(evaluate5Packed(c1, c2, c3, c4, c6))
+    update(evaluate5Packed(c1, c2, c3, c5, c6))
+    update(evaluate5Packed(c1, c2, c4, c5, c6))
+    update(evaluate5Packed(c1, c3, c4, c5, c6))
+    update(evaluate5Packed(c2, c3, c4, c5, c6))
+    bestPacked
+
+  private inline def allDistinct5(c0: Card, c1: Card, c2: Card, c3: Card, c4: Card): Boolean =
+    c0 != c1 &&
+      c0 != c2 &&
+      c0 != c3 &&
+      c0 != c4 &&
+      c1 != c2 &&
+      c1 != c3 &&
+      c1 != c4 &&
+      c2 != c3 &&
+      c2 != c4 &&
+      c3 != c4
+
+  private inline def allDistinct7(
+      c0: Card,
+      c1: Card,
+      c2: Card,
+      c3: Card,
+      c4: Card,
+      c5: Card,
+      c6: Card
+  ): Boolean =
+    allDistinct5(c0, c1, c2, c3, c4) &&
+      c5 != c0 &&
+      c5 != c1 &&
+      c5 != c2 &&
+      c5 != c3 &&
+      c5 != c4 &&
+      c6 != c0 &&
+      c6 != c1 &&
+      c6 != c2 &&
+      c6 != c3 &&
+      c6 != c4 &&
+      c6 != c5
+
+  private inline def packRank(categoryStrength: Int, t0: Int, t1: Int, t2: Int, t3: Int, t4: Int): Int =
+    (((((categoryStrength << 4) | t0) << 4 | t1) << 4 | t2) << 4 | t3) << 4 | t4
+
+  private inline def unpackRank(packed: Int): HandRank =
+    HandRank(packed)
+
+  private def evaluate5Packed(c0: Card, c1: Card, c2: Card, c3: Card, c4: Card): Int =
+    val r0 = c0.rank.value
+    val r1 = c1.rank.value
+    val r2 = c2.rank.value
+    val r3 = c3.rank.value
+    val r4 = c4.rank.value
+
+    val isFlush =
+      c0.suit == c1.suit &&
+        c1.suit == c2.suit &&
+        c2.suit == c3.suit &&
+        c3.suit == c4.suit
+
+    val rankCounts = rankCountScratch.get()
+    val uniqueRanks = uniqueRankScratch.get()
+    var uniqueCount = 0
+
+    if rankCounts(r0) == 0 then
+      uniqueRanks(uniqueCount) = r0
+      uniqueCount += 1
+    rankCounts(r0) += 1
+
+    if rankCounts(r1) == 0 then
+      uniqueRanks(uniqueCount) = r1
+      uniqueCount += 1
+    rankCounts(r1) += 1
+
+    if rankCounts(r2) == 0 then
+      uniqueRanks(uniqueCount) = r2
+      uniqueCount += 1
+    rankCounts(r2) += 1
+
+    if rankCounts(r3) == 0 then
+      uniqueRanks(uniqueCount) = r3
+      uniqueCount += 1
+    rankCounts(r3) += 1
+
+    if rankCounts(r4) == 0 then
+      uniqueRanks(uniqueCount) = r4
+      uniqueCount += 1
+    rankCounts(r4) += 1
+
+    val packed =
+      if uniqueCount == 5 then
+        val mn = math.min(math.min(math.min(math.min(r0, r1), r2), r3), r4)
+        val mx = math.max(math.max(math.max(math.max(r0, r1), r2), r3), r4)
+        val sum = r0 + r1 + r2 + r3 + r4
+        val wheel = mx == 14 && mn == 2 && sum == 28
+        val isStraight = (mx - mn == 4) || wheel
+        if isStraight then
+          val high = if wheel then 5 else mx
+          if isFlush then packRank(HandCategory.StraightFlush.strength, high, 0, 0, 0, 0)
+          else packRank(HandCategory.Straight.strength, high, 0, 0, 0, 0)
+        else
+          var i = 1
+          while i < uniqueCount do
+            val value = uniqueRanks(i)
+            var j = i - 1
+            while j >= 0 && uniqueRanks(j) < value do
+              uniqueRanks(j + 1) = uniqueRanks(j)
+              j -= 1
+            uniqueRanks(j + 1) = value
+            i += 1
+          if isFlush then
+            packRank(
+              HandCategory.Flush.strength,
+              uniqueRanks(0),
+              uniqueRanks(1),
+              uniqueRanks(2),
+              uniqueRanks(3),
+              uniqueRanks(4)
+            )
+          else
+            packRank(
+              HandCategory.HighCard.strength,
+              uniqueRanks(0),
+              uniqueRanks(1),
+              uniqueRanks(2),
+              uniqueRanks(3),
+              uniqueRanks(4)
+            )
+      else if uniqueCount == 4 then
+        var pair = 0
+        var s0 = 0
+        var s1 = 0
+        var s2 = 0
+        var singles = 0
+        var i = 0
+        while i < uniqueCount do
+          val rank = uniqueRanks(i)
+          if rankCounts(rank) == 2 then pair = rank
+          else
+            if singles == 0 then s0 = rank
+            else if singles == 1 then s1 = rank
+            else s2 = rank
+            singles += 1
+          i += 1
+
+        if s0 < s1 then
+          val tmp = s0
+          s0 = s1
+          s1 = tmp
+        if s1 < s2 then
+          val tmp = s1
+          s1 = s2
+          s2 = tmp
+        if s0 < s1 then
+          val tmp = s0
+          s0 = s1
+          s1 = tmp
+        packRank(HandCategory.OnePair.strength, pair, s0, s1, s2, 0)
+      else if uniqueCount == 3 then
+        var trip = 0
+        var k0 = 0
+        var k1 = 0
+        var kickers = 0
+        var p0 = 0
+        var p1 = 0
+        var pairs = 0
+        var kicker = 0
+        var i = 0
+        while i < uniqueCount do
+          val rank = uniqueRanks(i)
+          rankCounts(rank) match
+            case 3 =>
+              trip = rank
+            case 2 =>
+              if pairs == 0 then p0 = rank else p1 = rank
+              pairs += 1
+            case _ =>
+              if kickers == 0 then k0 = rank else k1 = rank
+              kickers += 1
+              kicker = rank
+          i += 1
+
+        if trip != 0 then
+          if k0 < k1 then
+            val tmp = k0
+            k0 = k1
+            k1 = tmp
+          packRank(HandCategory.ThreeOfKind.strength, trip, k0, k1, 0, 0)
+        else
+          if p0 < p1 then
+            val tmp = p0
+            p0 = p1
+            p1 = tmp
+          packRank(HandCategory.TwoPair.strength, p0, p1, kicker, 0, 0)
+      else
+        val ra = uniqueRanks(0)
+        val rb = uniqueRanks(1)
+        val ca = rankCounts(ra)
+        if ca == 4 || ca == 1 then
+          val quad = if ca == 4 then ra else rb
+          val kicker = if ca == 1 then ra else rb
+          packRank(HandCategory.FourOfKind.strength, quad, kicker, 0, 0, 0)
+        else
+          val trip = if ca == 3 then ra else rb
+          val pair = if ca == 2 then ra else rb
+          packRank(HandCategory.FullHouse.strength, trip, pair, 0, 0, 0)
+
+    var clearIndex = 0
+    while clearIndex < uniqueCount do
+      rankCounts(uniqueRanks(clearIndex)) = 0
+      clearIndex += 1
+    packed
 
   /** Category-only evaluation optimized for bulk enumeration.
     *
@@ -268,51 +503,22 @@ object HandEvaluator:
     cache5.clear()
     cache7.clear()
 
-  /** Detects whether ranks form a straight and returns the high card if so.
-    *
-    * The wheel (A-2-3-4-5) is treated as a 5-high straight, not Ace-high.
-    *
-    * @return Some(highRank) if a straight is found, None otherwise
-    */
-  private def straightHigh(ranks: Seq[Int]): Option[Int] =
-    val distinct = ranks.distinct.sorted
-    if distinct.length != 5 then None
-    else
-      // Wheel: Ace plays low as the bottom of A-2-3-4-5; high card is 5.
-      val wheel = distinct == List(2, 3, 4, 5, 14)
-      if wheel then Some(5)
-      else if isConsecutive(distinct) then Some(distinct.last)
-      else None
-
-  /** Checks whether a sorted ascending sequence has no gaps (each element = predecessor + 1). */
-  private def isConsecutive(sortedAsc: Seq[Int]): Boolean =
-    import scala.util.boundary, boundary.break
-    boundary:
-      var i = 0
-      while i < sortedAsc.length - 1 do
-        if sortedAsc(i + 1) != sortedAsc(i) + 1 then break(false)
-        i += 1
-      true
-
   /** Encodes a set of cards into a single Long for use as a cache key.
     *
-    * Each card is mapped to a unique integer ID (0..51) via [[CardId.toId]].
-    * The IDs are sorted so that the same hand in any order produces the same key.
-    * Each ID occupies 6 bits (sufficient for 0..63), and they are packed left-to-right
-    * into a Long. For 5 cards this uses 30 bits; for 7 cards, 42 bits -- both fit
-    * comfortably within a 64-bit Long, avoiding any object allocation for the key.
+    * Each card maps to bit position [[CardId.toId]] (0..51). The final key is
+    * the OR of those bits, so card order never affects the key.
     */
   private inline def keyFor(cards: Seq[Card]): Long =
-    val ids = new Array[Int](cards.length)
-    var i = 0
-    cards.foreach { card =>
-      ids(i) = CardId.toId(card)
-      i += 1
-    }
-    Arrays.sort(ids) // Sort so hand order doesn't affect the key
     var key = 0L
-    var j = 0
-    while j < ids.length do
-      key = (key << 6) | (ids(j).toLong & 0x3fL) // Pack 6 bits per card ID
-      j += 1
+    cards.foreach { card =>
+      key |= 1L << CardId.toId(card)
+    }
     key
+
+  private def configuredCacheLimit(property: String, env: String, default: Int): Int =
+    sys.props
+      .get(property)
+      .orElse(sys.env.get(env))
+      .flatMap(_.trim.toIntOption)
+      .filter(_ >= 0)
+      .getOrElse(default)

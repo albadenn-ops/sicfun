@@ -1,7 +1,0 @@
-vendored_from: https://github.com/jgravelle/jcodemunch-mcp
-upstream_branch: main
-upstream_commit: f4dbab37bc651bfa49e5cd5cc409fb52369604b9
-notes:
-  - vendored package source only (src/jcodemunch_mcp)
-  - local patches add Scala support and Windows-safe raw file persistence
-  - upstream README states non-commercial use is free and commercial use requires a paid license
