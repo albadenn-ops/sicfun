@@ -1,6 +1,6 @@
 package sicfun.core
 
-import sicfun.holdem.TestSystemPropertyScope
+import sicfun.holdem.types.TestSystemPropertyScope
 
 class HandEvaluatorTest extends munit.FunSuite:
   private def cards(tokens: String*): Vector[Card] =

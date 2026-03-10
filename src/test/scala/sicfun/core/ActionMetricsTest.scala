@@ -1,7 +1,8 @@
 package sicfun.core
 
 import munit.FunSuite
-import sicfun.holdem.*
+import sicfun.holdem.types.*
+import sicfun.holdem.model.*
 
 class ActionMetricsTest extends FunSuite:
   private def card(token: String): Card =

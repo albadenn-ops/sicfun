@@ -73,7 +73,7 @@ generateHeadsUpTable := {
       parallelism.toString,
       backend
     )
-    val result = run.run("sicfun.holdem.GenerateHeadsUpTable", cp, args, log)
+    val result = run.run("sicfun.holdem.tablegen.GenerateHeadsUpTable", cp, args, log)
     result match {
       case scala.util.Success(_) => ()
       case scala.util.Failure(err) =>
@@ -122,7 +122,7 @@ generateHeadsUpCanonicalTable := {
       parallelism.toString,
       backend
     )
-    val result = run.run("sicfun.holdem.GenerateHeadsUpCanonicalTable", cp, args, log)
+    val result = run.run("sicfun.holdem.tablegen.GenerateHeadsUpCanonicalTable", cp, args, log)
     result match {
       case scala.util.Success(_) => ()
       case scala.util.Failure(err) =>
@@ -137,7 +137,7 @@ gpuSmokeGate := {
   val log = streams.value.log
   val cp = (Compile / fullClasspath).value.files
   val run = new ForkRun(ForkOptions())
-  val result = run.run("sicfun.holdem.HeadsUpGpuSmokeGate", cp, Seq.empty, log)
+  val result = run.run("sicfun.holdem.bench.HeadsUpGpuSmokeGate", cp, Seq.empty, log)
   result match {
     case scala.util.Success(_) => ()
     case scala.util.Failure(err) =>
@@ -149,7 +149,7 @@ gpuExactParityGate := {
   val log = streams.value.log
   val cp = (Compile / fullClasspath).value.files
   val run = new ForkRun(ForkOptions())
-  val result = run.run("sicfun.holdem.HeadsUpGpuExactParityGate", cp, Seq.empty, log)
+  val result = run.run("sicfun.holdem.bench.HeadsUpGpuExactParityGate", cp, Seq.empty, log)
   result match {
     case scala.util.Success(_) => ()
     case scala.util.Failure(err) =>

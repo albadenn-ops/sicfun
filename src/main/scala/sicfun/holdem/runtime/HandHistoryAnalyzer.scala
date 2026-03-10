@@ -1,0 +1,379 @@
+package sicfun.holdem.runtime
+import sicfun.holdem.types.*
+import sicfun.holdem.model.*
+import sicfun.holdem.engine.*
+import sicfun.holdem.equity.*
+import sicfun.holdem.io.*
+import sicfun.holdem.cli.*
+
+import java.nio.file.{Files, Path, Paths}
+import scala.util.Random
+
+/** Batch hand history analyzer.
+  *
+  * Loads a DecisionLoopEventFeedIO TSV file, replays each hand through a
+  * [[RealTimeAdaptiveEngine]], and annotates each hero decision with the
+  * recommended action and EV comparison.
+  *
+  * Usage:
+  *   runMain sicfun.holdem.HandHistoryAnalyzer <feedFile> [--key=value ...]
+  *
+  * Options:
+  *   --hero=<playerId>       Hero player ID (default "hero")
+  *   --heroCards=<token>     Hero hole cards (e.g. AcKh) for EV/recommendation analysis
+  *   --model=<dir>           Model artifact directory (defaults to uniform model if omitted)
+  *   --seed=42               RNG seed
+  *   --bunchingTrials=400    Bunching Monte Carlo trials
+  *   --equityTrials=4000     Equity Monte Carlo trials
+  *   --budgetMs=2000         Decision budget in milliseconds
+  *   --topN=10               Show top N worst decisions
+  */
+object HandHistoryAnalyzer:
+
+  final case class AnalyzedDecision(
+      handId: String,
+      street: Street,
+      heroCards: Option[HoleCards],
+      actualAction: PokerAction,
+      recommendedAction: PokerAction,
+      actualEv: Double,
+      recommendedEv: Double,
+      evDifference: Double,
+      heroEquityMean: Double
+  )
+
+  final case class AnalysisSummary(
+      handsAnalyzed: Int,
+      decisionsAnalyzed: Int,
+      mistakes: Int,
+      totalEvLost: Double,
+      biggestMistakeEv: Double,
+      decisions: Vector[AnalyzedDecision]
+  )
+
+  def main(args: Array[String]): Unit =
+    run(args) match
+      case Left(err) =>
+        System.err.println(err)
+        sys.exit(1)
+      case Right(summary) =>
+        printSummary(summary)
+
+  def run(args: Array[String]): Either[String, AnalysisSummary] =
+    for
+      config <- parseArgs(args)
+      events <- loadEvents(config.feedPath)
+      summary <- analyze(events, config)
+    yield summary
+
+  private final case class CliConfig(
+      feedPath: Path,
+      heroPlayerId: String,
+      heroCards: Option[HoleCards],
+      modelDir: Option[Path],
+      seed: Long,
+      bunchingTrials: Int,
+      equityTrials: Int,
+      budgetMs: Long,
+      topN: Int
+  )
+
+  private def loadEvents(path: Path): Either[String, Vector[DecisionLoopEventFeedIO.FeedEvent]] =
+    try Right(DecisionLoopEventFeedIO.read(path))
+    catch case e: Exception => Left(s"Failed to read event feed: ${e.getMessage}")
+
+  private def analyze(
+      events: Vector[DecisionLoopEventFeedIO.FeedEvent],
+      config: CliConfig
+  ): Either[String, AnalysisSummary] =
+    try
+      Right(new AnalysisRunner(events, config).run())
+    catch
+      case e: Exception => Left(s"Analysis failed: ${e.getMessage}")
+
+  private final class AnalysisRunner(
+      events: Vector[DecisionLoopEventFeedIO.FeedEvent],
+      config: CliConfig
+  ):
+    private val tableRanges = TableRanges.defaults(TableFormat.NineMax)
+    private val engine = new RealTimeAdaptiveEngine(
+      tableRanges = tableRanges,
+      actionModel = config.modelDir.map(path => PokerActionModelArtifactIO.load(path).model).getOrElse(PokerActionModel.uniform),
+      bunchingTrials = config.bunchingTrials,
+      defaultEquityTrials = config.equityTrials,
+      minEquityTrials = math.max(200, config.equityTrials / 10)
+    )
+    private val seedRng = new Random(config.seed)
+
+    def run(): AnalysisSummary =
+      val analyzed = Vector.newBuilder[AnalyzedDecision]
+      var handsAnalyzed = 0
+      groupedHandEvents().foreach { handEvents =>
+        if handEvents.exists(_.playerId == config.heroPlayerId) then
+          handsAnalyzed += 1
+          analyzed ++= analyzeHand(handEvents)
+      }
+      buildSummary(handsAnalyzed, analyzed.result())
+
+    private def groupedHandEvents(): Vector[Vector[PokerEvent]] =
+      events
+        .map(_.event)
+        .groupBy(_.handId)
+        .toVector
+        .sortBy { case (_, groupedEvents) =>
+          groupedEvents.map(_.occurredAtEpochMillis).min
+        }
+        .map { case (_, groupedEvents) =>
+          groupedEvents.sortBy(_.sequenceInHand)
+        }
+
+    private def analyzeHand(handEvents: Vector[PokerEvent]): Vector[AnalyzedDecision] =
+      config.heroCards match
+        case Some(cards) =>
+          analyzeWithHeroCards(
+            events = handEvents,
+            heroPlayerId = config.heroPlayerId,
+            heroCards = cards,
+            engine = engine,
+            tableRanges = tableRanges,
+            budgetMs = config.budgetMs,
+            rng = new Random(seedRng.nextLong())
+          )
+        case None => Vector.empty
+
+    private def buildSummary(
+        handsAnalyzed: Int,
+        decisions: Vector[AnalyzedDecision]
+    ): AnalysisSummary =
+      val mistakes = decisions.count(d => d.actualAction.category != d.recommendedAction.category)
+      val evLost = decisions.map(d => math.min(0.0, d.evDifference)).sum
+      val biggestMistake =
+        if decisions.nonEmpty then decisions.map(d => math.abs(d.evDifference)).max
+        else 0.0
+      AnalysisSummary(
+        handsAnalyzed = handsAnalyzed,
+        decisionsAnalyzed = decisions.length,
+        mistakes = mistakes,
+        totalEvLost = evLost,
+        biggestMistakeEv = biggestMistake,
+        decisions = decisions.sortBy(d => (d.handId, d.street.toString))
+      )
+
+  /** Analyze events with known hero hole cards (for programmatic use). */
+  def analyzeWithHeroCards(
+      events: Vector[PokerEvent],
+      heroPlayerId: String,
+      heroCards: HoleCards,
+      engine: RealTimeAdaptiveEngine,
+      tableRanges: TableRanges,
+      budgetMs: Long = 2000L,
+      rng: Random = new Random()
+  ): Vector[AnalyzedDecision] =
+    new HeroDecisionAnalyzer(events, heroPlayerId, heroCards, engine, tableRanges, budgetMs, rng).analyze()
+
+  private final class HeroDecisionAnalyzer(
+      events: Vector[PokerEvent],
+      heroPlayerId: String,
+      heroCards: HoleCards,
+      engine: RealTimeAdaptiveEngine,
+      tableRanges: TableRanges,
+      budgetMs: Long,
+      rng: Random
+  ):
+    private val sortedEvents = events.sortBy(_.sequenceInHand)
+    private val heroEvents = sortedEvents.filter(_.playerId == heroPlayerId)
+    private val villainEvents = sortedEvents.filter(_.playerId != heroPlayerId)
+
+    def analyze(): Vector[AnalyzedDecision] =
+      val analyzed = Vector.newBuilder[AnalyzedDecision]
+      heroEvents.foreach { heroEvent =>
+        analyzeDecision(heroEvent).foreach(analyzed += _)
+      }
+      analyzed.result()
+
+    private def analyzeDecision(heroEvent: PokerEvent): Option[AnalyzedDecision] =
+      try
+        val recommendation = engine.decide(
+          hero = heroCards,
+          state = gameStateFor(heroEvent),
+          folds = preflopFoldsFor(heroEvent),
+          villainPos = villainPositionFor(heroEvent),
+          observations = priorVillainObservations(heroEvent),
+          candidateActions = candidateActionsFor(heroEvent),
+          decisionBudgetMillis = Some(budgetMs),
+          rng = new Random(rng.nextLong())
+        ).decision.recommendation
+        Some(buildDecision(heroEvent, recommendation))
+      catch
+        case _: Exception => None
+
+    private def priorVillainObservations(heroEvent: PokerEvent): Seq[VillainObservation] =
+      villainEvents
+        .filter(_.sequenceInHand < heroEvent.sequenceInHand)
+        .filter(_.action != PokerAction.Fold)
+        .map(event => VillainObservation(event.action, gameStateFor(event)))
+
+    private def gameStateFor(event: PokerEvent): GameState =
+      GameState(
+        street = event.street,
+        board = event.board,
+        pot = event.potBefore,
+        toCall = event.toCall,
+        position = event.position,
+        stackSize = event.stackBefore,
+        betHistory = event.betHistory
+      )
+
+    private def candidateActionsFor(heroEvent: PokerEvent): Vector[PokerAction] =
+      val candidates = buildCandidates(gameStateFor(heroEvent))
+      if candidates.exists(_.category == heroEvent.action.category) then candidates
+      else candidates :+ heroEvent.action
+
+    private def villainPositionFor(heroEvent: PokerEvent): Position =
+      villainEvents.headOption.map(_.position)
+        .getOrElse(if heroEvent.position == Position.SmallBlind then Position.BigBlind else Position.SmallBlind)
+
+    private def preflopFoldsFor(heroEvent: PokerEvent): Vector[PreflopFold] =
+      val openerPos =
+        if heroEvent.position == Position.SmallBlind then Position.Button
+        else Position.BigBlind
+      tableRanges.format.foldsBeforeOpener(openerPos).map(PreflopFold(_))
+
+    private def buildDecision(
+        heroEvent: PokerEvent,
+        recommendation: ActionRecommendation
+    ): AnalyzedDecision =
+      val recommendedEv = expectedValueFor(recommendation, recommendation.bestAction)
+      val actualEv = expectedValueForCategory(recommendation, heroEvent.action)
+      AnalyzedDecision(
+        handId = heroEvent.handId,
+        street = heroEvent.street,
+        heroCards = Some(heroCards),
+        actualAction = heroEvent.action,
+        recommendedAction = recommendation.bestAction,
+        actualEv = actualEv,
+        recommendedEv = recommendedEv,
+        evDifference = actualEv - recommendedEv,
+        heroEquityMean = recommendation.heroEquity.mean
+      )
+
+    private def expectedValueFor(
+        recommendation: ActionRecommendation,
+        action: PokerAction
+    ): Double =
+      recommendation.actionEvaluations
+        .find(_.action == action)
+        .map(_.expectedValue)
+        .getOrElse(0.0)
+
+    private def expectedValueForCategory(
+        recommendation: ActionRecommendation,
+        action: PokerAction
+    ): Double =
+      recommendation.actionEvaluations
+        .find(_.action.category == action.category)
+        .map(_.expectedValue)
+        .getOrElse(0.0)
+
+  // ---- Output ----
+
+  private def printSummary(summary: AnalysisSummary): Unit =
+    println("=== Hand History Analysis ===")
+    println(f"  Hands analyzed: ${summary.handsAnalyzed}")
+    println(f"  Decisions analyzed: ${summary.decisionsAnalyzed}")
+    println(f"  Mistakes: ${summary.mistakes} (${if summary.decisionsAnalyzed > 0 then summary.mistakes * 100.0 / summary.decisionsAnalyzed else 0.0}%.1f%%)")
+    println(f"  Total EV lost: ${summary.totalEvLost}%.2f")
+    println(f"  Biggest mistake: ${summary.biggestMistakeEv}%.2f")
+
+    if summary.decisions.nonEmpty then
+      println()
+      println("  Per-decision breakdown:")
+      summary.decisions.foreach { d =>
+        val mark = if d.actualAction.category == d.recommendedAction.category then "OK" else "MISS"
+        println(f"    ${d.handId} ${d.street}: actual=${renderAction(d.actualAction)} rec=${renderAction(d.recommendedAction)} ev_diff=${d.evDifference}%+.2f $mark")
+      }
+
+  // ---- Helpers ----
+
+  private def buildCandidates(state: GameState): Vector[PokerAction] =
+    val pot = state.pot
+    val toCall = state.toCall
+    val stack = state.stackSize
+    if toCall <= 0.0 then
+      val raises = Vector(0.5, 0.75, 1.0, 1.5).map(f => PokerAction.Raise(roundChips(pot * f)))
+        .filter { case PokerAction.Raise(a) => a > 0.0 && a <= stack; case _ => false }.distinct
+      Vector(PokerAction.Check) ++ raises
+    else
+      val basis = pot + toCall
+      val raises = Vector(0.5, 0.75, 1.0, 1.5).map(f => PokerAction.Raise(roundChips(basis * f)))
+        .filter { case PokerAction.Raise(a) => a > toCall && a <= stack; case _ => false }.distinct
+      Vector(PokerAction.Fold, PokerAction.Call) ++ raises
+
+  private def roundChips(v: Double): Double = math.round(v * 2.0) / 2.0
+
+  private def renderAction(action: PokerAction): String = action match
+    case PokerAction.Fold       => "FOLD"
+    case PokerAction.Check      => "CHECK"
+    case PokerAction.Call       => "CALL"
+    case PokerAction.Raise(amt) => f"RAISE($amt%.1f)"
+
+  // ---- CLI arg parsing ----
+
+  private def parseArgs(args: Array[String]): Either[String, CliConfig] =
+    if args.isEmpty || args.contains("--help") || args.contains("-h") then Left(usage)
+    else
+      val feedPath = Paths.get(args.head)
+      if !Files.exists(feedPath) then Left(s"Feed file not found: ${args.head}")
+      else
+        val optArgs = args.tail
+        for
+          options <- CliHelpers.parseOptions(optArgs)
+          heroId = options.getOrElse("hero", "hero")
+          heroCards <- parseOptionalHoleCards(options, "heroCards")
+          modelDir <- parseOptionalPath(options, "model")
+          seed <- CliHelpers.parseLongOptionEither(options, "seed", 42L)
+          bunchingTrials <- CliHelpers.parseIntOptionEither(options, "bunchingTrials", 400)
+          equityTrials <- CliHelpers.parseIntOptionEither(options, "equityTrials", 4000)
+          budgetMs <- CliHelpers.parseLongOptionEither(options, "budgetMs", 2000L)
+          topN <- CliHelpers.parseIntOptionEither(options, "topN", 10)
+        yield CliConfig(
+          feedPath = feedPath,
+          heroPlayerId = heroId,
+          heroCards = heroCards,
+          modelDir = modelDir,
+          seed = seed,
+          bunchingTrials = bunchingTrials,
+          equityTrials = equityTrials,
+          budgetMs = budgetMs,
+          topN = topN
+        )
+
+  private def parseOptionalPath(options: Map[String, String], key: String): Either[String, Option[Path]] =
+    options.get(key) match
+      case None => Right(None)
+      case Some(raw) =>
+        val path = Paths.get(raw)
+        if Files.isDirectory(path) then Right(Some(path)) else Left(s"--$key: directory '$raw' not found")
+
+  private def parseOptionalHoleCards(options: Map[String, String], key: String): Either[String, Option[HoleCards]] =
+    options.get(key) match
+      case None => Right(None)
+      case Some(raw) =>
+        try Right(Some(CliHelpers.parseHoleCards(raw)))
+        catch
+          case e: IllegalArgumentException => Left(s"--$key: ${e.getMessage}")
+
+  private val usage =
+    """Usage:
+      |  runMain sicfun.holdem.HandHistoryAnalyzer <feedFile> [--key=value ...]
+      |
+      |Options:
+      |  --hero=<playerId>       Hero player ID (default "hero")
+      |  --heroCards=<token>     Hero hole cards (e.g. AcKh) for EV/recommendation analysis
+      |  --model=<dir>           Model artifact directory
+      |  --seed=42               RNG seed
+      |  --bunchingTrials=400    Bunching Monte Carlo trials
+      |  --equityTrials=4000     Equity Monte Carlo trials
+      |  --budgetMs=2000         Decision budget in milliseconds
+      |  --topN=10               Show top N worst decisions
+      |""".stripMargin
