@@ -107,3 +107,50 @@ Go/no-go criteria:
 **Decision:** Proceed for determinism value (+/- 5% neutral criterion met). The real performance win is expected in Phase 2: converting `DiscreteDistribution` to compact `Array[Prob]` storage (4 bytes vs 8-byte Double in Map), which would halve cache pressure during range iteration and eliminate Map overhead.
 
 **Spec correction:** The original spec's "accumulate raw, divide once at end" approach assumed uniform boardCount across villain hands. In practice, boardCount varies per villain (dead cards differ), so the implementation correctly divides `weight.raw / boardCount` per villain hand, matching the original Double code's semantics.
+
+## 6. Phase 2: Array-Based Equity with Prob Weights
+
+Phase 1 showed the inner loop is dominated by `evaluate7Cached`, so converting accumulators alone gave no speedup. Phase 2 targets the **outer loop**: replacing `Map.foreach` iteration with flat array iteration using Prob weights.
+
+### PreparedRangeProb
+
+New private type in `HoldemEquity`, mirroring the existing `PreparedRange`:
+
+```scala
+private final case class PreparedRangeProb(
+    hands: Array[HoleCards],
+    weights: Array[Int],     // Prob raw values (Int32 @ 2^30)
+    size: Int
+)
+```
+
+Built by a new `prepareRangeProb` method that reuses the existing thread-local scratch buffers. Weights are converted to Prob once during preparation, not per-iteration.
+
+### equityExactProb refactored
+
+Uses `PreparedRangeProb` instead of `Map.foreach`:
+
+```scala
+val prepared = prepareRangeProb(villainRange, dead)
+var i = 0
+while i < prepared.size do
+  val villain = prepared.hands(i)
+  val weightRaw = prepared.weights(i)
+  if weightRaw > 0 then
+    val remaining = ...
+    val boardCount = combinationsCount(remaining.length, missing)
+    val perBoardWeight = weightRaw.toLong / boardCount
+    boards.foreach { extra =>
+      ...
+      if cmp > 0 then winL += perBoardWeight
+      else if cmp == 0 then tieL += perBoardWeight
+      else lossL += perBoardWeight
+    }
+  i += 1
+```
+
+Benefits:
+- Linear array iteration replaces Map.foreach (no hashing/boxing/virtual dispatch)
+- Sorted by HoleCardsIndex ID for cache-friendly access
+- 4 bytes per weight (Int) vs 8 bytes (Double) — 2x denser arrays
+- Thread-local scratch reuse (already proven in existing `prepareRange`)
