@@ -90,3 +90,20 @@ Go/no-go criteria:
 4. CFR solver regrets/strategies (unbounded values — needs separate `FixedVal` type with different scale)
 5. GPU/native: JNI Int32, CUDA kernels with int arithmetic
 6. GameState (pot, stack, EV) — unbounded, final phase
+
+## 5. Benchmark Results (Phase 1)
+
+**Setup:** `equityExact` (Double) vs `equityExactProb` (Prob/Long accumulation), 20 hands range, 5 warmup, 20 interleaved runs.
+
+| Mode | Double median | Prob median | Speedup | Equity diff |
+|------|--------------|-------------|---------|-------------|
+| Turn (1 missing) | 1.98 ms | 2.16 ms | 0.917x | 3.3e-8 |
+| Flop (2 missing) | 17.98 ms | 18.02 ms | 0.998x | 3.7e-8 |
+
+**Correctness:** Excellent — equity differences < 4e-8 (well within 1e-3 tolerance).
+
+**Performance:** Neutral-to-slightly-slower. The inner loop is dominated by `evaluate7Cached` (hand evaluation), not weight accumulation. Converting accumulators from Double to Long has negligible effect on throughput.
+
+**Decision:** Proceed for determinism value (+/- 5% neutral criterion met). The real performance win is expected in Phase 2: converting `DiscreteDistribution` to compact `Array[Prob]` storage (4 bytes vs 8-byte Double in Map), which would halve cache pressure during range iteration and eliminate Map overhead.
+
+**Spec correction:** The original spec's "accumulate raw, divide once at end" approach assumed uniform boardCount across villain hands. In practice, boardCount varies per villain (dead cards differ), so the implementation correctly divides `weight.raw / boardCount` per villain hand, matching the original Double code's semantics.
