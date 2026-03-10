@@ -27,6 +27,11 @@ object HoldemEquity:
       weights: Array[Double],
       handIds: Array[Int]
   )
+  private final case class PreparedRangeProb(
+      hands: Array[HoleCards],
+      weights: Array[Int], // Prob raw values (Int32 @ 2^30)
+      size: Int
+  )
   private val preparedRangeWeightScratch = new ThreadLocal[Array[Double]]:
     override def initialValue(): Array[Double] = new Array[Double](HoleCardsIndex.size)
   private val preparedRangeTouchedIdsScratch = new ThreadLocal[Array[Int]]:
@@ -70,10 +75,11 @@ object HoldemEquity:
     val total = win + tie + loss
     EquityResult(win / total, tie / total, loss / total)
 
-  /** Fixed-point variant of equityExact. Uses Int32 weights with Long accumulation
-    * for deterministic arithmetic and better cache utilization.
+  /** Fixed-point variant of equityExact. Uses PreparedRangeProb (flat arrays with
+    * Int32 Prob weights) for cache-friendly iteration and deterministic arithmetic.
     *
-    * Integer division of weight.raw by boardCount introduces truncation error of at most
+    * Phase 2: replaces Map.foreach with while-loop over sorted arrays.
+    * Integer division of weight / boardCount introduces truncation error of at most
     * 1 LSB per board evaluation (~4e-8 relative error), negligible for poker equity needs.
     */
   def equityExactProb(
@@ -83,7 +89,7 @@ object HoldemEquity:
   ): EquityResult =
     validateHeroBoard(hero, board)
     val dead = hero.asSet ++ board.asSet
-    val range = sanitizeRange(villainRange, dead)
+    val prepared = prepareRangeProb(villainRange, dead)
     val missing = board.missing
 
     // Accumulate as Long. Max: 1326 × 1081 × (2^30/1) ≈ 1.5e15, Long max 9.2e18.
@@ -91,12 +97,14 @@ object HoldemEquity:
     var tieL = 0L
     var lossL = 0L
 
-    range.weights.foreach { case (villain, weightD) =>
-      if weightD > 0.0 then
-        val weight = Prob.fromDouble(weightD)
+    var i = 0
+    while i < prepared.size do
+      val villain = prepared.hands(i)
+      val weightRaw = prepared.weights(i)
+      if weightRaw > 0 then
         val remaining = Deck.full.filterNot(card => dead.contains(card) || villain.contains(card)).toIndexedSeq
         val boardCount = combinationsCount(remaining.length, missing)
-        val perBoardWeight = weight.raw.toLong / boardCount
+        val perBoardWeight = weightRaw.toLong / boardCount
 
         val boards =
           if missing == 0 then Iterator.single(Vector.empty[Card])
@@ -111,7 +119,7 @@ object HoldemEquity:
           else if cmp == 0 then tieL += perBoardWeight
           else lossL += perBoardWeight
         }
-    }
+      i += 1
 
     val total = winL + tieL + lossL
     if total == 0L then EquityResult(0.0, 0.0, 0.0)
@@ -747,6 +755,54 @@ object HoldemEquity:
         weights(i) *= invTotal
         i += 1
       PreparedRange(hands, weights, handIds)
+    finally
+      var i = 0
+      while i < touchedCount do
+        weightScratch(touchedIds(i)) = 0.0
+        i += 1
+
+  /** Like prepareRange but outputs Prob (Int32) weights and filters by dead card Set.
+    * Used by equityExactProb which needs Set-based dead card filtering (not bitmask).
+    */
+  private def prepareRangeProb(
+      range: DiscreteDistribution[HoleCards],
+      dead: Set[Card]
+  ): PreparedRangeProb =
+    val weightScratch = preparedRangeWeightScratch.get()
+    val touchedIds = preparedRangeTouchedIdsScratch.get()
+    var touchedCount = 0
+    try
+      range.weights.foreach { case (hand, weight) =>
+        if weight > 0.0 &&
+          !dead.contains(hand.first) &&
+          !dead.contains(hand.second)
+        then
+          val canonical = HoleCards.canonical(hand.first, hand.second)
+          val handId = HoleCardsIndex.fastIdOf(canonical)
+          if weightScratch(handId) == 0.0 then
+            touchedIds(touchedCount) = handId
+            touchedCount += 1
+          weightScratch(handId) += weight
+      }
+      require(touchedCount > 0, "villain range is empty after filtering")
+      java.util.Arrays.sort(touchedIds, 0, touchedCount)
+
+      val hands = new Array[HoleCards](touchedCount)
+      val probWeights = new Array[Int](touchedCount)
+      var total = 0.0
+      var i = 0
+      while i < touchedCount do
+        total += weightScratch(touchedIds(i))
+        i += 1
+      require(total > 0.0, "villain range is empty after filtering")
+      val invTotal = 1.0 / total
+      i = 0
+      while i < touchedCount do
+        val handId = touchedIds(i)
+        hands(i) = HoleCardsIndex.byIdUnchecked(handId)
+        probWeights(i) = Prob.fromDouble(weightScratch(handId) * invTotal).raw
+        i += 1
+      PreparedRangeProb(hands, probWeights, touchedCount)
     finally
       var i = 0
       while i < touchedCount do
