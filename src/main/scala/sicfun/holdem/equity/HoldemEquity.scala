@@ -32,6 +32,58 @@ object HoldemEquity:
       weights: Array[Int], // Prob raw values (Int32 @ 2^30)
       size: Int
   )
+  /** Flat-array posterior for the Bayes → Equity hot path.
+    * Built from arrays already computed in HoldemBayesProvider.scalaUpdate/nativeUpdate.
+    * Equity methods consume this directly without Map allocation.
+    * Non-hot consumers access the lazy `distribution` field.
+    */
+  final class CompactPosterior(
+      val hands: Array[HoleCards],
+      val probWeights: Array[Int], // Prob raw values (Int32 @ 2^30), normalized
+      val size: Int
+  ):
+    lazy val distribution: DiscreteDistribution[HoleCards] =
+      val builder = Map.newBuilder[HoleCards, Double]
+      builder.sizeHint(size)
+      var i = 0
+      while i < size do
+        builder += hands(i) -> Prob(probWeights(i)).toDouble
+        i += 1
+      DiscreteDistribution(builder.result())
+
+  /** Builds a CompactPosterior from flat arrays (as produced by Bayesian update).
+    * Skips zero-weight hypotheses. Normalizes weights to sum to Prob.Scale.
+    */
+  def buildCompactPosterior(
+      hypotheses: Vector[HoleCards],
+      posterior: Array[Double]
+  ): CompactPosterior =
+    require(hypotheses.length == posterior.length,
+      s"hypotheses.length (${hypotheses.length}) != posterior.length (${posterior.length})")
+    var total = 0.0
+    var positiveCount = 0
+    var i = 0
+    while i < hypotheses.length do
+      val w = math.max(0.0, posterior(i))
+      if w > 0.0 then
+        total += w
+        positiveCount += 1
+      i += 1
+    require(total > 0.0, "all-zero posterior")
+    val invTotal = 1.0 / total
+    val hands = new Array[HoleCards](positiveCount)
+    val weights = new Array[Int](positiveCount)
+    var j = 0
+    i = 0
+    while i < hypotheses.length do
+      val w = math.max(0.0, posterior(i))
+      if w > 0.0 then
+        hands(j) = hypotheses(i)
+        weights(j) = Prob.fromDouble(w * invTotal).raw
+        j += 1
+      i += 1
+    new CompactPosterior(hands, weights, positiveCount)
+
   private val preparedRangeWeightScratch = new ThreadLocal[Array[Double]]:
     override def initialValue(): Array[Double] = new Array[Double](HoleCardsIndex.size)
   private val preparedRangeTouchedIdsScratch = new ThreadLocal[Array[Int]]:
