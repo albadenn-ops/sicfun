@@ -2,7 +2,8 @@ package sicfun.holdem.equity
 import sicfun.holdem.types.*
 import sicfun.holdem.gpu.*
 
-import sicfun.core.{Card, Deck, DiscreteDistribution, HandEvaluator}
+import sicfun.core.{Card, Deck, DiscreteDistribution, HandEvaluator, Prob}
+import Prob.*
 
 import scala.util.Random
 import scala.annotation.targetName
@@ -68,6 +69,55 @@ object HoldemEquity:
 
     val total = win + tie + loss
     EquityResult(win / total, tie / total, loss / total)
+
+  /** Fixed-point variant of equityExact. Uses Int32 weights with Long accumulation
+    * for deterministic arithmetic and better cache utilization.
+    *
+    * Integer division of weight.raw by boardCount introduces truncation error of at most
+    * 1 LSB per board evaluation (~4e-8 relative error), negligible for poker equity needs.
+    */
+  def equityExactProb(
+      hero: HoleCards,
+      board: Board,
+      villainRange: DiscreteDistribution[HoleCards]
+  ): EquityResult =
+    validateHeroBoard(hero, board)
+    val dead = hero.asSet ++ board.asSet
+    val range = sanitizeRange(villainRange, dead)
+    val missing = board.missing
+
+    // Accumulate as Long. Max: 1326 × 1081 × (2^30/1) ≈ 1.5e15, Long max 9.2e18.
+    var winL = 0L
+    var tieL = 0L
+    var lossL = 0L
+
+    range.weights.foreach { case (villain, weightD) =>
+      if weightD > 0.0 then
+        val weight = Prob.fromDouble(weightD)
+        val remaining = Deck.full.filterNot(card => dead.contains(card) || villain.contains(card)).toIndexedSeq
+        val boardCount = combinationsCount(remaining.length, missing)
+        val perBoardWeight = weight.raw.toLong / boardCount
+
+        val boards =
+          if missing == 0 then Iterator.single(Vector.empty[Card])
+          else HoldemCombinator.combinations(remaining, missing)
+
+        boards.foreach { extra =>
+          val fullBoard = board.cards ++ extra
+          val heroRank = HandEvaluator.evaluate7Cached(hero.toVector ++ fullBoard)
+          val villainRank = HandEvaluator.evaluate7Cached(villain.toVector ++ fullBoard)
+          val cmp = heroRank.compare(villainRank)
+          if cmp > 0 then winL += perBoardWeight
+          else if cmp == 0 then tieL += perBoardWeight
+          else lossL += perBoardWeight
+        }
+    }
+
+    val total = winL + tieL + lossL
+    if total == 0L then EquityResult(0.0, 0.0, 0.0)
+    else
+      val invTotal = 1.0 / total.toDouble
+      EquityResult(winL * invTotal, tieL * invTotal, lossL * invTotal)
 
   def equityExact(
       hero: HoleCards,
