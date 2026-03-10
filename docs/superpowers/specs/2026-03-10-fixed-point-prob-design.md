@@ -154,3 +154,16 @@ Benefits:
 - Sorted by HoleCardsIndex ID for cache-friendly access
 - 4 bytes per weight (Int) vs 8 bytes (Double) — 2x denser arrays
 - Thread-local scratch reuse (already proven in existing `prepareRange`)
+- Combines sanitizeRange + prepareRange into a single pass (no intermediate Map allocation)
+
+### Phase 2 Benchmark Results
+
+| Mode | Double median | Prob Phase 2 median | Speedup | Equity diff |
+|------|--------------|---------------------|---------|-------------|
+| Turn (1 missing, 20 runs) | 1.33 ms | 1.21 ms | 1.11x | 3.3e-8 |
+| Turn (1 missing, 30 runs, 10 warmup) | 2.31 ms | 1.79 ms | 1.29x | 3.3e-8 |
+| Flop (2 missing, 20 runs) | 20.25 ms | 20.06 ms | 1.01x | 3.7e-8 |
+
+Phase 2 eliminated the `sanitizeRange` → intermediate `DiscreteDistribution` → `Map.foreach` overhead by combining filtering, canonical dedup, normalization, and Prob conversion into a single `prepareRangeProb` pass. The speedup is most visible on turn (shorter inner loop → outer loop overhead is a larger fraction) and less visible on flop (inner loop dominates).
+
+Correctness remains excellent — equity differences < 4e-8.
