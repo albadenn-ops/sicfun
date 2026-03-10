@@ -82,3 +82,4 @@ nul
 .jcodemunch-index/
 third_party/**/__pycache__/
 third_party/**/*.pyc
+.worktrees/
