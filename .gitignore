@@ -50,19 +50,30 @@ build/
 
 ### Exploratory / generated data ###
 data/bench/
+data/bench-*
+data/perf-*
 data/_probe-*.tbl
 data/_gpu-*.tbl
 data/_nativecpu-*.tbl
 data/_autotune-*.tbl
+data/_*.txt
+data/_*.err
+data/_*.out
+data/_*.html
+data/_*.py
 data/tmp-*.tbl
+data/tmp/
 data/cuda-visibility-test.tbl
 data/*-check*.bin
 data/*-smoke*.bin
+data/*-smoke*/
 data/*-sample*.bin
 data/*-backup*.bin
 data/*-postfix*.bin
+data/*-probe*/
 data/*-readable*.tsv
 data/check*.tsv
+data/runtime-classpath.txt
 
 ### Build artifacts ###
 HeadsUpOpenCLBindings.obj
@@ -70,16 +81,26 @@ HeadsUpOpenCLBindings.obj
 ### Generated test/benchmark data ###
 data/playing-hall-*/
 data/benchmarks/
+data/manual-bench-auto/
 
 ### Windows reserved names ###
 nul
 
 ### Local AI/code tools ###
+.env.local
 .venv-tools/
 .github-tools/
 .tool-cache/
 .repomap.tags.cache.v1/
 .jcodemunch-index/
+.sbt-global/
+.claude/scheduled_tasks.lock
+scripts/__pycache__/
 third_party/**/__pycache__/
 third_party/**/*.pyc
 .worktrees/
+
+### Local scratch output ###
+test-output*.txt
+test-run*.txt
+code-review-*.md
