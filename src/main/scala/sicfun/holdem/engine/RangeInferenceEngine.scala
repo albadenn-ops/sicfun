@@ -28,6 +28,7 @@ final case class PosteriorCollapse(
 final class PosteriorInferenceResult private (
     val prior: DiscreteDistribution[HoleCards],
     val posterior: DiscreteDistribution[HoleCards],
+    val compact: Option[HoldemEquity.CompactPosterior],
     val logEvidence: Double,
     collapseThunk: () => PosteriorCollapse
 ):
@@ -38,10 +39,11 @@ object PosteriorInferenceResult:
   def apply(
       prior: DiscreteDistribution[HoleCards],
       posterior: DiscreteDistribution[HoleCards],
+      compact: Option[HoldemEquity.CompactPosterior],
       logEvidence: Double,
       collapse: => PosteriorCollapse
   ): PosteriorInferenceResult =
-    new PosteriorInferenceResult(prior, posterior, logEvidence, () => collapse)
+    new PosteriorInferenceResult(prior, posterior, compact, logEvidence, () => collapse)
 
 /** EV evaluation of a candidate hero action against an inferred posterior. */
 final case class ActionEvaluation(action: PokerAction, expectedValue: Double)
@@ -273,23 +275,28 @@ object RangeInferenceEngine:
           ddreConfig = ddreConfig
         )
 
-    val (posterior, logEvidence) =
+    val (posterior, logEvidence, compact) =
       if observationsForBayes.isEmpty then
-        (resolveDecisionPosteriorFor(normalizedPrior), 0.0)
+        (resolveDecisionPosteriorFor(normalizedPrior), 0.0, None)
       else if canSkipBayesUpdate then
-        (resolveDecisionPosteriorFor(normalizedPrior), 0.0)
+        (resolveDecisionPosteriorFor(normalizedPrior), 0.0, None)
       else
         val bayesUpdate = HoldemBayesProvider.updatePosterior(
           prior = normalizedPrior,
           observations = observationsForBayes,
           actionModel = actionModel
         )
+        val usesCompact =
+          ddreConfig.mode == HoldemDdreProvider.Mode.Off ||
+            ddreConfig.mode == HoldemDdreProvider.Mode.Shadow
         val resolved = resolveDecisionPosteriorFor(bayesUpdate.posterior)
-        (resolved, bayesUpdate.logEvidence)
+        val compactOption = if usesCompact then Some(bayesUpdate.compact) else None
+        (resolved, bayesUpdate.logEvidence, compactOption)
 
     PosteriorInferenceResult(
       normalizedPrior,
       posterior,
+      compact,
       logEvidence,
       {
         val collapseSummary = CollapseMetrics.summary(normalizedPrior, posterior)
@@ -654,6 +661,104 @@ object RangeInferenceEngine:
     }
     ActionRecommendation(heroEquity, evaluations, best.action)
 
+  /** Variant that accepts an optional CompactPosterior for the equity fast path. */
+  private[holdem] def recommendActionWithCompact(
+      hero: HoleCards,
+      state: GameState,
+      posterior: DiscreteDistribution[HoleCards],
+      compact: Option[HoldemEquity.CompactPosterior],
+      candidateActions: Vector[PokerAction],
+      actionValueModel: ActionValueModel = ActionValueModel.ChipEv(),
+      villainResponseModel: Option[VillainResponseModel] = None,
+      equityTrials: Int = 50_000,
+      rng: Random = new Random()
+  ): ActionRecommendation =
+    require(candidateActions.nonEmpty, "candidateActions must be non-empty")
+    require(equityTrials > 0, "equityTrials must be positive")
+
+    val maxHands = configuredEquityPosteriorMaxHands
+    val minMass = configuredEquityPosteriorMinMass
+    val minHands = math.max(1, math.min(maxHands, DefaultEquityPosteriorMinHands))
+
+    val heroEquity = compact match
+      case Some(cp) =>
+        val truncated = truncateCompact(cp, maxHands, minMass, minHands)
+        HoldemEquity.equityMonteCarlo(hero, state.board, truncated, equityTrials, rng)
+      case None =>
+        val equityPosterior = compactPosteriorForEquity(posterior)
+        HoldemEquity.equityMonteCarlo(hero, state.board, equityPosterior, equityTrials, rng)
+
+    // For response-aware raise EV, fall back to DiscreteDistribution
+    // (VillainResponseModel needs per-hand Map iteration)
+    val equityPosteriorForResponse = compact match
+      case Some(cp) => cp.distribution
+      case None => compactPosteriorForEquity(posterior)
+
+    val evaluations = candidateActions.map { action =>
+      val expectedValue =
+        villainResponseModel match
+          case Some(responseModel) =>
+            action match
+              case PokerAction.Raise(_) =>
+                val raiseRng =
+                  responseModel match
+                    case _: UniformVillainResponseModel => rng
+                    case _ => new Random(rng.nextLong())
+                responseAwareRaiseEv(
+                  hero = hero,
+                  state = state,
+                  posterior = equityPosteriorForResponse,
+                  heroEquityMean = heroEquity.mean,
+                  action = action,
+                  responseModel = responseModel,
+                  equityTrials = equityTrials,
+                  rng = raiseRng
+                )
+              case _ =>
+                actionValueModel.expectedValue(action, state, heroEquity.mean)
+          case None =>
+            actionValueModel.expectedValue(action, state, heroEquity.mean)
+      ActionEvaluation(action = action, expectedValue = expectedValue)
+    }
+
+    val best = evaluations.reduceLeft { (a, b) =>
+      if a.expectedValue >= b.expectedValue then a else b
+    }
+    ActionRecommendation(heroEquity, evaluations, best.action)
+
+  /** Truncates a CompactPosterior to top-k hands by weight. */
+  private def truncateCompact(
+      cp: HoldemEquity.CompactPosterior,
+      maxHands: Int,
+      minMass: Double,
+      minHands: Int
+  ): HoldemEquity.CompactPosterior =
+    if maxHands <= 0 || cp.size <= maxHands then cp
+    else
+      val indices = Array.tabulate(cp.size)(i => Integer.valueOf(i))
+      java.util.Arrays.sort(indices, (a: Integer, b: Integer) =>
+        java.lang.Integer.compare(cp.probWeights(b.intValue), cp.probWeights(a.intValue))
+      )
+      val hands = new Array[HoleCards](math.min(maxHands, cp.size))
+      val weights = new Array[Int](hands.length)
+      var keptCount = 0
+      var mass = 0.0
+      var idx = 0
+      while idx < indices.length &&
+        keptCount < maxHands &&
+        (keptCount < minHands || mass < minMass)
+      do
+        val i = indices(idx).intValue
+        val w = sicfun.core.Prob(cp.probWeights(i)).toDouble
+        if w > 0.0 then
+          hands(keptCount) = cp.hands(i)
+          weights(keptCount) = cp.probWeights(i)
+          mass += w
+          keptCount += 1
+        idx += 1
+      if keptCount == 0 then cp
+      else new HoldemEquity.CompactPosterior(hands, weights, keptCount)
+
   private def compactPosteriorForEquity(
       posterior: DiscreteDistribution[HoleCards]
   ): DiscreteDistribution[HoleCards] =
@@ -854,10 +959,11 @@ object RangeInferenceEngine:
       rng = new Random(rng.nextLong())
     )
 
-    val recommendation = recommendActionAssumeNormalized(
+    val recommendation = recommendActionWithCompact(
       hero = hero,
       state = state,
       posterior = posteriorInference.posterior,
+      compact = posteriorInference.compact,
       candidateActions = candidateActions,
       actionValueModel = actionValueModel,
       villainResponseModel = villainResponseModel,

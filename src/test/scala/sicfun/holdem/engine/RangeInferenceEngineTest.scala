@@ -81,6 +81,7 @@ class RangeInferenceEngineTest extends FunSuite:
     val result = PosteriorInferenceResult(
       prior = dist,
       posterior = dist,
+      compact = None,
       logEvidence = 0.0,
       collapse = {
         computed = true

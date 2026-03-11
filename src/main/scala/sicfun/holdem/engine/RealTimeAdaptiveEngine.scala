@@ -116,19 +116,6 @@ final class RealTimeAdaptiveEngine(
   require(minEquityTrials > 0, "minEquityTrials must be positive")
   require(minEquityTrials <= defaultEquityTrials, "minEquityTrials must be <= defaultEquityTrials")
 
-  // Heuristic response-to-raise profiles per archetype: VillainResponseProfile(foldFreq, callFreq, raiseFreq).
-  // These approximate typical frequencies observed in online 6-max NLHE microstakes.
-  // Array-indexed by archetype ordinal to avoid Map lookup overhead on hot paths.
-  private val archetypeRaiseResponseByOrdinal: Array[VillainResponseProfile] = {
-    val arr = new Array[VillainResponseProfile](PlayerArchetype.values.length)
-    arr(PlayerArchetype.Nit.ordinal)            = VillainResponseProfile(0.68, 0.28, 0.04)
-    arr(PlayerArchetype.Tag.ordinal)            = VillainResponseProfile(0.48, 0.42, 0.10)
-    arr(PlayerArchetype.Lag.ordinal)            = VillainResponseProfile(0.34, 0.50, 0.16)
-    arr(PlayerArchetype.CallingStation.ordinal) = VillainResponseProfile(0.20, 0.73, 0.07)
-    arr(PlayerArchetype.Maniac.ordinal)         = VillainResponseProfile(0.25, 0.30, 0.45)
-    arr
-  }
-
   private final case class InferenceCacheKey(
       hero: HoleCards,
       board: Board,
@@ -144,7 +131,6 @@ final class RealTimeAdaptiveEngine(
       equilibriumBaseline: Option[HoldemCfrSolution]
   )
 
-  private val Eps = 1e-12
   private val MaxInferenceCacheSize = 64
   private val LowLatencyMaxPosteriorHands = 192
   private val tableRangesIdentity = System.identityHashCode(tableRanges)
@@ -160,6 +146,7 @@ final class RealTimeAdaptiveEngine(
         PosteriorInferenceResult(
           prior = compacted,
           posterior = compacted,
+          compact = None,
           logEvidence = 0.0,
           collapse = PosteriorCollapse(
             entropyReduction = 0.0,
@@ -188,38 +175,17 @@ final class RealTimeAdaptiveEngine(
   def clearInferenceCache(): Unit =
     inferenceCache.clear()
 
+  def seedArchetypePosterior(posterior: ArchetypePosterior): Unit =
+    archetypePosteriorRef.set(posterior)
+
   /** Online Bayesian update of villain archetype from observed response to a hero raise.
     *
     * Only fold/call/raise observations carry signal for this model.
     */
   def observeVillainResponseToRaise(villainAction: PokerAction): ArchetypePosterior =
-    responseOutcome(villainAction) match
-      case None => archetypePosteriorRef.get()
-      case Some(outcome) =>
-        archetypePosteriorRef.updateAndGet { current =>
-          val archetypes = cachedArchetypeValues
-          val n = archetypes.length
-          val weights = new Array[Double](n)
-          var total = 0.0
-          var i = 0
-          while i < n do
-            val archetype = archetypes(i)
-            val prior = current.probabilityOf(archetype)
-            val likelihood = responseLikelihood(archetype, outcome)
-            val posteriorUnnormalized = prior * likelihood
-            weights(i) = posteriorUnnormalized
-            total += posteriorUnnormalized
-            i += 1
-          if total <= Eps then ArchetypePosterior.uniform
-          else
-            val inv = 1.0 / total
-            val normalized = Map.newBuilder[PlayerArchetype, Double]
-            i = 0
-            while i < n do
-              normalized += archetypes(i) -> (weights(i) * inv)
-              i += 1
-            ArchetypePosterior(normalized.result())
-        }
+    archetypePosteriorRef.updateAndGet(current =>
+      ArchetypeLearning.updatePosterior(current, villainAction)
+    )
 
   /** Low-latency adaptive recommendation against a provided posterior range. */
   def recommendAgainstPosterior(
@@ -236,6 +202,7 @@ final class RealTimeAdaptiveEngine(
       hero = hero,
       state = state,
       posterior = posterior,
+      compact = None,
       candidateActions = candidateActions,
       actionValueModel = actionValueModel,
       equityTrials = trials,
@@ -296,6 +263,7 @@ final class RealTimeAdaptiveEngine(
       hero = hero,
       state = state,
       posterior = posteriorInference.posterior,
+      compact = posteriorInference.compact,
       candidateActions = candidateActions,
       actionValueModel = actionValueModel,
       equityTrials = trials,
@@ -312,51 +280,8 @@ final class RealTimeAdaptiveEngine(
       equilibriumBaseline = recommendationOutcome.equilibriumBaseline
     )
 
-  private enum ResponseOutcome:
-    case Fold
-    case Call
-    case Raise
-
-  private def responseOutcome(action: PokerAction): Option[ResponseOutcome] =
-    action match
-      case PokerAction.Fold => Some(ResponseOutcome.Fold)
-      case PokerAction.Call => Some(ResponseOutcome.Call)
-      case PokerAction.Raise(_) => Some(ResponseOutcome.Raise)
-      case _ => None
-
-  // Cache PlayerArchetype.values to avoid repeated array copy on each .values call.
-  private val cachedArchetypeValues: Array[PlayerArchetype] = PlayerArchetype.values
-
-  private def responseLikelihood(
-      archetype: PlayerArchetype,
-      outcome: ResponseOutcome
-  ): Double =
-    val profile = archetypeRaiseResponseByOrdinal(archetype.ordinal)
-    outcome match
-      case ResponseOutcome.Fold => profile.foldProbability
-      case ResponseOutcome.Call => profile.callProbability
-      case ResponseOutcome.Raise => profile.raiseProbability
-
   private def blendedRaiseResponse(posterior: ArchetypePosterior): VillainResponseProfile =
-    val archetypes = cachedArchetypeValues
-    val n = archetypes.length
-    var fold = 0.0
-    var call = 0.0
-    var raise = 0.0
-    var i = 0
-    while i < n do
-      val archetype = archetypes(i)
-      val weight = posterior.probabilityOf(archetype)
-      val profile = archetypeRaiseResponseByOrdinal(i)
-      fold += weight * profile.foldProbability
-      call += weight * profile.callProbability
-      raise += weight * profile.raiseProbability
-      i += 1
-    val total = fold + call + raise
-    if total <= Eps then VillainResponseProfile(0.0, 1.0, 0.0)
-    else
-      val inv = 1.0 / total
-      VillainResponseProfile(fold * inv, call * inv, raise * inv)
+    ArchetypeLearning.blendedRaiseResponse(posterior)
 
   private def effectiveEquityTrials(
       decisionBudgetMillis: Option[Long],
@@ -446,15 +371,17 @@ final class RealTimeAdaptiveEngine(
       hero: HoleCards,
       state: GameState,
       posterior: DiscreteDistribution[HoleCards],
+      compact: Option[HoldemEquity.CompactPosterior],
       candidateActions: Vector[PokerAction],
       actionValueModel: ActionValueModel,
       equityTrials: Int,
       rng: Random
   ): RecommendationOutcome =
-    val baseRecommendation = RangeInferenceEngine.recommendActionAssumeNormalized(
+    val baseRecommendation = RangeInferenceEngine.recommendActionWithCompact(
       hero = hero,
       state = state,
       posterior = posterior,
+      compact = compact,
       candidateActions = candidateActions,
       actionValueModel = actionValueModel,
       villainResponseModel = Some(adaptiveResponseModel),
