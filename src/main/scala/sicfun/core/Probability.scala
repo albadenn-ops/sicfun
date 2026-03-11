@@ -15,22 +15,7 @@ object Probability:
   private[core] inline def isFiniteNonNegative(value: Double): Boolean =
     java.lang.Double.isFinite(value) && value >= 0.0
 
-  private def normalizeChecked[A](
-      weights: Iterable[(A, Double)],
-      zeroMessage: String
-  ): Map[A, Double] =
-    val normalized = Map.newBuilder[A, Double]
-    var total = 0.0
-    weights.foreach { case (key, weight) =>
-      require(isFiniteNonNegative(weight), s"invalid weight for key '$key': $weight")
-      total += weight
-      normalized += key -> weight
-    }
-    require(total > Eps, zeroMessage)
-    val invTotal = 1.0 / total
-    normalized.result().view.mapValues(_ * invTotal).toMap
-
-  /** Computes the expected value (weighted average) of a set of outcomes.
+/** Computes the expected value (weighted average) of a set of outcomes.
     *
     * Requires that the probabilities of all outcomes sum to 1 (within tolerance 1e-9).
     *
@@ -59,7 +44,18 @@ object Probability:
     * @throws IllegalArgumentException if the total weight is effectively zero
     */
   def normalize[A](weights: Map[A, Double]): Map[A, Double] =
-    normalizeChecked(weights, "cannot normalize empty or zero-sum weights")
+    var total = 0.0
+    weights.foreach { case (key, weight) =>
+      require(isFiniteNonNegative(weight), s"invalid weight for key '$key': $weight")
+      total += weight
+    }
+    require(total > Eps, "cannot normalize empty or zero-sum weights")
+    // Skip Map creation when weights are already normalized (common case
+    // for distributions that were previously normalized).
+    if math.abs(total - 1.0) <= 1e-10 then weights
+    else
+      val invTotal = 1.0 / total
+      weights.view.mapValues(_ * invTotal).toMap
 
 /** The result of a Monte Carlo estimation run.
   *

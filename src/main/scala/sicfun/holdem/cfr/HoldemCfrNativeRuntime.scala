@@ -2,6 +2,7 @@ package sicfun.holdem.cfr
 import sicfun.holdem.types.*
 import sicfun.holdem.*
 import sicfun.holdem.gpu.*
+import sicfun.core.{FixedVal, Prob}
 
 import java.util.concurrent.atomic.AtomicReference
 
@@ -35,6 +36,32 @@ private[holdem] object HoldemCfrNativeRuntime:
     require(nodeTypes.length == nodeInfosets.length, "nodeTypes/nodeInfosets length mismatch")
     require(nodeTypes.length == terminalUtilities.length, "nodeTypes/terminalUtilities length mismatch")
     require(edgeChildIds.length == edgeProbabilities.length, "edgeChildIds/edgeProbabilities length mismatch")
+    require(infosetKeys.length == infosetPlayers.length, "infosetKeys/infosetPlayers length mismatch")
+    require(infosetKeys.length == infosetActions.length, "infosetKeys/infosetActions length mismatch")
+    require(infosetKeys.length == infosetActionCounts.length, "infosetKeys/infosetActionCounts length mismatch")
+
+  final case class NativeTreeSpecFixed(
+      rootNodeId: Int,
+      rootInfoSetIndex: Int,
+      nodeTypes: Array[Int],
+      nodeStarts: Array[Int],
+      nodeCounts: Array[Int],
+      nodeInfosets: Array[Int],
+      edgeChildIds: Array[Int],
+      edgeProbabilitiesRaw: Array[Int],
+      terminalUtilitiesRaw: Array[Int],
+      infosetKeys: Vector[String],
+      infosetPlayers: Array[Int],
+      infosetActions: Vector[Vector[PokerAction]],
+      infosetActionCounts: Array[Int]
+  ):
+    require(rootNodeId >= 0, "rootNodeId must be non-negative")
+    require(rootInfoSetIndex >= 0, "rootInfoSetIndex must be non-negative")
+    require(nodeTypes.length == nodeStarts.length, "nodeTypes/nodeStarts length mismatch")
+    require(nodeTypes.length == nodeCounts.length, "nodeTypes/nodeCounts length mismatch")
+    require(nodeTypes.length == nodeInfosets.length, "nodeTypes/nodeInfosets length mismatch")
+    require(nodeTypes.length == terminalUtilitiesRaw.length, "nodeTypes/terminalUtilitiesRaw length mismatch")
+    require(edgeChildIds.length == edgeProbabilitiesRaw.length, "edgeChildIds/edgeProbabilitiesRaw length mismatch")
     require(infosetKeys.length == infosetPlayers.length, "infosetKeys/infosetPlayers length mismatch")
     require(infosetKeys.length == infosetActions.length, "infosetKeys/infosetActions length mismatch")
     require(infosetKeys.length == infosetActionCounts.length, "infosetKeys/infosetActionCounts length mismatch")
@@ -156,6 +183,86 @@ private[holdem] object HoldemCfrNativeRuntime:
         catch
           case ex: UnsatisfiedLinkError =>
             Left(s"${backendLabel(backend)} native CFR symbols not found: ${ex.getMessage}")
+          case ex: Throwable =>
+            Left(
+              Option(ex.getMessage)
+                .map(_.trim)
+                .filter(_.nonEmpty)
+                .getOrElse(ex.getClass.getSimpleName)
+            )
+
+  def solveTreeFixed(
+      backend: Backend,
+      spec: NativeTreeSpecFixed,
+      config: CfrSolver.Config
+  ): Either[String, NativeSolveResult] =
+    val loadResult =
+      backend match
+        case Backend.Cpu => cpuLoadResult()
+        case Backend.Gpu => gpuLoadResult()
+    loadResult match
+      case Left(reason) =>
+        Left(reason)
+      case Right(_) =>
+        try
+          val outAverageStrategiesRaw = new Array[Int](spec.infosetActionCounts.sum)
+          val outExpectedValueRaw = Array(0)
+          val status =
+            backend match
+              case Backend.Cpu =>
+                HoldemCfrNativeCpuBindings.solveTreeFixed(
+                  config.iterations,
+                  config.averagingDelay,
+                  config.cfrPlus,
+                  config.linearAveraging,
+                  spec.rootNodeId,
+                  spec.nodeTypes,
+                  spec.nodeStarts,
+                  spec.nodeCounts,
+                  spec.nodeInfosets,
+                  spec.edgeChildIds,
+                  spec.edgeProbabilitiesRaw,
+                  spec.terminalUtilitiesRaw,
+                  spec.infosetPlayers,
+                  spec.infosetActionCounts,
+                  outAverageStrategiesRaw,
+                  outExpectedValueRaw
+                )
+              case Backend.Gpu =>
+                HoldemCfrNativeGpuBindings.solveTreeFixed(
+                  config.iterations,
+                  config.averagingDelay,
+                  config.cfrPlus,
+                  config.linearAveraging,
+                  spec.rootNodeId,
+                  spec.nodeTypes,
+                  spec.nodeStarts,
+                  spec.nodeCounts,
+                  spec.nodeInfosets,
+                  spec.edgeChildIds,
+                  spec.edgeProbabilitiesRaw,
+                  spec.terminalUtilitiesRaw,
+                  spec.infosetPlayers,
+                  spec.infosetActionCounts,
+                  outAverageStrategiesRaw,
+                  outExpectedValueRaw
+                )
+          if status != 0 then Left(describeStatus(status))
+          else
+            val engineCode =
+              backend match
+                case Backend.Cpu => safeLastEngineCodeCpu()
+                case Backend.Gpu => safeLastEngineCodeGpu()
+            Right(
+              NativeSolveResult(
+                averageStrategiesFlattened = outAverageStrategiesRaw.map(raw => raw.toDouble / Prob.Scale.toDouble),
+                expectedValuePlayer0 = outExpectedValueRaw(0).toDouble / FixedVal.Scale.toDouble,
+                lastEngineCode = engineCode
+              )
+            )
+        catch
+          case ex: UnsatisfiedLinkError =>
+            Left(s"${backendLabel(backend)} native CFR fixed symbols not found: ${ex.getMessage}")
           case ex: Throwable =>
             Left(
               Option(ex.getMessage)

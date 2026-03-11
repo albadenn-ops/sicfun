@@ -115,6 +115,55 @@ class HoldemCfrSolverTest extends FunSuite:
     assert(solution.provider.nonEmpty)
   }
 
+  test("scala-fixed full solve stays close to scala on preflop spot") {
+    withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
+      val hero = hole("Ac", "Ad")
+      val state = GameState(
+        street = Street.Preflop,
+        board = Board.empty,
+        pot = 6.0,
+        toCall = 2.0,
+        position = Position.Button,
+        stackSize = 100.0,
+        betHistory = Vector.empty
+      )
+      val posterior = DiscreteDistribution(
+        Map(
+          hole("7c", "2d") -> 0.6,
+          hole("Kc", "Qd") -> 0.3,
+          hole("Ks", "Kh") -> 0.1
+        )
+      )
+      val candidateActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(8.0))
+      val config = HoldemCfrConfig(
+        iterations = 1_200,
+        averagingDelay = 100,
+        maxVillainHands = 32,
+        equityTrials = 1_000,
+        preferNativeBatch = true,
+        rngSeed = 37L
+      )
+
+      val baseline = HoldemCfrSolver.solve(hero, state, posterior, candidateActions, config)
+
+      withSystemProperties(Map("sicfun.cfr.provider" -> "scala-fixed")) {
+        val fixed = HoldemCfrSolver.solve(hero, state, posterior, candidateActions, config)
+
+        assertEquals(fixed.provider, "scala-fixed")
+        assertEquals(fixed.bestAction, baseline.bestAction)
+        assertEqualsDouble(fixed.expectedValuePlayer0, baseline.expectedValuePlayer0, 0.15)
+        candidateActions.foreach { action =>
+          val pBaseline = baseline.actionProbabilities.getOrElse(action, 0.0)
+          val pFixed = fixed.actionProbabilities.getOrElse(action, 0.0)
+          assert(
+            math.abs(pFixed - pBaseline) <= 0.08,
+            s"policy mismatch for $action: baseline=$pBaseline fixed=$pFixed"
+          )
+        }
+      }
+    }
+  }
+
   test("native CPU provider falls back to scala when native path is invalid") {
     val missingNativePath = Paths
       .get(System.getProperty("java.io.tmpdir"), s"sicfun-cfr-native-missing-${System.nanoTime()}.dll")
@@ -159,6 +208,112 @@ class HoldemCfrSolverTest extends FunSuite:
           equityTrials = 800,
           preferNativeBatch = true,
           rngSeed = 19L
+        )
+      )
+
+      assertEquals(solution.provider, "scala")
+    }
+  }
+
+  test("native CPU fixed provider falls back to scala when native path is invalid") {
+    val missingNativePath = Paths
+      .get(System.getProperty("java.io.tmpdir"), s"sicfun-cfr-native-fixed-missing-${System.nanoTime()}.dll")
+      .toString
+
+    withSystemProperties(
+      Map(
+        "sicfun.cfr.provider" -> "native-cpu-fixed",
+        "sicfun.cfr.native.cpu.path" -> missingNativePath
+      )
+    ) {
+      HoldemCfrNativeRuntime.resetLoadCacheForTests()
+      HoldemCfrSolver.resetAutoProviderForTests()
+
+      val hero = hole("Ac", "Ad")
+      val state = GameState(
+        street = Street.Preflop,
+        board = Board.empty,
+        pot = 6.0,
+        toCall = 2.0,
+        position = Position.Button,
+        stackSize = 100.0,
+        betHistory = Vector.empty
+      )
+      val posterior = DiscreteDistribution(
+        Map(
+          hole("7c", "2d") -> 0.5,
+          hole("Kc", "Qd") -> 0.5
+        )
+      )
+      val candidateActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(8.0))
+
+      val solution = HoldemCfrSolver.solve(
+        hero = hero,
+        state = state,
+        villainPosterior = posterior,
+        candidateActions = candidateActions,
+        config = HoldemCfrConfig(
+          iterations = 600,
+          averagingDelay = 100,
+          maxVillainHands = 16,
+          equityTrials = 800,
+          preferNativeBatch = true,
+          rngSeed = 43L
+        )
+      )
+
+      assertEquals(solution.provider, "scala")
+    }
+  }
+
+  test("native GPU fixed provider falls back to scala when native path is invalid") {
+    val missingNativePath = Paths
+      .get(System.getProperty("java.io.tmpdir"), s"sicfun-cfr-gpu-fixed-missing-${System.nanoTime()}.dll")
+      .toString
+    val missingCpuPath = Paths
+      .get(System.getProperty("java.io.tmpdir"), s"sicfun-cfr-gpu-fixed-cpu-missing-${System.nanoTime()}.dll")
+      .toString
+
+    withSystemProperties(
+      Map(
+        "sicfun.cfr.provider" -> "native-gpu-fixed",
+        "sicfun.cfr.native.gpu.path" -> missingNativePath,
+        "sicfun.cfr.native.cpu.path" -> missingCpuPath
+      )
+    ) {
+      HoldemCfrNativeRuntime.resetLoadCacheForTests()
+      HoldemCfrSolver.resetAutoProviderForTests()
+
+      val hero = hole("Ac", "Ad")
+      val state = GameState(
+        street = Street.Preflop,
+        board = Board.empty,
+        pot = 6.0,
+        toCall = 2.0,
+        position = Position.Button,
+        stackSize = 100.0,
+        betHistory = Vector.empty
+      )
+      val posterior = DiscreteDistribution(
+        Map(
+          hole("7c", "2d") -> 0.5,
+          hole("Kc", "Qd") -> 0.5
+        )
+      )
+      val candidateActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(8.0))
+
+      val solution = HoldemCfrSolver.solve(
+        hero = hero,
+        state = state,
+        villainPosterior = posterior,
+        candidateActions = candidateActions,
+        config = HoldemCfrConfig(
+          iterations = 600,
+          averagingDelay = 100,
+          maxVillainHands = 16,
+          equityTrials = 800,
+          preferNativeBatch = true,
+          rngSeed = 47L
         )
       )
 
@@ -218,6 +373,55 @@ class HoldemCfrSolverTest extends FunSuite:
           math.abs(pFull - pDecision) < 1e-9,
           s"policy mismatch for $action: full=$pFull decision=$pDecision"
         )
+      }
+    }
+  }
+
+  test("scala-fixed decision-only solve stays close to scala root policy") {
+    withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
+      val hero = hole("Ac", "Kd")
+      val state = GameState(
+        street = Street.Turn,
+        board = Board.from(Vector(card("2c"), card("7d"), card("Jh"), card("Qc"))),
+        pot = 18.0,
+        toCall = 4.0,
+        position = Position.Button,
+        stackSize = 82.0,
+        betHistory = Vector(BetAction(1, PokerAction.Raise(4.0)))
+      )
+      val posterior = DiscreteDistribution(
+        Map(
+          hole("As", "Qd") -> 0.35,
+          hole("Ts", "9s") -> 0.30,
+          hole("Qh", "Js") -> 0.20,
+          hole("7c", "7s") -> 0.15
+        )
+      )
+      val candidateActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
+      val config = HoldemCfrConfig(
+        iterations = 700,
+        averagingDelay = 100,
+        maxVillainHands = 32,
+        equityTrials = 700,
+        preferNativeBatch = true,
+        rngSeed = 41L
+      )
+
+      val baseline = HoldemCfrSolver.solveDecisionPolicy(hero, state, posterior, candidateActions, config)
+
+      withSystemProperties(Map("sicfun.cfr.provider" -> "scala-fixed")) {
+        val fixed = HoldemCfrSolver.solveDecisionPolicy(hero, state, posterior, candidateActions, config)
+
+        assertEquals(fixed.provider, "scala-fixed")
+        assertEquals(fixed.bestAction, baseline.bestAction)
+        candidateActions.foreach { action =>
+          val pBaseline = baseline.actionProbabilities.getOrElse(action, 0.0)
+          val pFixed = fixed.actionProbabilities.getOrElse(action, 0.0)
+          assert(
+            math.abs(pFixed - pBaseline) <= 0.08,
+            s"policy mismatch for $action: baseline=$pBaseline fixed=$pFixed"
+          )
+        }
       }
     }
   }

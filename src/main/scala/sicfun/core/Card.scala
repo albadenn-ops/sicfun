@@ -111,8 +111,16 @@ object Rank:
   * @param suit the card's suit (Clubs, Diamonds, Hearts, or Spades)
   */
 final case class Card(rank: Rank, suit: Suit):
+  /** Precomputed integer identity (0-51) for fast equality and hashing. */
+  val id: Int = suit.ordinal * 13 + rank.ordinal
+
   /** Returns the canonical two-character token (e.g., "Ah", "2c"). Inverse of [[Card.parse]]. */
   inline def toToken: String = s"${rank.toChar}${suit.toChar}"
+
+  override def hashCode(): Int = id
+  override def equals(that: Any): Boolean = that match
+    case c: Card => id == c.id
+    case _ => false
 
 /** Companion object providing parsing utilities for [[Card]]. */
 object Card:

@@ -5,7 +5,7 @@ import sicfun.holdem.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
 
-import sicfun.core.{Card, CardId, DiscreteDistribution, HandEvaluator}
+import sicfun.core.{Card, CardId, DiscreteDistribution, FixedVal, HandEvaluator, Prob}
 
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
@@ -99,6 +99,9 @@ object HoldemCfrSolver:
 
   private enum Provider:
     case Scala
+    case ScalaFixed
+    case NativeCpuFixed
+    case NativeGpuFixed
     case NativeCpu
     case NativeGpu
 
@@ -865,6 +868,9 @@ object HoldemCfrSolver:
   private def providerLabel(provider: Provider): String =
     provider match
       case Provider.Scala => "scala"
+      case Provider.ScalaFixed => "scala-fixed"
+      case Provider.NativeCpuFixed => "native-cpu-fixed"
+      case Provider.NativeGpuFixed => "native-gpu-fixed"
       case Provider.NativeCpu => "native-cpu"
       case Provider.NativeGpu => "native-gpu"
 
@@ -907,6 +913,17 @@ object HoldemCfrSolver:
     configured match
       case Provider.Scala =>
         solveWithScala(game, config)
+      case Provider.ScalaFixed =>
+        solveWithScalaFixed(game, config)
+      case Provider.NativeCpuFixed =>
+        solveWithNativeFixedCpu(game, config)
+          .orElse(solveWithNative(game, config, HoldemCfrNativeRuntime.Backend.Cpu))
+          .getOrElse(solveWithScala(game, config))
+      case Provider.NativeGpuFixed =>
+        solveWithNativeFixedGpu(game, config)
+          .orElse(solveWithNative(game, config, HoldemCfrNativeRuntime.Backend.Gpu))
+          .orElse(solveWithNative(game, config, HoldemCfrNativeRuntime.Backend.Cpu))
+          .getOrElse(solveWithScala(game, config))
       case Provider.NativeCpu =>
         solveWithNative(game, config, HoldemCfrNativeRuntime.Backend.Cpu)
           .getOrElse(solveWithScala(game, config))
@@ -923,6 +940,17 @@ object HoldemCfrSolver:
     configured match
       case Provider.Scala =>
         solveRootWithScala(game, config)
+      case Provider.ScalaFixed =>
+        solveRootWithScalaFixed(game, config)
+      case Provider.NativeCpuFixed =>
+        solveRootWithNativeFixedCpu(game, config)
+          .orElse(solveRootWithNative(game, config, HoldemCfrNativeRuntime.Backend.Cpu))
+          .getOrElse(solveRootWithScala(game, config))
+      case Provider.NativeGpuFixed =>
+        solveRootWithNativeFixedGpu(game, config)
+          .orElse(solveRootWithNative(game, config, HoldemCfrNativeRuntime.Backend.Gpu))
+          .orElse(solveRootWithNative(game, config, HoldemCfrNativeRuntime.Backend.Cpu))
+          .getOrElse(solveRootWithScala(game, config))
       case Provider.NativeCpu =>
         solveRootWithNative(game, config, HoldemCfrNativeRuntime.Backend.Cpu)
           .getOrElse(solveRootWithScala(game, config))
@@ -936,9 +964,26 @@ object HoldemCfrSolver:
       config: CfrSolver.Config
   ): PolicySolveResult =
     val training = CfrSolver.solve(game = game, config = config)
-    val averagePolicy = training.infosets.view.mapValues(toActionMap).toMap
+    val averagePolicy = training.infosets.iterator.map { case (key, snapshot) =>
+      key -> toActionMap(snapshot)
+    }.toMap
     PolicySolveResult(
       provider = Provider.Scala,
+      iterations = training.iterations,
+      expectedValuePlayer0 = training.expectedValuePlayer0,
+      averagePolicy = averagePolicy
+    )
+
+  private def solveWithScalaFixed(
+      game: HoldemDecisionGame,
+      config: CfrSolver.Config
+  ): PolicySolveResult =
+    val training = CfrSolver.solveFixed(game = game, config = config)
+    val averagePolicy = training.infosets.iterator.map { case (key, snapshot) =>
+      key -> toActionMap(snapshot)
+    }.toMap
+    PolicySolveResult(
+      provider = Provider.ScalaFixed,
       iterations = training.iterations,
       expectedValuePlayer0 = training.expectedValuePlayer0,
       averagePolicy = averagePolicy
@@ -973,6 +1018,46 @@ object HoldemCfrSolver:
           )
         )
 
+  private def solveWithNativeFixedCpu(
+      game: HoldemDecisionGame,
+      config: CfrSolver.Config
+  ): Option[PolicySolveResult] =
+    val spec = game.toNativeTreeSpecFixed
+    HoldemCfrNativeRuntime.solveTreeFixed(HoldemCfrNativeRuntime.Backend.Cpu, spec, config) match
+      case Left(reason) =>
+        GpuRuntimeSupport.log(s"native CFR cpu fixed solve unavailable: $reason")
+        None
+      case Right(nativeResult) =>
+        val averagePolicy = policyFromNativeFlattened(spec, nativeResult.averageStrategiesFlattened)
+        Some(
+          PolicySolveResult(
+            provider = Provider.NativeCpuFixed,
+            iterations = config.iterations,
+            expectedValuePlayer0 = nativeResult.expectedValuePlayer0,
+            averagePolicy = averagePolicy
+          )
+        )
+
+  private def solveWithNativeFixedGpu(
+      game: HoldemDecisionGame,
+      config: CfrSolver.Config
+  ): Option[PolicySolveResult] =
+    val spec = game.toNativeTreeSpecFixed
+    HoldemCfrNativeRuntime.solveTreeFixed(HoldemCfrNativeRuntime.Backend.Gpu, spec, config) match
+      case Left(reason) =>
+        GpuRuntimeSupport.log(s"native CFR gpu fixed solve unavailable: $reason")
+        None
+      case Right(nativeResult) =>
+        val averagePolicy = policyFromNativeFlattened(spec, nativeResult.averageStrategiesFlattened)
+        Some(
+          PolicySolveResult(
+            provider = Provider.NativeGpuFixed,
+            iterations = config.iterations,
+            expectedValuePlayer0 = nativeResult.expectedValuePlayer0,
+            averagePolicy = averagePolicy
+          )
+        )
+
   private def solveRootWithScala(
       game: HoldemDecisionGame,
       config: CfrSolver.Config
@@ -985,6 +1070,22 @@ object HoldemCfrSolver:
     )
     RootPolicySolveResult(
       provider = Provider.Scala,
+      iterations = root.iterations,
+      actionProbabilities = normalizedPolicyFromVector(root.actions, root.strategy)
+    )
+
+  private def solveRootWithScalaFixed(
+      game: HoldemDecisionGame,
+      config: CfrSolver.Config
+  ): RootPolicySolveResult =
+    val root = CfrSolver.solveRootPolicyFixed(
+      game = game,
+      rootInfoSetKey = game.heroRootInfoSetKey,
+      rootActions = game.heroActions,
+      config = config
+    )
+    RootPolicySolveResult(
+      provider = Provider.ScalaFixed,
       iterations = root.iterations,
       actionProbabilities = normalizedPolicyFromVector(root.actions, root.strategy)
     )
@@ -1019,8 +1120,85 @@ object HoldemCfrSolver:
           )
         )
 
+  private def solveRootWithNativeFixedCpu(
+      game: HoldemDecisionGame,
+      config: CfrSolver.Config
+  ): Option[RootPolicySolveResult] =
+    val spec = game.toNativeTreeSpecFixed
+    HoldemCfrNativeRuntime.solveTreeFixed(HoldemCfrNativeRuntime.Backend.Cpu, spec, config) match
+      case Left(reason) =>
+        GpuRuntimeSupport.log(s"native CFR cpu fixed root solve unavailable: $reason")
+        None
+      case Right(nativeResult) =>
+        Some(
+          RootPolicySolveResult(
+            provider = Provider.NativeCpuFixed,
+            iterations = config.iterations,
+            actionProbabilities = rootPolicyFromNativeFlattened(
+              spec = spec,
+              flattened = nativeResult.averageStrategiesFlattened,
+              rootActions = game.heroActions
+            )
+          )
+        )
+
+  private def solveRootWithNativeFixedGpu(
+      game: HoldemDecisionGame,
+      config: CfrSolver.Config
+  ): Option[RootPolicySolveResult] =
+    val spec = game.toNativeTreeSpecFixed
+    HoldemCfrNativeRuntime.solveTreeFixed(HoldemCfrNativeRuntime.Backend.Gpu, spec, config) match
+      case Left(reason) =>
+        GpuRuntimeSupport.log(s"native CFR gpu fixed root solve unavailable: $reason")
+        None
+      case Right(nativeResult) =>
+        Some(
+          RootPolicySolveResult(
+            provider = Provider.NativeGpuFixed,
+            iterations = config.iterations,
+            actionProbabilities = rootPolicyFromNativeFlattened(
+              spec = spec,
+              flattened = nativeResult.averageStrategiesFlattened,
+              rootActions = game.heroActions
+            )
+          )
+        )
+
   private def policyFromNativeFlattened(
       spec: HoldemCfrNativeRuntime.NativeTreeSpec,
+      flattened: Array[Double]
+  ): Map[String, Map[PokerAction, Double]] =
+    val expectedLength = spec.infosetActionCounts.sum
+    require(flattened.length == expectedLength, s"native flattened strategy length mismatch: ${flattened.length} != $expectedLength")
+
+    var cursor = 0
+    val builder = Map.newBuilder[String, Map[PokerAction, Double]]
+    var infosetIdx = 0
+    while infosetIdx < spec.infosetKeys.length do
+      val actions = spec.infosetActions(infosetIdx)
+      val count = spec.infosetActionCounts(infosetIdx)
+      val raw = Map.newBuilder[PokerAction, Double]
+      var idx = 0
+      var total = 0.0
+      while idx < count do
+        val p = math.max(0.0, flattened(cursor + idx))
+        raw += actions(idx) -> p
+        total += p
+        idx += 1
+      val normalized =
+        if total > Epsilon then
+          val inv = 1.0 / total
+          raw.result().map { case (action, probability) => action -> (probability * inv) }
+        else
+          val uniform = 1.0 / actions.length.toDouble
+          actions.map(action => action -> uniform).toMap
+      builder += spec.infosetKeys(infosetIdx) -> normalized
+      cursor += count
+      infosetIdx += 1
+    builder.result()
+
+  private def policyFromNativeFlattened(
+      spec: HoldemCfrNativeRuntime.NativeTreeSpecFixed,
       flattened: Array[Double]
   ): Map[String, Map[PokerAction, Double]] =
     val expectedLength = spec.infosetActionCounts.sum
@@ -1072,10 +1250,55 @@ object HoldemCfrSolver:
       idx += 1
     normalizedPolicyForActions(rootActions, raw.result())
 
+  private def rootPolicyFromNativeFlattened(
+      spec: HoldemCfrNativeRuntime.NativeTreeSpecFixed,
+      flattened: Array[Double],
+      rootActions: Vector[PokerAction]
+  ): Map[PokerAction, Double] =
+    val expectedLength = spec.infosetActionCounts.sum
+    require(flattened.length == expectedLength, s"native flattened strategy length mismatch: ${flattened.length} != $expectedLength")
+
+    var cursor = 0
+    var infosetIdx = 0
+    while infosetIdx < spec.rootInfoSetIndex do
+      cursor += spec.infosetActionCounts(infosetIdx)
+      infosetIdx += 1
+
+    val count = spec.infosetActionCounts(spec.rootInfoSetIndex)
+    require(count == rootActions.length, s"native root action-count mismatch: $count != ${rootActions.length}")
+    val raw = Map.newBuilder[PokerAction, Double]
+    var idx = 0
+    while idx < count do
+      raw += spec.infosetActions(spec.rootInfoSetIndex)(idx) -> math.max(0.0, flattened(cursor + idx))
+      idx += 1
+    normalizedPolicyForActions(rootActions, raw.result())
+
   private def resolveConfiguredProvider(): Provider =
     GpuRuntimeSupport.resolveNonEmptyLower(CfrProviderProperty, CfrProviderEnv) match
       case Some("scala" | "jvm") =>
         Provider.Scala
+      case Some("scala-fixed" | "fixed") =>
+        Provider.ScalaFixed
+      case Some("native-cpu-fixed" | "cpu-fixed" | "native-fixed") =>
+        val availability = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Cpu)
+        if availability.available then
+          GpuRuntimeSupport.warn(
+            "CFR native CPU fixed provider is experimental and currently fails parity on some Hold'em turn trees; using it only because it was explicitly requested"
+          )
+          Provider.NativeCpuFixed
+        else
+          GpuRuntimeSupport.warn(s"CFR native CPU fixed provider unavailable (${availability.detail}); falling back to Scala")
+          Provider.Scala
+      case Some("native-gpu-fixed" | "gpu-fixed" | "cuda-fixed") =>
+        val availability = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Gpu)
+        if availability.available then
+          GpuRuntimeSupport.warn(
+            "CFR native GPU fixed provider is experimental and currently fails parity on some Hold'em turn trees; using it only because it was explicitly requested"
+          )
+          Provider.NativeGpuFixed
+        else
+          GpuRuntimeSupport.warn(s"CFR native GPU fixed provider unavailable (${availability.detail}); falling back to Scala")
+          Provider.Scala
       case Some("native-cpu" | "cpu") =>
         val availability = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Cpu)
         if availability.available then Provider.NativeCpu
@@ -1132,11 +1355,17 @@ object HoldemCfrSolver:
                     provider = provider,
                     solveThunk = solveWithNative(syntheticGame, benchmarkConfig, HoldemCfrNativeRuntime.Backend.Cpu)
                   )
+                case Provider.NativeGpuFixed =>
+                  None
                 case Provider.NativeGpu =>
                   benchmarkNativeProvider(
                     provider = provider,
                     solveThunk = solveWithNative(syntheticGame, benchmarkConfig, HoldemCfrNativeRuntime.Backend.Gpu)
                   )
+                case Provider.NativeCpuFixed =>
+                  None
+                case Provider.ScalaFixed =>
+                  None
                 case Provider.Scala =>
                   None
             }
@@ -1751,6 +1980,46 @@ object HoldemCfrSolver:
         case None =>
           val finalPot = publicState.pot + heroInvestment + villainInvestment
           (equity * finalPot) - heroInvestment
+
+    def toNativeTreeSpecFixed: HoldemCfrNativeRuntime.NativeTreeSpecFixed =
+      val spec = toNativeTreeSpec
+      val edgeProbabilitiesRaw = new Array[Int](spec.edgeProbabilities.length)
+      var nodeIdx = 0
+      while nodeIdx < spec.nodeTypes.length do
+        if spec.nodeTypes(nodeIdx) == 1 then
+          val start = spec.nodeStarts(nodeIdx)
+          val count = spec.nodeCounts(nodeIdx)
+          var totalRaw = 0
+          var maxIdx = 0
+          var maxRaw = Int.MinValue
+          var idx = 0
+          while idx < count do
+            val raw = Prob.fromDouble(spec.edgeProbabilities(start + idx)).raw
+            edgeProbabilitiesRaw(start + idx) = raw
+            totalRaw += raw
+            if raw > maxRaw then
+              maxRaw = raw
+              maxIdx = idx
+            idx += 1
+          if count > 0 then
+            edgeProbabilitiesRaw(start + maxIdx) += (Prob.Scale - totalRaw)
+        nodeIdx += 1
+
+      HoldemCfrNativeRuntime.NativeTreeSpecFixed(
+        rootNodeId = spec.rootNodeId,
+        rootInfoSetIndex = spec.rootInfoSetIndex,
+        nodeTypes = spec.nodeTypes,
+        nodeStarts = spec.nodeStarts,
+        nodeCounts = spec.nodeCounts,
+        nodeInfosets = spec.nodeInfosets,
+        edgeChildIds = spec.edgeChildIds,
+        edgeProbabilitiesRaw = edgeProbabilitiesRaw,
+        terminalUtilitiesRaw = spec.terminalUtilities.map(value => FixedVal.fromDouble(value).raw),
+        infosetKeys = spec.infosetKeys,
+        infosetPlayers = spec.infosetPlayers,
+        infosetActions = spec.infosetActions,
+        infosetActionCounts = spec.infosetActionCounts
+      )
 
     def toNativeTreeSpec: HoldemCfrNativeRuntime.NativeTreeSpec =
       val villainCount = villainDistribution.length

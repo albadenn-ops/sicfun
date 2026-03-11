@@ -83,6 +83,39 @@ int write_single_double(JNIEnv* env, jdoubleArray array, const double value) {
   return cfrnative::kStatusOk;
 }
 
+int write_int_array(JNIEnv* env, jintArray array, const std::vector<int>& values) {
+  if (array == nullptr) {
+    return cfrnative::kStatusNullArray;
+  }
+  const jsize length = env->GetArrayLength(array);
+  if (length != static_cast<jsize>(values.size())) {
+    return cfrnative::kStatusLengthMismatch;
+  }
+  if (length > 0) {
+    env->SetIntArrayRegion(array, 0, length, reinterpret_cast<const jint*>(values.data()));
+    if (clear_pending_jni_exception(env)) {
+      return cfrnative::kStatusWriteFailure;
+    }
+  }
+  return cfrnative::kStatusOk;
+}
+
+int write_single_int(JNIEnv* env, jintArray array, const int value) {
+  if (array == nullptr) {
+    return cfrnative::kStatusNullArray;
+  }
+  const jsize length = env->GetArrayLength(array);
+  if (length < 1) {
+    return cfrnative::kStatusLengthMismatch;
+  }
+  const jint boxed = static_cast<jint>(value);
+  env->SetIntArrayRegion(array, 0, 1, &boxed);
+  if (clear_pending_jni_exception(env)) {
+    return cfrnative::kStatusWriteFailure;
+  }
+  return cfrnative::kStatusOk;
+}
+
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL
@@ -140,6 +173,67 @@ Java_sicfun_holdem_HoldemCfrNativeGpuBindings_solveTree(
   status = write_double_array(env, outAverageStrategiesArray, output.average_strategies);
   if (status != cfrnative::kStatusOk) return status;
   status = write_single_double(env, outExpectedValueArray, output.expected_value_player0);
+  if (status != cfrnative::kStatusOk) return status;
+
+  g_last_engine_code.store(kEngineGpu, std::memory_order_relaxed);
+  return cfrnative::kStatusOk;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_sicfun_holdem_HoldemCfrNativeGpuBindings_solveTreeFixed(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jint iterations,
+    jint averagingDelay,
+    jboolean cfrPlus,
+    jboolean linearAveraging,
+    jint rootNodeId,
+    jintArray nodeTypesArray,
+    jintArray nodeStartsArray,
+    jintArray nodeCountsArray,
+    jintArray nodeInfosetsArray,
+    jintArray edgeChildIdsArray,
+    jintArray edgeProbabilitiesRawArray,
+    jintArray terminalUtilitiesRawArray,
+    jintArray infosetPlayersArray,
+    jintArray infosetActionCountsArray,
+    jintArray outAverageStrategiesRawArray,
+    jintArray outExpectedValueRawArray) {
+  cfrnative::TreeSpecFixed spec;
+  spec.iterations = static_cast<int>(iterations);
+  spec.averaging_delay = static_cast<int>(averagingDelay);
+  spec.cfr_plus = (cfrPlus == JNI_TRUE);
+  spec.linear_averaging = (linearAveraging == JNI_TRUE);
+  spec.root_node_id = static_cast<int>(rootNodeId);
+
+  int status = read_int_array(env, nodeTypesArray, spec.node_types);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeStartsArray, spec.node_starts);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeCountsArray, spec.node_counts);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeInfosetsArray, spec.node_infosets);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, edgeChildIdsArray, spec.edge_child_ids);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, edgeProbabilitiesRawArray, spec.edge_probabilities_raw);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, terminalUtilitiesRawArray, spec.terminal_utilities_raw);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, infosetPlayersArray, spec.infoset_players);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, infosetActionCountsArray, spec.infoset_action_counts);
+  if (status != cfrnative::kStatusOk) return status;
+
+  cfrnative::SolveOutputFixed output;
+  status = cfrnative::solve_fixed(spec, output);
+  if (status != cfrnative::kStatusOk) {
+    return status;
+  }
+
+  status = write_int_array(env, outAverageStrategiesRawArray, output.average_strategies_raw);
+  if (status != cfrnative::kStatusOk) return status;
+  status = write_single_int(env, outExpectedValueRawArray, output.expected_value_player0_raw);
   if (status != cfrnative::kStatusOk) return status;
 
   g_last_engine_code.store(kEngineGpu, std::memory_order_relaxed);

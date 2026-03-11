@@ -6,7 +6,9 @@ final case class DiscreteDistribution[A](weights: Map[A, Double]):
   require(weights.values.forall(isFiniteNonNegative), "distribution weights must be finite and non-negative")
 
   def normalized: DiscreteDistribution[A] =
-    DiscreteDistribution(Probability.normalize(weights))
+    val normalizedWeights = Probability.normalize(weights)
+    if normalizedWeights eq weights then this
+    else DiscreteDistribution(normalizedWeights)
 
   inline def probabilityOf(a: A): Double = weights.getOrElse(a, 0.0)
 
@@ -20,21 +22,30 @@ final case class DiscreteDistribution[A](weights: Map[A, Double]):
     DiscreteDistribution(mapped)
 
   def updateWithLikelihood(likelihood: A => Double): (DiscreteDistribution[A], Double) =
-    val raw = scala.collection.mutable.ArrayBuffer.empty[(A, Double)]
+    // Single-pass: collect unnormalized weights into a fixed-size Array,
+    // then build the normalized Map in one go (eliminates ArrayBuffer intermediate).
+    val n = weights.size
+    val keys = new Array[Any](n)
+    val vals = new Array[Double](n)
     var evidence = 0.0
+    var i = 0
     weights.foreach { case (a, w) =>
       val l = likelihood(a)
       require(isFiniteNonNegative(l), s"invalid likelihood for key '$a': $l")
       val updated = w * l
-      raw += (a -> updated)
+      keys(i) = a
+      vals(i) = updated
       evidence += updated
+      i += 1
     }
     require(evidence > Eps, "likelihoods produce zero evidence")
     val invEvidence = 1.0 / evidence
     val posterior = Map.newBuilder[A, Double]
-    raw.foreach { case (a, updated) =>
-      posterior += a -> (updated * invEvidence)
-    }
+    posterior.sizeHint(n)
+    i = 0
+    while i < n do
+      posterior += keys(i).asInstanceOf[A] -> (vals(i) * invEvidence)
+      i += 1
     (DiscreteDistribution(posterior.result()), evidence)
 
 object DiscreteDistribution:
