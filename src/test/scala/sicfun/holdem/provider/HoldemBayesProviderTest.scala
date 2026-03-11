@@ -5,6 +5,7 @@ import sicfun.holdem.gpu.*
 
 import munit.FunSuite
 import sicfun.core.{Card, DiscreteDistribution}
+import sicfun.holdem.equity.HoldemEquity
 
 import java.nio.file.Paths
 
@@ -117,25 +118,27 @@ class HoldemBayesProviderTest extends FunSuite:
     val h2 = hole("Kc", "Qd")
     val h3 = hole("7c", "2d")
     val hypotheses = Vector(h1, h2, h3)
+    val candidateDist = DiscreteDistribution(
+      Map(h1 -> 0.20, h2 -> 0.30, h3 -> 0.50)
+    )
+    val candidateCompact = HoldemEquity.buildCompactPosterior(
+      Vector(h1, h2, h3), Array(0.20, 0.30, 0.50)
+    )
     val candidate = HoldemBayesProvider.UpdateResult(
-      posterior = DiscreteDistribution(
-        Map(
-          h1 -> 0.20,
-          h2 -> 0.30,
-          h3 -> 0.50
-        )
-      ),
+      posterior = candidateDist,
+      compact = candidateCompact,
       logEvidence = -3.0,
       provider = HoldemBayesProvider.Provider.NativeCpu
     )
+    val referenceDist = DiscreteDistribution(
+      Map(h1 -> 0.21, h2 -> 0.29, h3 -> 0.50)
+    )
+    val referenceCompact = HoldemEquity.buildCompactPosterior(
+      Vector(h1, h2, h3), Array(0.21, 0.29, 0.50)
+    )
     val reference = HoldemBayesProvider.UpdateResult(
-      posterior = DiscreteDistribution(
-        Map(
-          h1 -> 0.21,
-          h2 -> 0.29,
-          h3 -> 0.50
-        )
-      ),
+      posterior = referenceDist,
+      compact = referenceCompact,
       logEvidence = -2.95,
       provider = HoldemBayesProvider.Provider.Scala
     )

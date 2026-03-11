@@ -23,6 +23,7 @@ private[holdem] object HoldemBayesProvider:
 
   final case class UpdateResult(
       posterior: DiscreteDistribution[HoleCards],
+      compact: HoldemEquity.CompactPosterior,
       logEvidence: Double,
       provider: Provider
   )
@@ -78,8 +79,13 @@ private[holdem] object HoldemBayesProvider:
       actionModel: PokerActionModel
   ): UpdateResult =
     if observations.isEmpty then
+      val normalized = prior.normalized
+      val hypotheses = normalized.weights.keysIterator.toVector
+      val posteriorArray = hypotheses.map(normalized.probabilityOf).toArray
+      val compact = HoldemEquity.buildCompactPosterior(hypotheses, posteriorArray)
       UpdateResult(
-        posterior = prior.normalized,
+        posterior = normalized,
+        compact = compact,
         logEvidence = 0.0,
         provider = Provider.Scala
       )
@@ -288,14 +294,16 @@ private[holdem] object HoldemBayesProvider:
         )
         None
       case Right(_) =>
-        val weights = Map.newBuilder[HoleCards, Double]
+        val clamped = new Array[Double](hypotheses.length)
         var idx = 0
         while idx < hypotheses.length do
-          weights += hypotheses(idx) -> math.max(0.0, outPosterior(idx))
+          clamped(idx) = math.max(0.0, outPosterior(idx))
           idx += 1
+        val compact = HoldemEquity.buildCompactPosterior(hypotheses, clamped)
         Some(
           UpdateResult(
-            posterior = DiscreteDistribution(weights.result()).normalized,
+            posterior = compact.distribution,
+            compact = compact,
             logEvidence = outLogEvidence(0),
             provider = selectedProvider
           )
@@ -339,14 +347,10 @@ private[holdem] object HoldemBayesProvider:
       logEvidence += math.log(evidence)
       observationIdx += 1
 
-    val weights = Map.newBuilder[HoleCards, Double]
-    idx = 0
-    while idx < hypotheses.length do
-      weights += hypotheses(idx) -> posterior(idx)
-      idx += 1
-
+    val compact = HoldemEquity.buildCompactPosterior(hypotheses, posterior)
     UpdateResult(
-      posterior = DiscreteDistribution(weights.result()).normalized,
+      posterior = compact.distribution,
+      compact = compact,
       logEvidence = logEvidence,
       provider = provider
     )
