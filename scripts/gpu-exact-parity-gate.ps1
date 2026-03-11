@@ -62,7 +62,7 @@ try {
 
   Stop-StaleSbtJavaProcesses
   $joined = $args -join " "
-  Invoke-SbtWithRetry -Commands @("runMain sicfun.holdem.HeadsUpGpuExactParityGate $joined")
+  Invoke-SbtWithRetry -Commands @("runMain sicfun.holdem.bench.HeadsUpGpuExactParityGate $joined")
 }
 finally {
   if ($null -ne $previousSbtOpts) {

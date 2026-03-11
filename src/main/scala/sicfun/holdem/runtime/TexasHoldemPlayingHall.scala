@@ -28,6 +28,10 @@ object TexasHoldemPlayingHall:
     case Adaptive
     case Gto
 
+  private enum HeroSeat:
+    case Button
+    case BigBlind
+
   private enum GtoMode:
     case Fast
     case Exact
@@ -46,6 +50,7 @@ object TexasHoldemPlayingHall:
       outDir: Path,
       modelArtifactDir: Option[Path],
       heroMode: HeroMode,
+      heroSeat: HeroSeat,
       gtoMode: GtoMode,
       villainMode: VillainMode,
       heroExplorationRate: Double,
@@ -311,7 +316,15 @@ object TexasHoldemPlayingHall:
         deal = deal,
         result = result,
         modelId = activeArtifact.version.id,
-        archetype = villainLabel
+        archetype = villainLabel,
+        heroPosition =
+          config.heroSeat match
+            case HeroSeat.Button => Position.Button
+            case HeroSeat.BigBlind => Position.BigBlind,
+        villainPosition =
+          config.heroSeat match
+            case HeroSeat.Button => Position.BigBlind
+            case HeroSeat.BigBlind => Position.Button
       )
       maybeReport(handNo)
       maybeRetrain(handNo)
@@ -469,10 +482,19 @@ object TexasHoldemPlayingHall:
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
       exactGtoCacheStats: GtoCacheStats
   ):
-    private var heroStack = 99.5
-    private var villainStack = 99.0
-    private var heroContribution = 0.5
-    private var villainContribution = 1.0
+    private val heroPosition =
+      config.heroSeat match
+        case HeroSeat.Button => Position.Button
+        case HeroSeat.BigBlind => Position.BigBlind
+    private val villainPosition =
+      if heroPosition == Position.Button then Position.BigBlind
+      else Position.Button
+    private val heroStartsOnButton = heroPosition == Position.Button
+
+    private var heroStack = if heroStartsOnButton then 99.5 else 99.0
+    private var villainStack = if heroStartsOnButton then 99.0 else 99.5
+    private var heroContribution = if heroStartsOnButton then 0.5 else 1.0
+    private var villainContribution = if heroStartsOnButton then 1.0 else 0.5
     private var pot = heroContribution + villainContribution
     private var betHistory = Vector.empty[BetAction]
 
@@ -556,7 +578,7 @@ object TexasHoldemPlayingHall:
         board = board,
         pot = pot,
         toCall = toCall,
-        position = Position.Button,
+        position = heroPosition,
         stackSize = heroStack,
         betHistory = betHistory
       )
@@ -568,7 +590,7 @@ object TexasHoldemPlayingHall:
             hero = deal.hero,
             state = state,
             folds = folds,
-            villainPos = Position.BigBlind,
+            villainPos = villainPosition,
             observations = villainObservations.toVector,
             candidateActions = candidates,
             decisionBudgetMillis = Some(1L),
@@ -588,6 +610,7 @@ object TexasHoldemPlayingHall:
             baseEquityTrials = config.equityTrials,
             rng = rng,
             perspective = 0,
+            villainPosition = villainPosition,
             exactGtoCache = exactGtoCache,
             exactGtoCacheStats = exactGtoCacheStats
           )
@@ -614,7 +637,7 @@ object TexasHoldemPlayingHall:
           board = state.board,
           folds = folds,
           tableRanges = tableRanges,
-          villainPos = Position.BigBlind,
+          villainPos = villainPosition,
           observations = Vector.empty,
           actionModel = actionModel,
           bunchingTrials = labelBunchingTrials,
@@ -634,7 +657,7 @@ object TexasHoldemPlayingHall:
       ddreTrainingSamples += DdreTrainingSample(
         decisionIndex = ddreTrainingSamples.length + 1,
         state = state,
-        villainPosition = Position.BigBlind,
+        villainPosition = villainPosition,
         villainStackBefore = villainStack,
         observations = observationsSnapshot,
         heroHole = deal.hero,
@@ -656,7 +679,7 @@ object TexasHoldemPlayingHall:
         board = board,
         pot = pot,
         toCall = toCall,
-        position = Position.BigBlind,
+        position = villainPosition,
         stackSize = villainStack,
         betHistory = betHistory
       )
@@ -681,6 +704,7 @@ object TexasHoldemPlayingHall:
             baseEquityTrials = config.equityTrials,
             rng = rng,
             perspective = 1,
+            heroPosition = heroPosition,
             exactGtoCache = exactGtoCache,
             exactGtoCacheStats = exactGtoCacheStats
           )
@@ -703,25 +727,24 @@ object TexasHoldemPlayingHall:
     private def playPreflop(): Unit =
       streetsPlayed += 1
       val board = boardFor(Street.Preflop)
+      if heroStartsOnButton then playPreflopHeroOnButton(board)
+      else playPreflopHeroOnBigBlind(board)
+
+    private def playPreflopHeroOnButton(board: Board): Unit =
       val heroAction = decideHero(Street.Preflop, board, toCall = 0.5, allowRaise = true)
       betHistory = betHistory :+ BetAction(0, heroAction)
       heroAction match
         case PokerAction.Fold =>
           handOver = true
           outcome = -1
-        case PokerAction.Check =>
-          val paid = payHero(0.5)
-          if paid < 0.5 then
-            handOver = true
-            outcome = -1
-        case PokerAction.Call =>
+        case PokerAction.Check | PokerAction.Call =>
           val paid = payHero(0.5)
           if paid < 0.5 then
             handOver = true
             outcome = -1
         case PokerAction.Raise(amount) =>
-          val paid = payHero(0.5 + amount)
-          val villainToCall = math.max(0.0, paid - 0.5)
+          payHero(0.5 + amount)
+          val villainToCall = TexasHoldemPlayingHall.contributionGap(heroContribution, villainContribution)
           if villainToCall <= 0.0 then
             handOver = true
             outcome = 1
@@ -738,13 +761,11 @@ object TexasHoldemPlayingHall:
               case PokerAction.Fold =>
                 handOver = true
                 outcome = 1
-              case PokerAction.Call =>
-                payVillain(villainToCall)
-              case PokerAction.Check =>
+              case PokerAction.Call | PokerAction.Check =>
                 payVillain(villainToCall)
               case PokerAction.Raise(reRaiseAmount) =>
-                val paidVillain = payVillain(villainToCall + reRaiseAmount)
-                val heroToCall = math.max(0.0, paidVillain - villainToCall)
+                payVillain(villainToCall + reRaiseAmount)
+                val heroToCall = TexasHoldemPlayingHall.contributionGap(villainContribution, heroContribution)
                 val heroResponse = decideHero(
                   street = Street.Preflop,
                   board = board,
@@ -762,106 +783,188 @@ object TexasHoldemPlayingHall:
                       handOver = true
                       outcome = -1
 
+    private def playPreflopHeroOnBigBlind(board: Board): Unit =
+      val villainAction = decideVillain(
+        street = Street.Preflop,
+        board = board,
+        toCall = 0.5,
+        allowRaise = true,
+        facingHeroRaise = false
+      )
+      betHistory = betHistory :+ BetAction(1, villainAction)
+      villainAction match
+        case PokerAction.Fold =>
+          handOver = true
+          outcome = 1
+        case PokerAction.Check | PokerAction.Call =>
+          val paidVillain = payVillain(0.5)
+          if paidVillain < 0.5 then
+            handOver = true
+            outcome = 1
+        case PokerAction.Raise(amount) =>
+          payVillain(0.5 + amount)
+          val heroToCall = TexasHoldemPlayingHall.contributionGap(villainContribution, heroContribution)
+          val heroResponse = decideHero(
+            street = Street.Preflop,
+            board = board,
+            toCall = heroToCall,
+            allowRaise = true
+          )
+          betHistory = betHistory :+ BetAction(0, heroResponse)
+          heroResponse match
+            case PokerAction.Fold =>
+              handOver = true
+              outcome = -1
+            case PokerAction.Call | PokerAction.Check =>
+              val paidHero = payHero(heroToCall)
+              if paidHero < heroToCall then
+                handOver = true
+                outcome = -1
+            case PokerAction.Raise(reRaiseAmount) =>
+              payHero(heroToCall + reRaiseAmount)
+              val villainToCall = TexasHoldemPlayingHall.contributionGap(heroContribution, villainContribution)
+              if villainToCall <= 0.0 then
+                handOver = true
+                outcome = 1
+              else
+                val villainResponse = decideVillain(
+                  street = Street.Preflop,
+                  board = board,
+                  toCall = villainToCall,
+                  allowRaise = false,
+                  facingHeroRaise = true
+                )
+                betHistory = betHistory :+ BetAction(1, villainResponse)
+                villainResponse match
+                  case PokerAction.Fold =>
+                    handOver = true
+                    outcome = 1
+                  case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
+                    payVillain(villainToCall)
+
     private def playPostflopStreet(street: Street): Unit =
       if handOver then ()
       else
         streetsPlayed += 1
         val board = boardFor(street)
-        val villainLead = decideVillain(
-          street = street,
-          board = board,
-          toCall = 0.0,
-          allowRaise = true,
-          facingHeroRaise = false
-        )
-        betHistory = betHistory :+ BetAction(1, villainLead)
-        villainLead match
-          case PokerAction.Check =>
-            val heroAction = decideHero(street, board, toCall = 0.0, allowRaise = true)
+        if heroStartsOnButton then playPostflopStreetHeroOnButton(street, board)
+        else playPostflopStreetHeroOnBigBlind(street, board)
+
+    private def playPostflopStreetHeroOnButton(street: Street, board: Board): Unit =
+      val villainLead = decideVillain(
+        street = street,
+        board = board,
+        toCall = 0.0,
+        allowRaise = true,
+        facingHeroRaise = false
+      )
+      betHistory = betHistory :+ BetAction(1, villainLead)
+      villainLead match
+        case PokerAction.Check =>
+          val heroAction = decideHero(street, board, toCall = 0.0, allowRaise = true)
+          betHistory = betHistory :+ BetAction(0, heroAction)
+          heroAction match
+            case PokerAction.Check | PokerAction.Call =>
+              ()
+            case PokerAction.Fold =>
+              handOver = true
+              outcome = -1
+            case PokerAction.Raise(amount) =>
+              val paidHero = payHero(amount)
+              val villainToCall = paidHero
+              if villainToCall > 0.0 then
+                val villainResponse = decideVillain(
+                  street = street,
+                  board = board,
+                  toCall = villainToCall,
+                  allowRaise = false,
+                  facingHeroRaise = true
+                )
+                betHistory = betHistory :+ BetAction(1, villainResponse)
+                villainResponse match
+                  case PokerAction.Fold =>
+                    handOver = true
+                    outcome = 1
+                  case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
+                    payVillain(villainToCall)
+        case PokerAction.Raise(amount) =>
+          val paidVillain = payVillain(amount)
+          val heroToCall = paidVillain
+          if heroToCall > 0.0 then
+            val heroAction = decideHero(street, board, toCall = heroToCall, allowRaise = false)
             betHistory = betHistory :+ BetAction(0, heroAction)
             heroAction match
-              case PokerAction.Check | PokerAction.Call =>
-                ()
               case PokerAction.Fold =>
                 handOver = true
                 outcome = -1
-              case PokerAction.Raise(amount) =>
-                val paidHero = payHero(amount)
-                val villainToCall = paidHero
-                if villainToCall <= 0.0 then ()
-                else
-                  val villainResponse = decideVillain(
-                    street = street,
-                    board = board,
-                    toCall = villainToCall,
-                    allowRaise = false,
-                    facingHeroRaise = true
-                  )
-                  betHistory = betHistory :+ BetAction(1, villainResponse)
-                  villainResponse match
-                    case PokerAction.Fold =>
-                      handOver = true
-                      outcome = 1
-                    case PokerAction.Call | PokerAction.Check =>
-                      payVillain(villainToCall)
-                    case PokerAction.Raise(reRaiseAmount) =>
-                      val paidVillain = payVillain(villainToCall + reRaiseAmount)
-                      val heroToCall = math.max(0.0, paidVillain - villainToCall)
-                      val heroResponse = decideHero(
-                        street = street,
-                        board = board,
-                        toCall = heroToCall,
-                        allowRaise = false
-                      )
-                      betHistory = betHistory :+ BetAction(0, heroResponse)
-                      heroResponse match
-                        case PokerAction.Fold =>
-                          handOver = true
-                          outcome = -1
-                        case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
-                          payHero(heroToCall)
-          case PokerAction.Raise(amount) =>
-            val paidVillain = payVillain(amount)
-            val heroToCall = paidVillain
-            if heroToCall <= 0.0 then ()
-            else
-              val heroAction = decideHero(street, board, toCall = heroToCall, allowRaise = false)
-              betHistory = betHistory :+ BetAction(0, heroAction)
-              heroAction match
-                case PokerAction.Fold =>
-                  handOver = true
-                  outcome = -1
-                case PokerAction.Call | PokerAction.Check =>
-                  payHero(heroToCall)
-                case PokerAction.Raise(reRaiseAmount) =>
-                  val paidHero = payHero(heroToCall + reRaiseAmount)
-                  val villainToCall = math.max(0.0, paidHero - heroToCall)
-                  if villainToCall <= 0.0 then ()
-                  else
-                    val villainResponse = decideVillain(
-                      street = street,
-                      board = board,
-                      toCall = villainToCall,
-                      allowRaise = false,
-                      facingHeroRaise = true
-                    )
-                    betHistory = betHistory :+ BetAction(1, villainResponse)
-                    villainResponse match
-                      case PokerAction.Fold =>
-                        handOver = true
-                        outcome = 1
-                      case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
-                        payVillain(villainToCall)
-          case PokerAction.Call =>
-            ()
-          case PokerAction.Fold =>
-            handOver = true
-            outcome = 1
+              case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
+                payHero(heroToCall)
+        case PokerAction.Call =>
+          ()
+        case PokerAction.Fold =>
+          handOver = true
+          outcome = 1
+
+    private def playPostflopStreetHeroOnBigBlind(street: Street, board: Board): Unit =
+      val heroLead = decideHero(street, board, toCall = 0.0, allowRaise = true)
+      betHistory = betHistory :+ BetAction(0, heroLead)
+      heroLead match
+        case PokerAction.Check | PokerAction.Call =>
+          val villainAction = decideVillain(
+            street = street,
+            board = board,
+            toCall = 0.0,
+            allowRaise = true,
+            facingHeroRaise = false
+          )
+          betHistory = betHistory :+ BetAction(1, villainAction)
+          villainAction match
+            case PokerAction.Check | PokerAction.Call =>
+              ()
+            case PokerAction.Fold =>
+              handOver = true
+              outcome = 1
+            case PokerAction.Raise(amount) =>
+              val paidVillain = payVillain(amount)
+              val heroToCall = paidVillain
+              if heroToCall > 0.0 then
+                val heroResponse = decideHero(street, board, toCall = heroToCall, allowRaise = false)
+                betHistory = betHistory :+ BetAction(0, heroResponse)
+                heroResponse match
+                  case PokerAction.Fold =>
+                    handOver = true
+                    outcome = -1
+                  case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
+                    payHero(heroToCall)
+        case PokerAction.Fold =>
+          handOver = true
+          outcome = -1
+        case PokerAction.Raise(amount) =>
+          val paidHero = payHero(amount)
+          val villainToCall = paidHero
+          if villainToCall > 0.0 then
+            val villainResponse = decideVillain(
+              street = street,
+              board = board,
+              toCall = villainToCall,
+              allowRaise = false,
+              facingHeroRaise = true
+            )
+            betHistory = betHistory :+ BetAction(1, villainResponse)
+            villainResponse match
+              case PokerAction.Fold =>
+                handOver = true
+                outcome = 1
+              case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
+                payVillain(villainToCall)
 
   private def outcomeToNet(outcome: Int, pot: Double, heroContribution: Double): Double =
     if outcome > 0 then pot - heroContribution
     else if outcome < 0 then -heroContribution
     else (pot * 0.5) - heroContribution
+
+  private[holdem] def contributionGap(targetContribution: Double, currentContribution: Double): Double =
+    math.max(0.0, targetContribution - currentContribution)
 
   private def minEquityTrials(configured: Int): Int =
     math.max(1, configured / 30)
@@ -934,6 +1037,7 @@ object TexasHoldemPlayingHall:
       baseEquityTrials: Int,
       rng: Random,
       perspective: Int,
+      villainPosition: Position,
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
       exactGtoCacheStats: GtoCacheStats
   ): PokerAction =
@@ -950,7 +1054,12 @@ object TexasHoldemPlayingHall:
             rng = rng
           )
         case GtoMode.Exact =>
-          val villainPosterior = villainPosteriorForHeroGto(hero = hand, board = state.board, tableRanges = tableRanges)
+          val villainPosterior = villainPosteriorForHeroGto(
+            hero = hand,
+            board = state.board,
+            tableRanges = tableRanges,
+            villainPosition = villainPosition
+          )
           solveGtoByCfr(
             hand = hand,
             state = state,
@@ -973,6 +1082,7 @@ object TexasHoldemPlayingHall:
       baseEquityTrials: Int,
       rng: Random,
       perspective: Int,
+      heroPosition: Position,
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
       exactGtoCacheStats: GtoCacheStats
   ): PokerAction =
@@ -989,7 +1099,12 @@ object TexasHoldemPlayingHall:
             rng = rng
           )
         case GtoMode.Exact =>
-          val heroPosterior = heroPosteriorForGto(villain = hand, board = state.board, tableRanges = tableRanges)
+          val heroPosterior = heroPosteriorForGto(
+            villain = hand,
+            board = state.board,
+            tableRanges = tableRanges,
+            heroPosition = heroPosition
+          )
           solveGtoByCfr(
             hand = hand,
             state = state,
@@ -1151,16 +1266,18 @@ object TexasHoldemPlayingHall:
   private def villainPosteriorForHeroGto(
       hero: HoleCards,
       board: Board,
-      tableRanges: TableRanges
+      tableRanges: TableRanges,
+      villainPosition: Position
   ): DiscreteDistribution[HoleCards] =
-    tableRanges.rangeFor(Position.BigBlind)
+    tableRanges.rangeFor(villainPosition)
 
   private def heroPosteriorForGto(
       villain: HoleCards,
       board: Board,
-      tableRanges: TableRanges
+      tableRanges: TableRanges,
+      heroPosition: Position
   ): DiscreteDistribution[HoleCards] =
-    tableRanges.rangeFor(Position.Button)
+    tableRanges.rangeFor(heroPosition)
 
   private def gtoIterations(
       street: Street,
@@ -1557,6 +1674,8 @@ object TexasHoldemPlayingHall:
     val header = Vector(
       "hand",
       "tableId",
+      "heroPosition",
+      "villainPosition",
       "heroHole",
       "villainHole",
       "board",
@@ -1579,7 +1698,9 @@ object TexasHoldemPlayingHall:
       deal: Deal,
       result: HandResult,
       modelId: String,
-      archetype: String
+      archetype: String,
+      heroPosition: Position,
+      villainPosition: Position
   ): Unit =
     val boardToken = deal.board.cards.map(_.toToken).mkString(" ")
     val heroAction = result.heroActions.headOption.map(renderAction).getOrElse("-")
@@ -1593,6 +1714,8 @@ object TexasHoldemPlayingHall:
     val row = Vector(
       hand.toString,
       tableId.toString,
+      heroPosition.toString,
+      villainPosition.toString,
       deal.hero.toToken,
       deal.villain.toToken,
       boardToken,
@@ -1751,6 +1874,7 @@ object TexasHoldemPlayingHall:
         outDir <- pathOpt(options, "outDir", Paths.get("data/playing-hall"))
         modelArtifactDir <- optionalPathOpt(options, "modelArtifactDir")
         heroMode <- heroModeOpt(options, "heroStyle", HeroMode.Adaptive)
+        heroSeat <- heroSeatOpt(options, "heroSeat", HeroSeat.Button)
         gtoMode <- gtoModeOpt(options, "gtoMode", GtoMode.Exact)
         villainMode <- villainModeOpt(options, "villainStyle", VillainMode.Archetype(PlayerArchetype.Tag))
         heroExplorationRate <- doubleOpt(options, "heroExplorationRate", 0.05)
@@ -1774,6 +1898,7 @@ object TexasHoldemPlayingHall:
         outDir = outDir,
         modelArtifactDir = modelArtifactDir,
         heroMode = heroMode,
+        heroSeat = heroSeat,
         gtoMode = gtoMode,
         villainMode = villainMode,
         heroExplorationRate = heroExplorationRate,
@@ -1830,6 +1955,19 @@ object TexasHoldemPlayingHall:
           case "gto"      => Right(HeroMode.Gto)
           case _          => Left("--heroStyle must be one of: adaptive, gto")
 
+  private def heroSeatOpt(
+      options: Map[String, String],
+      key: String,
+      default: HeroSeat
+  ): Either[String, HeroSeat] =
+    options.get(key) match
+      case None => Right(default)
+      case Some(raw) =>
+        raw.trim.toLowerCase match
+          case "button" => Right(HeroSeat.Button)
+          case "bigblind" | "bb" => Right(HeroSeat.BigBlind)
+          case _ => Left("--heroSeat must be one of: button, bigblind")
+
   private def gtoModeOpt(
       options: Map[String, String],
       key: String,
@@ -1864,7 +2002,7 @@ object TexasHoldemPlayingHall:
 
   private val usage =
     """Usage:
-      |  runMain sicfun.holdem.TexasHoldemPlayingHall [--key=value ...]
+      |  runMain sicfun.holdem.runtime.TexasHoldemPlayingHall [--key=value ...]
       |
       |  --hands=<int>                 default 100000
       |  --tableCount=<int>            default 1
@@ -1875,6 +2013,7 @@ object TexasHoldemPlayingHall:
       |  --outDir=<path>               default data/playing-hall
       |  --modelArtifactDir=<path>     optional initial trained model
       |  --heroStyle=<style>           adaptive|gto
+      |  --heroSeat=<seat>             button|bigblind (default button)
       |  --gtoMode=<mode>              fast|exact (default exact)
       |  --villainStyle=<style>        nit|tag|lag|callingstation|station|maniac|gto
       |  --heroExplorationRate=<double> default 0.05 (epsilon-greedy, [0,1])

@@ -172,7 +172,7 @@ try {
     }
     $classpathCache = Join-Path $cacheDir "runtime-classpath.txt"
     $classpath = Resolve-RuntimeClasspath -CachePath $classpathCache
-    & java -cp $classpath "sicfun.holdem.TexasHoldemPlayingHall" @args
+    & java -cp $classpath "sicfun.holdem.runtime.TexasHoldemPlayingHall" @args
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
       throw "java run failed with exit code $exitCode"
@@ -181,7 +181,7 @@ try {
   else {
     $joined = $args -join " "
     Stop-StaleSbtJavaProcesses
-    Invoke-SbtWithRetry -Commands @("runMain sicfun.holdem.TexasHoldemPlayingHall $joined")
+    Invoke-SbtWithRetry -Commands @("runMain sicfun.holdem.runtime.TexasHoldemPlayingHall $joined")
   }
 }
 finally {

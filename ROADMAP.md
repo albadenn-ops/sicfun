@@ -78,6 +78,7 @@ Status note: a checked box means code landed in the repo. It does not automatica
 
 ## M10 Native acceleration surfaces (done)
 - [x] Heads-up native runtime providers (CPU/CUDA/OpenCL/hybrid)
+- [x] Heads-up range CUDA autotuner CLI (`HeadsUpRangeGpuAutoTuner`) with cache-based runtime selection
 - [x] CFR native providers (CPU + CUDA build) with auto selection
 - [x] Bayesian native providers (CPU + CUDA build) with optional shadow parity validation
 - [x] Postflop native runtime (CPU + CUDA) with auto-engine routing and CPU fallback on CUDA failure
@@ -108,3 +109,4 @@ Status note: a checked box means code landed in the repo. It does not automatica
 - [x] Hybrid dispatcher adaptive-weight concurrency guard: added regression coverage proving lossless concurrent adaptive calibration updates (`HeadsUpHybridDispatcherPlanningTest`)
 - [x] Hall launcher classpath resilience: hardened Java classpath export/parsing against noisy `sbt` output for stable long-running scripted runs (`scripts/run-playing-hall.ps1`, `scripts/run-playing-hall-max.ps1`)
 - [x] Exact GTO hall throughput uplift (correctness-preserving): added decision-only CFR root-policy path and batched postflop villain equity evaluation in `HoldemCfrSolver`, then wired `TexasHoldemPlayingHall` exact mode to the lightweight solver path
+- [x] Runtime/tooling maintainability sweep: extracted shared CLI decoding/helpers and reduced orchestration hotspots across hall, CFR/DDRE benchmarks, heads-up autotuners, analyzer/advisor loops, and postflop benchmark/tuner surfaces (`CliHelpers`, `TexasHoldemPlayingHall`, `HoldemCfrSolver`, `HeadsUpBackendAutoTuner`, `HoldemDdreParityBenchmark`, `AlwaysOnDecisionLoop`, `PokerAdvisor`, `HandHistoryAnalyzer`, `HoldemPostflop*`)

@@ -41,25 +41,25 @@ function Invoke-SbtWithRetry {
 }
 
 $fullSuites = @(
-  "sicfun.holdem.PokerPipelineTest",
-  "sicfun.holdem.HandEngineTest",
-  "sicfun.holdem.RangeInferenceEngineTest",
-  "sicfun.holdem.RealTimeAdaptiveEngineTest",
-  "sicfun.holdem.LiveHandSimulatorTest",
-  "sicfun.holdem.AlwaysOnDecisionLoopTest",
-  "sicfun.holdem.TexasHoldemPlayingHallTest",
-  "sicfun.holdem.TrainPokerActionModelCliTest",
-  "sicfun.holdem.GenerateSignalsCliTest",
-  "sicfun.holdem.OperationalRegressionSuiteTest"
+  "sicfun.holdem.bench.PokerPipelineTest",
+  "sicfun.holdem.types.HandEngineTest",
+  "sicfun.holdem.engine.RangeInferenceEngineTest",
+  "sicfun.holdem.engine.RealTimeAdaptiveEngineTest",
+  "sicfun.holdem.runtime.LiveHandSimulatorTest",
+  "sicfun.holdem.runtime.AlwaysOnDecisionLoopTest",
+  "sicfun.holdem.runtime.TexasHoldemPlayingHallTest",
+  "sicfun.holdem.model.TrainPokerActionModelCliTest",
+  "sicfun.holdem.analysis.GenerateSignalsCliTest",
+  "sicfun.holdem.bench.OperationalRegressionSuiteTest"
 )
 
 $quickSuites = @(
-  "sicfun.holdem.PokerPipelineTest",
-  "sicfun.holdem.HandEngineTest",
-  "sicfun.holdem.LiveHandSimulatorTest",
-  "sicfun.holdem.AlwaysOnDecisionLoopTest",
-  "sicfun.holdem.TexasHoldemPlayingHallTest",
-  "sicfun.holdem.OperationalRegressionSuiteTest"
+  "sicfun.holdem.bench.PokerPipelineTest",
+  "sicfun.holdem.types.HandEngineTest",
+  "sicfun.holdem.runtime.LiveHandSimulatorTest",
+  "sicfun.holdem.runtime.AlwaysOnDecisionLoopTest",
+  "sicfun.holdem.runtime.TexasHoldemPlayingHallTest",
+  "sicfun.holdem.bench.OperationalRegressionSuiteTest"
 )
 
 $selectedSuites =

@@ -56,21 +56,26 @@ object DecisionLoopEventFeedIO:
     val raf = new RandomAccessFile(path.toFile, "r")
     try
       val fileLength = raf.length()
-      if fileLength <= byteOffset then
+      if fileLength == byteOffset then
         return (Vector.empty, byteOffset)
+      val recoveringFromTruncation = byteOffset > fileLength
       val effectiveOffset =
-        if byteOffset == 0L then
+        if byteOffset <= 0L || recoveringFromTruncation then
           raf.seek(0L)
           val headerRaw = raf.readLine()
-          require(headerRaw != null, s"event feed file is empty: $path")
+          if headerRaw == null then
+            if recoveringFromTruncation then return (Vector.empty, 0L)
+            else throw new IllegalArgumentException(s"event feed file is empty: $path")
           val header = new String(headerRaw.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8)
             .split("\t", -1)
             .map(_.trim.toLowerCase)
             .toVector
-          require(
-            header == ExpectedColumns,
-            s"event feed header mismatch. expected: ${ExpectedColumns.mkString(",")} got: ${header.mkString(",")}"
-          )
+          if header != ExpectedColumns then
+            if recoveringFromTruncation then return (Vector.empty, 0L)
+            else
+              throw new IllegalArgumentException(
+                s"event feed header mismatch. expected: ${ExpectedColumns.mkString(",")} got: ${header.mkString(",")}"
+              )
           raf.getFilePointer
         else
           byteOffset

@@ -357,7 +357,7 @@ object HoldemDdreOfflineGate:
 
   private val usage =
     """Usage:
-      |  runMain sicfun.holdem.HoldemDdreOfflineGate --dataset=<ddre-training.tsv> --artifactDir=<dir> [--key=value ...]
+      |  runMain sicfun.holdem.provider.HoldemDdreOfflineGate --dataset=<ddre-training.tsv> --artifactDir=<dir> [--key=value ...]
       |
       |Options:
       |  --actionModel=<dir>                 Optional poker action-model artifact used for likelihood reconstruction

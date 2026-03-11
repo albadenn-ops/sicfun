@@ -5,6 +5,7 @@ import sicfun.holdem.engine.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.io.*
 import sicfun.holdem.cli.*
+import sicfun.holdem.history.*
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths, StandardOpenOption}
@@ -25,6 +26,8 @@ import scala.util.Random
 object AlwaysOnDecisionLoop:
   private val IsoFormatter = DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC)
 
+  private type EventKey = (String, Long, String)
+
   private[holdem] final class PendingHeroRaiseTracker:
     private val pendingByHand = mutable.Map.empty[String, Boolean]
 
@@ -41,6 +44,36 @@ object AlwaysOnDecisionLoop:
           case _ => None
       pendingByHand.remove(handId)
       response
+
+  private[holdem] def replayedArchetypePosterior(
+      rememberedPosterior: Option[ArchetypePosterior],
+      sessionRaiseResponses: RaiseResponseCounts
+  ): Option[ArchetypePosterior] =
+    rememberedPosterior match
+      case Some(posterior) =>
+        Some(ArchetypeLearning.posteriorFromCounts(sessionRaiseResponses, prior = posterior))
+      case None if sessionRaiseResponses.total > 0 =>
+        Some(ArchetypeLearning.posteriorFromCounts(sessionRaiseResponses))
+      case None =>
+        None
+
+  private[holdem] def mergeVillainObservations(
+      rememberedEvents: Seq[PokerEvent],
+      currentHandEvents: Seq[PokerEvent],
+      villainPlayerId: String
+  ): Vector[VillainObservation] =
+    val currentVillainEvents = currentHandEvents.filter(_.playerId == villainPlayerId).toVector
+    val currentKeys = currentVillainEvents.iterator.map(eventKey).toSet
+    val builder = Vector.newBuilder[VillainObservation]
+    rememberedEvents.iterator
+      .filter(event => event.playerId == villainPlayerId && event.action != PokerAction.Fold)
+      .filterNot(event => currentKeys.contains(eventKey(event)))
+      .foreach(event => builder += eventToObservation(event))
+    currentVillainEvents.foreach(event => builder += eventToObservation(event))
+    builder.result()
+
+  private def eventKey(event: PokerEvent): EventKey =
+    (event.handId, event.sequenceInHand, event.playerId)
 
   private final case class CliConfig(
       feedPath: Path,
@@ -73,7 +106,10 @@ object AlwaysOnDecisionLoop:
       cfrBlend: Double,
       cfrVillainHands: Int,
       cfrEquityTrials: Int,
-      cfrVillainReraises: Boolean
+      cfrVillainReraises: Boolean,
+      opponentStore: Option[OpponentMemoryTarget],
+      opponentSite: Option[String],
+      opponentName: Option[String]
   )
 
   final case class RunSummary(
@@ -121,9 +157,13 @@ object AlwaysOnDecisionLoop:
     private var activeModelDir = config.modelArtifactDir
     private var activeArtifact = PokerActionModelArtifactIO.load(activeModelDir)
     private var engine = newAdaptiveEngine(config, activeArtifact.model)
+    private var opponentProfileStore = config.opponentStore.map(OpponentProfileStorePersistence.load)
+    private var opponentProfileStoreDirty = false
+    private val rememberedOpponent = loadRememberedOpponent(opponentProfileStore, config)
+    private val rememberedArchetypePosterior = rememberedOpponent.map(_.archetypePosterior)
 
     private val states = mutable.Map.empty[String, HandState]
-    private val observedVillainResponses = mutable.ArrayBuffer.empty[PokerAction]
+    private var sessionRaiseResponses = RaiseResponseCounts()
     private var byteOffset = readByteOffset(offsetFile)
     private var processedEvents = 0
     private var decisionsEmitted = 0
@@ -133,12 +173,15 @@ object AlwaysOnDecisionLoop:
     private val folds = config.tableFormat.foldsBeforeOpener(config.openerPosition).map(PreflopFold(_))
     private val seedRng = new Random(config.seed)
 
+    seedEngineArchetypePosterior(engine)
+
     def run(): Either[String, RunSummary] =
       try
         Files.createDirectories(config.outputDir)
         Files.createDirectories(snapshotsRoot)
         Files.createDirectories(modelsRoot)
         loop()
+        flushOpponentProfileStore()
         Right(
           RunSummary(
             processedEvents = processedEvents,
@@ -150,6 +193,7 @@ object AlwaysOnDecisionLoop:
         )
       catch
         case e: Exception =>
+          flushOpponentProfileStore()
           Left(s"always-on decision loop failed: ${e.getMessage}")
 
     private def loop(): Unit =
@@ -157,12 +201,16 @@ object AlwaysOnDecisionLoop:
         val (pending, newByteOffset) = DecisionLoopEventFeedIO.readIncremental(config.feedPath, byteOffset)
         if pending.nonEmpty then
           processPendingEvents(pending)
-          byteOffset = newByteOffset
-          writeByteOffset(offsetFile, byteOffset)
+        persistByteOffset(newByteOffset)
 
         poll += 1
         if config.maxPolls < 0 || poll < config.maxPolls then
           Thread.sleep(math.max(0L, config.pollMillis))
+
+    private def persistByteOffset(newByteOffset: Long): Unit =
+      if newByteOffset != byteOffset then
+        byteOffset = newByteOffset
+        writeByteOffset(offsetFile, byteOffset)
 
     private def processPendingEvents(pending: Vector[DecisionLoopEventFeedIO.FeedEvent]): Unit =
       pending.foreach { entry =>
@@ -171,6 +219,7 @@ object AlwaysOnDecisionLoop:
         maybeObserveVillainResponse(event)
         maybeEmitHeroDecision(event, updated)
       }
+      flushOpponentProfileStore()
 
     private def updateHandState(event: PokerEvent): HandState =
       val current = states.getOrElse(
@@ -185,10 +234,31 @@ object AlwaysOnDecisionLoop:
 
     private def maybeObserveVillainResponse(event: PokerEvent): Unit =
       if event.playerId == config.villainPlayerId then
-        pendingRaiseTracker.onVillainAction(event.handId, event.action).foreach { response =>
-          observedVillainResponses += response
+        val responseToHeroRaise = pendingRaiseTracker.onVillainAction(event.handId, event.action)
+        responseToHeroRaise.foreach { response =>
+          sessionRaiseResponses = sessionRaiseResponses.observe(response)
           engine.observeVillainResponseToRaise(response)
         }
+        persistVillainObservation(event, facedRaiseResponse = responseToHeroRaise.nonEmpty)
+
+    private def persistVillainObservation(event: PokerEvent, facedRaiseResponse: Boolean): Unit =
+      (config.opponentSite, config.opponentName) match
+        case (Some(site), Some(name)) =>
+          val currentStore = opponentProfileStore.getOrElse(OpponentProfileStore.empty)
+          val updatedStore = currentStore.observeEvent(site, name, event, facedRaiseResponse)
+          if updatedStore != currentStore then
+            opponentProfileStore = Some(updatedStore)
+            opponentProfileStoreDirty = true
+        case _ => ()
+
+    private def flushOpponentProfileStore(): Unit =
+      if opponentProfileStoreDirty then
+        (config.opponentStore, opponentProfileStore) match
+          case (Some(target), Some(store)) =>
+            OpponentProfileStorePersistence.save(target, store)
+            opponentProfileStoreDirty = false
+          case _ =>
+            opponentProfileStoreDirty = false
 
     private def maybeEmitHeroDecision(event: PokerEvent, updated: HandState): Unit =
       if event.playerId == config.heroPlayerId then
@@ -204,9 +274,11 @@ object AlwaysOnDecisionLoop:
         updated: HandState,
         heroState: GameState
     ): AdaptiveDecisionResult =
-      val observations = updated.events
-        .filter(_.playerId == config.villainPlayerId)
-        .map(eventToObservation)
+      val observations = mergeVillainObservations(
+        rememberedEvents = currentRememberedVillainEvents(),
+        currentHandEvents = updated.events,
+        villainPlayerId = config.villainPlayerId
+      )
       engine.decide(
         hero = config.heroCards,
         state = heroState,
@@ -280,7 +352,7 @@ object AlwaysOnDecisionLoop:
       activeModelDir = done.outputDir
       activeArtifact = done.artifact
       engine = newAdaptiveEngine(config, activeArtifact.model)
-      observedVillainResponses.foreach(engine.observeVillainResponseToRaise)
+      seedEngineArchetypePosterior(engine)
       retrainCount += 1
       appendModelUpdate(
         path = retrainLog,
@@ -295,6 +367,15 @@ object AlwaysOnDecisionLoop:
         title = "retrain-succeeded",
         summary = s"decision=$decisionsEmitted newModel=${activeArtifact.version.id}"
       )
+
+    private def seedEngineArchetypePosterior(targetEngine: RealTimeAdaptiveEngine): Unit =
+      replayedArchetypePosterior(
+        rememberedPosterior = rememberedArchetypePosterior,
+        sessionRaiseResponses = sessionRaiseResponses
+      ).foreach(targetEngine.seedArchetypePosterior)
+
+    private def currentRememberedVillainEvents(): Vector[PokerEvent] =
+      loadRememberedOpponent(opponentProfileStore, config).map(_.recentEvents).getOrElse(Vector.empty)
 
   private def newAdaptiveEngine(config: CliConfig, model: PokerActionModel): RealTimeAdaptiveEngine =
     val equilibriumBaselineConfig =
@@ -317,6 +398,15 @@ object AlwaysOnDecisionLoop:
       minEquityTrials = math.max(200, config.equityTrials / 10),
       equilibriumBaselineConfig = equilibriumBaselineConfig
     )
+
+  private def loadRememberedOpponent(
+      store: Option[OpponentProfileStore],
+      config: CliConfig
+  ): Option[OpponentProfile] =
+    (store, config.opponentSite, config.opponentName) match
+      case (Some(profileStore), Some(site), Some(name)) =>
+        profileStore.find(site, name)
+      case _ => None
 
   private def eventToObservation(event: PokerEvent): VillainObservation =
     VillainObservation(
@@ -468,6 +558,10 @@ object AlwaysOnDecisionLoop:
         cfrEquityTrials <- CliHelpers.parseIntOptionEither(options, "cfrEquityTrials", 4000)
         _ <- if cfrEquityTrials > 0 then Right(()) else Left("--cfrEquityTrials must be > 0")
         cfrVillainReraises <- CliHelpers.parseStrictBooleanOptionEither(options, "cfrVillainReraises", true)
+        opponentStore <- parseOptionalOpponentStore(options)
+        opponentSite = options.get("opponentSite").map(_.trim).filter(_.nonEmpty)
+        opponentName = options.get("opponentName").map(_.trim).filter(_.nonEmpty)
+        _ <- validateOpponentMemoryArgs(opponentStore, opponentSite, opponentName)
       yield CliConfig(
         feedPath = feedPath,
         modelArtifactDir = modelArtifactDir,
@@ -499,7 +593,10 @@ object AlwaysOnDecisionLoop:
         cfrBlend = cfrBlend,
         cfrVillainHands = cfrVillainHands,
         cfrEquityTrials = cfrEquityTrials,
-        cfrVillainReraises = cfrVillainReraises
+        cfrVillainReraises = cfrVillainReraises,
+        opponentStore = opponentStore,
+        opponentSite = opponentSite,
+        opponentName = opponentName
       )
 
   private def parseRequiredPath(options: Map[String, String], key: String): Either[String, Path] =
@@ -510,6 +607,27 @@ object AlwaysOnDecisionLoop:
 
   private def parseOptionalPathOption(options: Map[String, String], key: String): Either[String, Option[Path]] =
     Right(options.get(key).map(Paths.get(_)))
+
+  private def parseOptionalOpponentStore(options: Map[String, String]): Either[String, Option[OpponentMemoryTarget]] =
+    options.get("opponentStore") match
+      case None => Right(None)
+      case Some(raw) =>
+        OpponentMemoryTarget.parse(
+          raw = raw,
+          user = options.get("opponentStoreUser"),
+          password = options.get("opponentStorePassword"),
+          schema = options.getOrElse("opponentStoreSchema", "public")
+        ).map(Some(_))
+
+  private def validateOpponentMemoryArgs(
+      opponentStore: Option[OpponentMemoryTarget],
+      opponentSite: Option[String],
+      opponentName: Option[String]
+  ): Either[String, Unit] =
+    if opponentStore.isDefined == opponentSite.isDefined &&
+      opponentSite.isDefined == opponentName.isDefined
+    then Right(())
+    else Left("--opponentStore, --opponentSite, and --opponentName must be provided together")
 
   private def parseStringOption(options: Map[String, String], key: String, default: String): Either[String, String] =
     Right(options.getOrElse(key, default))
@@ -573,4 +691,10 @@ object AlwaysOnDecisionLoop:
       |  --cfrVillainHands=<int>           Default 96
       |  --cfrEquityTrials=<int>           Default 4000
       |  --cfrVillainReraises=<true|false> Default true
+      |  --opponentStore=<path|jdbc:postgresql://...> Optional persisted opponent memory store
+      |  --opponentStoreUser=<user>        Optional PostgreSQL user
+      |  --opponentStorePassword=<password> Optional PostgreSQL password
+      |  --opponentStoreSchema=<schema>    Optional PostgreSQL schema (default: public)
+      |  --opponentSite=<id>               Opponent site key for lookup
+      |  --opponentName=<name>             Opponent screen name for lookup
       |""".stripMargin

@@ -397,7 +397,7 @@ function Invoke-HallParallelRun {
       }
       $javaArgs.Add("-cp")
       $javaArgs.Add($Classpath)
-      $javaArgs.Add("sicfun.holdem.TexasHoldemPlayingHall")
+      $javaArgs.Add("sicfun.holdem.runtime.TexasHoldemPlayingHall")
       $javaArgs.Add("--hands=$workerHands")
       $javaArgs.Add("--seed=$workerSeed")
       $javaArgs.Add("--outDir=$workerDir")

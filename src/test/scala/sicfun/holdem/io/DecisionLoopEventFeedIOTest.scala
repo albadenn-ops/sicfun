@@ -65,3 +65,42 @@ class DecisionLoopEventFeedIOTest extends FunSuite:
     finally
       Files.deleteIfExists(path)
   }
+
+  test("readIncremental recovers when the feed is recreated from a smaller file") {
+    val path = Files.createTempFile("decision-loop-feed-rotated-", ".tsv")
+    Files.delete(path)
+    try
+      DecisionLoopEventFeedIO.append(path, event(0L, PokerAction.Call))
+      DecisionLoopEventFeedIO.append(path, event(1L, PokerAction.Raise(8.0)))
+
+      val (_, offset) = DecisionLoopEventFeedIO.readIncremental(path, 0L)
+      assert(offset > 0L)
+
+      Files.delete(path)
+      DecisionLoopEventFeedIO.append(path, event(9L, PokerAction.Fold))
+
+      val (events, nextOffset) = DecisionLoopEventFeedIO.readIncremental(path, offset)
+      assertEquals(events.map(_.event.sequenceInHand), Vector(9L))
+      assert(nextOffset > 0L)
+    finally
+      Files.deleteIfExists(path)
+  }
+
+  test("readIncremental tolerates an empty recreated feed while waiting for a new header") {
+    val path = Files.createTempFile("decision-loop-feed-empty-", ".tsv")
+    Files.delete(path)
+    try
+      DecisionLoopEventFeedIO.append(path, event(0L, PokerAction.Call))
+      DecisionLoopEventFeedIO.append(path, event(1L, PokerAction.Raise(8.0)))
+
+      val (_, offset) = DecisionLoopEventFeedIO.readIncremental(path, 0L)
+      assert(offset > 0L)
+
+      Files.write(path, Array.emptyByteArray)
+
+      val (events, nextOffset) = DecisionLoopEventFeedIO.readIncremental(path, offset)
+      assertEquals(events, Vector.empty)
+      assertEquals(nextOffset, 0L)
+    finally
+      Files.deleteIfExists(path)
+  }

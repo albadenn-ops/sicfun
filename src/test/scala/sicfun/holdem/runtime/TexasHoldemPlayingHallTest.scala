@@ -10,6 +10,12 @@ import scala.concurrent.duration.*
 class TexasHoldemPlayingHallTest extends FunSuite:
   override val munitTimeout: Duration = 180.seconds
 
+  test("contribution gap preserves the full big blind call amount after a small blind raise") {
+    assertEquals(TexasHoldemPlayingHall.contributionGap(targetContribution = 3.5, currentContribution = 1.0), 2.5)
+    assertEquals(TexasHoldemPlayingHall.contributionGap(targetContribution = 3.5, currentContribution = 3.5), 0.0)
+    assertEquals(TexasHoldemPlayingHall.contributionGap(targetContribution = 1.0, currentContribution = 3.5), 0.0)
+  }
+
   test("playing hall runs end-to-end and emits logs") {
     val root = Files.createTempDirectory("playing-hall-test-")
     try
@@ -44,6 +50,10 @@ class TexasHoldemPlayingHallTest extends FunSuite:
       val handHeader = handRows.head.split("\t", -1).toVector
       val tableIdIdx = handHeader.indexOf("tableId")
       assert(tableIdIdx >= 0, "hands.tsv missing tableId column")
+      val heroPositionIdx = handHeader.indexOf("heroPosition")
+      assert(heroPositionIdx >= 0, "hands.tsv missing heroPosition column")
+      val villainPositionIdx = handHeader.indexOf("villainPosition")
+      assert(villainPositionIdx >= 0, "hands.tsv missing villainPosition column")
       val heroActionIdx = handHeader.indexOf("heroAction")
       assert(heroActionIdx >= 0, "hands.tsv missing heroAction column")
       val streetsPlayedIdx = handHeader.indexOf("streetsPlayed")
@@ -53,6 +63,16 @@ class TexasHoldemPlayingHallTest extends FunSuite:
         fields.lift(tableIdIdx)
       }.toSet
       assertEquals(tableIds, Set("1", "2", "3"))
+      val heroPositions = handRows.drop(1).flatMap { row =>
+        val fields = row.split("\t", -1).toVector
+        fields.lift(heroPositionIdx)
+      }.toSet
+      assertEquals(heroPositions, Set("Button"))
+      val villainPositions = handRows.drop(1).flatMap { row =>
+        val fields = row.split("\t", -1).toVector
+        fields.lift(villainPositionIdx)
+      }.toSet
+      assertEquals(villainPositions, Set("BigBlind"))
       val sawIllegalOpeningCheck = handRows.drop(1).exists { row =>
         val fields = row.split("\t", -1).toVector
         fields.lift(heroActionIdx).contains("Check")
@@ -129,6 +149,48 @@ class TexasHoldemPlayingHallTest extends FunSuite:
           fields.lift(archetypeIdx).contains("gto")
         }
       assert(sawGto, "expected at least one hand row with archetype=gto")
+    finally
+      deleteRecursively(root)
+  }
+
+  test("playing hall supports hero big blind seat") {
+    val root = Files.createTempDirectory("playing-hall-bigblind-test-")
+    try
+      val out = root.resolve("hall-bigblind-out")
+      val result = TexasHoldemPlayingHall.run(Array(
+        "--hands=12",
+        "--reportEvery=6",
+        "--learnEveryHands=0",
+        "--learningWindowSamples=50",
+        "--seed=29",
+        s"--outDir=$out",
+        "--heroSeat=bigblind",
+        "--villainStyle=tag",
+        "--heroExplorationRate=0.0",
+        "--raiseSize=2.5",
+        "--bunchingTrials=8",
+        "--equityTrials=80",
+        "--saveTrainingTsv=false",
+        "--saveDdreTrainingTsv=false"
+      ))
+      assert(result.isRight, s"big blind hall run failed: $result")
+      val handRows = Files.readAllLines(out.resolve("hands.tsv"), StandardCharsets.UTF_8).asScala.toVector
+      assert(handRows.length > 1, "expected hand log rows")
+      val handHeader = handRows.head.split("\t", -1).toVector
+      val heroPositionIdx = handHeader.indexOf("heroPosition")
+      val villainPositionIdx = handHeader.indexOf("villainPosition")
+      assert(heroPositionIdx >= 0, "hands.tsv missing heroPosition column")
+      assert(villainPositionIdx >= 0, "hands.tsv missing villainPosition column")
+      val heroPositions = handRows.drop(1).flatMap { row =>
+        val fields = row.split("\t", -1).toVector
+        fields.lift(heroPositionIdx)
+      }.toSet
+      assertEquals(heroPositions, Set("BigBlind"))
+      val villainPositions = handRows.drop(1).flatMap { row =>
+        val fields = row.split("\t", -1).toVector
+        fields.lift(villainPositionIdx)
+      }.toSet
+      assertEquals(villainPositions, Set("Button"))
     finally
       deleteRecursively(root)
   }

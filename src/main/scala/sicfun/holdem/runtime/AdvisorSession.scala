@@ -3,6 +3,7 @@ import sicfun.holdem.types.*
 import sicfun.holdem.engine.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.cli.*
+import sicfun.holdem.history.*
 
 import sicfun.core.Card
 
@@ -52,7 +53,10 @@ enum HandEvent:
       villainObsBefore: Vector[VillainObservation],
       heroDecisionsBefore: Vector[HeroDecisionRecord],
       finishedBefore: Boolean,
-      heroNetBefore: Double
+      heroNetBefore: Double,
+      rememberedOpponentBefore: Option[OpponentProfile],
+      opponentMemoryStoreBefore: Option[OpponentProfileStore],
+      opponentMemoryDirtyBefore: Boolean
   )
   case BoardDealt(
       boardBefore: Board,
@@ -103,7 +107,14 @@ final class AdvisorSession(
     val tableRanges: TableRanges,
     val hand: Option[HandSnapshot],
     val stats: AdvisorSessionStats,
-    val rng: Random
+    val rng: Random,
+    val rememberedOpponent: Option[OpponentProfile] = None,
+    val rememberedVillainObservations: Vector[VillainObservation] = Vector.empty,
+    val opponentMemoryTarget: Option[OpponentMemoryTarget] = None,
+    val opponentMemorySite: Option[String] = None,
+    val opponentMemoryName: Option[String] = None,
+    val opponentMemoryStore: Option[OpponentProfileStore] = None,
+    val opponentMemoryDirty: Boolean = false
 ):
   private val HeroIdx = 0
   private val VillainIdx = 1
@@ -120,7 +131,7 @@ final class AdvisorSession(
       case AdvisorCommand.SessionStats     => doSessionStats()
       case AdvisorCommand.Undo             => doUndo()
       case AdvisorCommand.Help             => doHelp()
-      case AdvisorCommand.Quit             => CommandResult(this, Vector("Goodbye."))
+      case AdvisorCommand.Quit             => doQuit()
       case AdvisorCommand.Unknown(input, reason) =>
         CommandResult(this, Vector(s"Unknown command: $reason. Type 'help' for usage."))
 
@@ -129,6 +140,12 @@ final class AdvisorSession(
   private def doNewHand(): CommandResult =
     val prevHand = hand
     val newNumber = prevHand.map(_.handNumber + 1).getOrElse(1)
+    val (persistedStore, persistedDirty) = flushOpponentMemoryIfDirty(opponentMemoryStore, opponentMemoryDirty)
+    val archivedVillainObservations = prevHand match
+      case Some(previous) =>
+        (rememberedVillainObservations ++ previous.villainObservations).takeRight(OpponentProfile.MaxRecentEvents)
+      case None =>
+        rememberedVillainObservations
 
     // Alternate positions
     val heroPos =
@@ -174,7 +191,16 @@ final class AdvisorSession(
       f"Blinds posted. Pot: ${pot}%.1f. Hero stack: ${heroStack}%.1f. Villain stack: ${villainStack}%.1f."
     ) ++ (if toCall > 0.0 then Vector(f"Hero to act. To call: ${toCall}%.1f.") else Vector("Hero has option."))
 
-    CommandResult(updated(newHand = Some(snapshot), newStats = updatedStats), out)
+    CommandResult(
+      updated(
+        newHand = Some(snapshot),
+        newStats = updatedStats,
+        newRememberedVillainObservations = archivedVillainObservations,
+        newOpponentMemoryStore = persistedStore,
+        newOpponentMemoryDirty = persistedDirty
+      ),
+      out
+    )
 
   // ---- HeroCards ----
 
@@ -230,7 +256,10 @@ final class AdvisorSession(
       villainObsBefore = h.villainObservations,
       heroDecisionsBefore = h.heroDecisions,
       finishedBefore = h.finished,
-      heroNetBefore = h.heroNetResult
+      heroNetBefore = h.heroNetResult,
+      rememberedOpponentBefore = rememberedOpponent,
+      opponentMemoryStoreBefore = opponentMemoryStore,
+      opponentMemoryDirtyBefore = opponentMemoryDirty
     )
 
     val playerIdx = if isHero then HeroIdx else VillainIdx
@@ -249,6 +278,9 @@ final class AdvisorSession(
     var heroDecisions = h.heroDecisions
     var finished = false
     var heroNet = h.heroNetResult
+    var remembered = rememberedOpponent
+    var memoryStore = opponentMemoryStore
+    var memoryDirty = opponentMemoryDirty
 
     action match
       case PokerAction.Fold =>
@@ -306,6 +338,12 @@ final class AdvisorSession(
       )
       villainObs = villainObs :+ VillainObservation(action, obsState)
 
+    if !isHero then
+      val (updatedStore, updatedOpponent, updatedDirty) = persistVillainObservation(h, action)
+      memoryStore = updatedStore
+      remembered = updatedOpponent
+      memoryDirty = updatedDirty
+
     // Record hero decision for review
     if isHero && action != PokerAction.Fold then
       h.heroCards.foreach { cards =>
@@ -315,7 +353,7 @@ final class AdvisorSession(
         )
         heroDecisions = heroDecisions :+ HeroDecisionRecord(
           street = h.street, gameState = gs, heroCards = cards,
-          actualAction = action, villainObservations = villainObs
+          actualAction = action, villainObservations = combinedVillainObservations(villainObs)
         )
       }
 
@@ -330,6 +368,9 @@ final class AdvisorSession(
         heroNet = -(config.startingStack - heroStack)
       else
         heroNet = pot - (config.startingStack - heroStack)
+      val flushedMemory = flushOpponentMemoryIfDirty(memoryStore, memoryDirty)
+      memoryStore = flushedMemory._1
+      memoryDirty = flushedMemory._2
 
     val updatedSnapshot = h.copy(
       pot = pot, heroStack = heroStack, villainStack = villainStack,
@@ -353,7 +394,16 @@ final class AdvisorSession(
     if finished then
       out += f"--- Hand #${h.handNumber} result: ${heroNet}%+.1f ---"
 
-    CommandResult(updated(newHand = Some(updatedSnapshot), newStats = updatedStats), out.result())
+    CommandResult(
+      updated(
+        newHand = Some(updatedSnapshot),
+        newStats = updatedStats,
+        newRememberedOpponent = remembered,
+        newOpponentMemoryStore = memoryStore,
+        newOpponentMemoryDirty = memoryDirty
+      ),
+      out.result()
+    )
 
   // ---- Deal board ----
 
@@ -438,7 +488,7 @@ final class AdvisorSession(
               state = gameState,
               folds = folds,
               villainPos = h.villainPosition,
-              observations = h.villainObservations,
+              observations = combinedVillainObservations(h.villainObservations),
               candidateActions = candidates,
               decisionBudgetMillis = Some(config.decisionBudgetMillis),
               rng = new Random(rng.nextLong())
@@ -506,8 +556,22 @@ final class AdvisorSession(
       f"  BB/100: ${bb100}%+.1f",
       f"  Wins: ${s.heroWins}  Losses: ${s.heroLosses}  Splits: ${s.heroSplits}",
       s"  Villain archetype: ${formatArchetypePosterior(engine.archetypePosterior)}"
-    )
+    ) ++ rememberedOpponent.toVector.map { profile =>
+      s"  Remembered opponent: ${profile.site}/${profile.playerName} (${profile.handsObserved} hands)"
+    }
     CommandResult(this, out)
+
+  private def doQuit(): CommandResult =
+    val flushedMemory = flushOpponentMemoryIfDirty(opponentMemoryStore, opponentMemoryDirty)
+    CommandResult(
+      updated(
+        newHand = hand,
+        newStats = stats,
+        newOpponentMemoryStore = flushedMemory._1,
+        newOpponentMemoryDirty = flushedMemory._2
+      ),
+      Vector("Goodbye.")
+    )
 
   // ---- Undo ----
 
@@ -524,7 +588,7 @@ final class AdvisorSession(
             h.copy(heroCards = prev, eventLog = remaining)
 
           case e: HandEvent.ActionRecorded =>
-            // If we're undoing a hand-ending fold, also undo the stats
+        // If we're undoing a hand-ending fold, also undo the stats
             val restoredSnapshot = h.copy(
               pot = e.potBefore,
               heroStack = e.heroStackBefore,
@@ -563,7 +627,23 @@ final class AdvisorSession(
             )
           case _ => stats
 
-        CommandResult(updated(newHand = Some(restored), newStats = restoredStats), Vector("Undone."))
+        val restoredMemory = lastEvent match
+          case e: HandEvent.ActionRecorded =>
+            saveOpponentMemorySnapshot(e.opponentMemoryStoreBefore)
+            (e.rememberedOpponentBefore, e.opponentMemoryStoreBefore, false)
+          case _ =>
+            (rememberedOpponent, opponentMemoryStore, opponentMemoryDirty)
+
+        CommandResult(
+          updated(
+            newHand = Some(restored),
+            newStats = restoredStats,
+            newRememberedOpponent = restoredMemory._1,
+            newOpponentMemoryStore = restoredMemory._2,
+            newOpponentMemoryDirty = restoredMemory._3
+          ),
+          Vector("Undone.")
+        )
 
   // ---- Help ----
 
@@ -588,9 +668,77 @@ final class AdvisorSession(
 
   private def updated(
       newHand: Option[HandSnapshot],
-      newStats: AdvisorSessionStats
+      newStats: AdvisorSessionStats,
+      newRememberedOpponent: Option[OpponentProfile] = rememberedOpponent,
+      newRememberedVillainObservations: Vector[VillainObservation] = rememberedVillainObservations,
+      newOpponentMemoryStore: Option[OpponentProfileStore] = opponentMemoryStore,
+      newOpponentMemoryDirty: Boolean = opponentMemoryDirty
   ): AdvisorSession =
-    new AdvisorSession(config, engine, tableRanges, newHand, newStats, rng)
+    new AdvisorSession(
+      config = config,
+      engine = engine,
+      tableRanges = tableRanges,
+      hand = newHand,
+      stats = newStats,
+      rng = rng,
+      rememberedOpponent = newRememberedOpponent,
+      rememberedVillainObservations = newRememberedVillainObservations,
+      opponentMemoryTarget = opponentMemoryTarget,
+      opponentMemorySite = opponentMemorySite,
+      opponentMemoryName = opponentMemoryName,
+      opponentMemoryStore = newOpponentMemoryStore,
+      opponentMemoryDirty = newOpponentMemoryDirty
+    )
+
+  private def persistVillainObservation(
+      h: HandSnapshot,
+      action: PokerAction
+  ): (Option[OpponentProfileStore], Option[OpponentProfile], Boolean) =
+    (opponentMemorySite, opponentMemoryName) match
+      case (Some(site), Some(name)) =>
+        val currentStore = opponentMemoryStore.getOrElse(OpponentProfileStore.empty)
+        val updatedStore = currentStore.observeEvent(
+          site = site,
+          playerName = name,
+          event = PokerEvent(
+            handId = s"advisor-hand-${h.handNumber}",
+            sequenceInHand = h.eventLog.count {
+              case _: HandEvent.ActionRecorded => true
+              case _ => false
+            }.toLong,
+            playerId = name,
+            occurredAtEpochMillis = System.currentTimeMillis(),
+            street = h.street,
+            position = h.villainPosition,
+            board = h.board,
+            potBefore = h.pot,
+            toCall = h.toCall,
+            stackBefore = h.villainStack,
+            action = action,
+            decisionTimeMillis = None,
+            betHistory = h.betHistory
+          ),
+          facedRaiseResponse = h.lastHeroActionWasRaise
+        )
+        (
+          Some(updatedStore),
+          updatedStore.find(site, name).orElse(rememberedOpponent),
+          updatedStore != currentStore
+        )
+      case _ =>
+        (opponentMemoryStore, rememberedOpponent, opponentMemoryDirty)
+
+  private def saveOpponentMemorySnapshot(store: Option[OpponentProfileStore]): Unit =
+    opponentMemoryTarget.foreach(target => OpponentProfileStorePersistence.save(target, store.getOrElse(OpponentProfileStore.empty)))
+
+  private def flushOpponentMemoryIfDirty(
+      store: Option[OpponentProfileStore],
+      dirty: Boolean
+  ): (Option[OpponentProfileStore], Boolean) =
+    if dirty then
+      saveOpponentMemorySnapshot(store)
+      (store, false)
+    else (store, false)
 
   private def buildCandidateActions(h: HandSnapshot): Vector[PokerAction] =
     buildCandidateActionsForState(
@@ -624,6 +772,11 @@ final class AdvisorSession(
   private def formatAdvice(result: AdaptiveDecisionResult, h: HandSnapshot): Vector[String] =
     val out = Vector.newBuilder[String]
     val bb = config.bigBlind
+
+    rememberedOpponent.foreach { profile =>
+      out += s"  Memory: ${profile.site}/${profile.playerName} (${profile.handsObserved} hands)"
+      profile.exploitHints.take(2).foreach(hint => out += s"  Exploit: $hint")
+    }
 
     // Archetype line
     out += s"  Villain: ${formatArchetypePosterior(result.archetypePosterior)}"
@@ -666,6 +819,11 @@ final class AdvisorSession(
       out += s"  Top villain: $handStr"
 
     out.result()
+
+  private def combinedVillainObservations(
+      liveObservations: Vector[VillainObservation]
+  ): Vector[VillainObservation] =
+    rememberedVillainObservations ++ liveObservations
 
   private def formatArchetypePosterior(posterior: ArchetypePosterior): String =
     posterior.weights.toVector

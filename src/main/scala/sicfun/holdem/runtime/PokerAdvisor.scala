@@ -4,6 +4,7 @@ import sicfun.holdem.model.*
 import sicfun.holdem.engine.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.cli.*
+import sicfun.holdem.history.*
 
 import sicfun.core.Card
 
@@ -52,7 +53,10 @@ object PokerAdvisor:
       cfrBlend: Double,
       cfrVillainHands: Int,
       cfrEquityTrials: Int,
-      cfrVillainReraises: Boolean
+      cfrVillainReraises: Boolean,
+      opponentStore: Option[OpponentMemoryTarget],
+      opponentSite: Option[String],
+      opponentName: Option[String]
   )
 
   private def bootstrap(config: CliConfig): Either[String, AdvisorSession] =
@@ -61,9 +65,15 @@ object PokerAdvisor:
       val tableRanges = TableRanges.defaults(TableFormat.NineMax)
       val artifact = loadArtifact(config)
       val engine = buildEngine(config, artifact, tableRanges)
-      val session = buildSession(config, engine, tableRanges)
+      val opponentMemoryStore = loadRememberedOpponentStore(config)
+      val rememberedOpponent = loadRememberedOpponent(opponentMemoryStore, config)
+      rememberedOpponent.foreach(profile => engine.seedArchetypePosterior(profile.archetypePosterior))
+      val session = buildSession(config, engine, tableRanges, rememberedOpponent, opponentMemoryStore)
       System.err.println("done.")
       printBootstrapBanner(config)
+      rememberedOpponent.foreach { profile =>
+        println(s"Loaded memory for ${profile.site}/${profile.playerName}: ${profile.handsObserved} hands")
+      }
       Right(session)
     catch
       case e: Exception =>
@@ -121,7 +131,9 @@ object PokerAdvisor:
   private def buildSession(
       config: CliConfig,
       engine: RealTimeAdaptiveEngine,
-      tableRanges: TableRanges
+      tableRanges: TableRanges,
+      rememberedOpponent: Option[OpponentProfile],
+      opponentMemoryStore: Option[OpponentProfileStore]
   ): AdvisorSession =
     new AdvisorSession(
       config = SessionConfig(
@@ -134,8 +146,28 @@ object PokerAdvisor:
       tableRanges = tableRanges,
       hand = None,
       stats = AdvisorSessionStats(),
-      rng = new Random(config.seed)
+      rng = new Random(config.seed),
+      rememberedOpponent = rememberedOpponent,
+      rememberedVillainObservations = rememberedOpponent.map(_.recentObservations).getOrElse(Vector.empty),
+      opponentMemoryTarget = config.opponentStore,
+      opponentMemorySite = config.opponentSite,
+      opponentMemoryName = config.opponentName,
+      opponentMemoryStore = opponentMemoryStore
     )
+
+  private def loadRememberedOpponent(
+      store: Option[OpponentProfileStore],
+      config: CliConfig
+  ): Option[OpponentProfile] =
+    (store, config.opponentSite, config.opponentName) match
+      case (Some(profileStore), Some(site), Some(name)) =>
+        profileStore.find(site, name)
+      case _ => None
+
+  private def loadRememberedOpponentStore(
+      config: CliConfig
+  ): Option[OpponentProfileStore] =
+    config.opponentStore.map(OpponentProfileStorePersistence.load)
 
   private def printBootstrapBanner(config: CliConfig): Unit =
     println(s"sicfun poker advisor")
@@ -211,7 +243,7 @@ object PokerAdvisor:
     else
       for
         options <- CliHelpers.parseOptions(args)
-        modelDir <- parseOptionalPath(options, "model")
+        modelDir <- parseOptionalDirectory(options, "model")
         stack <- CliHelpers.parseDoubleOptionEither(options, "stack", 200.0)
         _ <- if stack > 0.0 then Right(()) else Left("--stack must be > 0")
         sb <- CliHelpers.parseDoubleOptionEither(options, "sb", 1.0)
@@ -234,6 +266,10 @@ object PokerAdvisor:
         cfrEquityTrials <- CliHelpers.parseIntOptionEither(options, "cfrEquityTrials", 4000)
         _ <- if cfrEquityTrials > 0 then Right(()) else Left("--cfrEquityTrials must be > 0")
         cfrVillainReraises <- CliHelpers.parseBooleanOptionEither(options, "cfrVillainReraises", true)
+        opponentStore <- parseOptionalOpponentStore(options)
+        opponentSite = options.get("opponentSite").map(_.trim).filter(_.nonEmpty)
+        opponentName = options.get("opponentName").map(_.trim).filter(_.nonEmpty)
+        _ <- validateOpponentMemoryArgs(opponentStore, opponentSite, opponentName)
       yield CliConfig(
         modelDir = modelDir,
         stack = stack,
@@ -247,16 +283,40 @@ object PokerAdvisor:
         cfrBlend = cfrBlend,
         cfrVillainHands = cfrVillainHands,
         cfrEquityTrials = cfrEquityTrials,
-        cfrVillainReraises = cfrVillainReraises
+        cfrVillainReraises = cfrVillainReraises,
+        opponentStore = opponentStore,
+        opponentSite = opponentSite,
+        opponentName = opponentName
       )
 
-  private def parseOptionalPath(options: Map[String, String], key: String): Either[String, Option[Path]] =
+  private def parseOptionalDirectory(options: Map[String, String], key: String): Either[String, Option[Path]] =
     options.get(key) match
       case None => Right(None)
       case Some(raw) =>
         val path = Paths.get(raw)
         if Files.isDirectory(path) then Right(Some(path))
         else Left(s"--$key: directory '$raw' does not exist")
+
+  private def parseOptionalOpponentStore(options: Map[String, String]): Either[String, Option[OpponentMemoryTarget]] =
+    options.get("opponentStore") match
+      case None => Right(None)
+      case Some(raw) =>
+        OpponentMemoryTarget.parse(
+          raw = raw,
+          user = options.get("opponentStoreUser"),
+          password = options.get("opponentStorePassword"),
+          schema = options.getOrElse("opponentStoreSchema", "public")
+        ).map(Some(_))
+
+  private def validateOpponentMemoryArgs(
+      opponentStore: Option[OpponentMemoryTarget],
+      opponentSite: Option[String],
+      opponentName: Option[String]
+  ): Either[String, Unit] =
+    if opponentStore.isDefined == opponentSite.isDefined &&
+      opponentSite.isDefined == opponentName.isDefined
+    then Right(())
+    else Left("--opponentStore, --opponentSite, and --opponentName must be provided together")
 
   private def fmtSigned(v: Double): String =
     if v >= 0 then f"+$v%.1f" else f"$v%.1f"
@@ -279,4 +339,10 @@ object PokerAdvisor:
       |  --cfrVillainHands=96   Max villain posterior hands kept for CFR
       |  --cfrEquityTrials=4000 Equity trials used inside CFR terminal evaluation
       |  --cfrVillainReraises=true  Allow villain 3-bet branch in CFR abstraction
+      |  --opponentStore=<path|jdbc:postgresql://...> Persisted opponent memory store
+      |  --opponentStoreUser=<user> Optional PostgreSQL user
+      |  --opponentStorePassword=<password> Optional PostgreSQL password
+      |  --opponentStoreSchema=<schema> Optional PostgreSQL schema (default: public)
+      |  --opponentSite=<id>    Opponent site key (for example pokerstars)
+      |  --opponentName=<name>  Opponent screen name to preload
       |""".stripMargin

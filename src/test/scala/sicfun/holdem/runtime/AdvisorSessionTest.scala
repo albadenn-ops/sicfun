@@ -4,10 +4,13 @@ import sicfun.holdem.model.*
 import sicfun.holdem.engine.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.cli.*
+import sicfun.holdem.history.*
 
 import munit.FunSuite
 import sicfun.core.Card
 
+import java.nio.file.{Files, Path}
+import scala.jdk.CollectionConverters.*
 import scala.util.Random
 
 class AdvisorSessionTest extends FunSuite:
@@ -56,8 +59,48 @@ class AdvisorSessionTest extends FunSuite:
       rng = new Random(42)
     )
 
+  private def freshSessionWithMemory(storePath: Path): AdvisorSession =
+    val store = OpponentProfileStore.load(storePath)
+    val rememberedOpponent = store.find("pokerstars", "Villain")
+    new AdvisorSession(
+      config = SessionConfig(),
+      engine = engine,
+      tableRanges = tableRanges,
+      hand = None,
+      stats = AdvisorSessionStats(),
+      rng = new Random(42),
+      rememberedOpponent = rememberedOpponent,
+      rememberedVillainObservations = rememberedOpponent.map(_.recentObservations).getOrElse(Vector.empty),
+      opponentMemoryTarget = Some(OpponentMemoryTarget.Json(storePath)),
+      opponentMemorySite = Some("pokerstars"),
+      opponentMemoryName = Some("Villain"),
+      opponentMemoryStore = Some(store)
+    )
+
   private def card(t: String): Card =
     Card.parse(t).getOrElse(throw new IllegalArgumentException(s"bad card: $t"))
+
+  private def seedOpponentStore(path: Path): Unit =
+    val profile = OpponentProfile(
+      site = "pokerstars",
+      playerName = "Villain",
+      handsObserved = 2,
+      firstSeenEpochMillis = 1_700_000_000_000L,
+      lastSeenEpochMillis = 1_700_000_000_100L,
+      actionSummary = OpponentActionSummary(folds = 1, raises = 1, calls = 1, checks = 0),
+      raiseResponses = RaiseResponseCounts(folds = 0, calls = 1, raises = 0),
+      recentEvents = Vector.empty,
+      seenHandIds = Vector("mem-1", "mem-2")
+    )
+    OpponentProfileStore.save(path, OpponentProfileStore(Vector(profile)))
+
+  private def deleteRecursively(path: Path): Unit =
+    if Files.exists(path) then
+      val stream = Files.walk(path)
+      try
+        stream.iterator().asScala.toVector.sortBy(_.toString.length).reverse.foreach(Files.deleteIfExists)
+      finally
+        stream.close()
 
   // ---- Command parser tests ----
 
@@ -201,6 +244,93 @@ class AdvisorSessionTest extends FunSuite:
     assert(h.finished)
     assert(h.heroNetResult > 0.0, s"hero should have positive result, got ${h.heroNetResult}")
     assertEquals(r3.session.stats.heroWins, 1)
+  }
+
+  test("starting a new hand carries prior villain observations into session memory") {
+    val s = freshSession()
+    val r1 = s.execute(AdvisorCommand.NewHand)
+    val r2 = r1.session.execute(AdvisorCommand.HeroAction(PokerAction.Raise(6.0)))
+    val r3 = r2.session.execute(AdvisorCommand.VillainAction(PokerAction.Call))
+    assertEquals(r3.session.hand.get.villainObservations.length, 1)
+
+    val r4 = r3.session.execute(AdvisorCommand.NewHand)
+    assertEquals(r4.session.rememberedVillainObservations.length, 1)
+    assertEquals(r4.session.hand.get.villainObservations, Vector.empty)
+  }
+
+  test("mid-hand villain memory stays buffered until a new-hand boundary flushes it") {
+    val root = Files.createTempDirectory("advisor-session-buffered-memory-test-")
+    try
+      val storePath = root.resolve("profiles.json")
+      seedOpponentStore(storePath)
+      val session = freshSessionWithMemory(storePath)
+
+      val r1 = session.execute(AdvisorCommand.NewHand)
+      val r2 = r1.session.execute(AdvisorCommand.HeroAction(PokerAction.Raise(6.0)))
+      val r3 = r2.session.execute(AdvisorCommand.VillainAction(PokerAction.Call))
+
+      val bufferedOnly = OpponentProfileStore.load(storePath).find("pokerstars", "Villain").getOrElse(fail("missing profile"))
+      assertEquals(bufferedOnly.handsObserved, 2)
+      assertEquals(bufferedOnly.actionSummary.calls, 1)
+      assertEquals(r3.session.rememberedOpponent.map(_.handsObserved), Some(3))
+      assert(r3.session.opponentMemoryDirty)
+
+      val r4 = r3.session.execute(AdvisorCommand.NewHand)
+      val flushed = OpponentProfileStore.load(storePath).find("pokerstars", "Villain").getOrElse(fail("missing profile"))
+      assertEquals(flushed.handsObserved, 3)
+      assertEquals(flushed.actionSummary.calls, 2)
+      assertEquals(flushed.raiseResponses.calls, 2)
+      assert(!r4.session.opponentMemoryDirty)
+    finally
+      deleteRecursively(root)
+  }
+
+  test("quit flushes buffered villain memory to the opponent store") {
+    val root = Files.createTempDirectory("advisor-session-quit-flush-test-")
+    try
+      val storePath = root.resolve("profiles.json")
+      seedOpponentStore(storePath)
+      val session = freshSessionWithMemory(storePath)
+
+      val r1 = session.execute(AdvisorCommand.NewHand)
+      val r2 = r1.session.execute(AdvisorCommand.HeroAction(PokerAction.Raise(6.0)))
+      val r3 = r2.session.execute(AdvisorCommand.VillainAction(PokerAction.Call))
+      assert(r3.session.opponentMemoryDirty)
+
+      val r4 = r3.session.execute(AdvisorCommand.Quit)
+      val flushed = OpponentProfileStore.load(storePath).find("pokerstars", "Villain").getOrElse(fail("missing profile"))
+      assertEquals(flushed.handsObserved, 3)
+      assertEquals(flushed.actionSummary.calls, 2)
+      assertEquals(flushed.raiseResponses.calls, 2)
+      assert(!r4.session.opponentMemoryDirty)
+    finally
+      deleteRecursively(root)
+  }
+
+  test("villain actions persist to opponent store and undo restores the previous snapshot") {
+    val root = Files.createTempDirectory("advisor-session-memory-test-")
+    try
+      val storePath = root.resolve("profiles.json")
+      seedOpponentStore(storePath)
+      val session = freshSessionWithMemory(storePath)
+
+      val r1 = session.execute(AdvisorCommand.NewHand)
+      val r2 = r1.session.execute(AdvisorCommand.HeroAction(PokerAction.Raise(6.0)))
+      val r3 = r2.session.execute(AdvisorCommand.VillainAction(PokerAction.Fold))
+
+      val updated = OpponentProfileStore.load(storePath).find("pokerstars", "Villain").getOrElse(fail("missing profile"))
+      assertEquals(updated.handsObserved, 3)
+      assertEquals(updated.actionSummary.folds, 2)
+      assertEquals(updated.raiseResponses.folds, 1)
+
+      val r4 = r3.session.execute(AdvisorCommand.Undo)
+      val restored = OpponentProfileStore.load(storePath).find("pokerstars", "Villain").getOrElse(fail("missing profile"))
+      assertEquals(restored.handsObserved, 2)
+      assertEquals(restored.actionSummary.folds, 1)
+      assertEquals(restored.raiseResponses.folds, 0)
+      assertEquals(r4.session.rememberedOpponent.map(_.handsObserved), Some(2))
+    finally
+      deleteRecursively(root)
   }
 
   test("position alternates between hands") {
