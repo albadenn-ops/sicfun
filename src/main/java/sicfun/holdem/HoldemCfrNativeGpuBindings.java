@@ -50,6 +50,37 @@ public final class HoldemCfrNativeGpuBindings {
   );
 
   /**
+   * Batch CFR solve: N trees with shared topology, float arithmetic on GPU.
+   *
+   * <p>Per-tree data is concatenated: tree0 data, tree1 data, ..., treeN data.
+   * Terminal utilities are indexed as [treeIdx * nodeCount + nodeId].
+   * Chance weights are indexed as [treeIdx * edgeCount + edgeIdx].
+   * Output strategies are indexed as [treeIdx * strategySize + offset].
+   *
+   * @return 0 on success, negative on CUDA error, positive on validation error
+   */
+  public static native int solveTreeBatch(
+      int iterations,
+      int averagingDelay,
+      boolean cfrPlus,
+      boolean linearAveraging,
+      int rootNodeId,
+      int[] nodeTypes,
+      int[] nodeStarts,
+      int[] nodeCounts,
+      int[] nodeInfosets,
+      int[] edgeChildIds,
+      int[] infosetPlayers,
+      int[] infosetActionCounts,
+      int[] infosetOffsets,
+      float[] terminalUtilities,
+      float[] chanceWeights,
+      float[] outAverageStrategies,
+      float[] outExpectedValues,
+      int batchSize
+  );
+
+  /**
    * Returns the last engine code used by this native library:
    * 0 = unknown, 2 = GPU provider (or CUDA-compiled host fallback).
    */

@@ -117,6 +117,28 @@ int write_single_int(JNIEnv* env, jintArray array, const int value) {
   return cfrnative::kStatusOk;
 }
 
+int read_float_array(JNIEnv* env, jfloatArray array, std::vector<float>& out) {
+  if (array == nullptr) return cfrnative::kStatusNullArray;
+  const jsize length = env->GetArrayLength(array);
+  out.resize(static_cast<size_t>(length));
+  if (length > 0) {
+    env->GetFloatArrayRegion(array, 0, length, reinterpret_cast<jfloat*>(out.data()));
+    if (clear_pending_jni_exception(env)) return cfrnative::kStatusReadFailure;
+  }
+  return cfrnative::kStatusOk;
+}
+
+int write_float_array(JNIEnv* env, jfloatArray array, const std::vector<float>& values) {
+  if (array == nullptr) return cfrnative::kStatusNullArray;
+  const jsize length = env->GetArrayLength(array);
+  if (length != static_cast<jsize>(values.size())) return cfrnative::kStatusLengthMismatch;
+  if (length > 0) {
+    env->SetFloatArrayRegion(array, 0, length, reinterpret_cast<const jfloat*>(values.data()));
+    if (clear_pending_jni_exception(env)) return cfrnative::kStatusWriteFailure;
+  }
+  return cfrnative::kStatusOk;
+}
+
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL
@@ -235,6 +257,103 @@ Java_sicfun_holdem_HoldemCfrNativeGpuBindings_solveTreeFixed(
   status = write_int_array(env, outAverageStrategiesRawArray, output.average_strategies_raw);
   if (status != cfrnative::kStatusOk) return status;
   status = write_single_int(env, outExpectedValueRawArray, output.expected_value_player0_raw);
+  if (status != cfrnative::kStatusOk) return status;
+
+  g_last_engine_code.store(kEngineGpu, std::memory_order_relaxed);
+  return cfrnative::kStatusOk;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_sicfun_holdem_HoldemCfrNativeGpuBindings_solveTreeBatch(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jint iterations,
+    jint averagingDelay,
+    jboolean cfrPlus,
+    jboolean linearAveraging,
+    jint rootNodeId,
+    jintArray nodeTypesArray,
+    jintArray nodeStartsArray,
+    jintArray nodeCountsArray,
+    jintArray nodeInfosetsArray,
+    jintArray edgeChildIdsArray,
+    jintArray infosetPlayersArray,
+    jintArray infosetActionCountsArray,
+    jintArray infosetOffsetsArray,
+    jfloatArray terminalUtilitiesArray,
+    jfloatArray chanceWeightsArray,
+    jfloatArray outAverageStrategiesArray,
+    jfloatArray outExpectedValuesArray,
+    jint batchSize) {
+
+  // Read shared topology
+  std::vector<int> node_types, node_starts, node_counts, node_infosets;
+  std::vector<int> edge_child_ids, infoset_players, infoset_action_counts, infoset_offsets;
+
+  int status;
+  status = read_int_array(env, nodeTypesArray, node_types);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeStartsArray, node_starts);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeCountsArray, node_counts);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeInfosetsArray, node_infosets);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, edgeChildIdsArray, edge_child_ids);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, infosetPlayersArray, infoset_players);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, infosetActionCountsArray, infoset_action_counts);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, infosetOffsetsArray, infoset_offsets);
+  if (status != cfrnative::kStatusOk) return status;
+
+  const int N = static_cast<int>(node_types.size());
+  const int E = static_cast<int>(edge_child_ids.size());
+  const int I = static_cast<int>(infoset_action_counts.size());
+  const int S = infoset_offsets.back(); // strategy_size = last offset
+  const int B = static_cast<int>(batchSize);
+
+  // Read per-tree float arrays
+  std::vector<float> terminal_utilities, chance_weights;
+  status = read_float_array(env, terminalUtilitiesArray, terminal_utilities);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_float_array(env, chanceWeightsArray, chance_weights);
+  if (status != cfrnative::kStatusOk) return status;
+
+  if (static_cast<int>(terminal_utilities.size()) != B * N) return cfrnative::kStatusLengthMismatch;
+  if (static_cast<int>(chance_weights.size()) != B * E) return cfrnative::kStatusLengthMismatch;
+
+  // Output buffers
+  std::vector<float> out_strategies(B * S);
+  std::vector<float> out_ev(B);
+
+  cfrbatch::BatchSpec spec;
+  spec.root_node_id = static_cast<int>(rootNodeId);
+  spec.node_count = N;
+  spec.edge_count = E;
+  spec.infoset_count = I;
+  spec.strategy_size = S;
+  spec.iterations = static_cast<int>(iterations);
+  spec.averaging_delay = static_cast<int>(averagingDelay);
+  spec.cfr_plus = (cfrPlus == JNI_TRUE);
+  spec.linear_averaging = (linearAveraging == JNI_TRUE);
+  spec.batch_size = B;
+
+  int result = cfrbatch::launch_batch_solve(
+      spec,
+      node_types.data(), node_starts.data(), node_counts.data(),
+      node_infosets.data(), edge_child_ids.data(),
+      infoset_action_counts.data(), infoset_offsets.data(),
+      terminal_utilities.data(), chance_weights.data(),
+      out_strategies.data(), out_ev.data());
+
+  if (result != 0) return -1; // CUDA error
+
+  // Write back
+  status = write_float_array(env, outAverageStrategiesArray, out_strategies);
+  if (status != cfrnative::kStatusOk) return status;
+  status = write_float_array(env, outExpectedValuesArray, out_ev);
   if (status != cfrnative::kStatusOk) return status;
 
   g_last_engine_code.store(kEngineGpu, std::memory_order_relaxed);
