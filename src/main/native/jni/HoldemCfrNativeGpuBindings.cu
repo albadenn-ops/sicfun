@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "CfrNativeSolverCore.hpp"
+#include "CfrBatchCudaKernel.cuh"
 
 namespace {
 
