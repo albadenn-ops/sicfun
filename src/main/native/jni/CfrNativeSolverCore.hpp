@@ -205,33 +205,43 @@ inline int averaging_weight(const TreeSpecFixed& spec, const int iteration) {
   return iteration - spec.averaging_delay;
 }
 
-inline void regret_matching(
-    const std::vector<double>& regrets,
+template <typename F>
+inline void regret_matching_fp(
+    const std::vector<F>& regrets,
     const int start,
     const int count,
-    double* out_strategy) {
-  double positive_sum = 0.0;
-  const double* regret_ptr = regrets.data() + start;
+    F* out_strategy) {
+  F positive_sum = F(0);
+  const F* regret_ptr = regrets.data() + start;
   for (int idx = 0; idx < count; ++idx) {
-    const double positive = regret_ptr[idx] > 0.0 ? regret_ptr[idx] : 0.0;
+    const F positive = regret_ptr[idx] > F(0) ? regret_ptr[idx] : F(0);
     out_strategy[idx] = positive;
     positive_sum += positive;
   }
 
-  if (positive_sum > 0.0) {
-    const double inv = 1.0 / positive_sum;
+  if (positive_sum > F(0)) {
+    const F inv = F(1) / positive_sum;
     for (int idx = 0; idx < count; ++idx) {
       out_strategy[idx] *= inv;
     }
   } else {
-    const double uniform = 1.0 / static_cast<double>(count);
+    const F uniform = F(1) / static_cast<F>(count);
     for (int idx = 0; idx < count; ++idx) {
       out_strategy[idx] = uniform;
     }
   }
 }
 
-inline int solve(const TreeSpec& spec, SolveOutput& output) {
+inline void regret_matching(
+    const std::vector<double>& regrets,
+    const int start,
+    const int count,
+    double* out_strategy) {
+  regret_matching_fp(regrets, start, count, out_strategy);
+}
+
+template <typename F>
+inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
   const int validation = validate_tree(spec);
   if (validation != kStatusOk) {
     return validation;
@@ -245,9 +255,9 @@ inline int solve(const TreeSpec& spec, SolveOutput& output) {
   const int strategy_size = infoset_offsets[infoset_count];
   output.average_strategies.assign(strategy_size, 0.0);
 
-  std::vector<double> cumulative_regret(strategy_size, 0.0);
-  std::vector<double> cumulative_strategy(strategy_size, 0.0);
-  std::vector<double> chance_edge_weights(spec.edge_probabilities.size(), 0.0);
+  std::vector<F> cumulative_regret(strategy_size, F(0));
+  std::vector<F> cumulative_strategy(strategy_size, F(0));
+  std::vector<F> chance_edge_weights(spec.edge_probabilities.size(), F(0));
 
   const int node_count = static_cast<int>(spec.node_types.size());
   for (int node = 0; node < node_count; ++node) {
@@ -256,30 +266,30 @@ inline int solve(const TreeSpec& spec, SolveOutput& output) {
     }
     const int start = spec.node_starts[node];
     const int count = spec.node_counts[node];
-    double prob_sum = 0.0;
+    F prob_sum = F(0);
     for (int edge = start; edge < start + count; ++edge) {
-      prob_sum += spec.edge_probabilities[edge];
+      prob_sum += static_cast<F>(spec.edge_probabilities[edge]);
     }
-    const double inv_prob_sum = 1.0 / prob_sum;
+    const F inv_prob_sum = F(1) / prob_sum;
     for (int edge = start; edge < start + count; ++edge) {
-      chance_edge_weights[edge] = spec.edge_probabilities[edge] * inv_prob_sum;
+      chance_edge_weights[edge] = static_cast<F>(spec.edge_probabilities[edge]) * inv_prob_sum;
     }
   }
 
-  auto cfr = [&](auto&& self, const int node_id, const double reach_p0, const double reach_p1,
-                 const int avg_weight) -> double {
+  auto cfr = [&](auto&& self, const int node_id, const F reach_p0, const F reach_p1,
+                 const int avg_weight) -> F {
     const int node_type = spec.node_types[node_id];
     if (node_type == kNodeTerminal) {
-      return spec.terminal_utilities[node_id];
+      return static_cast<F>(spec.terminal_utilities[node_id]);
     }
 
     const int start = spec.node_starts[node_id];
     const int count = spec.node_counts[node_id];
 
     if (node_type == kNodeChance) {
-      double value = 0.0;
+      F value = F(0);
       for (int edge = start; edge < start + count; ++edge) {
-        const double probability = chance_edge_weights[edge];
+        const F probability = chance_edge_weights[edge];
         const int child = spec.edge_child_ids[edge];
         value += probability * self(self, child, reach_p0 * probability, reach_p1 * probability, avg_weight);
       }
@@ -289,27 +299,27 @@ inline int solve(const TreeSpec& spec, SolveOutput& output) {
     const int infoset = spec.node_infosets[node_id];
     const int infoset_start = infoset_offsets[infoset];
 
-    std::array<double, kInlineActionBufferSize> strategy_inline{};
-    std::array<double, kInlineActionBufferSize> action_utility_inline{};
-    std::vector<double> strategy_heap;
-    std::vector<double> action_utility_heap;
-    double* strategy = nullptr;
-    double* action_utility = nullptr;
+    std::array<F, kInlineActionBufferSize> strategy_inline{};
+    std::array<F, kInlineActionBufferSize> action_utility_inline{};
+    std::vector<F> strategy_heap;
+    std::vector<F> action_utility_heap;
+    F* strategy = nullptr;
+    F* action_utility = nullptr;
     if (count <= kInlineActionBufferSize) {
       strategy = strategy_inline.data();
       action_utility = action_utility_inline.data();
     } else {
-      strategy_heap.assign(static_cast<size_t>(count), 0.0);
-      action_utility_heap.assign(static_cast<size_t>(count), 0.0);
+      strategy_heap.assign(static_cast<size_t>(count), F(0));
+      action_utility_heap.assign(static_cast<size_t>(count), F(0));
       strategy = strategy_heap.data();
       action_utility = action_utility_heap.data();
     }
-    regret_matching(cumulative_regret, infoset_start, count, strategy);
+    regret_matching_fp(cumulative_regret, infoset_start, count, strategy);
 
-    double node_value = 0.0;
+    F node_value = F(0);
     for (int idx = 0; idx < count; ++idx) {
       const int child = spec.edge_child_ids[start + idx];
-      const double action_value =
+      const F action_value =
           (node_type == kNodePlayer0)
               ? self(self, child, reach_p0 * strategy[idx], reach_p1, avg_weight)
               : self(self, child, reach_p0, reach_p1 * strategy[idx], avg_weight);
@@ -318,23 +328,23 @@ inline int solve(const TreeSpec& spec, SolveOutput& output) {
     }
 
     if (node_type == kNodePlayer0) {
-      const double strategy_scale = static_cast<double>(avg_weight) * reach_p0;
+      const F strategy_scale = static_cast<F>(avg_weight) * reach_p0;
       for (int idx = 0; idx < count; ++idx) {
-        const double regret_delta = reach_p1 * (action_utility[idx] - node_value);
-        double updated = cumulative_regret[infoset_start + idx] + regret_delta;
-        if (spec.cfr_plus && updated < 0.0) {
-          updated = 0.0;
+        const F regret_delta = reach_p1 * (action_utility[idx] - node_value);
+        F updated = cumulative_regret[infoset_start + idx] + regret_delta;
+        if (spec.cfr_plus && updated < F(0)) {
+          updated = F(0);
         }
         cumulative_regret[infoset_start + idx] = updated;
         cumulative_strategy[infoset_start + idx] += strategy_scale * strategy[idx];
       }
     } else {
-      const double strategy_scale = static_cast<double>(avg_weight) * reach_p1;
+      const F strategy_scale = static_cast<F>(avg_weight) * reach_p1;
       for (int idx = 0; idx < count; ++idx) {
-        const double regret_delta = reach_p0 * (node_value - action_utility[idx]);
-        double updated = cumulative_regret[infoset_start + idx] + regret_delta;
-        if (spec.cfr_plus && updated < 0.0) {
-          updated = 0.0;
+        const F regret_delta = reach_p0 * (node_value - action_utility[idx]);
+        F updated = cumulative_regret[infoset_start + idx] + regret_delta;
+        if (spec.cfr_plus && updated < F(0)) {
+          updated = F(0);
         }
         cumulative_regret[infoset_start + idx] = updated;
         cumulative_strategy[infoset_start + idx] += strategy_scale * strategy[idx];
@@ -345,34 +355,34 @@ inline int solve(const TreeSpec& spec, SolveOutput& output) {
 
   for (int iteration = 1; iteration <= spec.iterations; ++iteration) {
     const int avg_weight = averaging_weight(spec, iteration);
-    (void)cfr(cfr, spec.root_node_id, 1.0, 1.0, avg_weight);
+    (void)cfr(cfr, spec.root_node_id, F(1), F(1), avg_weight);
   }
 
   for (int infoset = 0; infoset < infoset_count; ++infoset) {
     const int start = infoset_offsets[infoset];
     const int count = spec.infoset_action_counts[infoset];
-    double sum = 0.0;
+    F sum = F(0);
     for (int idx = 0; idx < count; ++idx) {
       sum += cumulative_strategy[start + idx];
     }
-    if (sum > 0.0) {
-      const double inv = 1.0 / sum;
+    if (sum > F(0)) {
+      const F inv = F(1) / sum;
       for (int idx = 0; idx < count; ++idx) {
-        output.average_strategies[start + idx] = cumulative_strategy[start + idx] * inv;
+        output.average_strategies[start + idx] = static_cast<double>(cumulative_strategy[start + idx] * inv);
       }
     } else {
-      std::array<double, kInlineActionBufferSize> fallback_inline{};
-      std::vector<double> fallback_heap;
-      double* fallback = nullptr;
+      std::array<F, kInlineActionBufferSize> fallback_inline{};
+      std::vector<F> fallback_heap;
+      F* fallback = nullptr;
       if (count <= kInlineActionBufferSize) {
         fallback = fallback_inline.data();
       } else {
-        fallback_heap.assign(static_cast<size_t>(count), 0.0);
+        fallback_heap.assign(static_cast<size_t>(count), F(0));
         fallback = fallback_heap.data();
       }
-      regret_matching(cumulative_regret, start, count, fallback);
+      regret_matching_fp(cumulative_regret, start, count, fallback);
       for (int idx = 0; idx < count; ++idx) {
-        output.average_strategies[start + idx] = fallback[idx];
+        output.average_strategies[start + idx] = static_cast<double>(fallback[idx]);
       }
     }
   }
@@ -388,7 +398,7 @@ inline int solve(const TreeSpec& spec, SolveOutput& output) {
     if (node_type == kNodeChance) {
       double value = 0.0;
       for (int edge = start; edge < start + count; ++edge) {
-        const double probability = chance_edge_weights[edge];
+        const double probability = static_cast<double>(chance_edge_weights[edge]);
         value += probability * self(self, spec.edge_child_ids[edge]);
       }
       return value;
@@ -406,6 +416,10 @@ inline int solve(const TreeSpec& spec, SolveOutput& output) {
 
   output.expected_value_player0 = expected_value(expected_value, spec.root_node_id);
   return kStatusOk;
+}
+
+inline int solve(const TreeSpec& spec, SolveOutput& output) {
+  return solve_impl<double>(spec, output);
 }
 
 inline int validate_tree_fixed(const TreeSpecFixed& spec) {
@@ -555,6 +569,19 @@ inline void normalize_non_negative_weights_to_prob_raw(
     return;
   }
 
+  // Pre-reduce weights to prevent overflow in weight * kProbScale.
+  // We need (sum >> shift) * kProbScale <= INT64_MAX.
+  int shift = 0;
+  {
+    int64_t s = sum;
+    constexpr int64_t safe_limit = INT64_MAX / static_cast<int64_t>(kProbScale);
+    while (s > safe_limit) {
+      s >>= 1;
+      shift++;
+    }
+  }
+
+  const int64_t shifted_sum = sum >> shift;
   int assigned = 0;
   for (int idx = 0; idx < count; ++idx) {
     const int64_t weight = weights[idx];
@@ -564,7 +591,7 @@ inline void normalize_non_negative_weights_to_prob_raw(
       out_probabilities_raw[idx] = kProbScale - assigned;
     } else {
       const int raw = static_cast<int>(
-          static_cast<double>(weight) / static_cast<double>(sum) * static_cast<double>(kProbScale));
+          ((weight >> shift) * static_cast<int64_t>(kProbScale)) / shifted_sum);
       out_probabilities_raw[idx] = raw;
       assigned += raw;
     }
