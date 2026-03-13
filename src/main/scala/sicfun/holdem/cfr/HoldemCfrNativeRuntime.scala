@@ -72,6 +72,42 @@ private[holdem] object HoldemCfrNativeRuntime:
       lastEngineCode: Int
   )
 
+  final case class BatchTreeSpec(
+      rootNodeId: Int,
+      nodeTypes: Array[Int],
+      nodeStarts: Array[Int],
+      nodeCounts: Array[Int],
+      nodeInfosets: Array[Int],
+      edgeChildIds: Array[Int],
+      infosetPlayers: Array[Int],
+      infosetActionCounts: Array[Int],
+      infosetOffsets: Array[Int],
+      terminalUtilities: Array[Float],
+      chanceWeights: Array[Float],
+      batchSize: Int
+  ):
+    require(batchSize > 0, "batchSize must be positive")
+    val nodeCount: Int = nodeTypes.length
+    val edgeCount: Int = edgeChildIds.length
+    val infosetCount: Int = infosetActionCounts.length
+    val strategySize: Int = infosetOffsets.last
+    require(terminalUtilities.length == batchSize * nodeCount, "terminal utilities size mismatch")
+    require(chanceWeights.length == batchSize * edgeCount, "chance weights size mismatch")
+
+  /** NOTE: expectedValues are NOT computed by the current kernel (always 0.0f).
+    * EV computation requires an additional tree walk after the CFR loop, which
+    * is deferred to a follow-up. For decision policies, only strategies are needed.
+    */
+  final case class BatchSolveResult(
+      averageStrategiesFlattened: Array[Float],
+      expectedValues: Array[Float],
+      batchSize: Int,
+      strategySize: Int
+  ):
+    def strategiesForTree(treeIdx: Int): Array[Float] =
+      val offset = treeIdx * strategySize
+      java.util.Arrays.copyOfRange(averageStrategiesFlattened, offset, offset + strategySize)
+
   private val CpuPathProperty = "sicfun.cfr.native.cpu.path"
   private val CpuPathEnv = "sicfun_CFR_NATIVE_CPU_PATH"
   private val CpuLibProperty = "sicfun.cfr.native.cpu.lib"
@@ -270,6 +306,50 @@ private[holdem] object HoldemCfrNativeRuntime:
                 .filter(_.nonEmpty)
                 .getOrElse(ex.getClass.getSimpleName)
             )
+
+  def solveTreeBatch(
+      spec: BatchTreeSpec,
+      config: CfrSolver.Config
+  ): Either[String, BatchSolveResult] =
+    gpuLoadResult() match
+      case Left(reason) => Left(reason)
+      case Right(_) =>
+        try
+          val outStrategies = new Array[Float](spec.batchSize * spec.strategySize)
+          val outEv = new Array[Float](spec.batchSize)
+          val status = HoldemCfrNativeGpuBindings.solveTreeBatch(
+            config.iterations,
+            config.averagingDelay,
+            config.cfrPlus,
+            config.linearAveraging,
+            spec.rootNodeId,
+            spec.nodeTypes,
+            spec.nodeStarts,
+            spec.nodeCounts,
+            spec.nodeInfosets,
+            spec.edgeChildIds,
+            spec.infosetPlayers,
+            spec.infosetActionCounts,
+            spec.infosetOffsets,
+            spec.terminalUtilities,
+            spec.chanceWeights,
+            outStrategies,
+            outEv,
+            spec.batchSize
+          )
+          if status != 0 then Left(describeStatus(status))
+          else Right(BatchSolveResult(
+            averageStrategiesFlattened = outStrategies,
+            expectedValues = outEv,
+            batchSize = spec.batchSize,
+            strategySize = spec.strategySize
+          ))
+        catch
+          case ex: UnsatisfiedLinkError =>
+            Left(s"GPU batch CFR symbols not found: ${ex.getMessage}")
+          case ex: Throwable =>
+            Left(Option(ex.getMessage).map(_.trim).filter(_.nonEmpty)
+              .getOrElse(ex.getClass.getSimpleName))
 
   private def cpuLoadResult(): Either[String, String] =
     val cached = cpuLoadResultRef.get()
