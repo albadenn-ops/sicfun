@@ -268,6 +268,174 @@ object HoldemCfrSolver:
       provider = providerLabel(rootPolicy.provider)
     )
 
+  def solveBatchDecisionPolicies(
+      heroHands: IndexedSeq[HoleCards],
+      state: GameState,
+      villainPosterior: DiscreteDistribution[HoleCards],
+      candidateActions: Vector[PokerAction],
+      config: HoldemCfrConfig = HoldemCfrConfig()
+  ): IndexedSeq[(HoleCards, HoldemCfrDecisionPolicy)] =
+    require(heroHands.nonEmpty, "heroHands must be non-empty")
+
+    val sanitizedHeroActions = sanitizeHeroActions(state, candidateActions)
+
+    // Build individual tree specs (reuses existing prepareGame + toNativeTreeSpec)
+    val preparedSpecs = heroHands.map { hero =>
+      val prepared = prepareGame(
+        hero = hero,
+        state = state,
+        villainPosterior = villainPosterior,
+        candidateActions = sanitizedHeroActions,
+        config = config
+      )
+      (hero, prepared)
+    }
+
+    // Try GPU batch path
+    val batchResult = tryGpuBatch(preparedSpecs, config)
+    batchResult match
+      case Right(results) => results
+      case Left(_) =>
+        // Fallback: sequential single-tree solve
+        preparedSpecs.map { case (hero, _) =>
+          val policy = solveDecisionPolicy(
+            hero = hero,
+            state = state,
+            villainPosterior = villainPosterior,
+            candidateActions = candidateActions,
+            config = config
+          )
+          (hero, policy)
+        }
+
+  private def tryGpuBatch(
+      preparedSpecs: IndexedSeq[(HoleCards, PreparedGame)],
+      config: HoldemCfrConfig
+  ): Either[String, IndexedSeq[(HoleCards, HoldemCfrDecisionPolicy)]] =
+    val gpuAvail = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Gpu)
+    if !gpuAvail.available then return Left("GPU not available")
+
+    val nativeSpecs = preparedSpecs.map { case (hero, prepared) =>
+      (hero, prepared, prepared.game.toNativeTreeSpec)
+    }
+
+    val cfrConfig = CfrSolver.Config(
+      iterations = config.iterations,
+      cfrPlus = config.cfrPlus,
+      averagingDelay = config.averagingDelay,
+      linearAveraging = config.linearAveraging
+    )
+
+    val batchSpec = buildBatchTreeSpec(nativeSpecs.map(_._3))
+    HoldemCfrNativeRuntime.solveTreeBatch(batchSpec, cfrConfig) match
+      case Left(error) => Left(error)
+      case Right(result) =>
+        val policies = nativeSpecs.indices.map { i =>
+          val (hero, prepared, spec) = nativeSpecs(i)
+          val strategies = result.strategiesForTree(i)
+          val rootInfosetStart = batchSpec.infosetOffsets(spec.rootInfoSetIndex)
+          val heroActions = prepared.heroActions
+          val actionProbs = heroActions.indices.map { a =>
+            heroActions(a) -> strategies(rootInfosetStart + a).toDouble
+          }.toMap
+          val normalizedProbs = normalizedPolicyForActions(heroActions, actionProbs)
+          val bestAction = selectBestActionByProbability(heroActions, normalizedProbs)
+          val policy = HoldemCfrDecisionPolicy(
+            actionProbabilities = normalizedProbs,
+            bestAction = bestAction,
+            iterations = config.iterations,
+            infoSetKey = spec.infosetKeys.head,
+            villainSupport = prepared.villainSupport.length,
+            provider = "batch-gpu"
+          )
+          (hero, policy)
+        }
+        Right(policies)
+
+  private def buildBatchTreeSpec(
+      specs: IndexedSeq[HoldemCfrNativeRuntime.NativeTreeSpec]
+  ): HoldemCfrNativeRuntime.BatchTreeSpec =
+    require(specs.nonEmpty, "batch must have at least one tree")
+    val template = specs.head
+    val nodeCount = template.nodeTypes.length
+    val edgeCount = template.edgeChildIds.length
+    val infosetCount = template.infosetActionCounts.length
+
+    // Build infoset offsets
+    val infosetOffsets = new Array[Int](infosetCount + 1)
+    var offset = 0
+    var is = 0
+    while is < infosetCount do
+      infosetOffsets(is) = offset
+      offset += template.infosetActionCounts(is)
+      is += 1
+    infosetOffsets(infosetCount) = offset
+
+    // Validate all specs share identical topology (not just sizes)
+    val batchSize = specs.length
+    specs.indices.foreach { i =>
+      val s = specs(i)
+      require(s.nodeTypes.length == nodeCount, s"tree $i nodeCount mismatch")
+      require(s.edgeChildIds.length == edgeCount, s"tree $i edgeCount mismatch")
+      require(java.util.Arrays.equals(s.nodeTypes, template.nodeTypes), s"tree $i nodeTypes differ")
+      require(java.util.Arrays.equals(s.nodeStarts, template.nodeStarts), s"tree $i nodeStarts differ")
+      require(java.util.Arrays.equals(s.nodeCounts, template.nodeCounts), s"tree $i nodeCounts differ")
+      require(java.util.Arrays.equals(s.nodeInfosets, template.nodeInfosets), s"tree $i nodeInfosets differ")
+      require(java.util.Arrays.equals(s.edgeChildIds, template.edgeChildIds), s"tree $i edgeChildIds differ")
+      require(java.util.Arrays.equals(s.infosetActionCounts, template.infosetActionCounts),
+        s"tree $i infosetActionCounts differ")
+    }
+
+    // Pack per-tree data
+    val terminalUtilities = new Array[Float](batchSize * nodeCount)
+    val chanceWeights = new Array[Float](batchSize * edgeCount)
+
+    var treeIdx = 0
+    while treeIdx < batchSize do
+      val s = specs(treeIdx)
+      val tuBase = treeIdx * nodeCount
+      val cwBase = treeIdx * edgeCount
+
+      // Convert double terminal utilities to float
+      var n = 0
+      while n < nodeCount do
+        terminalUtilities(tuBase + n) = s.terminalUtilities(n).toFloat
+        n += 1
+
+      // Normalize chance weights to float
+      var node = 0
+      while node < nodeCount do
+        if s.nodeTypes(node) == 1 then // chance
+          val start = s.nodeStarts(node)
+          val count = s.nodeCounts(node)
+          var probSum = 0.0
+          var e = start
+          while e < start + count do
+            probSum += s.edgeProbabilities(e)
+            e += 1
+          val inv = if probSum > 0.0 then 1.0 / probSum else 0.0
+          e = start
+          while e < start + count do
+            chanceWeights(cwBase + e) = (s.edgeProbabilities(e) * inv).toFloat
+            e += 1
+        node += 1
+      treeIdx += 1
+
+    HoldemCfrNativeRuntime.BatchTreeSpec(
+      rootNodeId = template.rootNodeId,
+      nodeTypes = template.nodeTypes,
+      nodeStarts = template.nodeStarts,
+      nodeCounts = template.nodeCounts,
+      nodeInfosets = template.nodeInfosets,
+      edgeChildIds = template.edgeChildIds,
+      infosetPlayers = template.infosetPlayers,
+      infosetActionCounts = template.infosetActionCounts,
+      infosetOffsets = infosetOffsets,
+      terminalUtilities = terminalUtilities,
+      chanceWeights = chanceWeights,
+      batchSize = batchSize
+    )
+
   /** Direct solver for the shallow hall/action-abstraction tree.
     *
     * This bypasses iterative CFR when the tree shape is:
@@ -1281,21 +1449,13 @@ object HoldemCfrSolver:
         Provider.ScalaFixed
       case Some("native-cpu-fixed" | "cpu-fixed" | "native-fixed") =>
         val availability = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Cpu)
-        if availability.available then
-          GpuRuntimeSupport.warn(
-            "CFR native CPU fixed provider is experimental and currently fails parity on some Hold'em turn trees; using it only because it was explicitly requested"
-          )
-          Provider.NativeCpuFixed
+        if availability.available then Provider.NativeCpuFixed
         else
           GpuRuntimeSupport.warn(s"CFR native CPU fixed provider unavailable (${availability.detail}); falling back to Scala")
           Provider.Scala
       case Some("native-gpu-fixed" | "gpu-fixed" | "cuda-fixed") =>
         val availability = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Gpu)
-        if availability.available then
-          GpuRuntimeSupport.warn(
-            "CFR native GPU fixed provider is experimental and currently fails parity on some Hold'em turn trees; using it only because it was explicitly requested"
-          )
-          Provider.NativeGpuFixed
+        if availability.available then Provider.NativeGpuFixed
         else
           GpuRuntimeSupport.warn(s"CFR native GPU fixed provider unavailable (${availability.detail}); falling back to Scala")
           Provider.Scala
