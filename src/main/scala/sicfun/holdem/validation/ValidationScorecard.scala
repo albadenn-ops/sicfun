@@ -29,16 +29,16 @@ object ValidationScorecard:
       sb.append(s"  Leak fired:       ${fmt(r.leakFiredCount)} / ${fmt(r.leakApplicableSpots)} applicable spots")
       if r.leakApplicableSpots > 0 then
         val pct = r.leakFiredCount.toDouble / r.leakApplicableSpots * 100.0
-        sb.append(f" ($pct%.1f%%)")
+        sb.append(s" (${fmtD(pct, "%.1f")}%)")
       sb.append("\n")
-      sb.append(f"  Hero net EV:      ${r.heroNetBbPer100}%+.1f bb/100\n")
+      sb.append(s"  Hero net EV:      ${fmtD(r.heroNetBbPer100, "%+.1f")} bb/100\n")
       sb.append("\n")
 
       sb.append("  PRIMARY: Leak Detection\n")
       val detected = if r.convergence.detected then "DETECTED" else "NOT DETECTED"
       sb.append(s"    Status:         $detected\n")
       r.convergence.handsToDetect.foreach(h => sb.append(s"    Hands to detect: ${fmt(h)}\n"))
-      sb.append(f"    Confidence:     ${r.convergence.finalConfidence}%.2f\n")
+      sb.append(s"    Confidence:     ${fmtD(r.convergence.finalConfidence, "%.2f")}\n")
       sb.append(s"    False positives: ${r.convergence.totalFalsePositives}\n")
       sb.append("\n")
 
@@ -62,10 +62,10 @@ object ValidationScorecard:
 
       sb.append("=== AGGREGATE ===\n")
       sb.append(s"  Players:          $total\n")
-      sb.append(f"  Leaks detected:   $detected/$total (${detected.toDouble / total * 100}%.1f%%)\n")
+      sb.append(s"  Leaks detected:   $detected/$total (${fmtD(detected.toDouble / total * 100, "%.1f")}%)\n")
       sb.append(s"  Median hands-to-detect: ${fmt(median)}\n")
-      sb.append(f"  Avg false positives: $avgFP%.1f per player\n")
-      sb.append(f"  Hero winrate:     $avgWinrate%+.1f bb/100 avg")
+      sb.append(s"  Avg false positives: ${fmtD(avgFP, "%.1f")} per player\n")
+      sb.append(s"  Hero winrate:     ${fmtD(avgWinrate, "%+.1f")} bb/100 avg")
       if avgWinrate > 0 then sb.append(" (adaptive beats exploitable: CONFIRMED)")
       else sb.append(" (adaptive does NOT beat exploitable: INVESTIGATE)")
       sb.append("\n")
@@ -74,3 +74,6 @@ object ValidationScorecard:
 
   private def fmt(n: Int): String =
     String.format(Locale.ROOT, "%,d", Integer.valueOf(n))
+
+  private def fmtD(v: Double, pattern: String): String =
+    String.format(Locale.ROOT, pattern, java.lang.Double.valueOf(v))
