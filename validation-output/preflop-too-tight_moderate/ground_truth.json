@@ -1,0 +1,10 @@
+{
+  "leakId": "preflop-too-tight",
+  "leakDescription": "Folds playable hands preflop that GTO would open/defend",
+  "severity": 0.6,
+  "baselineNoise": 0.03,
+  "totalHands": 10000,
+  "leakFiredCount": 3036,
+  "leakApplicableSpots": 5021,
+  "heroNetBbPer100": 156.21202463999967
+}

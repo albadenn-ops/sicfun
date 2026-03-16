@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 460" role="img" aria-labelledby="title desc">
+  <title id="title">Range heatmap</title>
+  <desc id="desc">A stylized hold'em range matrix with highlighted value and bluff regions.</desc>
+  <rect width="760" height="460" fill="#0b120f"/>
+  <text x="28" y="36" fill="#4af626" font-family="Consolas, monospace" font-size="18">[RANGE_HEATMAP]</text>
+  <text x="528" y="36" fill="#8b9794" font-family="Consolas, monospace" font-size="16">POSTERIOR VIEW</text>
+
+  <g font-family="Consolas, monospace" font-size="14" fill="#8b9794">
+    <text x="66" y="72">A</text><text x="110" y="72">K</text><text x="154" y="72">Q</text><text x="198" y="72">J</text><text x="242" y="72">T</text><text x="286" y="72">9</text><text x="330" y="72">8</text><text x="374" y="72">7</text><text x="418" y="72">6</text><text x="462" y="72">5</text><text x="506" y="72">4</text><text x="550" y="72">3</text><text x="594" y="72">2</text>
+    <text x="32" y="112">A</text><text x="32" y="146">K</text><text x="32" y="180">Q</text><text x="32" y="214">J</text><text x="32" y="248">T</text><text x="32" y="282">9</text><text x="32" y="316">8</text><text x="32" y="350">7</text><text x="32" y="384">6</text><text x="32" y="418">5</text>
+  </g>
+
+  <g transform="translate(58 84)">
+    <rect width="598" height="340" fill="none" stroke="#1f3527"/>
+    <g stroke="#1f3527" stroke-width="1">
+      <path d="M46 0V340M92 0V340M138 0V340M184 0V340M230 0V340M276 0V340M322 0V340M368 0V340M414 0V340M460 0V340M506 0V340M552 0V340"/>
+      <path d="M0 34H598M0 68H598M0 102H598M0 136H598M0 170H598M0 204H598M0 238H598M0 272H598M0 306H598"/>
+    </g>
+
+    <g>
+      <rect x="0" y="0" width="46" height="34" fill="#4af626" fill-opacity="0.55"/>
+      <rect x="46" y="0" width="46" height="34" fill="#4af626" fill-opacity="0.42"/>
+      <rect x="92" y="0" width="46" height="34" fill="#4af626" fill-opacity="0.28"/>
+      <rect x="0" y="34" width="46" height="34" fill="#4af626" fill-opacity="0.42"/>
+      <rect x="46" y="34" width="46" height="34" fill="#4af626" fill-opacity="0.46"/>
+      <rect x="92" y="34" width="46" height="34" fill="#4af626" fill-opacity="0.36"/>
+      <rect x="138" y="34" width="46" height="34" fill="#4af626" fill-opacity="0.24"/>
+      <rect x="92" y="68" width="46" height="34" fill="#4af626" fill-opacity="0.32"/>
+      <rect x="138" y="68" width="46" height="34" fill="#4af626" fill-opacity="0.26"/>
+      <rect x="184" y="68" width="46" height="34" fill="#4af626" fill-opacity="0.18"/>
+
+      <rect x="414" y="238" width="46" height="34" fill="#ff4d00" fill-opacity="0.22"/>
+      <rect x="460" y="238" width="46" height="34" fill="#ff4d00" fill-opacity="0.18"/>
+      <rect x="460" y="272" width="46" height="34" fill="#ff4d00" fill-opacity="0.26"/>
+      <rect x="506" y="272" width="46" height="34" fill="#ff4d00" fill-opacity="0.2"/>
+      <rect x="552" y="306" width="46" height="34" fill="#ff4d00" fill-opacity="0.18"/>
+    </g>
+
+    <g stroke="#4af626" stroke-width="2" fill="none">
+      <rect x="0" y="0" width="230" height="102"/>
+    </g>
+    <g stroke="#ff4d00" stroke-width="2" fill="none">
+      <rect x="414" y="238" width="184" height="102"/>
+    </g>
+  </g>
+
+  <g font-family="Consolas, monospace" font-size="18">
+    <text x="80" y="438" fill="#edf6f0">VALUE CLUSTER PRESERVED</text>
+    <text x="414" y="438" fill="#ff4d00">LOW-FREQUENCY BLUFFS REMAIN</text>
+  </g>
+</svg>

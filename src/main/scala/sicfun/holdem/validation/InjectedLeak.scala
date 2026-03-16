@@ -1,6 +1,6 @@
 package sicfun.holdem.validation
 
-import sicfun.holdem.types.{PokerAction, Position, Street}
+import sicfun.holdem.types.{PokerAction, Street}
 import scala.util.Random
 
 /** A deliberate exploitable deviation from competent play.
@@ -55,16 +55,15 @@ final case class Overcalls(severity: Double) extends InjectedLeak:
   def deviate(competentAction: PokerAction, spot: SpotContext, rng: Random): PokerAction =
     rollAndDeviate(competentAction, PokerAction.Call, rng)
 
-/** Bets/raises turn with air on wet boards when in position -- GTO would check back. */
+/** Bets/raises turn with air on wet boards -- GTO would check. */
 final case class OverbluffsTurnBarrel(severity: Double) extends InjectedLeak:
   val id = "overbluff-turn-barrel"
-  val description = "Bets/raises turn with air on wet boards when IP -- GTO would check back"
+  val description = "Bets/raises turn with air on wet boards -- GTO would check"
 
   def applies(spot: SpotContext): Boolean =
     spot.street == Street.Turn &&
     spot.boardTexture.isWet &&
-    spot.handStrengthVsBoard == HandCategory.Air &&
-    (spot.position == Position.Button || spot.position == Position.Cutoff)
+    spot.handStrengthVsBoard == HandCategory.Air
 
   def deviate(competentAction: PokerAction, spot: SpotContext, rng: Random): PokerAction =
     val betSize = spot.potGeometry.effectiveStack * 0.6
@@ -105,3 +104,12 @@ final case class PreflopTooTight(severity: Double) extends InjectedLeak:
 
   def deviate(competentAction: PokerAction, spot: SpotContext, rng: Random): PokerAction =
     rollAndDeviate(competentAction, PokerAction.Fold, rng)
+
+/** GTO baseline control — no leak, never deviates. Used for false positive testing. */
+final case class NoLeak() extends InjectedLeak:
+  val id = "gto-baseline"
+  val description = "GTO baseline — no exploitable deviation"
+  val severity = 0.0
+  def applies(spot: SpotContext): Boolean = false
+  def deviate(competentAction: PokerAction, spot: SpotContext, rng: Random): PokerAction =
+    competentAction

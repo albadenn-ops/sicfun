@@ -51,6 +51,8 @@ object PokerAdvisor:
       budgetMs: Long,
       cfrIterations: Int,
       cfrBlend: Double,
+      cfrMaxLocalExploitability: Double,
+      cfrMaxBaselineActionRegret: Double,
       cfrVillainHands: Int,
       cfrEquityTrials: Int,
       cfrVillainReraises: Boolean,
@@ -62,7 +64,7 @@ object PokerAdvisor:
   private def bootstrap(config: CliConfig): Either[String, AdvisorSession] =
     try
       System.err.print("Bootstrapping action model... ")
-      val tableRanges = TableRanges.defaults(TableFormat.NineMax)
+      val tableRanges = TableRanges.defaults(TableFormat.HeadsUp)
       val artifact = loadArtifact(config)
       val engine = buildEngine(config, artifact, tableRanges)
       val opponentMemoryStore = loadRememberedOpponentStore(config)
@@ -122,6 +124,8 @@ object PokerAdvisor:
         EquilibriumBaselineConfig(
           iterations = config.cfrIterations,
           blendWeight = config.cfrBlend,
+          maxLocalExploitabilityForTrust = disabledThreshold(config.cfrMaxLocalExploitability),
+          maxBaselineActionRegret = disabledThreshold(config.cfrMaxBaselineActionRegret),
           maxVillainHands = config.cfrVillainHands,
           equityTrials = config.cfrEquityTrials,
           includeVillainReraises = config.cfrVillainReraises
@@ -261,6 +265,12 @@ object PokerAdvisor:
         _ <- if cfrIterations >= 0 then Right(()) else Left("--cfrIterations must be >= 0")
         cfrBlend <- CliHelpers.parseDoubleOptionEither(options, "cfrBlend", 0.35)
         _ <- if cfrBlend >= 0.0 && cfrBlend <= 1.0 then Right(()) else Left("--cfrBlend must be in [0,1]")
+        cfrMaxLocalExploitability <- CliHelpers.parseDoubleOptionEither(options, "cfrMaxLocalExploitability", -1.0)
+        _ <- if cfrMaxLocalExploitability >= 0.0 || cfrMaxLocalExploitability == -1.0 then Right(())
+          else Left("--cfrMaxLocalExploitability must be >= 0 or -1 to disable")
+        cfrMaxBaselineActionRegret <- CliHelpers.parseDoubleOptionEither(options, "cfrMaxBaselineActionRegret", -1.0)
+        _ <- if cfrMaxBaselineActionRegret >= 0.0 || cfrMaxBaselineActionRegret == -1.0 then Right(())
+          else Left("--cfrMaxBaselineActionRegret must be >= 0 or -1 to disable")
         cfrVillainHands <- CliHelpers.parseIntOptionEither(options, "cfrVillainHands", 96)
         _ <- if cfrVillainHands > 0 then Right(()) else Left("--cfrVillainHands must be > 0")
         cfrEquityTrials <- CliHelpers.parseIntOptionEither(options, "cfrEquityTrials", 4000)
@@ -281,6 +291,8 @@ object PokerAdvisor:
         budgetMs = budgetMs,
         cfrIterations = cfrIterations,
         cfrBlend = cfrBlend,
+        cfrMaxLocalExploitability = cfrMaxLocalExploitability,
+        cfrMaxBaselineActionRegret = cfrMaxBaselineActionRegret,
         cfrVillainHands = cfrVillainHands,
         cfrEquityTrials = cfrEquityTrials,
         cfrVillainReraises = cfrVillainReraises,
@@ -321,6 +333,9 @@ object PokerAdvisor:
   private def fmtSigned(v: Double): String =
     if v >= 0 then f"+$v%.1f" else f"$v%.1f"
 
+  private def disabledThreshold(raw: Double): Double =
+    if raw < 0.0 then Double.PositiveInfinity else raw
+
   private val usage =
     """Usage:
       |  runMain sicfun.holdem.PokerAdvisor [--key=value ...]
@@ -336,6 +351,8 @@ object PokerAdvisor:
       |  --budgetMs=2000        Decision budget in milliseconds
       |  --cfrIterations=0      CFR baseline iterations (0 disables equilibrium baseline)
       |  --cfrBlend=0.35        Blend weight for CFR EV in final ranking (0..1)
+      |  --cfrMaxLocalExploitability=-1  Max local exploitability allowed to trust CFR (-1 disables)
+      |  --cfrMaxBaselineActionRegret=-1 Max EV loss vs CFR-best action before guardrail clamps (-1 disables)
       |  --cfrVillainHands=96   Max villain posterior hands kept for CFR
       |  --cfrEquityTrials=4000 Equity trials used inside CFR terminal evaluation
       |  --cfrVillainReraises=true  Allow villain 3-bet branch in CFR abstraction

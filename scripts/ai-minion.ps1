@@ -216,6 +216,32 @@ function Get-ProviderContractPath {
   }
 }
 
+function Get-SharedContractPath {
+  return Join-Path $repoRoot "AI_ENTRYPOINT.md"
+}
+
+function Get-ContractText {
+  param(
+    [string]$Path,
+    [string]$Label
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path)) {
+    return "${Label}: <missing>"
+  }
+
+  $content = Get-Content -Raw $Path -ErrorAction SilentlyContinue
+  if ([string]::IsNullOrWhiteSpace($content)) {
+    return "${Label}: <empty>"
+  }
+
+  $repoPath = Get-RepoRelativePath -AbsolutePath $Path
+  return @(
+    "$Label ($repoPath):"
+    $content.Trim()
+  ) -join "`n`n"
+}
+
 function Resolve-ContextPaths {
   $resolvedPaths = @()
   foreach ($path in (Expand-DelimitedArguments -Values $ContextPath)) {
@@ -309,6 +335,7 @@ function Build-InjectedContext {
 
 function New-DelegationPrompt {
   param(
+    [string]$ProviderName,
     [string]$CurrentMode,
     [string]$CurrentTask,
     [string[]]$ResolvedContextPaths,
@@ -336,15 +363,24 @@ function New-DelegationPrompt {
   }
 
   $contractBlock = (Get-ModeContract -CurrentMode $CurrentMode) -join "`n"
+  $sharedContractBlock = Get-ContractText -Path (Get-SharedContractPath) -Label "Shared repository contract"
+  $providerContractBlock = Get-ContractText -Path (Get-ProviderContractPath -ProviderName $ProviderName) -Label "Provider role overlay"
 
   return @"
 You are a delegated worker inside the SICFUN repository.
 
+Provider: $ProviderName
 Mode: $CurrentMode
 Working directory: $repoRoot
 
 Task:
 $CurrentTask
+
+Shared contract:
+$sharedContractBlock
+
+Provider overlay:
+$providerContractBlock
 
 Rules:
 - Stay read-only. Do not edit files and do not claim to have edited files.
@@ -449,7 +485,7 @@ function Invoke-GeminiDelegate {
   if ($InjectContext) {
     $nodePath = Resolve-NodePath
     $entrypoint = Resolve-GeminiEntrypoint
-    $prompt = New-DelegationPrompt -CurrentMode $Mode -CurrentTask $Task -ResolvedContextPaths $ResolvedContextPaths -InjectContextBlock
+    $prompt = New-DelegationPrompt -ProviderName "gemini" -CurrentMode $Mode -CurrentTask $Task -ResolvedContextPaths $ResolvedContextPaths -InjectContextBlock
     $promptPath = [System.IO.Path]::ChangeExtension($ResolvedOutputPath, "prompt.txt")
     Write-Utf8NoBom -Path $promptPath -Value $prompt
 
@@ -640,6 +676,8 @@ function Invoke-ClaudeDoctor {
     Write-Host "  email: $($status.email)"
   }
   Write-Host "  project root: $claudeProjectRoot"
+  $sharedContractPath = Get-SharedContractPath
+  Write-Host "  shared contract: $(if (Test-Path $sharedContractPath) { $sharedContractPath } else { '<missing>' })"
   $contractPath = Get-ProviderContractPath -ProviderName "claude"
   Write-Host "  repo contract: $(if (Test-Path $contractPath) { $contractPath } else { '<missing>' })"
 }
@@ -675,7 +713,7 @@ function Invoke-ClaudeDelegate {
   $claudePath = Resolve-ClaudePath
   $sessionId = [guid]::NewGuid().ToString()
   $shouldInject = ($ResolvedContextPaths.Count -gt 0)
-  $prompt = New-DelegationPrompt -CurrentMode $Mode -CurrentTask $Task -ResolvedContextPaths $ResolvedContextPaths -InjectContextBlock:$shouldInject -NoTools
+  $prompt = New-DelegationPrompt -ProviderName "claude" -CurrentMode $Mode -CurrentTask $Task -ResolvedContextPaths $ResolvedContextPaths -InjectContextBlock:$shouldInject -NoTools
   $promptPath = [System.IO.Path]::ChangeExtension($ResolvedOutputPath, "prompt.txt")
   Write-Utf8NoBom -Path $promptPath -Value $prompt
 
@@ -794,6 +832,8 @@ function Invoke-GptDoctor {
   Write-Host "  cli version: $(Get-CodexVersion)"
   Write-Host "  login status: $(Get-CodexLoginStatus)"
   Write-Host "  config path: $codexConfigPath"
+  $sharedContractPath = Get-SharedContractPath
+  Write-Host "  shared contract: $(if (Test-Path $sharedContractPath) { $sharedContractPath } else { '<missing>' })"
   $contractPath = Get-ProviderContractPath -ProviderName "gpt"
   Write-Host "  repo contract: $(if (Test-Path $contractPath) { $contractPath } else { '<missing>' })"
 }
@@ -843,7 +883,7 @@ function Invoke-GptDelegate {
     throw "Delegate action requires -Task."
   }
 
-  $prompt = New-DelegationPrompt -CurrentMode $Mode -CurrentTask $Task -ResolvedContextPaths $ResolvedContextPaths -InjectContextBlock:$InjectContext
+  $prompt = New-DelegationPrompt -ProviderName "gpt" -CurrentMode $Mode -CurrentTask $Task -ResolvedContextPaths $ResolvedContextPaths -InjectContextBlock:$InjectContext
   $promptPath = [System.IO.Path]::ChangeExtension($ResolvedOutputPath, "prompt.txt")
   Write-Utf8NoBom -Path $promptPath -Value $prompt
 

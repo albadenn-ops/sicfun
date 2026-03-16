@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SICFUN | Texas Hold'em Hand-History Review</title>
+  <link rel="icon" href="data:,">
+  <meta
+    name="description"
+    content="Run SICFUN locally to review PokerStars, Winamax, or GGPoker hand histories with async upload analysis, ranked EV gaps, opponent notes, and model source."
+  >
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div class="backdrop" aria-hidden="true"></div>
+
+  <main class="page" id="main-content">
+    <header class="site-header surface">
+      <div class="brand-block">
+        <a class="brand" href="#hero">SICFUN</a>
+        <p class="pronunciation">Texas Hold'em hand-history review</p>
+      </div>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="#upload">Upload</a>
+        <a href="#proof">Results</a>
+        <a href="#range">Simulator</a>
+        <a href="#outputs">Outputs</a>
+        <a href="#workflow">Workflow</a>
+        <a href="#status">Scope</a>
+        <a href="#fit">Fit</a>
+      </nav>
+    </header>
+
+    <section class="hero" id="hero">
+      <div class="hero-copy surface">
+        <p class="eyebrow">Local Review</p>
+        <h1>Upload exported hands. Review the costly spots locally.</h1>
+        <p class="lead">
+          SICFUN turns exported hand histories into an async local review job: imported-hand counts,
+          ranked EV gaps, opponent reads, and the model source used for the run.
+        </p>
+        <div class="chip-row" aria-label="Key product facts">
+          <span>PokerStars / Winamax / GGPoker</span>
+          <span>Async upload + polling</span>
+          <span>2-max through 9-max context</span>
+          <span>Local-first default</span>
+        </div>
+        <div class="hero-actions">
+          <a class="button" href="#upload">Queue a review</a>
+          <a class="button button-secondary" href="#outputs">See sample outputs</a>
+        </div>
+      </div>
+
+      <aside class="hero-stack">
+        <article class="info-card frame">
+          <p class="card-label">One completed job gives you</p>
+          <ul class="info-list">
+            <li>Imported-hand count, detected site, and hero name when the file resolves one.</li>
+            <li>Ranked decision gaps with actual action, recommended line, and EV difference.</li>
+            <li>Warnings, opponent notes, and the model source used for that review run.</li>
+          </ul>
+        </article>
+
+        <article class="info-card surface">
+          <p class="card-label">Aligned to SICFUN today</p>
+          <ul class="info-list">
+            <li>Local review surface over the same importer and analyzer exercised by the repo tests.</li>
+            <li>Heads-up, six-max, and full-ring-style hand-history contexts when the upload resolves the seats.</li>
+            <li>Packaged Windows release for offline study use, not live-table automation.</li>
+          </ul>
+        </article>
+      </aside>
+    </section>
+
+    <section class="section" id="upload">
+      <div class="section-head">
+        <p class="eyebrow">Upload Review</p>
+        <h2>Queue an export and let SICFUN review it in the background.</h2>
+        <p class="section-note">
+          Drop in a PokerStars, Winamax, or GGPoker text export. SICFUN imports the file, identifies the
+          playable hands, accepts the upload quickly, and then returns hand counts, EV-loss review, and
+          opponent reads when the async job completes.
+        </p>
+      </div>
+
+      <div class="upload-grid">
+        <article class="surface upload-card">
+          <form class="upload-form" id="hand-upload-form">
+            <label class="field">
+              <span>Hand history file</span>
+              <input id="hand-history-file" type="file" accept=".txt,text/plain">
+            </label>
+
+            <label class="field">
+              <span>Site</span>
+              <select id="hand-history-site">
+                <option value="auto">Auto-detect</option>
+                <option value="pokerstars">PokerStars</option>
+                <option value="winamax">Winamax</option>
+                <option value="ggpoker">GGPoker</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Hero screen name</span>
+              <input id="hero-name" type="text" placeholder="Optional override">
+            </label>
+
+            <div class="upload-actions">
+              <button class="button" id="analyze-submit" type="submit">Queue Review</button>
+            </div>
+          </form>
+
+          <div class="upload-callout">
+            <p class="card-kicker">Best Results</p>
+            <p>
+              The strongest reports come from hands that include the hero hole cards. When the export is
+              missing that information, the review flags the limitation instead of guessing. Large uploads
+              stay on the same HTTP path but run as background jobs so the page stays responsive.
+            </p>
+          </div>
+        </article>
+
+        <article class="frame review-panel" id="review-panel" aria-live="polite">
+          <div class="review-status" id="review-status">
+            <p class="card-kicker">Ready</p>
+            <h3>Upload a hand-history file to start a local review job.</h3>
+            <p class="section-note">
+              Results include imported-hand counts, biggest decision gaps, total EV lost, warnings, opponent
+              notes, and the model source used for the run.
+            </p>
+          </div>
+
+          <div class="review-results hidden" id="review-results">
+            <div class="summary-grid" id="summary-grid"></div>
+
+            <div class="warning-block hidden" id="warning-block">
+              <p class="card-kicker">Warnings</p>
+              <ul class="status-list" id="warning-list"></ul>
+            </div>
+
+            <div class="decision-block">
+              <div class="results-head">
+                <p class="card-kicker">Top Decision Gaps</p>
+                <p class="card-meta" id="model-source">Model: -</p>
+              </div>
+              <div class="decision-list" id="decision-list"></div>
+            </div>
+
+            <div class="opponent-block">
+              <p class="card-kicker">Opponent Reads</p>
+              <div class="opponent-list" id="opponent-list"></div>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="proof">
+      <div class="section-head">
+        <p class="eyebrow">Engine Output</p>
+        <h2>Each completed review comes back with outputs you can act on.</h2>
+        <p class="section-note">
+          The review job ranks the mistakes, totals the damage, and keeps enough context around the result
+          for disciplined post-session study.
+        </p>
+      </div>
+
+      <div class="proof-grid">
+        <article class="proof-card surface">
+          <p class="card-kicker">Decision review</p>
+          <h3>See where the hand went off track.</h3>
+          <p>
+            The review ranks the biggest hero decision gaps, compares the action taken against the
+            recommendation, and puts the EV gap next to both.
+          </p>
+          <p class="card-meta">Delivered as: ranked decision-gap output</p>
+        </article>
+
+        <article class="proof-card surface">
+          <p class="card-kicker">Session summary</p>
+          <h3>Open the file and know what mattered.</h3>
+          <p>
+            Each upload comes back with imported hands, analyzed decisions, skipped hands, total EV lost,
+            biggest gap, detected site, and resolved hero name.
+          </p>
+          <p class="card-meta">Delivered as: upload summary and warnings</p>
+        </article>
+
+        <article class="proof-card surface">
+          <p class="card-kicker">Opponent context</p>
+          <h3>Get opponent reads from the same file.</h3>
+          <p>
+            The review returns opponent archetypes and exploit hints extracted from the uploaded hands.
+          </p>
+          <p class="card-meta">Delivered as: opponent-read summaries</p>
+        </article>
+
+        <article class="proof-card surface">
+          <p class="card-kicker">Range context</p>
+          <h3>Simulator context stays separate from the upload page.</h3>
+          <p>
+            SICFUN emits posterior summaries in simulator and hall outputs, but the upload review page does
+            not return posterior ranges yet.
+          </p>
+          <p class="card-meta">Available in: simulator and hall output, not upload review</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="range">
+      <div class="section-head">
+        <p class="eyebrow">Simulator Output</p>
+        <h2>Posterior hands are still a separate research surface.</h2>
+        <p class="section-note">
+          Separate from upload review, SICFUN's simulator and hall output can emit posterior hands and
+          probabilities. This panel shows the kind of read those CLI surfaces expose today.
+        </p>
+      </div>
+
+      <article class="range-panel frame">
+        <div class="terminal-bar">
+          <strong>Posterior Range View</strong>
+          <span>illustrative simulator/hall output</span>
+        </div>
+
+        <div class="range-layout">
+          <div class="range-screen screen">
+            <img
+              src="range-heatmap.svg"
+              alt="Illustrative posterior range display showing preserved value clusters and remaining low-frequency bluffs."
+            >
+          </div>
+
+          <div class="range-copy">
+            <p class="card-kicker">Range Context</p>
+            <h3>Useful context, but not part of the upload API yet.</h3>
+            <p>
+              The simulator prints posterior hands in text. This panel turns that separate research output
+              into a faster visual read without implying the upload page already returns it.
+            </p>
+            <pre>topPosterior:
+  &lt;hand&gt; -&gt; &lt;probability&gt;
+  &lt;hand&gt; -&gt; &lt;probability&gt;
+  &lt;hand&gt; -&gt; &lt;probability&gt;
+  ...</pre>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="section" id="outputs">
+      <div class="section-head">
+        <p class="eyebrow">More Outputs</p>
+        <h2>The engine exposes more than the upload page alone.</h2>
+        <p class="section-note">
+          The upload page focuses on local review jobs. These are adjacent CLI and research outputs from the
+          same codebase.
+        </p>
+      </div>
+
+      <div class="output-grid">
+        <article class="terminal-card frame">
+          <div class="terminal-bar">
+            <strong>HandHistoryAnalyzer</strong>
+            <span>per-decision review</span>
+          </div>
+          <pre>=== Hand History Analysis ===
+Hands analyzed: ...
+Decisions analyzed: ...
+Mistakes: ...
+Total EV lost: ...
+Biggest mistake: ...
+Per-decision breakdown:
+  &lt;handId&gt; &lt;street&gt;: actual=&lt;action&gt; rec=&lt;action&gt; ev_diff=&lt;value&gt; &lt;mark&gt;</pre>
+          <p>
+            This is the core review surface: identify the costly decision, compare the line taken against the
+            recommendation, and rank what to revisit first.
+          </p>
+        </article>
+
+        <article class="terminal-card frame">
+          <div class="terminal-bar">
+            <strong>GenerateSignals</strong>
+            <span>audit log generation</span>
+          </div>
+          <pre>outputAuditLog: &lt;path&gt;
+signalCount: &lt;n&gt;
+infoCount: &lt;n&gt;
+warningCount: &lt;n&gt;
+criticalCount: &lt;n&gt;</pre>
+          <p>
+            Signal logs matter when a coach or team needs a durable record of what was flagged, how severe it
+            was, and which artifact path produced it.
+          </p>
+        </article>
+
+        <article class="terminal-card frame">
+          <div class="terminal-bar">
+            <strong>LiveHandSimulator</strong>
+            <span>posterior summary</span>
+          </div>
+          <pre>bestAction: &lt;action&gt;
+heroEquityMean: &lt;value&gt;
+heroEquityStdErr: &lt;value&gt;
+signalCount: &lt;n&gt;
+artifactRoot: &lt;path | &lt;deleted&gt;&gt;
+topPosterior:
+  &lt;hand&gt; -&gt; &lt;probability&gt;
+  &lt;hand&gt; -&gt; &lt;probability&gt;</pre>
+          <p>
+            Posterior output adds context to the recommendation so the review is not just "do X" with no
+            explanation of the range behind it.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="status">
+      <div class="section-head">
+        <p class="eyebrow">Scope</p>
+        <h2>Clear product boundaries keep the review useful.</h2>
+      </div>
+
+      <div class="status-grid">
+        <article class="status-card surface status-card-positive">
+          <p class="card-kicker">Implemented</p>
+          <h3>Ready for local review sessions</h3>
+          <ul class="status-list">
+            <li>Upload supported text hand histories and get a fast async job id back.</li>
+            <li>Review actual versus recommended decisions with EV gaps and hero equity.</li>
+            <li>Return warnings, model source, and opponent reads with the finished review.</li>
+          </ul>
+        </article>
+
+        <article class="status-card surface status-card-caution">
+          <p class="card-kicker">Experimental</p>
+          <h3>Advanced modeling stays clearly labeled</h3>
+          <ul class="status-list">
+            <li>DDRE and related provider paths are still experimental.</li>
+            <li>Multi-player engine progress does not mean SICFUN is a validated 9-max solver.</li>
+            <li>Experimental paths are not presented as proven poker edge.</li>
+          </ul>
+        </article>
+
+        <article class="status-card surface status-card-negative">
+          <p class="card-kicker">Out of Scope</p>
+          <h3>No live-table play client</h3>
+          <ul class="status-list">
+            <li>No real-table integration</li>
+            <li>No action execution against a poker client</li>
+            <li>No promise of one-click real-time play</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="section method" id="workflow">
+      <div class="method-shell frame">
+        <div class="method-copy">
+          <p class="eyebrow">Workflow</p>
+          <h2>How a player or coach uses the current web path.</h2>
+          <p>
+            Export hands, queue the upload, and start with the biggest gaps when the job completes. The
+            point is simple: spend review time on the decisions that cost the most.
+          </p>
+        </div>
+
+        <div class="method-points">
+          <article class="method-point">
+            <h3>Queue once</h3>
+            <p>Supports PokerStars, Winamax, and GGPoker text histories, with an optional hero-name override.</p>
+          </article>
+
+          <article class="method-point">
+            <h3>Wait for completion</h3>
+            <p>The page polls the local review job until the finished summary, warnings, and decision gaps are ready.</p>
+          </article>
+
+          <article class="method-point">
+            <h3>Keep the trail</h3>
+            <p>Results stay tied to warnings, model source, and surfaced decision gaps for follow-up work.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="fit">
+      <div class="section-head">
+        <p class="eyebrow">Fit</p>
+        <h2>Built for disciplined local review. Not for live automation.</h2>
+      </div>
+
+      <div class="fit-grid">
+        <article class="fit-card surface">
+          <p class="card-kicker">Good fit</p>
+          <ul class="fit-list">
+            <li>Solo grinders doing post-session review.</li>
+            <li>Coaches reviewing marked-hand files with students.</li>
+            <li>Teams that want repeatable local evidence, not screenshots alone.</li>
+          </ul>
+        </article>
+
+        <article class="fit-card surface fit-card-muted">
+          <p class="card-kicker">Not for</p>
+          <ul class="fit-list">
+            <li>Real-time table assistance or client control.</li>
+            <li>Files that do not expose the hero hole cards.</li>
+            <li>Anyone expecting the web page to expose every simulator posterior artifact today.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="section final">
+      <div class="final-panel surface">
+        <p class="eyebrow">Start Here</p>
+        <h2>Queue one export and work the highest-cost decisions first.</h2>
+        <p>
+          Async upload review, ranked decision gaps, opponent notes, and model source are live on this page.
+        </p>
+        <div class="hero-actions">
+          <a class="button" href="#upload">Queue a review</a>
+          <a class="button button-secondary" href="#outputs">See sample outputs</a>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="site.js"></script>
+</body>
+</html>

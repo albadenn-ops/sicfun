@@ -13,6 +13,8 @@ import java.io.BufferedWriter
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import scala.collection.mutable
 import scala.util.Random
@@ -28,10 +30,6 @@ object TexasHoldemPlayingHall:
     case Adaptive
     case Gto
 
-  private enum HeroSeat:
-    case Button
-    case BigBlind
-
   private enum GtoMode:
     case Fast
     case Exact
@@ -40,9 +38,16 @@ object TexasHoldemPlayingHall:
     case Archetype(style: PlayerArchetype)
     case Gto
 
+  private final case class VillainProfile(
+      name: String,
+      mode: VillainMode,
+      label: String
+  )
+
   private final case class Config(
       hands: Int,
       tableCount: Int,
+      playerCount: Int,
       reportEvery: Int,
       learnEveryHands: Int,
       learningWindowSamples: Int,
@@ -50,20 +55,22 @@ object TexasHoldemPlayingHall:
       outDir: Path,
       modelArtifactDir: Option[Path],
       heroMode: HeroMode,
-      heroSeat: HeroSeat,
+      heroPosition: Position,
       gtoMode: GtoMode,
-      villainMode: VillainMode,
+      villainPool: Vector[VillainProfile],
       heroExplorationRate: Double,
       raiseSize: Double,
       bunchingTrials: Int,
       equityTrials: Int,
       saveTrainingTsv: Boolean,
-      saveDdreTrainingTsv: Boolean
+      saveDdreTrainingTsv: Boolean,
+      saveReviewHandHistory: Boolean
   )
 
   final case class HallSummary(
       handsPlayed: Int,
       tableCount: Int,
+      playerCount: Int,
       heroNetChips: Double,
       heroBbPer100: Double,
       heroWins: Int,
@@ -83,18 +90,65 @@ object TexasHoldemPlayingHall:
       if exactGtoCacheTotal > 0 then exactGtoCacheHits.toDouble / exactGtoCacheTotal.toDouble
       else 0.0
 
-  private final case class Deal(hero: HoleCards, villain: HoleCards, board: Board)
+  private final case class Deal(
+      holeCardsByPosition: Map[Position, HoleCards],
+      board: Board
+  ):
+    def holeCardsFor(position: Position): HoleCards = holeCardsByPosition(position)
+
+  private final case class TableScenario(
+      playerCount: Int,
+      modeledPositions: Vector[Position],
+      activePositions: Vector[Position],
+      heroPosition: Position,
+      primaryVillainPosition: Position,
+      openerPosition: Position,
+      foldedPositions: Vector[Position],
+      seatNumberByPosition: Map[Position, Int],
+      playerNameByPosition: Map[Position, String],
+      villainProfileByPosition: Map[Position, VillainProfile]
+  ):
+    def heroSeatNumber: Int = seatNumberByPosition(heroPosition)
+    def villainSeatNumber: Int = seatNumberByPosition(primaryVillainPosition)
+    def buttonSeatNumber: Int = seatNumberByPosition(Position.Button)
+    def nameFor(position: Position): String = playerNameByPosition(position)
+    def activeVillainPositions: Vector[Position] =
+      activePositions.filterNot(_ == heroPosition)
+    def primaryVillainProfile: VillainProfile = villainProfileByPosition(primaryVillainPosition)
+    def fallbackFoldsFor(
+        targetPosition: Position,
+        perspectivePosition: Position
+    ): Vector[PreflopFold] =
+      val realFolds =
+        foldedPositions
+          .distinct
+          .filterNot(position => position == perspectivePosition || position == targetPosition)
+      if realFolds.nonEmpty then realFolds.map(PreflopFold(_))
+      else
+        TableFormat
+          .forPlayerCount(playerCount)
+          .foldsBeforeOpener(openerPosition)
+          .filter(modeledPositions.contains)
+          .filterNot(position => position == perspectivePosition || position == targetPosition)
+          .map(PreflopFold(_))
 
   private final case class HandResult(
       heroNet: Double,
       outcome: Int,
+      tableScenario: TableScenario,
       villainDecision: Option[(GameState, PokerAction)],
       villainTrainingSamples: Vector[(GameState, HoleCards, PokerAction)],
       ddreTrainingSamples: Vector[DdreTrainingSample],
       raiseResponses: Vector[PokerAction],
       heroActions: Vector[PokerAction],
       villainActions: Vector[PokerAction],
-      streetsPlayed: Int
+      streetsPlayed: Int,
+      reviewHistoryLines: Vector[String],
+      maxLivePlayers: Int
+  )
+
+  private final case class ShowdownResolution(
+      heroPayout: Double
   )
 
   private final case class VillainStyleProfile(looseness: Double, aggression: Double)
@@ -150,7 +204,22 @@ object TexasHoldemPlayingHall:
     private def increment(counter: mutable.Map[String, Long], provider: String): Unit =
       counter.update(provider, counter(provider) + 1L)
 
+  private[holdem] final case class RaiseResponseEstimate(
+      foldProbability: Double,
+      continueProbability: Double,
+      continuationRange: DiscreteDistribution[HoleCards]
+  )
+
   private val MaxExactGtoCacheEntries = 500000
+  private val SmallBlindAmount = 0.5
+  private val BigBlindAmount = 1.0
+  private val ReviewUploadFileName = "review-upload-pokerstars.txt"
+  private val ReviewHeroName = "Hero"
+  private val ReviewStartingStack = 100.0
+  private val MoneyEpsilon = 1e-9
+  private val MultiwayExactMaxEvaluations = 250_000L
+  private val ReviewBaseTimestamp = LocalDateTime.of(2026, 3, 10, 12, 0, 0)
+  private val ReviewTimestampFormatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
   private val SuitPermutations: Array[Array[Int]] =
     Array(
       Array(0, 1, 2, 3), Array(0, 1, 3, 2), Array(0, 2, 1, 3), Array(0, 2, 3, 1),
@@ -168,6 +237,7 @@ object TexasHoldemPlayingHall:
         println("=== Texas Hold'em Playing Hall ===")
         println(s"handsPlayed: ${summary.handsPlayed}")
         println(s"tableCount: ${summary.tableCount}")
+        println(s"playerCount: ${summary.playerCount}")
         println(f"heroNetChips: ${summary.heroNetChips}%.4f")
         println(f"heroBbPer100: ${summary.heroBbPer100}%.3f")
         println(s"heroWins: ${summary.heroWins}")
@@ -201,14 +271,15 @@ object TexasHoldemPlayingHall:
     private val learningPath = config.outDir.resolve("learning.tsv")
     private val trainingPath = config.outDir.resolve("training-selfplay.tsv")
     private val ddrePath = config.outDir.resolve("ddre-training-selfplay.tsv")
+    private val reviewUploadPath = config.outDir.resolve(ReviewUploadFileName)
 
     private var handsWriterOpt: Option[BufferedWriter] = None
     private var learningWriterOpt: Option[BufferedWriter] = None
     private var trainingWriterOpt: Option[BufferedWriter] = None
     private var ddreWriterOpt: Option[BufferedWriter] = None
+    private var reviewWriterOpt: Option[BufferedWriter] = None
 
-    private val tableRanges = TableRanges.defaults(TableFormat.NineMax)
-    private val folds = TableFormat.NineMax.foldsBeforeOpener(Position.Button).map(PreflopFold(_))
+    private val tableRanges = TableRanges.defaults(TableFormat.forPlayerCount(config.playerCount))
     private val rng = new Random(config.seed)
     private val learningQueue = mutable.Queue.empty[(GameState, HoleCards, PokerAction)]
     private val raiseResponseHistory = mutable.ArrayBuffer.empty[PokerAction]
@@ -216,7 +287,6 @@ object TexasHoldemPlayingHall:
     private val exactGtoCacheStats = GtoCacheStats()
     private val collectVillainTraining = config.learnEveryHands > 0 || config.saveTrainingTsv
     private val collectDdreTraining = config.saveDdreTrainingTsv
-    private val villainLabel = villainModeLabel(config.villainMode)
 
     private var activeArtifactOpt = Option.empty[TrainedPokerActionModel]
     private var preflopEngineOpt = Option.empty[RealTimeAdaptiveEngine]
@@ -240,6 +310,9 @@ object TexasHoldemPlayingHall:
         ddreWriterOpt =
           if config.saveDdreTrainingTsv then Some(openLogWriter(ddrePath))
           else None
+        reviewWriterOpt =
+          if config.saveReviewHandHistory then Some(openLogWriter(reviewUploadPath))
+          else None
         initHandsLog(handsWriter)
         initLearningLog(learningWriter)
         trainingWriter.foreach(initTrainingTsv)
@@ -256,6 +329,7 @@ object TexasHoldemPlayingHall:
         learningWriterOpt.foreach(closeQuietly)
         trainingWriterOpt.foreach(closeQuietly)
         ddreWriterOpt.foreach(closeQuietly)
+        reviewWriterOpt.foreach(closeQuietly)
 
     private def handsWriter: BufferedWriter =
       handsWriterOpt.getOrElse(throw new IllegalStateException("hands writer not initialized"))
@@ -266,6 +340,8 @@ object TexasHoldemPlayingHall:
     private def trainingWriter: Option[BufferedWriter] = trainingWriterOpt
 
     private def ddreWriter: Option[BufferedWriter] = ddreWriterOpt
+
+    private def reviewWriter: Option[BufferedWriter] = reviewWriterOpt
 
     private def activeArtifact: TrainedPokerActionModel =
       activeArtifactOpt.getOrElse(throw new IllegalStateException("playing hall artifact not initialized"))
@@ -289,7 +365,14 @@ object TexasHoldemPlayingHall:
 
     private def playHand(handNo: Int): Unit =
       val tableId = ((handNo - 1) % config.tableCount) + 1
-      val deal = dealHand(rng)
+      val tableScenario = buildTableScenario(
+        playerCount = config.playerCount,
+        heroPosition = config.heroPosition,
+        villainPool = config.villainPool,
+        headsUpOnly = config.saveReviewHandHistory,
+        rng = rng
+      )
+      val deal = dealHand(tableScenario.modeledPositions, rng)
       val result = resolveHand(
         deal = deal,
         preflopEngine = preflopEngine,
@@ -297,7 +380,7 @@ object TexasHoldemPlayingHall:
         tableRanges = tableRanges,
         actionModel = activeArtifact.model,
         config = config,
-        folds = folds,
+        tableScenario = tableScenario,
         rng = new Random(rng.nextLong()),
         collectVillainTraining = collectVillainTraining,
         collectDdreTraining = collectDdreTraining,
@@ -316,16 +399,26 @@ object TexasHoldemPlayingHall:
         deal = deal,
         result = result,
         modelId = activeArtifact.version.id,
-        archetype = villainLabel,
-        heroPosition =
-          config.heroSeat match
-            case HeroSeat.Button => Position.Button
-            case HeroSeat.BigBlind => Position.BigBlind,
-        villainPosition =
-          config.heroSeat match
-            case HeroSeat.Button => Position.BigBlind
-            case HeroSeat.BigBlind => Position.Button
+        archetype = tableScenario.primaryVillainProfile.label,
+        playerCount = tableScenario.playerCount,
+        heroPosition = tableScenario.heroPosition,
+        villainPosition = result.tableScenario.primaryVillainPosition,
+        openerPosition = tableScenario.openerPosition,
+        foldedPositions = tableScenario.foldedPositions,
+        activePositions = tableScenario.activePositions,
+        maxLivePlayers = result.maxLivePlayers
       )
+      reviewWriter.foreach { writer =>
+        appendReviewHandHistory(
+          writer = writer,
+          hand = handNo,
+          tableId = tableId,
+          startedAt = ReviewBaseTimestamp.plusMinutes(handNo.toLong - 1L),
+          deal = deal,
+          result = result,
+          tableScenario = tableScenario
+        )
+      }
       maybeReport(handNo)
       maybeRetrain(handNo)
 
@@ -424,6 +517,7 @@ object TexasHoldemPlayingHall:
       HallSummary(
         handsPlayed = config.hands,
         tableCount = config.tableCount,
+        playerCount = config.playerCount,
         heroNetChips = heroNet,
         heroBbPer100 = bbPer100,
         heroWins = heroWins,
@@ -446,7 +540,7 @@ object TexasHoldemPlayingHall:
       tableRanges: TableRanges,
       actionModel: PokerActionModel,
       config: Config,
-      folds: Vector[PreflopFold],
+      tableScenario: TableScenario,
       rng: Random,
       collectVillainTraining: Boolean,
       collectDdreTraining: Boolean,
@@ -460,7 +554,7 @@ object TexasHoldemPlayingHall:
       tableRanges = tableRanges,
       actionModel = actionModel,
       config = config,
-      folds = folds,
+      tableScenario = tableScenario,
       rng = rng,
       collectVillainTraining = collectVillainTraining,
       collectDdreTraining = collectDdreTraining,
@@ -475,27 +569,29 @@ object TexasHoldemPlayingHall:
       tableRanges: TableRanges,
       actionModel: PokerActionModel,
       config: Config,
-      folds: Vector[PreflopFold],
+      tableScenario: TableScenario,
       rng: Random,
       collectVillainTraining: Boolean,
       collectDdreTraining: Boolean,
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
       exactGtoCacheStats: GtoCacheStats
   ):
-    private val heroPosition =
-      config.heroSeat match
-        case HeroSeat.Button => Position.Button
-        case HeroSeat.BigBlind => Position.BigBlind
-    private val villainPosition =
-      if heroPosition == Position.Button then Position.BigBlind
-      else Position.Button
-    private val heroStartsOnButton = heroPosition == Position.Button
-
-    private var heroStack = if heroStartsOnButton then 99.5 else 99.0
-    private var villainStack = if heroStartsOnButton then 99.0 else 99.5
-    private var heroContribution = if heroStartsOnButton then 0.5 else 1.0
-    private var villainContribution = if heroStartsOnButton then 1.0 else 0.5
-    private var pot = heroContribution + villainContribution
+    private val heroPosition = tableScenario.heroPosition
+    private val preflopOrder = tableScenario.modeledPositions
+    private val postflopOrder = tableScenario.modeledPositions.sortBy(postflopOrderIndex)
+    private val participatingPositions = tableScenario.activePositions.toSet
+    private val contributionByPosition =
+      mutable.HashMap.from(tableScenario.modeledPositions.map { position =>
+        position -> blindContributionFor(position, tableScenario.playerCount)
+      })
+    private val stackByPosition =
+      mutable.HashMap.from(tableScenario.modeledPositions.map { position =>
+        position -> (ReviewStartingStack - contributionByPosition(position))
+      })
+    private val foldedPositions = mutable.HashSet.empty[Position]
+    private val allInPositions = mutable.HashSet.empty[Position]
+    private val preflopFoldedPositions = mutable.ArrayBuffer.empty[Position]
+    private var pot = roundMoney(contributionByPosition.values.sum)
     private var betHistory = Vector.empty[BetAction]
 
     private val villainTrainingSamples = mutable.ArrayBuffer.empty[(GameState, HoleCards, PokerAction)]
@@ -503,7 +599,8 @@ object TexasHoldemPlayingHall:
     private val raiseResponses = mutable.ArrayBuffer.empty[PokerAction]
     private val heroActions = mutable.ArrayBuffer.empty[PokerAction]
     private val villainActions = mutable.ArrayBuffer.empty[PokerAction]
-    private val villainObservations = mutable.ArrayBuffer.empty[VillainObservation]
+    private val observationsByPosition = mutable.HashMap.empty[Position, mutable.ArrayBuffer[VillainObservation]]
+    private val reviewHistoryLines = mutable.ArrayBuffer.empty[String]
 
     private var firstVillainDecision: Option[(GameState, PokerAction)] = None
     private var outcome = 0
@@ -519,24 +616,30 @@ object TexasHoldemPlayingHall:
       if !handOver then playPostflopStreet(Street.Flop)
       if !handOver then playPostflopStreet(Street.Turn)
       if !handOver then playPostflopStreet(Street.River)
-      if !handOver then
-        outcome = showdownOutcome(deal)
-
       val heroNet =
-        if handOver && outcome > 0 then pot - heroContribution
-        else if handOver && outcome < 0 then -heroContribution
-        else outcomeToNet(outcome, pot, heroContribution)
+        if handOver && outcome > 0 then roundMoney(pot - contributionOf(heroPosition))
+        else if handOver && outcome < 0 then -contributionOf(heroPosition)
+        else
+          val showdown = showdownResolution()
+          roundMoney(showdown.heroPayout - contributionOf(heroPosition))
+      outcome =
+        if heroNet > MoneyEpsilon then 1
+        else if heroNet < -MoneyEpsilon then -1
+        else 0
 
       HandResult(
         heroNet = heroNet,
         outcome = outcome,
+        tableScenario = tableScenario,
         villainDecision = firstVillainDecision,
         villainTrainingSamples = villainTrainingSamples.toVector,
         ddreTrainingSamples = ddreTrainingSamples.toVector,
         raiseResponses = raiseResponses.toVector,
         heroActions = heroActions.toVector,
         villainActions = villainActions.toVector,
-        streetsPlayed = streetsPlayed
+        streetsPlayed = streetsPlayed,
+        reviewHistoryLines = reviewHistoryLines.toVector,
+        maxLivePlayers = tableScenario.activePositions.size
       )
 
     private def boardFor(street: Street): Board =
@@ -546,40 +649,187 @@ object TexasHoldemPlayingHall:
         case Street.Turn    => turnBoard
         case Street.River   => deal.board
 
-    private def payHero(amount: Double): Double =
-      val paid = math.max(0.0, math.min(amount, heroStack))
-      heroStack -= paid
-      heroContribution += paid
-      pot += paid
+    private def contributionOf(position: Position): Double =
+      contributionByPosition.getOrElse(position, 0.0)
+
+    private def stackOf(position: Position): Double =
+      stackByPosition.getOrElse(position, 0.0)
+
+    private def isAllIn(position: Position): Boolean =
+      allInPositions.contains(position) || stackOf(position) <= MoneyEpsilon
+
+    private def liveContestants: Vector[Position] =
+      tableScenario.activePositions.filterNot(foldedPositions.contains)
+
+    private def liveVillains: Vector[Position] =
+      liveContestants.filterNot(_ == heroPosition)
+
+    private def liveOpponentsFor(position: Position): Vector[Position] =
+      liveContestants.filterNot(_ == position)
+
+    private def multiwayRecommendationFor(
+        actor: Position,
+        state: GameState,
+        candidateActions: Vector[PokerAction],
+        posteriorOverrides: Map[Position, DiscreteDistribution[HoleCards]] = Map.empty
+    ): Option[ActionRecommendation] =
+      val opponents = liveOpponentsFor(actor)
+      if opponents.lengthCompare(1) <= 0 then None
+      else
+        val result = MultiwayInferenceEngine.inferAndRecommend(
+          hero = deal.holeCardsFor(actor),
+          state = state,
+          actorContribution = contributionOf(actor),
+          actorBetHistoryIndex = betHistoryPlayerIndex(actor),
+          tableRanges = tableRanges,
+          actionModel = actionModel,
+          opponents = opponents.map { opponent =>
+            MultiwayInferenceEngine.OpponentInput(
+              position = opponent,
+              folds = foldsForInference(actor, opponent),
+              observations = playerObservations(opponent),
+              stackSize = stackOf(opponent),
+              contribution = contributionOf(opponent),
+              isAllIn = isAllIn(opponent),
+              posteriorOverride = posteriorOverrides.get(opponent)
+            )
+          },
+          candidateActions = candidateActions,
+          bunchingTrials = inferenceBunchingTrials(state.street),
+          equityTrialsForOpponentCount = opponentCount =>
+            multiwayEquityTrials(state.street, config.equityTrials, opponentCount),
+          rng = new Random(rng.nextLong())
+        )
+        Some(result.recommendation)
+
+    private def payPosition(position: Position, amount: Double): Double =
+      val paid = roundMoney(math.max(0.0, math.min(amount, stackOf(position))))
+      stackByPosition.update(position, roundMoney(stackOf(position) - paid))
+      contributionByPosition.update(position, roundMoney(contributionOf(position) + paid))
+      pot = roundMoney(pot + paid)
+      if stackOf(position) <= MoneyEpsilon then allInPositions += position
       paid
 
-    private def payVillain(amount: Double): Double =
-      val paid = math.max(0.0, math.min(amount, villainStack))
-      villainStack -= paid
-      villainContribution += paid
-      pot += paid
-      paid
+    private def recordObservation(
+        position: Position,
+        state: GameState,
+        action: PokerAction
+    ): Unit =
+      val buffer = observationsByPosition.getOrElseUpdate(position, mutable.ArrayBuffer.empty)
+      buffer += VillainObservation(action, state)
 
-    private def recordVillainDecision(state: GameState, action: PokerAction): Unit =
+    private def recordVillainDecision(
+        position: Position,
+        state: GameState,
+        action: PokerAction
+    ): Unit =
       if collectVillainTraining then
-        villainTrainingSamples += ((state, deal.villain, action))
+        villainTrainingSamples += ((state, deal.holeCardsFor(position), action))
       villainActions += action
-      villainObservations += VillainObservation(action, state)
+      recordObservation(position, state, action)
       if firstVillainDecision.isEmpty then firstVillainDecision = Some((state, action))
+
+    private def appendReviewLine(playerName: String, suffix: String): Unit =
+      reviewHistoryLines += s"$playerName: $suffix"
+
+    private def appendReviewStreetHeader(street: Street): Unit =
+      street match
+        case Street.Preflop => ()
+        case Street.Flop =>
+          reviewHistoryLines += s"*** FLOP *** ${bracketedCards(flopBoard.cards)}"
+        case Street.Turn =>
+          reviewHistoryLines += s"*** TURN *** ${bracketedCards(flopBoard.cards)} ${bracketedCards(Vector(deal.board.cards(3)))}"
+        case Street.River =>
+          reviewHistoryLines += s"*** RIVER *** ${bracketedCards(turnBoard.cards)} ${bracketedCards(Vector(deal.board.cards(4)))}"
+
+    private def appendFold(playerName: String): Unit =
+      appendReviewLine(playerName, "folds")
+
+    private def appendCheck(playerName: String): Unit =
+      appendReviewLine(playerName, "checks")
+
+    private def appendCall(playerName: String, amount: Double): Unit =
+      appendReviewLine(playerName, s"calls ${money(amount)}")
+
+    private def appendRaiseTo(playerName: String, totalAmount: Double): Unit =
+      appendReviewLine(playerName, s"raises to ${money(totalAmount)}")
+
+    private def totalContributionAfterRaise(
+        currentContribution: Double,
+        toCall: Double,
+        raiseAmount: Double
+    ): Double =
+      roundMoney(currentContribution + toCall + raiseAmount)
+
+    private def actorName(position: Position): String =
+      tableScenario.nameFor(position)
+
+    private def betHistoryPlayerIndex(position: Position): Int =
+      tableScenario.seatNumberByPosition(position) - 1
+
+    private def appendBetHistory(position: Position, action: PokerAction): Unit =
+      betHistory = betHistory :+ BetAction(betHistoryPlayerIndex(position), action)
+
+    private def playerObservations(position: Position): Vector[VillainObservation] =
+      observationsByPosition.get(position).map(_.toVector).getOrElse(Vector.empty)
+
+    private def nextLiveVillainAfter(
+        anchor: Position,
+        actionOrder: Vector[Position]
+    ): Option[Position] =
+      orderAfter(actionOrder, anchor).find(position =>
+        position != heroPosition &&
+          participatingPositions.contains(position) &&
+          !foldedPositions.contains(position)
+      )
+
+    private def focusVillainForHero(
+        lastAggressor: Option[Position],
+        actionOrder: Vector[Position]
+    ): Position =
+      lastAggressor
+        .filter(position =>
+          position != heroPosition &&
+            participatingPositions.contains(position) &&
+            !foldedPositions.contains(position)
+        )
+        .orElse(nextLiveVillainAfter(heroPosition, actionOrder))
+        .orElse(liveVillains.headOption)
+        .getOrElse(tableScenario.primaryVillainPosition)
+
+    private def inferenceBunchingTrials(street: Street): Int =
+      if street == Street.Preflop then config.bunchingTrials
+      else postflopBunchingTrials(config.bunchingTrials)
+
+    private def foldsForInference(
+        perspectivePosition: Position,
+        targetPosition: Position
+    ): Vector[PreflopFold] =
+      val actual = mergedInferenceFolds(
+        staticFoldedPositions = tableScenario.foldedPositions,
+        preflopFoldedPositions = preflopFoldedPositions.toVector,
+        perspectivePosition = perspectivePosition,
+        targetPosition = targetPosition
+      )
+      if actual.nonEmpty then actual
+      else tableScenario.fallbackFoldsFor(targetPosition, perspectivePosition)
 
     private def decideHero(
         street: Street,
         board: Board,
         toCall: Double,
-        allowRaise: Boolean
+        allowRaise: Boolean,
+        lastAggressor: Option[Position],
+        actionOrder: Vector[Position]
     ): PokerAction =
+      val focusVillainPosition = focusVillainForHero(lastAggressor, actionOrder)
       val state = GameState(
         street = street,
         board = board,
         pot = pot,
         toCall = toCall,
         position = heroPosition,
-        stackSize = heroStack,
+        stackSize = stackOf(heroPosition),
         betHistory = betHistory
       )
       val candidates = heroCandidates(state, config.raiseSize, allowRaise)
@@ -587,57 +837,77 @@ object TexasHoldemPlayingHall:
         case HeroMode.Adaptive =>
           val engine = if street == Street.Preflop then preflopEngine else postflopEngine
           val adaptiveDecision = engine.decide(
-            hero = deal.hero,
+            hero = deal.holeCardsFor(heroPosition),
             state = state,
-            folds = folds,
-            villainPos = villainPosition,
-            observations = villainObservations.toVector,
+            folds = foldsForInference(heroPosition, focusVillainPosition),
+            villainPos = focusVillainPosition,
+            observations = playerObservations(focusVillainPosition),
             candidateActions = candidates,
             decisionBudgetMillis = Some(1L),
             rng = new Random(rng.nextLong())
           )
-          val greedy = adaptiveDecision.decision.recommendation.bestAction
+          val greedy =
+            multiwayRecommendationFor(
+              actor = heroPosition,
+              state = state,
+              candidateActions = candidates,
+              posteriorOverrides = Map(
+                focusVillainPosition -> adaptiveDecision.decision.posteriorInference.posterior
+              )
+            ).map(_.bestAction)
+              .getOrElse(adaptiveDecision.decision.recommendation.bestAction)
           if rng.nextDouble() < config.heroExplorationRate then candidates(rng.nextInt(candidates.length))
           else greedy
         case HeroMode.Gto =>
-          gtoHeroResponds(
-            hand = deal.hero,
+          multiwayRecommendationFor(
+            actor = heroPosition,
             state = state,
-            allowRaise = allowRaise,
-            raiseSize = config.raiseSize,
-            mode = config.gtoMode,
-            tableRanges = tableRanges,
-            baseEquityTrials = config.equityTrials,
-            rng = rng,
-            perspective = 0,
-            villainPosition = villainPosition,
-            exactGtoCache = exactGtoCache,
-            exactGtoCacheStats = exactGtoCacheStats
-          )
+            candidateActions = candidates
+          ).map(_.bestAction)
+            .getOrElse(
+              gtoHeroResponds(
+                hand = deal.holeCardsFor(heroPosition),
+                state = state,
+                allowRaise = allowRaise,
+                raiseSize = config.raiseSize,
+                mode = config.gtoMode,
+                tableRanges = tableRanges,
+                baseEquityTrials = config.equityTrials,
+                rng = rng,
+                perspective = 0,
+                villainPosition = focusVillainPosition,
+                exactGtoCache = exactGtoCache,
+                exactGtoCacheStats = exactGtoCacheStats
+              )
+            )
       val normalized = normalizeAction(
         action = sampled,
         toCall = toCall,
+        stackSize = stackOf(heroPosition),
         allowRaise = allowRaise,
         defaultRaise = config.raiseSize
       )
       if collectDdreTraining then
-        recordDdreTrainingSample(state, street)
+        recordDdreTrainingSample(state, street, focusVillainPosition)
+      recordObservation(heroPosition, state, normalized)
       heroActions += normalized
       normalized
 
-    private def recordDdreTrainingSample(state: GameState, street: Street): Unit =
-      val observationsSnapshot = villainObservations.toVector
+    private def recordDdreTrainingSample(
+        state: GameState,
+        street: Street,
+        focusVillainPosition: Position
+    ): Unit =
+      val observationsSnapshot = playerObservations(focusVillainPosition)
       val observationsForBayes = observationsSnapshot.map(obs => obs.action -> obs.state)
-      val labelBunchingTrials =
-        if street == Street.Preflop then config.bunchingTrials
-        else postflopBunchingTrials(config.bunchingTrials)
+      val labelBunchingTrials = inferenceBunchingTrials(street)
       val prior = RangeInferenceEngine
         .inferPosterior(
-          hero = deal.hero,
+          hero = deal.holeCardsFor(heroPosition),
           board = state.board,
-          folds = folds,
+          folds = foldsForInference(heroPosition, focusVillainPosition),
           tableRanges = tableRanges,
-          villainPos = villainPosition,
+          villainPos = focusVillainPosition,
           observations = Vector.empty,
           actionModel = actionModel,
           bunchingTrials = labelBunchingTrials,
@@ -657,17 +927,18 @@ object TexasHoldemPlayingHall:
       ddreTrainingSamples += DdreTrainingSample(
         decisionIndex = ddreTrainingSamples.length + 1,
         state = state,
-        villainPosition = villainPosition,
-        villainStackBefore = villainStack,
+        villainPosition = focusVillainPosition,
+        villainStackBefore = stackOf(focusVillainPosition),
         observations = observationsSnapshot,
-        heroHole = deal.hero,
-        villainHole = deal.villain,
+        heroHole = deal.holeCardsFor(heroPosition),
+        villainHole = deal.holeCardsFor(focusVillainPosition),
         prior = prior,
         bayesPosterior = bayesPosterior,
         bayesLogEvidence = bayesLogEvidence
       )
 
     private def decideVillain(
+        position: Position,
         street: Street,
         board: Board,
         toCall: Double,
@@ -679,14 +950,25 @@ object TexasHoldemPlayingHall:
         board = board,
         pot = pot,
         toCall = toCall,
-        position = villainPosition,
-        stackSize = villainStack,
+        position = position,
+        stackSize = stackOf(position),
         betHistory = betHistory
       )
-      val sampled = config.villainMode match
+      val villainProfile = tableScenario.villainProfileByPosition(position)
+      val candidates = heroCandidates(state, config.raiseSize, allowRaise)
+      val multiwayRecommendation =
+        villainProfile.mode match
+          case VillainMode.Gto =>
+            multiwayRecommendationFor(
+              actor = position,
+              state = state,
+              candidateActions = candidates
+            )
+          case _ => None
+      val sampled = villainProfile.mode match
         case VillainMode.Archetype(style) =>
           villainResponds(
-            hand = deal.villain,
+            hand = deal.holeCardsFor(position),
             style = style,
             state = state,
             allowRaise = allowRaise,
@@ -694,27 +976,32 @@ object TexasHoldemPlayingHall:
             rng = rng
           )
         case VillainMode.Gto =>
-          gtoVillainResponds(
-            hand = deal.villain,
-            state = state,
-            allowRaise = allowRaise,
-            raiseSize = config.raiseSize,
-            mode = config.gtoMode,
-            tableRanges = tableRanges,
-            baseEquityTrials = config.equityTrials,
-            rng = rng,
-            perspective = 1,
-            heroPosition = heroPosition,
-            exactGtoCache = exactGtoCache,
-            exactGtoCacheStats = exactGtoCacheStats
-          )
+          multiwayRecommendation
+            .map(_.bestAction)
+            .getOrElse(
+              gtoVillainResponds(
+                hand = deal.holeCardsFor(position),
+                state = state,
+                allowRaise = allowRaise,
+                raiseSize = config.raiseSize,
+                mode = config.gtoMode,
+                tableRanges = tableRanges,
+                baseEquityTrials = config.equityTrials,
+                rng = rng,
+                perspective = 1,
+                heroPosition = heroPosition,
+                exactGtoCache = exactGtoCache,
+                exactGtoCacheStats = exactGtoCacheStats
+              )
+            )
       val action = normalizeAction(
         action = sampled,
         toCall = toCall,
+        stackSize = stackOf(position),
         allowRaise = allowRaise,
         defaultRaise = config.raiseSize
       )
-      recordVillainDecision(state, action)
+      recordVillainDecision(position, state, action)
       if facingHeroRaise then
         action match
           case PokerAction.Fold | PokerAction.Call | PokerAction.Raise(_) =>
@@ -724,247 +1011,233 @@ object TexasHoldemPlayingHall:
           case _ => ()
       action
 
+    private def appendAction(
+        position: Position,
+        action: PokerAction,
+        toCallBefore: Double,
+        stackBefore: Double
+    ): Unit =
+      action match
+        case PokerAction.Fold =>
+          appendFold(actorName(position))
+        case PokerAction.Check =>
+          appendCheck(actorName(position))
+        case PokerAction.Call =>
+          if toCallBefore > 0.0 then appendCall(actorName(position), math.min(toCallBefore, stackBefore))
+          else appendCheck(actorName(position))
+        case PokerAction.Raise(amount) =>
+          appendRaiseTo(
+            actorName(position),
+            totalContributionAfterRaise(contributionOf(position), toCallBefore, amount)
+          )
+
+    private def markFolded(position: Position, street: Street): Unit =
+      if !foldedPositions.contains(position) then
+        foldedPositions += position
+        if street == Street.Preflop && !preflopFoldedPositions.contains(position) then
+          preflopFoldedPositions += position
+      if position == heroPosition then
+        handOver = true
+        outcome = -1
+      else if !foldedPositions.contains(heroPosition) && liveVillains.isEmpty then
+        handOver = true
+        outcome = 1
+
+    private def applyAction(
+        position: Position,
+        action: PokerAction,
+        toCallBefore: Double,
+        street: Street
+    ): Unit =
+      action match
+        case PokerAction.Fold =>
+          markFolded(position, street)
+        case PokerAction.Check =>
+          ()
+        case PokerAction.Call =>
+          payPosition(position, toCallBefore)
+        case PokerAction.Raise(amount) =>
+          val required = toCallBefore + amount
+          payPosition(position, required)
+
+    private def currentToCall(position: Position): Double =
+      val currentMaxContribution = contributionByPosition.values.max
+      TexasHoldemPlayingHall.contributionGap(currentMaxContribution, contributionOf(position))
+
+    private def orderAfter(
+        actionOrder: Vector[Position],
+        position: Position
+    ): Vector[Position] =
+      val idx = actionOrder.indexOf(position)
+      if idx < 0 then actionOrder
+      else actionOrder.drop(idx + 1) ++ actionOrder.take(idx)
+
+    private def initialQueueForStreet(
+        street: Street,
+        actionOrder: Vector[Position]
+    ): Vector[Position] =
+      actionOrder.filter(position => canQueue(position, street))
+
+    private def canQueue(position: Position, street: Street): Boolean =
+      if foldedPositions.contains(position) then false
+      else if isAllIn(position) then false
+      else if street == Street.Preflop then true
+      else participatingPositions.contains(position)
+
+    private def decidePosition(
+        position: Position,
+        street: Street,
+        board: Board,
+        toCall: Double,
+        allowRaise: Boolean,
+        lastAggressor: Option[Position],
+        actionOrder: Vector[Position]
+    ): PokerAction =
+      if position == heroPosition then
+        decideHero(
+          street = street,
+          board = board,
+          toCall = toCall,
+          allowRaise = allowRaise,
+          lastAggressor = lastAggressor,
+          actionOrder = actionOrder
+        )
+      else if participatingPositions.contains(position) then
+        decideVillain(
+          position = position,
+          street = street,
+          board = board,
+          toCall = toCall,
+          allowRaise = allowRaise,
+          facingHeroRaise = lastAggressor.contains(heroPosition) && toCall > 0.0
+        )
+      else PokerAction.Fold
+
+    private def playBettingRound(
+        street: Street,
+        board: Board,
+        actionOrder: Vector[Position],
+        maxRaises: Int
+    ): Unit =
+      var raiseCount = 0
+      var lastAggressor = Option.empty[Position]
+      var minimumRaiseAmount = BigBlindAmount
+      val actedSinceFullRaise = mutable.HashSet.empty[Position]
+      val raisingClosedFor = mutable.HashSet.empty[Position]
+      var queue = initialQueueForStreet(street, actionOrder)
+      while !handOver && queue.nonEmpty do
+        val actor = queue.head
+        queue = queue.tail
+        if canQueue(actor, street) then
+          val toCallBefore = currentToCall(actor)
+          val stackBefore = stackOf(actor)
+          val action = decidePosition(
+            position = actor,
+            street = street,
+            board = board,
+            toCall = toCallBefore,
+            allowRaise = (raiseCount < maxRaises) && !raisingClosedFor.contains(actor),
+            lastAggressor = lastAggressor,
+            actionOrder = actionOrder
+          )
+          appendBetHistory(actor, action)
+          appendAction(actor, action, toCallBefore, stackBefore)
+          applyAction(actor, action, toCallBefore, street)
+          actedSinceFullRaise += actor
+          if !handOver then
+            action match
+              case PokerAction.Raise(amount) =>
+                lastAggressor = Some(actor)
+                queue = orderAfter(actionOrder, actor).filter(position => canQueue(position, street))
+                if raiseReopensAction(amount, minimumRaiseAmount) then
+                  raiseCount += 1
+                  minimumRaiseAmount = roundMoney(amount)
+                  actedSinceFullRaise.clear()
+                  actedSinceFullRaise += actor
+                  raisingClosedFor.clear()
+                else
+                  raisingClosedFor ++= actedSinceFullRaise.filter(_ != actor)
+              case _ =>
+                ()
+
     private def playPreflop(): Unit =
       streetsPlayed += 1
-      val board = boardFor(Street.Preflop)
-      if heroStartsOnButton then playPreflopHeroOnButton(board)
-      else playPreflopHeroOnBigBlind(board)
-
-    private def playPreflopHeroOnButton(board: Board): Unit =
-      val heroAction = decideHero(Street.Preflop, board, toCall = 0.5, allowRaise = true)
-      betHistory = betHistory :+ BetAction(0, heroAction)
-      heroAction match
-        case PokerAction.Fold =>
-          handOver = true
-          outcome = -1
-        case PokerAction.Check | PokerAction.Call =>
-          val paid = payHero(0.5)
-          if paid < 0.5 then
-            handOver = true
-            outcome = -1
-        case PokerAction.Raise(amount) =>
-          payHero(0.5 + amount)
-          val villainToCall = TexasHoldemPlayingHall.contributionGap(heroContribution, villainContribution)
-          if villainToCall <= 0.0 then
-            handOver = true
-            outcome = 1
-          else
-            val villainAction = decideVillain(
-              street = Street.Preflop,
-              board = board,
-              toCall = villainToCall,
-              allowRaise = true,
-              facingHeroRaise = true
-            )
-            betHistory = betHistory :+ BetAction(1, villainAction)
-            villainAction match
-              case PokerAction.Fold =>
-                handOver = true
-                outcome = 1
-              case PokerAction.Call | PokerAction.Check =>
-                payVillain(villainToCall)
-              case PokerAction.Raise(reRaiseAmount) =>
-                payVillain(villainToCall + reRaiseAmount)
-                val heroToCall = TexasHoldemPlayingHall.contributionGap(villainContribution, heroContribution)
-                val heroResponse = decideHero(
-                  street = Street.Preflop,
-                  board = board,
-                  toCall = heroToCall,
-                  allowRaise = false
-                )
-                betHistory = betHistory :+ BetAction(0, heroResponse)
-                heroResponse match
-                  case PokerAction.Fold =>
-                    handOver = true
-                    outcome = -1
-                  case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
-                    val paidHero = payHero(heroToCall)
-                    if paidHero <= 0.0 then
-                      handOver = true
-                      outcome = -1
-
-    private def playPreflopHeroOnBigBlind(board: Board): Unit =
-      val villainAction = decideVillain(
+      playBettingRound(
         street = Street.Preflop,
-        board = board,
-        toCall = 0.5,
-        allowRaise = true,
-        facingHeroRaise = false
+        board = boardFor(Street.Preflop),
+        actionOrder = preflopOrder,
+        maxRaises = 2
       )
-      betHistory = betHistory :+ BetAction(1, villainAction)
-      villainAction match
-        case PokerAction.Fold =>
-          handOver = true
-          outcome = 1
-        case PokerAction.Check | PokerAction.Call =>
-          val paidVillain = payVillain(0.5)
-          if paidVillain < 0.5 then
-            handOver = true
-            outcome = 1
-        case PokerAction.Raise(amount) =>
-          payVillain(0.5 + amount)
-          val heroToCall = TexasHoldemPlayingHall.contributionGap(villainContribution, heroContribution)
-          val heroResponse = decideHero(
-            street = Street.Preflop,
-            board = board,
-            toCall = heroToCall,
-            allowRaise = true
-          )
-          betHistory = betHistory :+ BetAction(0, heroResponse)
-          heroResponse match
-            case PokerAction.Fold =>
-              handOver = true
-              outcome = -1
-            case PokerAction.Call | PokerAction.Check =>
-              val paidHero = payHero(heroToCall)
-              if paidHero < heroToCall then
-                handOver = true
-                outcome = -1
-            case PokerAction.Raise(reRaiseAmount) =>
-              payHero(heroToCall + reRaiseAmount)
-              val villainToCall = TexasHoldemPlayingHall.contributionGap(heroContribution, villainContribution)
-              if villainToCall <= 0.0 then
-                handOver = true
-                outcome = 1
-              else
-                val villainResponse = decideVillain(
-                  street = Street.Preflop,
-                  board = board,
-                  toCall = villainToCall,
-                  allowRaise = false,
-                  facingHeroRaise = true
-                )
-                betHistory = betHistory :+ BetAction(1, villainResponse)
-                villainResponse match
-                  case PokerAction.Fold =>
-                    handOver = true
-                    outcome = 1
-                  case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
-                    payVillain(villainToCall)
 
     private def playPostflopStreet(street: Street): Unit =
       if handOver then ()
       else
         streetsPlayed += 1
         val board = boardFor(street)
-        if heroStartsOnButton then playPostflopStreetHeroOnButton(street, board)
-        else playPostflopStreetHeroOnBigBlind(street, board)
+        appendReviewStreetHeader(street)
+        playBettingRound(
+          street = street,
+          board = board,
+          actionOrder = postflopOrder,
+          maxRaises = 1
+        )
 
-    private def playPostflopStreetHeroOnButton(street: Street, board: Board): Unit =
-      val villainLead = decideVillain(
-        street = street,
-        board = board,
-        toCall = 0.0,
-        allowRaise = true,
-        facingHeroRaise = false
-      )
-      betHistory = betHistory :+ BetAction(1, villainLead)
-      villainLead match
-        case PokerAction.Check =>
-          val heroAction = decideHero(street, board, toCall = 0.0, allowRaise = true)
-          betHistory = betHistory :+ BetAction(0, heroAction)
-          heroAction match
-            case PokerAction.Check | PokerAction.Call =>
-              ()
-            case PokerAction.Fold =>
-              handOver = true
-              outcome = -1
-            case PokerAction.Raise(amount) =>
-              val paidHero = payHero(amount)
-              val villainToCall = paidHero
-              if villainToCall > 0.0 then
-                val villainResponse = decideVillain(
-                  street = street,
-                  board = board,
-                  toCall = villainToCall,
-                  allowRaise = false,
-                  facingHeroRaise = true
-                )
-                betHistory = betHistory :+ BetAction(1, villainResponse)
-                villainResponse match
-                  case PokerAction.Fold =>
-                    handOver = true
-                    outcome = 1
-                  case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
-                    payVillain(villainToCall)
-        case PokerAction.Raise(amount) =>
-          val paidVillain = payVillain(amount)
-          val heroToCall = paidVillain
-          if heroToCall > 0.0 then
-            val heroAction = decideHero(street, board, toCall = heroToCall, allowRaise = false)
-            betHistory = betHistory :+ BetAction(0, heroAction)
-            heroAction match
-              case PokerAction.Fold =>
-                handOver = true
-                outcome = -1
-              case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
-                payHero(heroToCall)
-        case PokerAction.Call =>
-          ()
-        case PokerAction.Fold =>
-          handOver = true
-          outcome = 1
-
-    private def playPostflopStreetHeroOnBigBlind(street: Street, board: Board): Unit =
-      val heroLead = decideHero(street, board, toCall = 0.0, allowRaise = true)
-      betHistory = betHistory :+ BetAction(0, heroLead)
-      heroLead match
-        case PokerAction.Check | PokerAction.Call =>
-          val villainAction = decideVillain(
-            street = street,
-            board = board,
-            toCall = 0.0,
-            allowRaise = true,
-            facingHeroRaise = false
+    private def showdownResolution(): ShowdownResolution =
+      val remainingPlayers = liveContestants
+      if !remainingPlayers.contains(heroPosition) then ShowdownResolution(heroPayout = 0.0)
+      else
+        val boardCards = deal.board.cards
+        val ranked = remainingPlayers.map { position =>
+          val hand = deal.holeCardsFor(position)
+          position -> HandEvaluator.evaluate7PackedDirect(
+            hand.first,
+            hand.second,
+            boardCards(0),
+            boardCards(1),
+            boardCards(2),
+            boardCards(3),
+            boardCards(4)
           )
-          betHistory = betHistory :+ BetAction(1, villainAction)
-          villainAction match
-            case PokerAction.Check | PokerAction.Call =>
-              ()
-            case PokerAction.Fold =>
-              handOver = true
-              outcome = 1
-            case PokerAction.Raise(amount) =>
-              val paidVillain = payVillain(amount)
-              val heroToCall = paidVillain
-              if heroToCall > 0.0 then
-                val heroResponse = decideHero(street, board, toCall = heroToCall, allowRaise = false)
-                betHistory = betHistory :+ BetAction(0, heroResponse)
-                heroResponse match
-                  case PokerAction.Fold =>
-                    handOver = true
-                    outcome = -1
-                  case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
-                    payHero(heroToCall)
-        case PokerAction.Fold =>
-          handOver = true
-          outcome = -1
-        case PokerAction.Raise(amount) =>
-          val paidHero = payHero(amount)
-          val villainToCall = paidHero
-          if villainToCall > 0.0 then
-            val villainResponse = decideVillain(
-              street = street,
-              board = board,
-              toCall = villainToCall,
-              allowRaise = false,
-              facingHeroRaise = true
-            )
-            betHistory = betHistory :+ BetAction(1, villainResponse)
-            villainResponse match
-              case PokerAction.Fold =>
-                handOver = true
-                outcome = 1
-              case PokerAction.Call | PokerAction.Check | PokerAction.Raise(_) =>
-                payVillain(villainToCall)
-
-  private def outcomeToNet(outcome: Int, pot: Double, heroContribution: Double): Double =
-    if outcome > 0 then pot - heroContribution
-    else if outcome < 0 then -heroContribution
-    else (pot * 0.5) - heroContribution
+        }.toMap
+        val payouts = sidePotPayouts(
+          contributions = contributionByPosition.toMap,
+          remainingPlayers = remainingPlayers,
+          handStrengthByPosition = ranked
+        )
+        ShowdownResolution(heroPayout = payouts.getOrElse(heroPosition, 0.0))
 
   private[holdem] def contributionGap(targetContribution: Double, currentContribution: Double): Double =
     math.max(0.0, targetContribution - currentContribution)
+
+  private[holdem] def mergedInferenceFolds(
+      staticFoldedPositions: Seq[Position],
+      preflopFoldedPositions: Seq[Position],
+      perspectivePosition: Position,
+      targetPosition: Position
+  ): Vector[PreflopFold] =
+    (staticFoldedPositions ++ preflopFoldedPositions)
+      .distinct
+      .filterNot(position => position == perspectivePosition || position == targetPosition)
+      .map(PreflopFold(_))
+      .toVector
+
+  private[holdem] def estimateRaiseResponseFromRange(
+      range: DiscreteDistribution[HoleCards],
+      responseState: GameState,
+      actionModel: PokerActionModel,
+      raiseAction: PokerAction
+  ): RaiseResponseEstimate =
+    val estimate = MultiwayInferenceEngine.estimateRaiseResponseFromRange(
+      range = range,
+      responseState = responseState,
+      actionModel = actionModel,
+      raiseAction = raiseAction
+    )
+    RaiseResponseEstimate(
+      foldProbability = estimate.foldProbability,
+      continueProbability = estimate.continueProbability,
+      continuationRange = estimate.continuationRange
+    )
 
   private def minEquityTrials(configured: Int): Int =
     math.max(1, configured / 30)
@@ -974,6 +1247,61 @@ object TexasHoldemPlayingHall:
 
   private def postflopEquityTrials(configured: Int): Int =
     math.max(8, configured / 16)
+
+  private def multiwayEquityTrials(
+      street: Street,
+      baseEquityTrials: Int,
+      opponentCount: Int
+  ): Int =
+    require(opponentCount > 0, "opponentCount must be positive")
+    val floor =
+      street match
+        case Street.Preflop => 80
+        case Street.Flop    => 48
+        case Street.Turn    => 32
+        case Street.River   => 24
+    val divisor =
+      street match
+        case Street.Preflop => opponentCount
+        case _              => math.max(1, opponentCount - 1)
+    math.max(floor, math.round(baseEquityTrials.toDouble / divisor.toDouble).toInt)
+
+  private[holdem] def estimateEquityAgainstOpponentRanges(
+      hero: HoleCards,
+      board: Board,
+      opponentRanges: Seq[DiscreteDistribution[HoleCards]],
+      equityTrials: Int,
+      rng: Random,
+      exactMaxEvaluations: Long = MultiwayExactMaxEvaluations
+  ): EquityEstimate =
+    MultiwayInferenceEngine.estimateEquityAgainstOpponentRanges(
+      hero = hero,
+      board = board,
+      opponentRanges = opponentRanges,
+      equityTrials = equityTrials,
+      rng = rng,
+      exactMaxEvaluations = exactMaxEvaluations
+    )
+
+  private[holdem] def recommendActionAgainstOpponentRanges(
+      hero: HoleCards,
+      state: GameState,
+      opponentRanges: Seq[DiscreteDistribution[HoleCards]],
+      candidateActions: Vector[PokerAction],
+      equityTrials: Int,
+      rng: Random,
+      actionValueModel: ActionValueModel = ActionValueModel.ChipEv()
+  ): ActionRecommendation =
+    MultiwayInferenceEngine.recommendActionAgainstOpponentRanges(
+      hero = hero,
+      state = state,
+      opponentRanges = opponentRanges,
+      candidateActions = candidateActions,
+      equityTrials = equityTrials,
+      rng = rng,
+      actionValueModel = actionValueModel,
+      exactMaxEvaluations = MultiwayExactMaxEvaluations
+    )
 
   private def buildEngine(
       tableRanges: TableRanges,
@@ -988,18 +1316,6 @@ object TexasHoldemPlayingHall:
       defaultEquityTrials = equityTrials,
       minEquityTrials = minEquityTrials(equityTrials)
     )
-
-  private def showdownOutcome(deal: Deal): Int =
-    // Use evaluate7PackedDirect to avoid Vector allocations, require checks,
-    // and cache lookups. Showdown always has exactly 5 board cards.
-    val bc = deal.board.cards
-    val heroRank = HandEvaluator.evaluate7PackedDirect(
-      deal.hero.first, deal.hero.second, bc(0), bc(1), bc(2), bc(3), bc(4)
-    )
-    val villainRank = HandEvaluator.evaluate7PackedDirect(
-      deal.villain.first, deal.villain.second, bc(0), bc(1), bc(2), bc(3), bc(4)
-    )
-    Integer.compare(heroRank, villainRank)
 
   private def villainResponds(
       hand: HoleCards,
@@ -1564,6 +1880,50 @@ object TexasHoldemPlayingHall:
       case VillainMode.Archetype(style) => style.toString
       case VillainMode.Gto              => "gto"
 
+  private def villainModeSlug(mode: VillainMode): String =
+    villainModeLabel(mode).toLowerCase(Locale.ROOT)
+
+  private def buildVillainPool(
+      fallbackMode: VillainMode,
+      rawPool: Option[String]
+  ): Either[String, Vector[VillainProfile]] =
+    rawPool.map(_.trim).filter(_.nonEmpty) match
+      case None =>
+        Right(Vector(VillainProfile(name = "Villain", mode = fallbackMode, label = villainModeLabel(fallbackMode))))
+      case Some(raw) =>
+        val tokens = raw.split(",").toVector.map(_.trim).filter(_.nonEmpty)
+        if tokens.isEmpty then Left("--villainPool must include at least one style")
+        else
+          tokens.zipWithIndex.foldLeft[Either[String, Vector[VillainProfile]]](Right(Vector.empty)) {
+            case (Left(error), _) => Left(error)
+            case (Right(acc), (token, idx)) =>
+              parseVillainModeToken(token).left.map(error => s"--villainPool: $error").map { mode =>
+                acc :+ VillainProfile(
+                  name = f"Villain${idx + 1}%02d_${villainModeSlug(mode)}",
+                  mode = mode,
+                  label = villainModeLabel(mode)
+                )
+              }
+          }
+
+  private def parseVillainModeToken(raw: String): Either[String, VillainMode] =
+    raw.trim.toLowerCase match
+      case "nit"            => Right(VillainMode.Archetype(PlayerArchetype.Nit))
+      case "tag"            => Right(VillainMode.Archetype(PlayerArchetype.Tag))
+      case "lag"            => Right(VillainMode.Archetype(PlayerArchetype.Lag))
+      case "callingstation" => Right(VillainMode.Archetype(PlayerArchetype.CallingStation))
+      case "station"        => Right(VillainMode.Archetype(PlayerArchetype.CallingStation))
+      case "maniac"         => Right(VillainMode.Archetype(PlayerArchetype.Maniac))
+      case "gto"            => Right(VillainMode.Gto)
+      case _ =>
+        Left("style must be one of: nit, tag, lag, callingstation, station, maniac, gto")
+
+  private def bracketedCards(cards: Seq[Card]): String =
+    s"[${cards.map(_.toToken).mkString(" ")}]"
+
+  private def money(amount: Double): String =
+    s"$$${fmt(roundMoney(amount), 2)}"
+
   private def heroCandidates(
       state: GameState,
       raiseSize: Double,
@@ -1579,38 +1939,101 @@ object TexasHoldemPlayingHall:
         base :+ PokerAction.Raise(raiseSize)
       else base
 
-  private def normalizeAction(
+  private[holdem] def normalizeAction(
       action: PokerAction,
       toCall: Double,
+      stackSize: Double,
       allowRaise: Boolean,
       defaultRaise: Double
   ): PokerAction =
+    val effectiveStack = roundMoney(math.max(0.0, stackSize))
     action match
       case PokerAction.Check =>
-        if toCall <= 0.0 then PokerAction.Check else PokerAction.Call
+        if toCall <= MoneyEpsilon then PokerAction.Check else PokerAction.Call
       case PokerAction.Call =>
-        if toCall > 0.0 then PokerAction.Call else PokerAction.Check
+        if toCall > MoneyEpsilon then PokerAction.Call else PokerAction.Check
       case PokerAction.Fold =>
-        if toCall > 0.0 then PokerAction.Fold else PokerAction.Check
+        if toCall > MoneyEpsilon then PokerAction.Fold else PokerAction.Check
       case PokerAction.Raise(amount) =>
         if !allowRaise then
-          if toCall > 0.0 then PokerAction.Call else PokerAction.Check
+          if toCall > MoneyEpsilon then PokerAction.Call else PokerAction.Check
         else
           val cleanAmount = if amount > 0.0 then amount else defaultRaise
-          if cleanAmount <= 0.0 then
-            if toCall > 0.0 then PokerAction.Call else PokerAction.Check
-          else PokerAction.Raise(cleanAmount)
+          if cleanAmount <= MoneyEpsilon || effectiveStack <= MoneyEpsilon then
+            if toCall > MoneyEpsilon then PokerAction.Call else PokerAction.Check
+          else if toCall > MoneyEpsilon then
+            if effectiveStack <= toCall + MoneyEpsilon then PokerAction.Call
+            else
+              val affordableRaise = roundMoney(math.min(cleanAmount, effectiveStack - toCall))
+              if affordableRaise <= MoneyEpsilon then PokerAction.Call
+              else PokerAction.Raise(affordableRaise)
+          else PokerAction.Raise(roundMoney(math.min(cleanAmount, effectiveStack)))
+
+  private[holdem] def raiseReopensAction(
+      raiseAmount: Double,
+      minimumRaiseAmount: Double
+  ): Boolean =
+    roundMoney(raiseAmount) + MoneyEpsilon >= roundMoney(minimumRaiseAmount)
+
+  private[holdem] def sidePotPayouts(
+      contributions: Map[Position, Double],
+      remainingPlayers: Vector[Position],
+      handStrengthByPosition: Map[Position, Int]
+  ): Map[Position, Double] =
+    if remainingPlayers.isEmpty then Map.empty
+    else
+      require(
+        remainingPlayers.forall(handStrengthByPosition.contains),
+        "remaining players must have showdown hand strengths"
+      )
+      val roundedContributions =
+        contributions.iterator.map { case (position, amount) =>
+          position -> roundMoney(math.max(0.0, amount))
+        }.toMap
+      val contributionLevels =
+        roundedContributions.valuesIterator
+          .filter(_ > MoneyEpsilon)
+          .toVector
+          .distinct
+          .sorted
+      val remainingSet = remainingPlayers.toSet
+      val payouts = mutable.HashMap.empty[Position, Double].withDefaultValue(0.0)
+      var previousLevel = 0.0
+      contributionLevels.foreach { level =>
+        val slice = roundMoney(level - previousLevel)
+        if slice > MoneyEpsilon then
+          val potParticipants =
+            roundedContributions.collect { case (position, amount) if amount + MoneyEpsilon >= level => position }.toVector
+          val eligibleWinners = potParticipants.filter(remainingSet.contains)
+          if eligibleWinners.nonEmpty then
+            val bestStrength = eligibleWinners.map(handStrengthByPosition).max
+            val winners = eligibleWinners.filter(position => handStrengthByPosition(position) == bestStrength)
+            val share = (slice * potParticipants.size.toDouble) / winners.size.toDouble
+            winners.foreach { position =>
+              payouts.update(position, payouts(position) + share)
+            }
+        previousLevel = level
+      }
+      payouts.iterator.map { case (position, amount) =>
+        position -> roundMoney(amount)
+      }.toMap
 
   private def clamp(value: Double, lo: Double = 0.0, hi: Double = 1.0): Double =
     math.max(lo, math.min(hi, value))
 
-  private def dealHand(rng: Random): Deal =
+  private def dealHand(
+      modeledPositions: Vector[Position],
+      rng: Random
+  ): Deal =
     val cards = Deck.full.toArray
-    shufflePrefix(cards, 9, rng)
-    val hero = HoleCards.from(Vector(cards(0), cards(2)))
-    val villain = HoleCards.from(Vector(cards(1), cards(3)))
-    val board = Board.from(cards.slice(4, 9).toVector.sortBy(CardId.toId))
-    Deal(hero, villain, board)
+    val holeCardsCount = modeledPositions.length * 2
+    shufflePrefix(cards, holeCardsCount + 5, rng)
+    val holeCardsByPosition =
+      modeledPositions.zipWithIndex.map { case (position, idx) =>
+        position -> HoleCards.from(Vector(cards(idx * 2), cards((idx * 2) + 1)))
+      }.toMap
+    val board = Board.from(cards.slice(holeCardsCount, holeCardsCount + 5).toVector.sortBy(CardId.toId))
+    Deal(holeCardsByPosition, board)
 
   private def shufflePrefix[A](array: Array[A], count: Int, rng: Random): Unit =
     val limit = math.min(count, array.length)
@@ -1621,6 +2044,120 @@ object TexasHoldemPlayingHall:
       array(i) = array(j)
       array(j) = tmp
       i += 1
+
+  private def modeledPositionsForPlayerCount(playerCount: Int): Vector[Position] =
+    playerCount match
+      case 2 => Vector(Position.Button, Position.BigBlind)
+      case 3 => Vector(Position.Button, Position.SmallBlind, Position.BigBlind)
+      case 4 => Vector(Position.Cutoff, Position.Button, Position.SmallBlind, Position.BigBlind)
+      case 5 => Vector(Position.Middle, Position.Cutoff, Position.Button, Position.SmallBlind, Position.BigBlind)
+      case 6 => Vector(Position.UTG, Position.Middle, Position.Cutoff, Position.Button, Position.SmallBlind, Position.BigBlind)
+      case 7 => Vector(Position.UTG, Position.UTG1, Position.Middle, Position.Cutoff, Position.Button, Position.SmallBlind, Position.BigBlind)
+      case 8 => Vector(
+        Position.UTG,
+        Position.UTG1,
+        Position.UTG2,
+        Position.Middle,
+        Position.Cutoff,
+        Position.Button,
+        Position.SmallBlind,
+        Position.BigBlind
+      )
+      case 9 => Vector(
+        Position.UTG,
+        Position.UTG1,
+        Position.UTG2,
+        Position.Middle,
+        Position.Hijack,
+        Position.Cutoff,
+        Position.Button,
+        Position.SmallBlind,
+        Position.BigBlind
+      )
+      case _ => Vector.empty
+
+  private def smallBlindPositionFor(playerCount: Int): Position =
+    if playerCount <= 2 then Position.Button
+    else Position.SmallBlind
+
+  private def blindContributionFor(position: Position, playerCount: Int): Double =
+    if position == Position.BigBlind then BigBlindAmount
+    else if position == smallBlindPositionFor(playerCount) then SmallBlindAmount
+    else 0.0
+
+  private def postflopOrderIndex(position: Position): Int =
+    Vector(
+      Position.SmallBlind,
+      Position.BigBlind,
+      Position.UTG,
+      Position.UTG1,
+      Position.UTG2,
+      Position.Middle,
+      Position.Hijack,
+      Position.Cutoff,
+      Position.Button
+    ).indexOf(position)
+
+  private def buildTableScenario(
+      playerCount: Int,
+      heroPosition: Position,
+      villainPool: Vector[VillainProfile],
+      headsUpOnly: Boolean,
+      rng: Random
+  ): TableScenario =
+    val modeledPositions = modeledPositionsForPlayerCount(playerCount)
+    require(modeledPositions.contains(heroPosition), s"hero position $heroPosition is not valid for playerCount=$playerCount")
+    val availableVillains = modeledPositions.filterNot(_ == heroPosition)
+    val activeVillainPositions =
+      if headsUpOnly then
+        if heroPosition == Position.BigBlind then
+          Vector(availableVillains(rng.nextInt(availableVillains.length)))
+        else
+          Vector(Position.BigBlind)
+      else
+        val minVillainCount =
+          if availableVillains.length <= 1 then 1
+          else math.min(2, availableVillains.length)
+        val maxVillainCount =
+          math.min(availableVillains.length, if playerCount >= 6 then 3 else 2)
+        val villainCount =
+          if maxVillainCount <= minVillainCount then minVillainCount
+          else minVillainCount + rng.nextInt(maxVillainCount - minVillainCount + 1)
+        availableVillains
+          .sortBy(_ => rng.nextDouble())
+          .take(villainCount)
+          .sortBy(modeledPositions.indexOf)
+    val activePositions =
+      modeledPositions.filter(position => position == heroPosition || activeVillainPositions.contains(position))
+    val foldedPositions = modeledPositions.filterNot(activePositions.contains)
+    val profileOffset = rng.nextInt(villainPool.length)
+    val villainProfileByPosition =
+      activeVillainPositions.zipWithIndex.map { case (position, idx) =>
+        position -> villainPool((profileOffset + idx) % villainPool.length)
+      }.toMap
+    val seatNumberByPosition =
+      modeledPositions.zipWithIndex.map { case (position, idx) => position -> (idx + 1) }.toMap
+    val playerNameByPosition =
+      modeledPositions.zipWithIndex.map { case (position, idx) =>
+        val name =
+          if position == heroPosition then ReviewHeroName
+          else if villainProfileByPosition.contains(position) then villainProfileByPosition(position).name
+          else f"Player${idx + 1}%02d_${position.toString}"
+        position -> name
+      }.toMap
+
+    TableScenario(
+      playerCount = playerCount,
+      modeledPositions = modeledPositions,
+      activePositions = activePositions,
+      heroPosition = heroPosition,
+      primaryVillainPosition = activeVillainPositions.head,
+      openerPosition = activePositions.head,
+      foldedPositions = foldedPositions,
+      seatNumberByPosition = seatNumberByPosition,
+      playerNameByPosition = playerNameByPosition,
+      villainProfileByPosition = villainProfileByPosition
+    )
 
   private def loadInitialArtifact(config: Config, modelsRoot: Path): (TrainedPokerActionModel, Path) =
     config.modelArtifactDir match
@@ -1674,8 +2211,13 @@ object TexasHoldemPlayingHall:
     val header = Vector(
       "hand",
       "tableId",
+      "playerCount",
       "heroPosition",
       "villainPosition",
+      "openerPosition",
+      "foldedPositions",
+      "activePositions",
+      "maxLivePlayers",
       "heroHole",
       "villainHole",
       "board",
@@ -1699,14 +2241,25 @@ object TexasHoldemPlayingHall:
       result: HandResult,
       modelId: String,
       archetype: String,
+      playerCount: Int,
       heroPosition: Position,
-      villainPosition: Position
+      villainPosition: Position,
+      openerPosition: Position,
+      foldedPositions: Vector[Position],
+      activePositions: Vector[Position],
+      maxLivePlayers: Int
   ): Unit =
     val boardToken = deal.board.cards.map(_.toToken).mkString(" ")
     val heroAction = result.heroActions.headOption.map(renderAction).getOrElse("-")
     val villainAction = result.villainActions.headOption.map(renderAction).getOrElse("-")
     val heroActionTrace = if result.heroActions.nonEmpty then result.heroActions.map(renderAction).mkString("|") else "-"
     val villainActionTrace = if result.villainActions.nonEmpty then result.villainActions.map(renderAction).mkString("|") else "-"
+    val foldedToken =
+      if foldedPositions.isEmpty then "-"
+      else foldedPositions.map(_.toString).mkString("|")
+    val activeToken =
+      if activePositions.isEmpty then "-"
+      else activePositions.map(_.toString).mkString("|")
     val outcomeLabel =
       if result.outcome > 0 then "win"
       else if result.outcome < 0 then "loss"
@@ -1714,10 +2267,15 @@ object TexasHoldemPlayingHall:
     val row = Vector(
       hand.toString,
       tableId.toString,
+      playerCount.toString,
       heroPosition.toString,
       villainPosition.toString,
-      deal.hero.toToken,
-      deal.villain.toToken,
+      openerPosition.toString,
+      foldedToken,
+      activeToken,
+      maxLivePlayers.toString,
+      deal.holeCardsFor(heroPosition).toToken,
+      deal.holeCardsFor(villainPosition).toToken,
       boardToken,
       heroAction,
       villainAction,
@@ -1730,6 +2288,41 @@ object TexasHoldemPlayingHall:
       outcomeLabel
     ).mkString("\t")
     writeLine(writer, row)
+
+  private def appendReviewHandHistory(
+      writer: BufferedWriter,
+      hand: Int,
+      tableId: Int,
+      startedAt: LocalDateTime,
+      deal: Deal,
+      result: HandResult,
+      tableScenario: TableScenario
+  ): Unit =
+    val tableLabel =
+      if tableScenario.playerCount <= 2 then "2-max"
+      else s"${tableScenario.playerCount}-max"
+    val header = s"PokerStars Hand #${1000 + hand}:  Hold'em No Limit (${money(0.5)}/${money(1.0)} USD) - ${startedAt.format(ReviewTimestampFormatter)} ET"
+    val tableLine = s"Table 'SICFUN Proof $tableId' $tableLabel Seat #${tableScenario.buttonSeatNumber} is the button"
+    val heroCardsLine = s"Dealt to $ReviewHeroName ${bracketedCards(deal.holeCardsFor(tableScenario.heroPosition).toVector)}"
+    val seatLines =
+      tableScenario.modeledPositions.map { position =>
+        s"Seat ${tableScenario.seatNumberByPosition(position)}: ${tableScenario.nameFor(position)} (${money(ReviewStartingStack)} in chips)"
+      }
+    val smallBlindPosition = smallBlindPositionFor(tableScenario.playerCount)
+    val blindLines = Vector(
+      s"${tableScenario.nameFor(smallBlindPosition)}: posts small blind ${money(SmallBlindAmount)}",
+      s"${tableScenario.nameFor(Position.BigBlind)}: posts big blind ${money(BigBlindAmount)}"
+    )
+
+    writeLine(writer, header)
+    writeLine(writer, tableLine)
+    seatLines.foreach(line => writeLine(writer, line))
+    blindLines.foreach(line => writeLine(writer, line))
+    writeLine(writer, "*** HOLE CARDS ***")
+    writeLine(writer, heroCardsLine)
+    result.reviewHistoryLines.foreach(line => writeLine(writer, line))
+    writeLine(writer, "*** SUMMARY ***")
+    writer.newLine()
 
   private def initLearningLog(writer: BufferedWriter): Unit =
     writeLine(writer, "hand\tmodelId\tmeanBrierScore\tgatePassed\tsampleCount")
@@ -1855,6 +2448,33 @@ object TexasHoldemPlayingHall:
   private def fmt(value: Double, digits: Int): String =
     String.format(Locale.ROOT, s"%.${digits}f", java.lang.Double.valueOf(value))
 
+  private def roundMoney(value: Double): Double =
+    math.round(value * 100.0) / 100.0
+
+  private def parseLegacyHeroSeat(raw: String): Either[String, Position] =
+    raw.trim.toLowerCase match
+      case "button" => Right(Position.Button)
+      case "bigblind" | "bb" => Right(Position.BigBlind)
+      case _ => Left("--heroSeat must be one of: button, bigblind")
+
+  private def resolveHeroPosition(
+      options: Map[String, String],
+      playerCount: Int
+  ): Either[String, Position] =
+    val rawPosition =
+      options.get("heroPosition") match
+        case Some(raw) =>
+          CliHelpers.parsePositionOptionEither(options, "heroPosition", Position.Button)
+        case None =>
+          options.get("heroSeat") match
+            case Some(raw) => parseLegacyHeroSeat(raw)
+            case None => Right(Position.Button)
+    rawPosition.flatMap { position =>
+      val modeledPositions = modeledPositionsForPlayerCount(playerCount)
+      if modeledPositions.contains(position) then Right(position)
+      else Left(s"--heroPosition $position is not valid for playerCount=$playerCount")
+    }
+
   private def parseArgs(args: Array[String]): Either[String, Config] =
     if args.contains("--help") || args.contains("-h") then Left(usage)
     else
@@ -1864,6 +2484,8 @@ object TexasHoldemPlayingHall:
         _ <- if hands > 0 then Right(()) else Left("--hands must be > 0")
         tableCount <- intOpt(options, "tableCount", 1)
         _ <- if tableCount > 0 then Right(()) else Left("--tableCount must be > 0")
+        playerCount <- intOpt(options, "playerCount", 2)
+        _ <- if playerCount >= 2 && playerCount <= 9 then Right(()) else Left("--playerCount must be in [2,9]")
         reportEvery <- intOpt(options, "reportEvery", 10000)
         _ <- if reportEvery > 0 then Right(()) else Left("--reportEvery must be > 0")
         learnEveryHands <- intOpt(options, "learnEveryHands", 50000)
@@ -1874,9 +2496,10 @@ object TexasHoldemPlayingHall:
         outDir <- pathOpt(options, "outDir", Paths.get("data/playing-hall"))
         modelArtifactDir <- optionalPathOpt(options, "modelArtifactDir")
         heroMode <- heroModeOpt(options, "heroStyle", HeroMode.Adaptive)
-        heroSeat <- heroSeatOpt(options, "heroSeat", HeroSeat.Button)
+        heroPosition <- resolveHeroPosition(options, playerCount)
         gtoMode <- gtoModeOpt(options, "gtoMode", GtoMode.Exact)
         villainMode <- villainModeOpt(options, "villainStyle", VillainMode.Archetype(PlayerArchetype.Tag))
+        villainPool <- buildVillainPool(villainMode, options.get("villainPool"))
         heroExplorationRate <- doubleOpt(options, "heroExplorationRate", 0.05)
         _ <- if heroExplorationRate >= 0.0 && heroExplorationRate <= 1.0 then Right(())
         else Left("--heroExplorationRate must be in [0,1]")
@@ -1888,9 +2511,11 @@ object TexasHoldemPlayingHall:
         _ <- if equityTrials > 0 then Right(()) else Left("--equityTrials must be > 0")
         saveTrainingTsv <- boolOpt(options, "saveTrainingTsv", true)
         saveDdreTrainingTsv <- boolOpt(options, "saveDdreTrainingTsv", false)
+        saveReviewHandHistory <- boolOpt(options, "saveReviewHandHistory", false)
       yield Config(
         hands = hands,
         tableCount = tableCount,
+        playerCount = playerCount,
         reportEvery = reportEvery,
         learnEveryHands = learnEveryHands,
         learningWindowSamples = learningWindowSamples,
@@ -1898,15 +2523,16 @@ object TexasHoldemPlayingHall:
         outDir = outDir,
         modelArtifactDir = modelArtifactDir,
         heroMode = heroMode,
-        heroSeat = heroSeat,
+        heroPosition = heroPosition,
         gtoMode = gtoMode,
-        villainMode = villainMode,
+        villainPool = villainPool,
         heroExplorationRate = heroExplorationRate,
         raiseSize = raiseSize,
         bunchingTrials = bunchingTrials,
         equityTrials = equityTrials,
         saveTrainingTsv = saveTrainingTsv,
-        saveDdreTrainingTsv = saveDdreTrainingTsv
+        saveDdreTrainingTsv = saveDdreTrainingTsv,
+        saveReviewHandHistory = saveReviewHandHistory
       )
 
   private def intOpt(options: Map[String, String], key: String, default: Int): Either[String, Int] =
@@ -1955,19 +2581,6 @@ object TexasHoldemPlayingHall:
           case "gto"      => Right(HeroMode.Gto)
           case _          => Left("--heroStyle must be one of: adaptive, gto")
 
-  private def heroSeatOpt(
-      options: Map[String, String],
-      key: String,
-      default: HeroSeat
-  ): Either[String, HeroSeat] =
-    options.get(key) match
-      case None => Right(default)
-      case Some(raw) =>
-        raw.trim.toLowerCase match
-          case "button" => Right(HeroSeat.Button)
-          case "bigblind" | "bb" => Right(HeroSeat.BigBlind)
-          case _ => Left("--heroSeat must be one of: button, bigblind")
-
   private def gtoModeOpt(
       options: Map[String, String],
       key: String,
@@ -1989,16 +2602,7 @@ object TexasHoldemPlayingHall:
     options.get(key) match
       case None => Right(default)
       case Some(raw) =>
-        raw.trim.toLowerCase match
-          case "nit"            => Right(VillainMode.Archetype(PlayerArchetype.Nit))
-          case "tag"            => Right(VillainMode.Archetype(PlayerArchetype.Tag))
-          case "lag"            => Right(VillainMode.Archetype(PlayerArchetype.Lag))
-          case "callingstation" => Right(VillainMode.Archetype(PlayerArchetype.CallingStation))
-          case "station"        => Right(VillainMode.Archetype(PlayerArchetype.CallingStation))
-          case "maniac"         => Right(VillainMode.Archetype(PlayerArchetype.Maniac))
-          case "gto"            => Right(VillainMode.Gto)
-          case _ =>
-            Left("--villainStyle must be one of: nit, tag, lag, callingstation, station, maniac, gto")
+        parseVillainModeToken(raw).left.map(_ => "--villainStyle must be one of: nit, tag, lag, callingstation, station, maniac, gto")
 
   private val usage =
     """Usage:
@@ -2006,6 +2610,7 @@ object TexasHoldemPlayingHall:
       |
       |  --hands=<int>                 default 100000
       |  --tableCount=<int>            default 1
+      |  --playerCount=<int>           table seats to model (2..9, default 2)
       |  --reportEvery=<int>           default 10000
       |  --learnEveryHands=<int>       default 50000 (0 disables learning)
       |  --learningWindowSamples=<int> default 200000 (0 = unbounded)
@@ -2013,13 +2618,16 @@ object TexasHoldemPlayingHall:
       |  --outDir=<path>               default data/playing-hall
       |  --modelArtifactDir=<path>     optional initial trained model
       |  --heroStyle=<style>           adaptive|gto
-      |  --heroSeat=<seat>             button|bigblind (default button)
+      |  --heroPosition=<Position>     explicit table position (defaults to Button)
+      |  --heroSeat=<seat>             legacy heads-up alias: button|bigblind
       |  --gtoMode=<mode>              fast|exact (default exact)
       |  --villainStyle=<style>        nit|tag|lag|callingstation|station|maniac|gto
+      |  --villainPool=<styles>        optional comma-separated villain pool overriding villainStyle
       |  --heroExplorationRate=<double> default 0.05 (epsilon-greedy, [0,1])
       |  --raiseSize=<double>          default 2.5
       |  --bunchingTrials=<int>        default 80
       |  --equityTrials=<int>          default 700
       |  --saveTrainingTsv=<bool>      default true
       |  --saveDdreTrainingTsv=<bool>  default false
+      |  --saveReviewHandHistory=<bool> default false
       |""".stripMargin

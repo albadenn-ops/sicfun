@@ -58,6 +58,8 @@ final case class AdaptiveCacheStats(inferenceHits: Long, inferenceMisses: Long):
 final case class EquilibriumBaselineConfig(
     iterations: Int = 1_200,
     blendWeight: Double = 0.35,
+    maxLocalExploitabilityForTrust: Double = Double.PositiveInfinity,
+    maxBaselineActionRegret: Double = Double.PositiveInfinity,
     cfrPlus: Boolean = true,
     averagingDelay: Int = 100,
     linearAveraging: Boolean = true,
@@ -69,6 +71,14 @@ final case class EquilibriumBaselineConfig(
 ):
   require(iterations > 0, "iterations must be positive")
   require(blendWeight >= 0.0 && blendWeight <= 1.0, "blendWeight must be in [0, 1]")
+  require(
+    maxLocalExploitabilityForTrust >= 0.0 && !maxLocalExploitabilityForTrust.isNaN,
+    "maxLocalExploitabilityForTrust must be >= 0 or positive infinity"
+  )
+  require(
+    maxBaselineActionRegret >= 0.0 && !maxBaselineActionRegret.isNaN,
+    "maxBaselineActionRegret must be >= 0 or positive infinity"
+  )
   require(averagingDelay >= 0, "averagingDelay must be non-negative")
   require(maxVillainHands > 0, "maxVillainHands must be positive")
   require(equityTrials > 0, "equityTrials must be positive")
@@ -77,13 +87,47 @@ final case class EquilibriumBaselineConfig(
     "villainReraiseMultipliers must be finite and > 1.0"
   )
 
+enum AdaptationDecisionSource:
+  case AdaptiveOnly
+  case BlendedWithBaseline
+  case BaselineGuardrail
+
+final case class AdaptationDecisionTrace(
+    source: AdaptationDecisionSource,
+    requestedBlendWeight: Double,
+    effectiveBlendWeight: Double,
+    baselineBestAction: Option[PokerAction],
+    baselineChosenActionRegret: Double,
+    baselineLocalExploitability: Option[Double],
+    reason: Option[String]
+):
+  require(requestedBlendWeight >= 0.0 && requestedBlendWeight <= 1.0, "requestedBlendWeight must be in [0, 1]")
+  require(effectiveBlendWeight >= 0.0 && effectiveBlendWeight <= 1.0, "effectiveBlendWeight must be in [0, 1]")
+  require(
+    baselineChosenActionRegret >= 0.0 && !baselineChosenActionRegret.isNaN,
+    "baselineChosenActionRegret must be non-negative or positive infinity"
+  )
+
+object AdaptationDecisionTrace:
+  val adaptiveOnly: AdaptationDecisionTrace =
+    AdaptationDecisionTrace(
+      source = AdaptationDecisionSource.AdaptiveOnly,
+      requestedBlendWeight = 0.0,
+      effectiveBlendWeight = 0.0,
+      baselineBestAction = None,
+      baselineChosenActionRegret = 0.0,
+      baselineLocalExploitability = None,
+      reason = None
+    )
+
 /** Adaptive recommendation over a provided posterior range. */
 final case class AdaptiveRecommendationResult(
     recommendation: ActionRecommendation,
     archetypePosterior: ArchetypePosterior,
     archetypeMap: PlayerArchetype,
     equityTrialsUsed: Int,
-    equilibriumBaseline: Option[HoldemCfrSolution] = None
+    equilibriumBaseline: Option[HoldemCfrSolution] = None,
+    adaptationTrace: AdaptationDecisionTrace = AdaptationDecisionTrace.adaptiveOnly
 ):
   require(equityTrialsUsed > 0, "equityTrialsUsed must be positive")
 
@@ -94,7 +138,8 @@ final case class AdaptiveDecisionResult(
     archetypeMap: PlayerArchetype,
     equityTrialsUsed: Int,
     cacheStats: AdaptiveCacheStats,
-    equilibriumBaseline: Option[HoldemCfrSolution] = None
+    equilibriumBaseline: Option[HoldemCfrSolution] = None,
+    adaptationTrace: AdaptationDecisionTrace = AdaptationDecisionTrace.adaptiveOnly
 ):
   require(equityTrialsUsed > 0, "equityTrialsUsed must be positive")
 
@@ -128,7 +173,8 @@ final class RealTimeAdaptiveEngine(
 
   private final case class RecommendationOutcome(
       recommendation: ActionRecommendation,
-      equilibriumBaseline: Option[HoldemCfrSolution]
+      equilibriumBaseline: Option[HoldemCfrSolution],
+      adaptationTrace: AdaptationDecisionTrace
   )
 
   private val MaxInferenceCacheSize = 64
@@ -214,7 +260,8 @@ final class RealTimeAdaptiveEngine(
       archetypePosterior = currentPosterior,
       archetypeMap = currentPosterior.mapEstimate,
       equityTrialsUsed = trials,
-      equilibriumBaseline = recommendationOutcome.equilibriumBaseline
+      equilibriumBaseline = recommendationOutcome.equilibriumBaseline,
+      adaptationTrace = recommendationOutcome.adaptationTrace
     )
 
   /** End-to-end adaptive decision with posterior inference cache. */
@@ -277,7 +324,8 @@ final class RealTimeAdaptiveEngine(
       archetypeMap = currentPosterior.mapEstimate,
       equityTrialsUsed = trials,
       cacheStats = cacheStats,
-      equilibriumBaseline = recommendationOutcome.equilibriumBaseline
+      equilibriumBaseline = recommendationOutcome.equilibriumBaseline,
+      adaptationTrace = recommendationOutcome.adaptationTrace
     )
 
   private def blendedRaiseResponse(posterior: ArchetypePosterior): VillainResponseProfile =
@@ -388,9 +436,10 @@ final class RealTimeAdaptiveEngine(
       equityTrials = equityTrials,
       rng = rng
     )
-    if equilibriumBaselineConfig.isEmpty then RecommendationOutcome(baseRecommendation, None)
+    if equilibriumBaselineConfig.isEmpty then
+      RecommendationOutcome(baseRecommendation, None, AdaptationDecisionTrace.adaptiveOnly)
     else
-      val (recommendation, equilibriumBaseline) =
+      val (recommendation, equilibriumBaseline, adaptationTrace) =
         maybeBlendWithEquilibriumBaseline(
           hero = hero,
           state = state,
@@ -399,7 +448,7 @@ final class RealTimeAdaptiveEngine(
           baseRecommendation = baseRecommendation,
           rng = new Random(rng.nextLong())
         )
-      RecommendationOutcome(recommendation, equilibriumBaseline)
+      RecommendationOutcome(recommendation, equilibriumBaseline, adaptationTrace)
 
   private def lowLatencyPosteriorInference(
       villainPos: Position
@@ -431,10 +480,10 @@ final class RealTimeAdaptiveEngine(
       candidateActions: Vector[PokerAction],
       baseRecommendation: ActionRecommendation,
       rng: Random
-  ): (ActionRecommendation, Option[HoldemCfrSolution]) =
+  ): (ActionRecommendation, Option[HoldemCfrSolution], AdaptationDecisionTrace) =
     equilibriumBaselineConfig match
       case None =>
-        (baseRecommendation, None)
+        (baseRecommendation, None, AdaptationDecisionTrace.adaptiveOnly)
       case Some(config) =>
         try
           val baseline = HoldemCfrSolver.solve(
@@ -456,33 +505,116 @@ final class RealTimeAdaptiveEngine(
             )
           )
 
-          if config.blendWeight <= 0.0 then
-            (baseRecommendation, Some(baseline))
-          else
-            val baselineEvByAction = baseline.actionEvaluations.map(eval => eval.action -> eval.expectedValue).toMap
-            val blendedEvaluations = baseRecommendation.actionEvaluations.map { evaluation =>
-              val baselineEv = baselineEvByAction.getOrElse(evaluation.action, evaluation.expectedValue)
-              val blendedEv =
-                ((1.0 - config.blendWeight) * evaluation.expectedValue) +
-                  (config.blendWeight * baselineEv)
-              ActionEvaluation(evaluation.action, blendedEv)
-            }
-            val best = blendedEvaluations.reduceLeft { (a, b) =>
-              if a.expectedValue >= b.expectedValue then a else b
-            }
+          val baselineRecommendation = recommendationFromBaseline(baseRecommendation, baseline)
+          val baselineTrusted = baseline.localExploitability <= config.maxLocalExploitabilityForTrust
+          if !baselineTrusted then
             (
-              baseRecommendation.copy(
-                actionEvaluations = blendedEvaluations,
-                bestAction = best.action
-              ),
-              Some(baseline)
+              baseRecommendation,
+              Some(baseline),
+              AdaptationDecisionTrace(
+                source = AdaptationDecisionSource.AdaptiveOnly,
+                requestedBlendWeight = config.blendWeight,
+                effectiveBlendWeight = 0.0,
+                baselineBestAction = Some(baseline.bestAction),
+                baselineChosenActionRegret = 0.0,
+                baselineLocalExploitability = Some(baseline.localExploitability),
+                reason = Some("baseline_local_exploitability_exceeds_trust_threshold")
+              )
             )
+          else
+            val proposedRecommendation =
+              if config.blendWeight <= 0.0 then baseRecommendation
+              else blendRecommendationWithBaseline(baseRecommendation, baseline, config.blendWeight)
+            val baselineRegret = baselineActionRegret(baseline, proposedRecommendation.bestAction)
+            if baselineRegret > config.maxBaselineActionRegret then
+              (
+                baselineRecommendation,
+                Some(baseline),
+                AdaptationDecisionTrace(
+                  source = AdaptationDecisionSource.BaselineGuardrail,
+                  requestedBlendWeight = config.blendWeight,
+                  effectiveBlendWeight = 1.0,
+                  baselineBestAction = Some(baseline.bestAction),
+                  baselineChosenActionRegret = baselineRegret,
+                  baselineLocalExploitability = Some(baseline.localExploitability),
+                  reason = Some("baseline_action_regret_exceeds_threshold")
+                )
+              )
+            else
+              (
+                proposedRecommendation,
+                Some(baseline),
+                AdaptationDecisionTrace(
+                  source =
+                    if config.blendWeight <= 0.0 then AdaptationDecisionSource.AdaptiveOnly
+                    else AdaptationDecisionSource.BlendedWithBaseline,
+                  requestedBlendWeight = config.blendWeight,
+                  effectiveBlendWeight = config.blendWeight,
+                  baselineBestAction = Some(baseline.bestAction),
+                  baselineChosenActionRegret = baselineRegret,
+                  baselineLocalExploitability = Some(baseline.localExploitability),
+                  reason = None
+                )
+              )
         catch
           case NonFatal(error) =>
             GpuRuntimeSupport.warn(
               s"adaptive CFR baseline failed (${failureDetail(error)}); using range-inference recommendation"
             )
-            (baseRecommendation, None)
+            (
+              baseRecommendation,
+              None,
+              AdaptationDecisionTrace(
+                source = AdaptationDecisionSource.AdaptiveOnly,
+                requestedBlendWeight = config.blendWeight,
+                effectiveBlendWeight = 0.0,
+                baselineBestAction = None,
+                baselineChosenActionRegret = 0.0,
+                baselineLocalExploitability = None,
+                reason = Some("baseline_unavailable")
+              )
+            )
+
+  private def recommendationFromBaseline(
+      baseRecommendation: ActionRecommendation,
+      baseline: HoldemCfrSolution
+  ): ActionRecommendation =
+    ActionRecommendation(
+      heroEquity = baseRecommendation.heroEquity,
+      actionEvaluations = baseline.actionEvaluations,
+      bestAction = baseline.bestAction
+    )
+
+  private def blendRecommendationWithBaseline(
+      baseRecommendation: ActionRecommendation,
+      baseline: HoldemCfrSolution,
+      blendWeight: Double
+  ): ActionRecommendation =
+    val baselineEvByAction = baseline.actionEvaluations.map(eval => eval.action -> eval.expectedValue).toMap
+    val blendedEvaluations = baseRecommendation.actionEvaluations.map { evaluation =>
+      val baselineEv = baselineEvByAction.getOrElse(evaluation.action, evaluation.expectedValue)
+      val blendedEv =
+        ((1.0 - blendWeight) * evaluation.expectedValue) +
+          (blendWeight * baselineEv)
+      ActionEvaluation(evaluation.action, blendedEv)
+    }
+    val best = blendedEvaluations.reduceLeft { (a, b) =>
+      if a.expectedValue >= b.expectedValue then a else b
+    }
+    baseRecommendation.copy(
+      actionEvaluations = blendedEvaluations,
+      bestAction = best.action
+    )
+
+  private def baselineActionRegret(
+      baseline: HoldemCfrSolution,
+      chosenAction: PokerAction
+  ): Double =
+    val baselineEvByAction = baseline.actionEvaluations.map(eval => eval.action -> eval.expectedValue).toMap
+    val bestBaselineEv = baselineEvByAction.getOrElse(baseline.bestAction, 0.0)
+    baselineEvByAction.get(chosenAction) match
+      case Some(chosenBaselineEv) => math.max(0.0, bestBaselineEv - chosenBaselineEv)
+      case None                   => Double.PositiveInfinity
 
   private def failureDetail(error: Throwable): String =
     Option(error.getMessage).map(_.trim).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)

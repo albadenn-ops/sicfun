@@ -231,7 +231,7 @@ private[holdem] object HoldemBayesProvider:
       val potOdds = state.potOdds
       val stackToPot = math.min(state.stackToPot, 10.0) / 10.0
       val streetOrdinal = state.street.ordinal.toDouble / 3.0
-      val positionOrdinal = state.position.ordinal.toDouble / 7.0
+      val positionOrdinal = state.position.ordinal.toDouble / (Position.values.length.toDouble - 1.0)
 
       // Pre-allocate logits array once per observation to avoid recomputing
       // the 5-feature dot product twice per hypothesis (was: two full passes).

@@ -1,0 +1,5 @@
+# Generated native build output: keep it out of review focus.
+HeadsUpOpenCLBindings.obj linguist-generated=true -diff
+src/main/native/build/** linguist-generated=true -diff
+src/main/native/build-ddre-verify/** linguist-generated=true -diff
+src/main/native/build-ddre-verify-cuda/** linguist-generated=true -diff

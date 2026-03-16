@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SICFUN | See the Hand You Missed</title>
+  <link rel="icon" href="data:,">
+  <meta
+    name="description"
+    content="SICFUN replays poker decisions, shows what they cost, and lets players test better lines before the next session."
+  >
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <main class="page">
+    <header class="header">
+      <div class="brand-block">
+        <a class="brand" href="#hero">SICFUN</a>
+        <p class="pronunciation">/sik-fun/ yes, we know.</p>
+      </div>
+      <nav class="nav" aria-label="Primary">
+        <a href="#problem">Problem</a>
+        <a href="#works">How it works</a>
+        <a href="#outputs">What you see</a>
+        <a href="#fit">Who it's for</a>
+      </nav>
+    </header>
+
+    <section class="hero" id="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Poker Study For Players Who Would Rather Know Than Guess</p>
+        <h1>See the hand you missed.</h1>
+        <p class="lead">
+          SICFUN replays your poker decisions, shows you what they cost, and gives you a better line to test
+          before your next session.
+        </p>
+        <a class="button" href="#outputs">See what the output looks like</a>
+      </div>
+
+      <aside class="hand-panel">
+        <p class="panel-label">Example review output</p>
+        <div class="hand-card">
+          <div class="cards">
+            <span>A♠</span>
+            <span>7♣</span>
+          </div>
+          <div class="board">
+            <span>K♠</span>
+            <span>9♦</span>
+            <span>3♥</span>
+            <span>Q♣</span>
+            <span>2♠</span>
+          </div>
+          <div class="review-line">
+            <span>Hero action</span>
+            <strong>Call river</strong>
+          </div>
+          <div class="review-line">
+            <span>Recommended</span>
+            <strong>Fold river</strong>
+          </div>
+          <div class="review-line highlight">
+            <span>Estimated cost</span>
+            <strong>-2.3 BB</strong>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="section" id="problem">
+      <div class="heading">
+        <p class="eyebrow">The Problem</p>
+        <h2>Most poker study fails in the same three places.</h2>
+      </div>
+      <div class="problem-grid">
+        <article class="problem-card">
+          <h3>You replay hands from memory.</h3>
+          <p>Memory edits the parts that hurt, which makes honest review harder than it should be.</p>
+        </article>
+        <article class="problem-card">
+          <h3>You argue lines with no data.</h3>
+          <p>Everyone sounds confident until someone has to produce a method and a number.</p>
+        </article>
+        <article class="problem-card">
+          <h3>You fix a leak and reopen it later.</h3>
+          <p>Without disciplined review, the same expensive mistake keeps finding its way back.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="works">
+      <div class="heading">
+        <p class="eyebrow">How It Works</p>
+        <h2>Replay. Compare. Test.</h2>
+      </div>
+      <div class="works-grid">
+        <article class="works-card">
+          <span class="step">01</span>
+          <h3>Replay the hand</h3>
+          <p>Bring the action, position, and sizing back into view without post-session fog.</p>
+        </article>
+        <article class="works-card">
+          <span class="step">02</span>
+          <h3>Compare decisions</h3>
+          <p>Put your action next to the recommended line and see what the gap costs in expected value.</p>
+        </article>
+        <article class="works-card">
+          <span class="step">03</span>
+          <h3>Test the better line</h3>
+          <p>If you think a different line holds up, simulate it and get evidence instead of table talk.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="outputs">
+      <div class="heading">
+        <p class="eyebrow">What You See</p>
+        <h2>The page should show the product, not just talk about it.</h2>
+      </div>
+      <div class="outputs-grid">
+        <article class="output-card">
+          <p class="output-kicker">Hand review</p>
+          <h3>Actual action vs recommended action.</h3>
+          <pre>Hero checks turn
+Recommended: bet 33%
+Decision gap: medium
+Focus: missed pressure spot</pre>
+        </article>
+        <article class="output-card">
+          <p class="output-kicker">Signal</p>
+          <h3>Risk flag with context.</h3>
+          <pre>Risk score: 0.74
+Severity: warning
+Reason: over-commit vs narrow range
+Model: action-risk v1</pre>
+        </article>
+        <article class="output-card">
+          <p class="output-kicker">Range view</p>
+          <h3>Fewer guesses about what villain can have.</h3>
+          <pre>Range narrowed after turn raise
+Value-heavy node detected
+Polarized tail preserved
+Review with full trace</pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="section fit-grid" id="fit">
+      <article class="fit-card">
+        <p class="eyebrow">You'll Like This If</p>
+        <ul>
+          <li>You review hands seriously</li>
+          <li>You want to test ideas before building habits</li>
+          <li>You care how the answer was produced</li>
+        </ul>
+      </article>
+      <article class="fit-card fit-card-alt">
+        <p class="eyebrow">Skip This If</p>
+        <ul>
+          <li>You only want a magic verdict</li>
+          <li>You do not care about traceability</li>
+          <li>You want hype more than study discipline</li>
+        </ul>
+      </article>
+    </section>
+
+    <section class="section final">
+      <div class="final-panel">
+        <h2>Built for players who would rather know than guess.</h2>
+        <p>SICFUN should feel less like a lecture and more like a sharp review session that finally gets specific.</p>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

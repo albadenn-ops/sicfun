@@ -14,6 +14,7 @@ except ImportError:
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = "gemini-1.5-flash"
+DEFAULT_SHARED_SYSTEM_FILE = REPO_ROOT / "AI_ENTRYPOINT.md"
 DEFAULT_SYSTEM_FILE = REPO_ROOT / "GEMINI.md"
 ENV_FILE_CANDIDATES = (
     REPO_ROOT / ".env",
@@ -45,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--system-file",
         default=str(DEFAULT_SYSTEM_FILE) if DEFAULT_SYSTEM_FILE.exists() else None,
-        help="Optional system prompt file. Defaults to GEMINI.md when it exists.",
+        help="Optional provider overlay file. Defaults to GEMINI.md when it exists and is prepended by AI_ENTRYPOINT.md when present.",
     )
     parser.add_argument(
         "--no-system-file",
@@ -130,13 +131,32 @@ def build_prompt(task: str, context_files: list[str]) -> str:
 
 
 def load_system_instruction(args: argparse.Namespace) -> str | None:
-    if args.no_system_file or not args.system_file:
+    if args.no_system_file:
         return None
 
-    path = resolve_path(args.system_file)
-    if not path.exists():
-        raise FileNotFoundError(f"System file not found: {path}")
-    return read_text_file(path)
+    sections: list[str] = []
+
+    if DEFAULT_SHARED_SYSTEM_FILE.exists():
+        sections.append(
+            "Shared repository contract "
+            f"({repo_relative_label(DEFAULT_SHARED_SYSTEM_FILE)}):\n\n"
+            f"{read_text_file(DEFAULT_SHARED_SYSTEM_FILE)}"
+        )
+
+    if args.system_file:
+        path = resolve_path(args.system_file)
+        if not path.exists():
+            raise FileNotFoundError(f"System file not found: {path}")
+        if path != DEFAULT_SHARED_SYSTEM_FILE:
+            sections.append(
+                f"Provider role overlay ({repo_relative_label(path)}):\n\n"
+                f"{read_text_file(path)}"
+            )
+
+    if not sections:
+        return None
+
+    return "\n\n".join(sections)
 
 
 def create_model(args: argparse.Namespace):

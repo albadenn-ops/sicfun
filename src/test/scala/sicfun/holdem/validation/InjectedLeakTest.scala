@@ -146,10 +146,10 @@ class InjectedLeakTest extends FunSuite:
     val spot = turnSpotIP().copy(street = Street.River)
     assert(!leak.applies(spot))
 
-  test("OverbluffsTurnBarrel does NOT apply OOP"):
+  test("OverbluffsTurnBarrel applies OOP (position-agnostic)"):
     val leak = OverbluffsTurnBarrel(severity = 1.0)
     val spot = turnSpotIP().copy(position = Position.BigBlind)
-    assert(!leak.applies(spot))
+    assert(leak.applies(spot))
 
   test("OverbluffsTurnBarrel deviates to Raise"):
     val leak = OverbluffsTurnBarrel(severity = 1.0)

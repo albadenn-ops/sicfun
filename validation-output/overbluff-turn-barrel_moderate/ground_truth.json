@@ -1,0 +1,10 @@
+{
+  "leakId": "overbluff-turn-barrel",
+  "leakDescription": "Bets/raises turn with air on wet boards -- GTO would check",
+  "severity": 0.6,
+  "baselineNoise": 0.03,
+  "totalHands": 10000,
+  "leakFiredCount": 784,
+  "leakApplicableSpots": 1367,
+  "heroNetBbPer100": 191.5357523200013
+}

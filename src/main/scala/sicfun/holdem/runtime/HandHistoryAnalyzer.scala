@@ -51,6 +51,33 @@ object HandHistoryAnalyzer:
       decisions: Vector[AnalyzedDecision]
   )
 
+  def expectedValueForObservedAction(
+      actionEvaluations: Vector[ActionEvaluation],
+      action: PokerAction
+  ): Double =
+    actionEvaluations
+      .find(_.action == action)
+      .map(_.expectedValue)
+      .orElse {
+        action match
+          case PokerAction.Raise(amount) =>
+            actionEvaluations
+              .collect { case ActionEvaluation(PokerAction.Raise(candidateAmount), expectedValue) =>
+                math.abs(candidateAmount - amount) -> expectedValue
+              }
+              .sortBy(_._1)
+              .headOption
+              .map(_._2)
+          case _ =>
+            actionEvaluations
+              .find(_.action.category == action.category)
+              .map(_.expectedValue)
+      }
+      .getOrElse(0.0)
+
+  def countsAsMistake(decision: AnalyzedDecision): Boolean =
+    roundDecisionEv(decision.evDifference) < 0.0
+
   def main(args: Array[String]): Unit =
     run(args) match
       case Left(err) =>
@@ -95,14 +122,8 @@ object HandHistoryAnalyzer:
       events: Vector[DecisionLoopEventFeedIO.FeedEvent],
       config: CliConfig
   ):
-    private val tableRanges = TableRanges.defaults(TableFormat.NineMax)
-    private val engine = new RealTimeAdaptiveEngine(
-      tableRanges = tableRanges,
-      actionModel = config.modelDir.map(path => PokerActionModelArtifactIO.load(path).model).getOrElse(PokerActionModel.uniform),
-      bunchingTrials = config.bunchingTrials,
-      defaultEquityTrials = config.equityTrials,
-      minEquityTrials = math.max(200, config.equityTrials / 10)
-    )
+    private val actionModel =
+      config.modelDir.map(path => PokerActionModelArtifactIO.load(path).model).getOrElse(PokerActionModel.uniform)
     private val seedRng = new Random(config.seed)
 
     def run(): AnalysisSummary =
@@ -128,14 +149,23 @@ object HandHistoryAnalyzer:
         }
 
     private def analyzeHand(handEvents: Vector[PokerEvent]): Vector[AnalyzedDecision] =
+      val availablePositions = handEvents.iterator.map(_.position).toSet
+      val tableRanges = TableRanges.defaults(TableFormat.forPlayerCount(math.max(2, availablePositions.size)))
       config.heroCards match
         case Some(cards) =>
           analyzeWithHeroCards(
             events = handEvents,
             heroPlayerId = config.heroPlayerId,
             heroCards = cards,
-            engine = engine,
+            engine = new RealTimeAdaptiveEngine(
+              tableRanges = tableRanges,
+              actionModel = actionModel,
+              bunchingTrials = config.bunchingTrials,
+              defaultEquityTrials = config.equityTrials,
+              minEquityTrials = math.max(200, config.equityTrials / 10)
+            ),
             tableRanges = tableRanges,
+            availablePositions = availablePositions,
             budgetMs = config.budgetMs,
             rng = new Random(seedRng.nextLong())
           )
@@ -145,7 +175,7 @@ object HandHistoryAnalyzer:
         handsAnalyzed: Int,
         decisions: Vector[AnalyzedDecision]
     ): AnalysisSummary =
-      val mistakes = decisions.count(d => d.actualAction.category != d.recommendedAction.category)
+      val mistakes = decisions.count(countsAsMistake)
       val evLost = decisions.map(d => math.min(0.0, d.evDifference)).sum
       val biggestMistake =
         if decisions.nonEmpty then decisions.map(d => math.abs(d.evDifference)).max
@@ -166,10 +196,20 @@ object HandHistoryAnalyzer:
       heroCards: HoleCards,
       engine: RealTimeAdaptiveEngine,
       tableRanges: TableRanges,
+      availablePositions: Set[Position] = Set.empty,
       budgetMs: Long = 2000L,
       rng: Random = new Random()
   ): Vector[AnalyzedDecision] =
-    new HeroDecisionAnalyzer(events, heroPlayerId, heroCards, engine, tableRanges, budgetMs, rng).analyze()
+    new HeroDecisionAnalyzer(
+      events = events,
+      heroPlayerId = heroPlayerId,
+      heroCards = heroCards,
+      engine = engine,
+      tableRanges = tableRanges,
+      availablePositions = availablePositions,
+      budgetMs = budgetMs,
+      rng = rng
+    ).analyze()
 
   private final class HeroDecisionAnalyzer(
       events: Vector[PokerEvent],
@@ -177,12 +217,27 @@ object HandHistoryAnalyzer:
       heroCards: HoleCards,
       engine: RealTimeAdaptiveEngine,
       tableRanges: TableRanges,
+      availablePositions: Set[Position],
       budgetMs: Long,
       rng: Random
   ):
     private val sortedEvents = events.sortBy(_.sequenceInHand)
     private val heroEvents = sortedEvents.filter(_.playerId == heroPlayerId)
-    private val villainEvents = sortedEvents.filter(_.playerId != heroPlayerId)
+    private val villainEventsByPlayer =
+      sortedEvents
+        .filter(_.playerId != heroPlayerId)
+        .groupBy(_.playerId)
+        .view
+        .mapValues(_.sortBy(_.sequenceInHand))
+        .toMap
+    private val activeVillainPlayerId = resolveActiveVillainPlayerId()
+    private val activeVillainEvents =
+      activeVillainPlayerId
+        .flatMap(villainEventsByPlayer.get)
+        .getOrElse(Vector.empty)
+    private val eligiblePositions =
+      if availablePositions.nonEmpty then availablePositions
+      else tableRanges.format.preflopOrder.toSet
 
     def analyze(): Vector[AnalyzedDecision] =
       val analyzed = Vector.newBuilder[AnalyzedDecision]
@@ -207,8 +262,17 @@ object HandHistoryAnalyzer:
       catch
         case _: Exception => None
 
+    private def resolveActiveVillainPlayerId(): Option[String] =
+      villainEventsByPlayer.toVector.sortBy { case (_, playerEvents) =>
+        val latestNonFold =
+          playerEvents.filter(_.action != PokerAction.Fold).lastOption.map(_.sequenceInHand).getOrElse(Long.MinValue)
+        val latestAny = playerEvents.lastOption.map(_.sequenceInHand).getOrElse(Long.MinValue)
+        val actionCount = playerEvents.length.toLong
+        (-latestNonFold, -latestAny, -actionCount)
+      }.headOption.map(_._1)
+
     private def priorVillainObservations(heroEvent: PokerEvent): Seq[VillainObservation] =
-      villainEvents
+      activeVillainEvents
         .filter(_.sequenceInHand < heroEvent.sequenceInHand)
         .filter(_.action != PokerAction.Fold)
         .map(event => VillainObservation(event.action, gameStateFor(event)))
@@ -230,21 +294,39 @@ object HandHistoryAnalyzer:
       else candidates :+ heroEvent.action
 
     private def villainPositionFor(heroEvent: PokerEvent): Position =
-      villainEvents.headOption.map(_.position)
-        .getOrElse(if heroEvent.position == Position.SmallBlind then Position.BigBlind else Position.SmallBlind)
+      activeVillainEvents.headOption.map(_.position)
+        .getOrElse(if heroEvent.position == Position.BigBlind then Position.Button else Position.BigBlind)
 
     private def preflopFoldsFor(heroEvent: PokerEvent): Vector[PreflopFold] =
-      val openerPos =
-        if heroEvent.position == Position.SmallBlind then Position.Button
-        else Position.BigBlind
-      tableRanges.format.foldsBeforeOpener(openerPos).map(PreflopFold(_))
+      val actualPreflopFolds =
+        sortedEvents
+          .filter(_.street == Street.Preflop)
+          .filter(event => event.playerId != heroPlayerId)
+          .filter(event => !activeVillainPlayerId.contains(event.playerId))
+          .filter(_.action == PokerAction.Fold)
+          .map(_.position)
+          .filter(eligiblePositions.contains)
+          .distinct
+      if actualPreflopFolds.nonEmpty then actualPreflopFolds.map(PreflopFold(_))
+      else
+        val openerPos =
+          sortedEvents
+            .filter(_.street == Street.Preflop)
+            .filter(event => event.playerId == heroPlayerId || activeVillainPlayerId.contains(event.playerId))
+            .headOption
+            .map(_.position)
+            .getOrElse(tableRanges.format.preflopOrder.head)
+        tableRanges.format
+          .foldsBeforeOpener(openerPos)
+          .filter(eligiblePositions.contains)
+          .map(PreflopFold(_))
 
     private def buildDecision(
         heroEvent: PokerEvent,
         recommendation: ActionRecommendation
     ): AnalyzedDecision =
       val recommendedEv = expectedValueFor(recommendation, recommendation.bestAction)
-      val actualEv = expectedValueForCategory(recommendation, heroEvent.action)
+      val actualEv = expectedValueForObservedAction(recommendation.actionEvaluations, heroEvent.action)
       AnalyzedDecision(
         handId = heroEvent.handId,
         street = heroEvent.street,
@@ -266,15 +348,6 @@ object HandHistoryAnalyzer:
         .map(_.expectedValue)
         .getOrElse(0.0)
 
-    private def expectedValueForCategory(
-        recommendation: ActionRecommendation,
-        action: PokerAction
-    ): Double =
-      recommendation.actionEvaluations
-        .find(_.action.category == action.category)
-        .map(_.expectedValue)
-        .getOrElse(0.0)
-
   // ---- Output ----
 
   private def printSummary(summary: AnalysisSummary): Unit =
@@ -289,7 +362,7 @@ object HandHistoryAnalyzer:
       println()
       println("  Per-decision breakdown:")
       summary.decisions.foreach { d =>
-        val mark = if d.actualAction.category == d.recommendedAction.category then "OK" else "MISS"
+        val mark = if countsAsMistake(d) then "MISS" else "OK"
         println(f"    ${d.handId} ${d.street}: actual=${renderAction(d.actualAction)} rec=${renderAction(d.recommendedAction)} ev_diff=${d.evDifference}%+.2f $mark")
       }
 
@@ -310,6 +383,9 @@ object HandHistoryAnalyzer:
       Vector(PokerAction.Fold, PokerAction.Call) ++ raises
 
   private def roundChips(v: Double): Double = math.round(v * 2.0) / 2.0
+
+  private def roundDecisionEv(v: Double): Double =
+    math.round(v * 100.0) / 100.0
 
   private def renderAction(action: PokerAction): String = action match
     case PokerAction.Fold       => "FOLD"

@@ -120,6 +120,67 @@ class HandHistoryAnalyzerTest extends FunSuite:
     assert(d.heroCards.contains(heroCards))
   }
 
+  test("analyzeWithHeroCards supports heads-up button hero fallback without inventing small blind") {
+    val heroCards = CliHelpers.parseHoleCards("AcKh")
+    val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
+    val events = Vector(
+      PokerEvent(
+        handId = "hu-button", sequenceInHand = 0L, playerId = "hero",
+        occurredAtEpochMillis = 1000L, street = Street.Flop,
+        position = Position.Button, board = board,
+        potBefore = 20.0, toCall = 0.0, stackBefore = 194.0,
+        action = PokerAction.Check,
+        betHistory = Vector.empty
+      )
+    )
+
+    val baseState = GameState(
+      street = Street.Flop,
+      board = board,
+      pot = 20.0,
+      toCall = 10.0,
+      position = Position.BigBlind,
+      stackSize = 180.0,
+      betHistory = Vector.empty
+    )
+    val checkState = baseState.copy(toCall = 0.0, position = Position.Button)
+    val strong = HoleCards.from(Vector(card("Ah"), card("Ad")))
+    val medium = HoleCards.from(Vector(card("Qc"), card("Jc")))
+    val weak = HoleCards.from(Vector(card("7c"), card("2d")))
+    val data: Seq[(GameState, HoleCards, PokerAction)] =
+      Vector.fill(24)((baseState, strong, PokerAction.Raise(25.0))) ++
+        Vector.fill(24)((baseState, medium, PokerAction.Call)) ++
+        Vector.fill(24)((baseState, weak, PokerAction.Fold)) ++
+        Vector.fill(12)((checkState, medium, PokerAction.Check))
+    val artifact = PokerActionModel.trainVersioned(
+      trainingData = data, learningRate = 0.1, iterations = 200,
+      l2Lambda = 0.001, validationFraction = 0.25, splitSeed = 42L,
+      maxMeanBrierScore = 2.0, failOnGate = false,
+      modelId = "test-hu-button", schemaVersion = "v1", source = "test",
+      trainedAtEpochMillis = 1_000_000_000_000L
+    )
+    val tableRanges = TableRanges.defaults(TableFormat.HeadsUp)
+    val engine = new RealTimeAdaptiveEngine(
+      tableRanges = tableRanges, actionModel = artifact.model,
+      bunchingTrials = 50, defaultEquityTrials = 200, minEquityTrials = 100
+    )
+
+    val decisions = HandHistoryAnalyzer.analyzeWithHeroCards(
+      events = events,
+      heroPlayerId = "hero",
+      heroCards = heroCards,
+      engine = engine,
+      tableRanges = tableRanges,
+      availablePositions = Set(Position.Button, Position.BigBlind),
+      budgetMs = 5000L,
+      rng = new Random(42)
+    )
+
+    assertEquals(decisions.length, 1, s"expected 1 hero decision, got ${decisions.length}")
+    assertEquals(decisions.head.handId, "hu-button")
+    assertEquals(decisions.head.actualAction, PokerAction.Check)
+  }
+
   test("run returns Left for missing feed file") {
     val result = HandHistoryAnalyzer.run(Array("/nonexistent/feed.tsv"))
     assert(result.isLeft)
@@ -204,4 +265,72 @@ class HandHistoryAnalyzerTest extends FunSuite:
       assertEquals(summary.decisions, Vector.empty)
     finally
       Files.walk(tempDir).sorted(java.util.Comparator.reverseOrder()).forEach(Files.deleteIfExists)
+  }
+
+  test("countsAsMistake treats negative EV sizing gaps as mistakes and zero-gap category changes as non-mistakes") {
+    val sizingGap = HandHistoryAnalyzer.AnalyzedDecision(
+      handId = "public-sizing-gap",
+      street = Street.Flop,
+      heroCards = Some(CliHelpers.parseHoleCards("JsQs")),
+      actualAction = PokerAction.Raise(1.94),
+      recommendedAction = PokerAction.Raise(1.0),
+      actualEv = 0.62,
+      recommendedEv = 0.83,
+      evDifference = -0.21,
+      heroEquityMean = 0.84
+    )
+    val equalEvDifferentCategory = HandHistoryAnalyzer.AnalyzedDecision(
+      handId = "equal-ev",
+      street = Street.Flop,
+      heroCards = Some(CliHelpers.parseHoleCards("AcKh")),
+      actualAction = PokerAction.Call,
+      recommendedAction = PokerAction.Raise(1.0),
+      actualEv = 0.15,
+      recommendedEv = 0.15,
+      evDifference = 0.0,
+      heroEquityMean = 0.44
+    )
+
+    assert(HandHistoryAnalyzer.countsAsMistake(sizingGap))
+    assert(!HandHistoryAnalyzer.countsAsMistake(equalEvDifferentCategory))
+  }
+
+  test("countsAsMistake forgives sub-cent losses (rounding tolerance)") {
+    def decision(evDiff: Double) = HandHistoryAnalyzer.AnalyzedDecision(
+      handId = "boundary", street = Street.Flop,
+      heroCards = Some(CliHelpers.parseHoleCards("AcKh")),
+      actualAction = PokerAction.Call, recommendedAction = PokerAction.Raise(1.0),
+      actualEv = 0.0, recommendedEv = -evDiff, evDifference = evDiff,
+      heroEquityMean = 0.5
+    )
+    // -0.005 is forgiven (sub-cent noise)
+    assert(!HandHistoryAnalyzer.countsAsMistake(decision(-0.005)))
+    // -0.006 rounds to -0.01 and IS a mistake
+    assert(HandHistoryAnalyzer.countsAsMistake(decision(-0.006)))
+    // -0.01 is clearly a mistake
+    assert(HandHistoryAnalyzer.countsAsMistake(decision(-0.01)))
+    // exactly zero is not a mistake
+    assert(!HandHistoryAnalyzer.countsAsMistake(decision(0.0)))
+  }
+
+  test("expectedValueForObservedAction matches exact actions and falls back to the nearest raise size") {
+    val evaluations = Vector(
+      ActionEvaluation(PokerAction.Call, 0.1),
+      ActionEvaluation(PokerAction.Raise(0.5), 0.2),
+      ActionEvaluation(PokerAction.Raise(1.0), 0.8),
+      ActionEvaluation(PokerAction.Raise(2.0), 0.3)
+    )
+
+    assertEquals(
+      HandHistoryAnalyzer.expectedValueForObservedAction(evaluations, PokerAction.Call),
+      0.1
+    )
+    assertEquals(
+      HandHistoryAnalyzer.expectedValueForObservedAction(evaluations, PokerAction.Raise(1.94)),
+      0.3
+    )
+    assertEquals(
+      HandHistoryAnalyzer.expectedValueForObservedAction(evaluations, PokerAction.Raise(0.9)),
+      0.8
+    )
   }

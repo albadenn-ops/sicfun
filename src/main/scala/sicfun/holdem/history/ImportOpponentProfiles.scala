@@ -150,7 +150,7 @@ object ImportOpponentProfiles:
       |  runMain sicfun.holdem.history.ImportOpponentProfiles --input=<path> [--key=value ...]
       |
       |Options:
-      |  --site=<auto|pokerstars>   Default auto
+      |  --site=<auto|pokerstars|winamax|ggpoker>   Default auto
       |  --heroName=<screenName>    Optional hero name to exclude from stored opponent profiles
       |  --store=<path|jdbc:postgresql://...> Optional persistent opponent profile store output
       |  --storeUser=<user>         Optional PostgreSQL user

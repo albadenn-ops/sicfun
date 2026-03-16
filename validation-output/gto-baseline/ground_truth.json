@@ -1,0 +1,10 @@
+{
+  "leakId": "gto-baseline",
+  "leakDescription": "GTO baseline — no exploitable deviation",
+  "severity": 0,
+  "baselineNoise": 0.03,
+  "totalHands": 10000,
+  "leakFiredCount": 0,
+  "leakApplicableSpots": 0,
+  "heroNetBbPer100": 22.69924063999997
+}

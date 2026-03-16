@@ -1,0 +1,10 @@
+{
+  "leakId": "passive-big-pots",
+  "leakDescription": "Checks strong hands in big pots (SPR<2) instead of value betting",
+  "severity": 0.6,
+  "baselineNoise": 0.03,
+  "totalHands": 10000,
+  "leakFiredCount": 1112,
+  "leakApplicableSpots": 3379,
+  "heroNetBbPer100": 149.6723663999992
+}

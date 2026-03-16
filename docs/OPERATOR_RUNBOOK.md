@@ -183,6 +183,33 @@ Postflop CUDA auto-tuner:
 sbt "runMain sicfun.holdem.bench.HoldemPostflopGpuAutoTuner --villains=1024 --trials=2000 --warmupRuns=1 --runs=3 --cachePath=data/postflop-autotune.properties"
 ```
 
+## 5A. Hand-History Web Review
+
+Source-mode launcher:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-hand-history-web.ps1
+```
+
+Packaged release:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/release-hand-history-web.ps1
+```
+
+Start the packaged app:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File dist/hand-history-web/bin/run-hand-history-web.ps1
+```
+
+Operator notes:
+- The packaged release serves the upload UI from `dist/hand-history-web/static`.
+- The source and packaged launchers bind to `127.0.0.1` by default. Pass `-Host 0.0.0.0` only if you intentionally want network exposure.
+- Uploads are accepted quickly and processed as background jobs; the page polls `/api/analyze-hand-history/jobs/{id}` until the review finishes.
+- `scripts/release-hand-history-web.ps1` validates the required static assets and smoke-checks `/`, `/api/health`, async `/api/analyze-hand-history`, and oversized-upload rejection before declaring the build ready.
+- The web server supports `HOST`, `PORT`, `STATIC_DIR`, `MODEL_DIR`, and `MAX_UPLOAD_BYTES` environment-variable overrides in addition to CLI flags.
+
 ## 6. Troubleshooting
 
 Classpath appears stale or Java run behaves like old code:
@@ -269,6 +296,7 @@ powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
 
 Notes:
 
+- Shared sidecar rules live in `AI_ENTRYPOINT.md`, with provider-specific overlays in `GEMINI.md`, `CLAUDE.md`, and `GPT.md`.
 - Gemini keeps its provider-specific wrapper at `scripts/gemini-sidecar.ps1`.
 - Claude login is browser-based through `claude auth login`.
 - GPT uses the official OpenAI Codex CLI and ChatGPT/device auth.

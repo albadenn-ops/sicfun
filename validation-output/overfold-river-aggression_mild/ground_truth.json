@@ -1,0 +1,10 @@
+{
+  "leakId": "overfold-river-aggression",
+  "leakDescription": "Overfolds to large bets on wet boards when range is capped and hand is medium/weak",
+  "severity": 0.3,
+  "baselineNoise": 0.03,
+  "totalHands": 10000,
+  "leakFiredCount": 46,
+  "leakApplicableSpots": 238,
+  "heroNetBbPer100": 59.883767360000164
+}

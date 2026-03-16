@@ -105,6 +105,8 @@ Status note: a checked box means code landed in the repo. It does not automatica
 ## M12 Reliability hardening (ongoing)
 - [x] DDRE shadow/fallback posterior stability: preserve exact Bayesian posterior in off/shadow/fallback paths and short-circuit alpha edge cases in fusion (`RangeInferenceEngine`)
 - [x] Always-on response attribution hardening: replaced global raise-response gate with per-hand tracking to prevent interleaved-hand contamination (`AlwaysOnDecisionLoop`)
+- [x] Adaptive CFR safety guardrails: added explicit CFR trust/action-regret thresholds plus decision attribution telemetry so adaptive recommendations can prove when they blended with baseline versus being clamped back to it (`RealTimeAdaptiveEngine`, `AlwaysOnDecisionLoop`, `AdvisorSession`, `PokerAdvisor`)
+- [x] First-class multiway inferred-play engine: extracted hall-local multi-opponent posterior aggregation and multiway EV/recommendation logic into reusable engine APIs (`MultiwayInferenceEngine`, `TexasHoldemPlayingHall`)
 - [x] Hand-history analyzer correctness: removed placeholder zero-EV recommendations; now runs model-backed analysis when `--heroCards` is supplied and uses `--model` artifact when present (`HandHistoryAnalyzer`)
 - [x] Hybrid dispatcher adaptive-weight concurrency guard: added regression coverage proving lossless concurrent adaptive calibration updates (`HeadsUpHybridDispatcherPlanningTest`)
 - [x] Hall launcher classpath resilience: hardened Java classpath export/parsing against noisy `sbt` output for stable long-running scripted runs (`scripts/run-playing-hall.ps1`, `scripts/run-playing-hall-max.ps1`)

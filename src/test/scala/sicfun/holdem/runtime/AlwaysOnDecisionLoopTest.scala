@@ -340,9 +340,16 @@ class AlwaysOnDecisionLoopTest extends FunSuite:
       val decisionsPath = out.resolve("decisions.tsv")
       val decisionLines = Files.readAllLines(decisionsPath, StandardCharsets.UTF_8).asScala.toVector
       assert(decisionLines.nonEmpty, "expected non-empty decisions output")
+      assert(decisionLines.head.contains("decisionAttribution"))
+      assert(decisionLines.head.contains("decisionAttributionReason"))
+      assert(decisionLines.head.contains("cfrRequestedBlendWeight"))
+      assert(decisionLines.head.contains("cfrEffectiveBlendWeight"))
+      assert(decisionLines.head.contains("cfrChosenActionRegret"))
       assert(decisionLines.head.contains("cfrLocalExploitability"))
       assert(decisionLines.head.contains("cfrRootDeviationGap"))
       assert(decisionLines.head.contains("cfrVillainDeviationGap"))
+      assert(decisionLines.length >= 2)
+      assert(decisionLines(1).contains("BlendedWithBaseline"))
     finally
       deleteRecursively(root)
   }

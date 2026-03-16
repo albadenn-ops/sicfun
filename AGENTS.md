@@ -8,7 +8,9 @@ Default rule:
 - Use [`scripts/ai-minion.ps1`](scripts/ai-minion.ps1) for repo exploration, second-pass review, benchmark/result summarization, and patch planning.
 - Available linked workers are `gemini`, `claude`, and `gpt`.
 - Treat every provider as a read-only helper. Codex remains responsible for edits, verification, and final judgment.
-- Prefer `gemini` or `gpt` for routine delegated runs. Use `claude` as a second reviewer or fallback when you want signal from a different model family.
+- Prefer `claude` for planning, scope control, contradiction hunting, and fact-checking when available.
+- Prefer `gpt` for implementation-oriented breakdowns, execution planning after scope is set, and code-aware review.
+- Use `gemini` for bounded repo exploration, extraction, summarization, repetitive support work, and explicit execution tasks. Treat Gemini as low-trust for inference.
 - If the chosen provider is unavailable or auth is broken, state that briefly, retry once with fewer files and a sharper task, then switch providers instead of blocking.
 - If all providers are unavailable, proceed with local analysis and state that no sidecar review was obtained.
 
@@ -46,6 +48,7 @@ powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
 
 Notes:
 - The unified dispatcher writes prompts and outputs under `.tool-cache/ai-minions/<provider>/`.
+- Shared sidecar rules live in `AI_ENTRYPOINT.md`. Provider-specific role overlays live in `GEMINI.md`, `CLAUDE.md`, and `GPT.md`.
 - `scripts/gemini-sidecar.ps1` still exists for Gemini-specific auth/setup details; the unified dispatcher forwards normal Gemini flows to it.
 - Claude inlines requested `-ContextPath` file contents for delegated runs, even without `-InjectContext`, because its delegated path runs without file-reading tools. Passing `-InjectContext` to Claude is currently redundant but still useful for making that intent explicit in the command line. The dispatcher prints a note when it has to force that behavior.
 - Prefer focused `-ContextPath` inputs over broad directory dumps.

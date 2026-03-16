@@ -312,6 +312,54 @@ object OpponentProfile:
 
   private def exploitHintsFor(profile: OpponentProfile): Vector[String] =
     val hints = Vector.newBuilder[String]
+
+    // ── Per-street / per-context analysis from recent events ──
+    val events = profile.recentEvents
+    if events.size >= 10 then
+      // River fold rate when facing bets — 30%+ is exploitably high in HU
+      val riverFacingBet = events.filter(e => e.street == Street.River && e.toCall > 0)
+      if riverFacingBet.size >= 5 then
+        val riverFoldRate = riverFacingBet.count(_.action == PokerAction.Fold).toDouble / riverFacingBet.size
+        if riverFoldRate >= 0.30 then
+          hints += "Over-folds on the river facing aggression; increase bluff pressure on late streets."
+
+      // Call rate facing large bets (bet/pot-before-bet >= 0.6)
+      val facingLargeBet = events.filter { e =>
+        e.toCall > 0 && e.potBefore > e.toCall && e.toCall / (e.potBefore - e.toCall) >= 0.6
+      }
+      if facingLargeBet.size >= 5 then
+        val largeBetCallRate = facingLargeBet.count(_.action == PokerAction.Call).toDouble / facingLargeBet.size
+        if largeBetCallRate >= 0.60 then
+          hints += "Calls too often facing large bets; value bet thinner and cut bluffs."
+
+      // Turn aggression rate — 25%+ suggests excessive turn betting (HU baseline ~20%)
+      val turnEvents = events.filter(_.street == Street.Turn)
+      if turnEvents.size >= 5 then
+        val turnRaiseRate = turnEvents.count(_.action.category == PokerAction.Category.Raise).toDouble / turnEvents.size
+        if turnRaiseRate >= 0.25 then
+          hints += "Very aggressive on the turn; bluff-catch more selectively against turn barrels."
+
+      // Passive in big pots: checks strong spots when they could bet (toCall = 0, SPR < 4)
+      val bigPotCanBet = events.filter(e =>
+        e.potBefore > 0 && e.stackBefore / e.potBefore < 4.0 && e.toCall == 0
+      )
+      if bigPotCanBet.size >= 5 then
+        val bigPotCheckRate = bigPotCanBet.count(_.action == PokerAction.Check).toDouble / bigPotCanBet.size
+        if bigPotCheckRate >= 0.75 then
+          hints += "Plays passive in big pots; Respect their sudden aggression when they do bet large."
+
+      // Preflop fold rate — baseline ~13%, anything above 20% is exploitably tight
+      val preflopEvents = events.filter(_.street == Street.Preflop)
+      if preflopEvents.size >= 8 then
+        val preflopFoldRate = preflopEvents.count(_.action == PokerAction.Fold).toDouble / preflopEvents.size
+        if preflopFoldRate >= 0.20 then
+          hints += "Over-folds preflop; Open slightly wider against this player."
+        // Preflop call rate — HU BB baseline ~55%, 65%+ means too passive/calling
+        val preflopCallRate = preflopEvents.count(_.action == PokerAction.Call).toDouble / preflopEvents.size
+        if preflopCallRate >= 0.65 then
+          hints += "Calls too loose preflop; value bet wider preflop ranges."
+
+    // ── Aggregate raise response analysis ──
     val signature = profile.signature
     val responseTotal = profile.raiseResponses.total.toDouble
     if responseTotal >= 4.0 then
@@ -325,6 +373,7 @@ object OpponentProfile:
       if reraiseVsRaise >= 0.28 then
         hints += "Expect re-raises; trap stronger hands and avoid thin bluffs."
 
+    // ── Overall signature analysis ──
     val foldRate = signature.values(0)
     val raiseRate = signature.values(1)
     val callRate = signature.values(2)
@@ -342,7 +391,7 @@ object OpponentProfile:
         hints += "Profile is drifting; lower exploit confidence and stay closer to baseline."
     }
     val built = hints.result().distinct
-    if built.nonEmpty then built.take(3)
+    if built.nonEmpty then built.take(5)
     else Vector("No high-confidence exploit yet; use baseline strategy with mild archetype bias.")
 
   private[history] def eventToGameState(event: PokerEvent): GameState =

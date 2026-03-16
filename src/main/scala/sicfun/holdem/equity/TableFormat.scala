@@ -10,8 +10,7 @@ import sicfun.core.DiscreteDistribution
   * have folded before a given opener, which is the basis for bunching
   * effect computation.
   *
-  * NineMax uses the 8 distinct position categories from [[Position]],
-  * which covers standard 8-max and 9-max full-ring games.
+  * NineMax uses the full 9-position ordering from [[Position]].
   */
 enum TableFormat(val preflopOrder: Vector[Position]):
   case HeadsUp extends TableFormat(Vector(Position.Button, Position.BigBlind))
@@ -20,7 +19,7 @@ enum TableFormat(val preflopOrder: Vector[Position]):
     Position.Button, Position.SmallBlind, Position.BigBlind
   ))
   case NineMax extends TableFormat(Vector(
-    Position.UTG, Position.UTG1, Position.UTG2, Position.Middle,
+    Position.UTG, Position.UTG1, Position.UTG2, Position.Middle, Position.Hijack,
     Position.Cutoff, Position.Button, Position.SmallBlind, Position.BigBlind
   ))
 
@@ -34,6 +33,13 @@ enum TableFormat(val preflopOrder: Vector[Position]):
     val idx = preflopOrder.indexOf(openerPos)
     require(idx >= 0, s"$openerPos is not part of $this preflop order")
     preflopOrder.take(idx)
+
+object TableFormat:
+  def forPlayerCount(playerCount: Int): TableFormat =
+    require(playerCount >= 2, s"playerCount must be at least 2, got $playerCount")
+    if playerCount <= 2 then TableFormat.HeadsUp
+    else if playerCount <= 6 then TableFormat.SixMax
+    else TableFormat.NineMax
 
 /** Configuration of per-position preflop opening ranges for bunching analysis.
   *
@@ -127,6 +133,7 @@ object TableRanges:
     Position.UTG1      -> "22+, A2s+, K9s+, Q9s+, JTs, T9s, 98s, ATo+, KJo+, QJo",
     Position.UTG2      -> "22+, A2s+, K8s+, Q9s+, J9s+, T9s, 98s, 87s, ATo+, KTo+, QJo",
     Position.Middle    -> "22+, A2s+, K7s+, Q8s+, J8s+, T8s+, 98s, 87s, 76s, A9o+, KTo+, QTo+, JTo",
+    Position.Hijack    -> "22+, A2s+, K6s+, Q7s+, J7s+, T7s+, 97s+, 87s, 76s, 65s, A8o+, K9o+, Q9o+, J9o+, T9o",
     Position.Cutoff    -> "22+, A2s+, K5s+, Q7s+, J7s+, T7s+, 97s+, 87s, 76s, 65s, A7o+, K9o+, Q9o+, J9o+, T9o",
     Position.Button    -> "22+, A2s+, K2s+, Q4s+, J6s+, T6s+, 96s+, 86s+, 76s, 65s, 54s, A2o+, K7o+, Q8o+, J8o+, T8o+, 98o",
     Position.SmallBlind -> "22+, A2s+, K6s+, Q8s+, J8s+, T8s+, 97s+, 87s, 76s, A5o+, K9o+, Q9o+, J9o+, T9o",

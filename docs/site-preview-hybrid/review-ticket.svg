@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 460" role="img" aria-labelledby="title desc">
+  <title id="title">Hand review ticket</title>
+  <desc id="desc">A compact poker hand review summary showing actual action, recommended action, and EV loss.</desc>
+  <rect width="760" height="460" fill="#0b120f"/>
+  <text x="28" y="36" fill="#4af626" font-family="Consolas, monospace" font-size="18">[REVIEW_TICKET]</text>
+
+  <g transform="translate(42 78)">
+    <rect width="676" height="308" fill="#0f1714" stroke="#1f3527"/>
+    <rect x="0" y="0" width="676" height="58" fill="#101915" stroke="#2d4634"/>
+    <text x="18" y="37" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="30" font-weight="700">RIVER DECISION REVIEW</text>
+
+    <g transform="translate(18 82)">
+      <rect width="136" height="174" fill="#111a16" stroke="#4af626" stroke-width="2"/>
+      <text x="18" y="32" fill="#8b9794" font-family="Consolas, monospace" font-size="16">ACTUAL</text>
+      <text x="18" y="76" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="36" font-weight="700">CALL</text>
+      <text x="18" y="126" fill="#8b9794" font-family="Consolas, monospace" font-size="16">POT</text>
+      <text x="18" y="154" fill="#edf6f0" font-family="Consolas, monospace" font-size="24">68%</text>
+    </g>
+
+    <g transform="translate(184 82)">
+      <rect width="136" height="174" fill="#111a16" stroke="#4af626" stroke-width="2"/>
+      <text x="18" y="32" fill="#8b9794" font-family="Consolas, monospace" font-size="16">RECOMMENDED</text>
+      <text x="18" y="76" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="36" font-weight="700">FOLD</text>
+      <text x="18" y="126" fill="#8b9794" font-family="Consolas, monospace" font-size="16">NODE</text>
+      <text x="18" y="154" fill="#edf6f0" font-family="Consolas, monospace" font-size="24">EXIT</text>
+    </g>
+
+    <g transform="translate(352 82)">
+      <rect width="306" height="80" fill="#1a110d" stroke="#ff4d00" stroke-width="2"/>
+      <text x="18" y="28" fill="#8b9794" font-family="Consolas, monospace" font-size="16">DECISION GAP</text>
+      <text x="18" y="58" fill="#ff4d00" font-family="Consolas, monospace" font-size="28">-2.3 BB</text>
+    </g>
+
+    <g transform="translate(352 182)">
+      <rect width="306" height="74" fill="#101915" stroke="#2d4634" stroke-width="2"/>
+      <text x="18" y="28" fill="#8b9794" font-family="Consolas, monospace" font-size="16">FOCUS</text>
+      <text x="18" y="56" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="26" font-weight="700">MISSED EXIT NODE</text>
+    </g>
+
+    <g transform="translate(18 276)">
+      <rect width="640" height="20" fill="#111a16" stroke="#2d4634"/>
+      <rect width="220" height="20" fill="#ff4d00" fill-opacity="0.28"/>
+      <text x="18" y="-12" fill="#8b9794" font-family="Consolas, monospace" font-size="16">LEAK TRACKER // RIVER OVER-CALL</text>
+    </g>
+  </g>
+</svg>

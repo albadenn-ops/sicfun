@@ -1,6 +1,6 @@
 package sicfun.holdem.validation
 
-import sicfun.core.{Card, Deck, HandEvaluator}
+import sicfun.core.{Deck, HandEvaluator}
 import sicfun.holdem.engine.{RealTimeAdaptiveEngine, VillainObservation}
 import sicfun.holdem.types.*
 
@@ -42,8 +42,7 @@ final case class HandRecord(
   * no side pots, no training data collection.
   */
 final class HeadsUpSimulator(
-    heroEngine: RealTimeAdaptiveEngine,
-    villainEngine: RealTimeAdaptiveEngine,
+    heroEngine: Option[RealTimeAdaptiveEngine] = None,
     villain: LeakInjectedVillain,
     seed: Long,
     equityTrialsForCategory: Int = 500,
@@ -97,10 +96,10 @@ final class HeadsUpSimulator(
       // Preflop: SB(hero/Button) acts first. Postflop: villain(BB/OOP) acts first.
       var heroTurn = street == Street.Preflop
 
-      while !streetDone && !handOver do
+      while !streetDone && !handOver && actionsThisStreet < 8 do
         if heroTurn then
-          val gs = GameState(street, board, pot, toCall, Position.Button, heroStack, Vector.empty)
-          val heroAction = decideHero(heroCards, gs, board, street, villainObs.toVector)
+          val gs = GameState(street, board, pot, math.max(0.0, toCall), Position.Button, heroStack, Vector.empty)
+          val heroAction = validateAction(decideHero(heroCards, gs, board, street, villainObs.toVector), toCall)
           actions += RecordedAction(street, heroName, heroAction, pot, toCall, heroStack,
             leakFired = false, leakId = None)
           heroAction match
@@ -124,14 +123,14 @@ final class HeadsUpSimulator(
               heroStack -= netCost
               pot += netCost
               heroCommitted += netCost
-              toCall = heroCommitted - villainCommitted
+              toCall = math.max(0.0, heroCommitted - villainCommitted)
               actionsThisStreet += 1
         else
-          val gs = GameState(street, board, pot, toCall, Position.BigBlind, villainStack, Vector.empty)
-          val gtoAction = decideVillainGto(villainCards, gs, board, street)
+          val gs = GameState(street, board, pot, math.max(0.0, toCall), Position.BigBlind, villainStack, Vector.empty)
 
-          // Compute equity vs random for HandCategory classification
+          // Compute equity once — used for both GTO decision and SpotContext
           val equityVsRandom = estimateEquityVsRandom(villainCards, board)
+          val gtoAction = decideVillainGto(villainCards, gs, board, street, equityVsRandom)
           val facingAction = actions.lastOption.map(_.action)
           val spot = SpotContext.build(
             gs, villainCards,
@@ -142,14 +141,18 @@ final class HeadsUpSimulator(
           val result = villain.decide(gtoAction, spot)
           if result.leakApplicable then applicableSpots += 1
 
-          actions += RecordedAction(street, villain.name, result.action, pot, toCall, villainStack,
+          // Clamp action to be valid for current game state — leak deviations
+          // and noise can produce e.g. Call when toCall=0 or Check when toCall>0
+          val validatedAction = validateAction(result.action, toCall)
+
+          actions += RecordedAction(street, villain.name, validatedAction, pot, toCall, villainStack,
             result.leakFired, result.leakId)
 
           // Track observation for hero's adaptive inference
-          villainObs += VillainObservation(result.action, gs)
-          villainLine += result.action
+          villainObs += VillainObservation(validatedAction, gs)
+          villainLine += validatedAction
 
-          result.action match
+          validatedAction match
             case PokerAction.Fold =>
               handOver = true
               lastFolderIsHero = false
@@ -169,7 +172,7 @@ final class HeadsUpSimulator(
               villainStack -= netCost
               pot += netCost
               villainCommitted += netCost
-              toCall = villainCommitted - heroCommitted
+              toCall = math.max(0.0, villainCommitted - heroCommitted)
               actionsThisStreet += 1
 
         heroTurn = !heroTurn
@@ -218,46 +221,94 @@ final class HeadsUpSimulator(
   ): PokerAction =
     val candidates = buildCandidates(gs)
     if candidates.size <= 1 then candidates.headOption.getOrElse(PokerAction.Check)
-    else
-      try
-        val result = heroEngine.decide(
-          hero = hero,
-          state = gs,
-          folds = Vector.empty, // heads-up, no preflop folds
-          villainPos = Position.BigBlind,
-          observations = villainObservations,
-          candidateActions = candidates,
-          decisionBudgetMillis = Some(budgetMs),
-          rng = new Random(rng.nextLong())
-        )
-        result.decision.recommendation.bestAction
-      catch
-        case _: Exception => candidates.head
+    else heroEngine match
+      case Some(engine) =>
+        try
+          val result = engine.decide(
+            hero = hero,
+            state = gs,
+            folds = Vector.empty, // heads-up, no preflop folds
+            villainPos = Position.BigBlind,
+            observations = villainObservations,
+            candidateActions = candidates,
+            decisionBudgetMillis = Some(budgetMs),
+            rng = new Random(rng.nextLong())
+          )
+          result.decision.recommendation.bestAction
+        catch
+          case _: Exception => candidates.head
+      case None =>
+        // Fast equity-based hero — no engine inference
+        val equity = estimateEquityVsRandom(hero, board)
+        equityBasedDecision(equity, gs, street, candidates)
 
+  /** Lightweight equity-based villain decision — avoids full engine inference.
+    *
+    * Uses precomputed equity vs random to pick a "competent" action without the
+    * cost of Bayesian posterior inference, bunching MC, or per-candidate EV estimation.
+    */
   private def decideVillainGto(
       villainHand: HoleCards,
       gs: GameState,
       board: Board,
-      street: Street
+      street: Street,
+      equity: Double
   ): PokerAction =
     val candidates = buildCandidates(gs)
-    if candidates.size <= 1 then candidates.headOption.getOrElse(PokerAction.Check)
+    if candidates.size <= 1 then return candidates.headOption.getOrElse(PokerAction.Check)
+    equityBasedDecision(equity, gs, street, candidates)
+
+  /** Equity-based action decision shared by fast hero and villain GTO paths. */
+  private def equityBasedDecision(
+      equity: Double,
+      gs: GameState,
+      street: Street,
+      candidates: Vector[PokerAction]
+  ): PokerAction =
+    val potOdds = gs.potOdds
+    val localRng = new Random(rng.nextLong())
+
+    if gs.toCall > 0 then
+      val raiseActions = candidates.collect { case r: PokerAction.Raise => r }
+      // HU Button/SB preflop: open-raise strategy — raise most hands, rarely limp
+      if street == Street.Preflop && gs.position == Position.Button then
+        if equity >= 0.35 then
+          if raiseActions.nonEmpty then raiseActions.head else PokerAction.Call
+        else if equity >= 0.20 && localRng.nextDouble() < 0.4 then
+          if raiseActions.nonEmpty then raiseActions.head else PokerAction.Call
+        else PokerAction.Fold
+      // Facing a bet: fold, call, or raise based on equity vs pot odds
+      else if equity >= 0.75 then
+        // Strong hand — raise or call
+        if raiseActions.nonEmpty && localRng.nextDouble() < 0.6 then raiseActions.head
+        else PokerAction.Call
+      else if equity >= potOdds + 0.05 then
+        // Enough equity to call; sometimes raise preflop (3-bet)
+        if street == Street.Preflop && raiseActions.nonEmpty && localRng.nextDouble() < 0.25 then
+          raiseActions.head
+        else if equity >= 0.55 && raiseActions.nonEmpty && localRng.nextDouble() < 0.20 then
+          raiseActions.head
+        else PokerAction.Call
+      else if street == Street.Preflop && localRng.nextDouble() < 0.70 then
+        // HU preflop: defend wide (pot odds favorable, only ~30% fold)
+        if raiseActions.nonEmpty && localRng.nextDouble() < 0.20 then raiseActions.head
+        else PokerAction.Call
+      else if localRng.nextDouble() < 0.25 then
+        // Postflop: occasional float with weak hands
+        PokerAction.Call
+      else PokerAction.Fold
     else
-      try
-        // Villain uses engine with uniform prior (no learned bias) as "competent baseline"
-        val result = villainEngine.decide(
-          hero = villainHand,
-          state = gs,
-          folds = Vector.empty,
-          villainPos = Position.Button, // from villain's perspective, hero is in Button
-          observations = Seq.empty, // no observations — fresh each decision
-          candidateActions = candidates,
-          decisionBudgetMillis = Some(budgetMs),
-          rng = new Random(rng.nextLong())
-        )
-        result.decision.recommendation.bestAction
-      catch
-        case _: Exception => candidates.head
+      // No bet to call: check or bet
+      if equity >= 0.60 then
+        // Value bet
+        val raiseActions = candidates.collect { case r: PokerAction.Raise => r }
+        if raiseActions.nonEmpty then raiseActions(localRng.nextInt(raiseActions.size))
+        else PokerAction.Check
+      else if equity <= 0.30 && localRng.nextDouble() < 0.25 then
+        // Bluff occasionally with air
+        val raiseActions = candidates.collect { case r: PokerAction.Raise => r }
+        if raiseActions.nonEmpty then raiseActions.head else PokerAction.Check
+      else PokerAction.Check
 
   private def buildCandidates(gs: GameState): Vector[PokerAction] =
     val candidates = Vector.newBuilder[PokerAction]
@@ -267,42 +318,71 @@ final class HeadsUpSimulator(
       val raiseSize = math.min(gs.pot + gs.toCall * 2, gs.stackSize)
       if gs.stackSize > gs.toCall * 2 && raiseSize > gs.toCall then
         candidates += PokerAction.Raise(raiseSize)
+      // All-in at low SPR
+      val spr = if gs.pot > 0 then gs.stackSize / gs.pot else Double.MaxValue
+      if spr < 3.0 && gs.stackSize > raiseSize * 1.2 then
+        candidates += PokerAction.Raise(gs.stackSize)
     else
       candidates += PokerAction.Check
-      val betSize = gs.pot * 0.66
-      if gs.stackSize > betSize && betSize > 0 then
-        candidates += PokerAction.Raise(betSize)
+      val smallBet = gs.pot * 0.66
+      val bigBet = gs.pot * 1.0
+      if gs.stackSize > smallBet && smallBet > 0 then
+        candidates += PokerAction.Raise(smallBet)
+      if gs.stackSize > bigBet && bigBet > smallBet * 1.2 then
+        candidates += PokerAction.Raise(bigBet)
+      // All-in at low SPR
+      val spr = if gs.pot > 0 then gs.stackSize / gs.pot else Double.MaxValue
+      if spr < 3.0 && gs.stackSize > bigBet * 1.2 then
+        candidates += PokerAction.Raise(gs.stackSize)
     candidates.result()
 
-  /** Rough equity estimate vs a random hand on this board.
-    * Uses hand evaluator rank as a proxy — not precise but fast.
+  /** Clamp action to be valid for the current pot/call state.
+    * Leak deviations and noise can produce e.g. Call when toCall=0.
+    */
+  private def validateAction(action: PokerAction, toCall: Double): PokerAction =
+    action match
+      case PokerAction.Call if toCall <= 0 => PokerAction.Check
+      case PokerAction.Check if toCall > 0 => PokerAction.Call
+      case PokerAction.Fold if toCall <= 0 => PokerAction.Check
+      case PokerAction.Raise(amt) if amt <= 0.0 =>
+        if toCall > 0 then PokerAction.Call else PokerAction.Check
+      case other => other
+
+  /** Equity estimate vs a random hand on this board via Monte Carlo.
+    *
+    * For preflop/incomplete boards, deals the remaining community cards
+    * alongside random opponent cards. For postflop (3+ board cards),
+    * deals only the remaining runout cards.
     */
   private def estimateEquityVsRandom(hand: HoleCards, board: Board): Double =
-    if board.cards.isEmpty then 0.5 // preflop: no evaluation, assume average
-    else if board.cards.size < 3 then 0.5
-    else
-      // Monte Carlo mini-simulation: deal random opponent hands and compare
-      val trials = math.min(equityTrialsForCategory, 200)
-      val available = Deck.full.filterNot(c => hand.toVector.contains(c) || board.cards.contains(c))
-      if available.size < 2 then return 0.5
-      var wins = 0
-      var total = 0
-      val localRng = new Random(rng.nextLong())
-      val heroAll = hand.toVector ++ board.cards
-      val padded = if heroAll.size < 7 then
-        // Pad to 7 with remaining community cards (shouldn't happen for flop+)
-        heroAll ++ available.take(7 - heroAll.size)
-      else heroAll.take(7)
-      val heroRank = HandEvaluator.evaluate7(padded)
-
-      for _ <- 0 until trials do
-        val shuffled = localRng.shuffle(available)
-        val oppCards = shuffled.take(2)
-        val oppAll = oppCards ++ board.cards
-        val oppPadded = if oppAll.size < 7 then oppAll ++ shuffled.drop(2).take(7 - oppAll.size) else oppAll.take(7)
-        if oppPadded.size >= 7 then
-          val oppRank = HandEvaluator.evaluate7(oppPadded)
-          if heroRank > oppRank then wins += 1
-          total += 1
-
-      if total > 0 then wins.toDouble / total.toDouble else 0.5
+    val available = Deck.full.filterNot(c => hand.toVector.contains(c) || board.cards.contains(c))
+    if available.size < 2 then return 0.5
+    val boardSize = board.cards.size
+    val communityNeeded = 5 - boardSize
+    val needed = 2 + communityNeeded
+    val trials = if boardSize < 3 then 50 else math.min(equityTrialsForCategory, 100)
+    var wins = 0
+    var total = 0
+    val localRng = new Random(rng.nextLong())
+    val arr = available.toArray
+    val n = arr.length
+    val heroBase = hand.toVector
+    val boardCards = board.cards
+    for _ <- 0 until trials do
+      // Partial Fisher-Yates: only shuffle first `needed` positions (no allocation)
+      var i = 0
+      while i < needed do
+        val j = i + localRng.nextInt(n - i)
+        val tmp = arr(i); arr(i) = arr(j); arr(j) = tmp
+        i += 1
+      val fullBoard = if communityNeeded > 0 then
+        boardCards ++ (2 until needed).map(arr(_))
+      else boardCards
+      val heroAll = (heroBase ++ fullBoard).take(7)
+      val oppAll = (Vector(arr(0), arr(1)) ++ fullBoard).take(7)
+      if heroAll.size >= 7 && oppAll.size >= 7 then
+        val heroRank = HandEvaluator.evaluate7(heroAll)
+        val oppRank = HandEvaluator.evaluate7(oppAll)
+        if heroRank > oppRank then wins += 1
+        total += 1
+    if total > 0 then wins.toDouble / total.toDouble else 0.5

@@ -4,12 +4,14 @@ ThisBuild / scalaVersion := "3.8.1"
 
 val onnxRuntimeVersion = "1.19.2"
 val postgresqlJdbcVersion = "42.7.10"
+val embeddedPostgresVersion = "2.2.2"
 
 lazy val root = (project in file("."))
   .settings(
     name := "sicfun",
     libraryDependencies ++= Seq(
       "org.scalameta" %% "munit" % "1.2.2" % Test,
+      "io.zonky.test" % "embedded-postgres" % embeddedPostgresVersion % Test,
       "com.lihaoyi" %% "ujson" % "3.3.1",
       "com.microsoft.onnxruntime" % "onnxruntime" % onnxRuntimeVersion,
       "org.postgresql" % "postgresql" % postgresqlJdbcVersion

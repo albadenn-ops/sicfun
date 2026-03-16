@@ -25,7 +25,7 @@ class AdvisorSessionTest extends FunSuite:
       pot = 20.0, toCall = 10.0, position = Position.BigBlind,
       stackSize = 180.0, betHistory = Vector.empty
     )
-    val checkState = baseState.copy(toCall = 0.0)
+    val checkState = baseState.copy(toCall = 0.0, position = Position.Button)
     val strong = HoleCards.from(Vector(card("Ah"), card("Ad")))
     val medium = HoleCards.from(Vector(card("Qc"), card("Jc")))
     val weak = HoleCards.from(Vector(card("7c"), card("2d")))
@@ -42,7 +42,7 @@ class AdvisorSessionTest extends FunSuite:
       modelId = "test-advisor", schemaVersion = "v1",
       source = "test", trainedAtEpochMillis = 1_000_000_000_000L
     )
-    val tr = TableRanges.defaults(TableFormat.NineMax)
+    val tr = TableRanges.defaults(TableFormat.HeadsUp)
     val eng = new RealTimeAdaptiveEngine(
       tableRanges = tr, actionModel = artifact.model,
       bunchingTrials = 50, defaultEquityTrials = 200, minEquityTrials = 100
@@ -172,7 +172,7 @@ class AdvisorSessionTest extends FunSuite:
     assertEquals(h.pot, 3.0) // 1 + 2
     assertEquals(h.heroStack, 199.0) // 200 - 1 (SB)
     assertEquals(h.villainStack, 198.0) // 200 - 2 (BB)
-    assertEquals(h.heroPosition, Position.SmallBlind)
+    assertEquals(h.heroPosition, Position.Button)
     assert(result.output.exists(_.contains("Hand #1")))
   }
 
@@ -336,7 +336,7 @@ class AdvisorSessionTest extends FunSuite:
   test("position alternates between hands") {
     val s = freshSession()
     val r1 = s.execute(AdvisorCommand.NewHand)
-    assertEquals(r1.session.hand.get.heroPosition, Position.SmallBlind)
+    assertEquals(r1.session.hand.get.heroPosition, Position.Button)
 
     // Fold to finish hand 1
     val r2 = r1.session.execute(AdvisorCommand.HeroAction(PokerAction.Fold))
@@ -346,7 +346,7 @@ class AdvisorSessionTest extends FunSuite:
     // Fold to finish hand 2
     val r4 = r3.session.execute(AdvisorCommand.VillainAction(PokerAction.Fold))
     val r5 = r4.session.execute(AdvisorCommand.NewHand)
-    assertEquals(r5.session.hand.get.heroPosition, Position.SmallBlind)
+    assertEquals(r5.session.hand.get.heroPosition, Position.Button)
   }
 
   test("advise returns recommendation when hero cards are set".tag(munit.Slow)) {

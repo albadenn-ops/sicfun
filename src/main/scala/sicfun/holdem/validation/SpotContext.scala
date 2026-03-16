@@ -63,7 +63,7 @@ object BoardTexture:
   *
   * @param spr              stack-to-pot ratio
   * @param potOdds          toCall / (pot + toCall)
-  * @param betToPotRatio    toCall / pot (how big the bet is relative to the pot)
+  * @param betToPotRatio    toCall / pot-before-bet (standard poker bet sizing ratio)
   * @param effectiveStack   remaining stack
   */
 final case class PotGeometry(
@@ -77,10 +77,13 @@ final case class PotGeometry(
 
 object PotGeometry:
   def from(gs: GameState): PotGeometry =
+    // betToPotRatio = toCall / pot_before_bet. Since gs.pot includes the facing
+    // bet, subtract toCall to recover the pot-before-bet denominator.
+    val potBeforeBet = if gs.toCall > 0 then gs.pot - gs.toCall else gs.pot
     PotGeometry(
       spr = gs.stackToPot,
       potOdds = gs.potOdds,
-      betToPotRatio = if gs.pot > 0.0 then gs.toCall / gs.pot else 0.0,
+      betToPotRatio = if potBeforeBet > 0.0 then gs.toCall / potBeforeBet else 0.0,
       effectiveStack = gs.stackSize
     )
 

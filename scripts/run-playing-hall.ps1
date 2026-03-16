@@ -2,6 +2,8 @@
 param(
   [int]$Hands = 1000000,
   [int]$TableCount = 1,
+  [ValidateRange(2, 9)]
+  [int]$PlayerCount = 2,
   [int]$ReportEvery = 50000,
   [int]$LearnEveryHands = 50000,
   [int]$LearningWindowSamples = 200000,
@@ -9,16 +11,19 @@ param(
   [string]$OutDir = "data/playing-hall",
   [ValidateSet("adaptive", "gto")]
   [string]$HeroStyle = "adaptive",
+  [string]$HeroPosition = "",
   [ValidateSet("fast", "exact")]
   [string]$GtoMode = "exact",
   [ValidateSet("nit", "tag", "lag", "callingstation", "station", "maniac", "gto")]
   [string]$VillainStyle = "tag",
+  [string]$VillainPool = "",
   [double]$HeroExplorationRate = 0.05,
   [double]$RaiseSize = 2.5,
   [int]$BunchingTrials = 80,
   [int]$EquityTrials = 700,
   [object]$SaveTrainingTsv = $true,
   [object]$SaveDdreTrainingTsv = $false,
+  [object]$SaveReviewHandHistory = $false,
   [ValidateSet("java", "sbt")]
   [string]$Runner = "java",
   [switch]$RefreshClasspath
@@ -146,10 +151,12 @@ try {
   $env:SBT_OPTS = "-Dsbt.server.autostart=false"
   $saveTrainingTsvLiteral = Resolve-BoolLiteral -Value $SaveTrainingTsv -Name "SaveTrainingTsv"
   $saveDdreTrainingTsvLiteral = Resolve-BoolLiteral -Value $SaveDdreTrainingTsv -Name "SaveDdreTrainingTsv"
+  $saveReviewHandHistoryLiteral = Resolve-BoolLiteral -Value $SaveReviewHandHistory -Name "SaveReviewHandHistory"
 
   $args = @(
     "--hands=$Hands",
     "--tableCount=$TableCount",
+    "--playerCount=$PlayerCount",
     "--reportEvery=$ReportEvery",
     "--learnEveryHands=$LearnEveryHands",
     "--learningWindowSamples=$LearningWindowSamples",
@@ -163,8 +170,15 @@ try {
     "--bunchingTrials=$BunchingTrials",
     "--equityTrials=$EquityTrials",
     "--saveTrainingTsv=$saveTrainingTsvLiteral",
-    "--saveDdreTrainingTsv=$saveDdreTrainingTsvLiteral"
+    "--saveDdreTrainingTsv=$saveDdreTrainingTsvLiteral",
+    "--saveReviewHandHistory=$saveReviewHandHistoryLiteral"
   )
+  if (-not [string]::IsNullOrWhiteSpace($HeroPosition)) {
+    $args += "--heroPosition=$HeroPosition"
+  }
+  if (-not [string]::IsNullOrWhiteSpace($VillainPool)) {
+    $args += "--villainPool=$VillainPool"
+  }
   if ($Runner -eq "java") {
     $cacheDir = Join-Path $repoRoot "data"
     if (-not (Test-Path $cacheDir)) {

@@ -23,7 +23,7 @@ final case class PokerFeatures(values: Vector[Double]):
   *   - '''potOdds''' -- call price relative to the new pot, in [0, 1)
   *   - '''stackToPot''' -- stack-to-pot ratio clamped to [0, 10] then normalized to [0, 1]
   *   - '''streetOrdinal''' -- street ordinal / 3, mapping Preflop..River to [0, 1]
-  *   - '''positionOrdinal''' -- position ordinal / 7, mapping SB..BTN to [0, 1]
+  *   - '''positionOrdinal''' -- normalized position ordinal, mapping SB..BTN to [0, 1]
   *   - '''handStrengthProxy''' -- equity vs. the full opponent range, in [0, 1]
   *
   * Hand strength results are cached in a thread-safe [[ConcurrentHashMap]] keyed
@@ -70,7 +70,7 @@ object PokerFeatures:
       state.potOdds,
       math.min(state.stackToPot, 10.0) / 10.0,   // clamp SPR to [0, 10], normalize to [0, 1]
       state.street.ordinal.toDouble / 3.0,          // Preflop=0.0, River=1.0
-      state.position.ordinal.toDouble / 7.0,        // SB=0.0, BTN=1.0
+      state.position.ordinal.toDouble / (Position.values.length.toDouble - 1.0),
       strength
     ))
 

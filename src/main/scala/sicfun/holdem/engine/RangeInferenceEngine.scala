@@ -333,7 +333,7 @@ object RangeInferenceEngine:
       maxSize = MaxPriorCacheSize,
       mutationLock = priorCacheMutationLock
     ) {
-      if bunchingTrials <= 1 then
+      if bunchingTrials <= 1 || folds.isEmpty then
         naiveVillainRange(hero, board, tableRanges, villainPos)
       else
         BunchingEffect.adjustedRange(

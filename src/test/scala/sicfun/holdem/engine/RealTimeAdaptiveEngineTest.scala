@@ -252,6 +252,127 @@ class RealTimeAdaptiveEngineTest extends FunSuite:
     val baseline = result.equilibriumBaseline.getOrElse(fail("expected CFR baseline to be present"))
     assert(baseline.actionProbabilities.nonEmpty)
     assert(baseline.actionEvaluations.nonEmpty)
+    assertEquals(result.adaptationTrace.source, AdaptationDecisionSource.BlendedWithBaseline)
+    assertEquals(result.adaptationTrace.effectiveBlendWeight, 0.4)
+    assert(result.adaptationTrace.baselineLocalExploitability.nonEmpty)
+  }
+
+  test("equilibrium guardrail can clamp adaptive action back to CFR baseline") {
+    val hero = hole("9c", "8d")
+    val state = GameState(
+      street = Street.Preflop,
+      board = Board.empty,
+      pot = 1.5,
+      toCall = 0.5,
+      position = Position.SmallBlind,
+      stackSize = 99.5,
+      betHistory = Vector.empty
+    )
+    val posterior = DiscreteDistribution(Map(hole("Ah", "Ad") -> 1.0))
+    val actions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(2.5))
+
+    val adaptiveOnly = new RealTimeAdaptiveEngine(
+      tableRanges = table,
+      actionModel = model,
+      bunchingTrials = 100,
+      defaultEquityTrials = 6_000,
+      minEquityTrials = 500
+    )
+    val guardrailed = new RealTimeAdaptiveEngine(
+      tableRanges = table,
+      actionModel = model,
+      bunchingTrials = 100,
+      defaultEquityTrials = 6_000,
+      minEquityTrials = 500,
+      equilibriumBaselineConfig = Some(
+        EquilibriumBaselineConfig(
+          iterations = 600,
+          blendWeight = 0.0,
+          maxBaselineActionRegret = 0.0,
+          maxVillainHands = 24,
+          equityTrials = 800,
+          includeVillainReraises = true
+        )
+      )
+    )
+
+    var i = 0
+    while i < 24 do
+      adaptiveOnly.observeVillainResponseToRaise(PokerAction.Fold)
+      guardrailed.observeVillainResponseToRaise(PokerAction.Fold)
+      i += 1
+
+    val adaptiveOnlyResult = adaptiveOnly.recommendAgainstPosterior(
+      hero = hero,
+      state = state,
+      posterior = posterior,
+      candidateActions = actions,
+      rng = new Random(71)
+    )
+    val guardrailedResult = guardrailed.recommendAgainstPosterior(
+      hero = hero,
+      state = state,
+      posterior = posterior,
+      candidateActions = actions,
+      rng = new Random(71)
+    )
+
+    val baseline = guardrailedResult.equilibriumBaseline.getOrElse(fail("expected CFR baseline to be present"))
+    assertNotEquals(adaptiveOnlyResult.recommendation.bestAction, baseline.bestAction)
+    assertEquals(guardrailedResult.recommendation.bestAction, baseline.bestAction)
+    assertEquals(guardrailedResult.adaptationTrace.source, AdaptationDecisionSource.BaselineGuardrail)
+    assertEquals(guardrailedResult.adaptationTrace.reason, Some("baseline_action_regret_exceeds_threshold"))
+  }
+
+  test("equilibrium baseline trust gate can disable baseline blending when solve quality is below threshold") {
+    val engine = new RealTimeAdaptiveEngine(
+      tableRanges = table,
+      actionModel = model,
+      bunchingTrials = 100,
+      defaultEquityTrials = 1_200,
+      minEquityTrials = 300,
+      equilibriumBaselineConfig = Some(
+        EquilibriumBaselineConfig(
+          iterations = 600,
+          blendWeight = 0.4,
+          maxLocalExploitabilityForTrust = 0.0,
+          maxVillainHands = 24,
+          equityTrials = 800,
+          includeVillainReraises = true
+        )
+      )
+    )
+
+    val hero = hole("Ac", "Kh")
+    val state = GameState(
+      street = Street.Preflop,
+      board = Board.empty,
+      pot = 6.0,
+      toCall = 2.0,
+      position = Position.Button,
+      stackSize = 100.0,
+      betHistory = Vector.empty
+    )
+    val posterior = DiscreteDistribution(
+      Map(
+        hole("7c", "2d") -> 0.6,
+        hole("Qs", "Qh") -> 0.4
+      )
+    )
+
+    val result = engine.recommendAgainstPosterior(
+      hero = hero,
+      state = state,
+      posterior = posterior,
+      candidateActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(8.0)),
+      rng = new Random(99)
+    )
+
+    val baseline = result.equilibriumBaseline.getOrElse(fail("expected CFR baseline to be present"))
+    assert(baseline.localExploitability > 0.0)
+    assertEquals(result.adaptationTrace.source, AdaptationDecisionSource.AdaptiveOnly)
+    assertEquals(result.adaptationTrace.effectiveBlendWeight, 0.0)
+    assertEquals(result.adaptationTrace.reason, Some("baseline_local_exploitability_exceeds_trust_threshold"))
   }
 
   test("adaptive engine keeps archetype posterior normalized under concurrent updates") {

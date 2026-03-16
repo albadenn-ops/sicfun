@@ -104,6 +104,8 @@ object AlwaysOnDecisionLoop:
       retrainFailOnGate: Boolean,
       cfrIterations: Int,
       cfrBlend: Double,
+      cfrMaxLocalExploitability: Double,
+      cfrMaxBaselineActionRegret: Double,
       cfrVillainHands: Int,
       cfrEquityTrials: Int,
       cfrVillainReraises: Boolean,
@@ -307,7 +309,9 @@ object AlwaysOnDecisionLoop:
       appendContextEntry(
         contextLog,
         title = "hero-decision",
-        summary = s"hand=${event.handId} seq=${event.sequenceInHand} bestAction=${renderAction(decision.decision.recommendation.bestAction)}"
+        summary =
+          s"hand=${event.handId} seq=${event.sequenceInHand} bestAction=${renderAction(decision.decision.recommendation.bestAction)} " +
+            s"source=${decision.adaptationTrace.source} reason=${decision.adaptationTrace.reason.getOrElse("ok")}"
       )
 
     private def maybeRetrain(): Unit =
@@ -385,6 +389,8 @@ object AlwaysOnDecisionLoop:
           EquilibriumBaselineConfig(
             iterations = config.cfrIterations,
             blendWeight = config.cfrBlend,
+            maxLocalExploitabilityForTrust = disabledThreshold(config.cfrMaxLocalExploitability),
+            maxBaselineActionRegret = disabledThreshold(config.cfrMaxBaselineActionRegret),
             maxVillainHands = config.cfrVillainHands,
             equityTrials = config.cfrEquityTrials,
             includeVillainReraises = config.cfrVillainReraises
@@ -432,10 +438,15 @@ object AlwaysOnDecisionLoop:
       Files.write(
         decisionsLog,
         Vector(
-          "handId\tsequenceInHand\tplayerId\tbestAction\theroEquityMean\theroEquityStdErr\tarchetypeMap\tmodelId\toccurredAtEpochMillis\tcfrLocalExploitability\tcfrRootDeviationGap\tcfrVillainDeviationGap"
+          "handId\tsequenceInHand\tplayerId\tbestAction\theroEquityMean\theroEquityStdErr\tarchetypeMap\tmodelId\toccurredAtEpochMillis\tdecisionAttribution\tdecisionAttributionReason\tcfrRequestedBlendWeight\tcfrEffectiveBlendWeight\tcfrChosenActionRegret\tcfrLocalExploitability\tcfrRootDeviationGap\tcfrVillainDeviationGap"
         ).asJava,
         StandardCharsets.UTF_8
       )
+    val decisionAttribution = decision.adaptationTrace.source.toString
+    val decisionAttributionReason = decision.adaptationTrace.reason.getOrElse("")
+    val cfrRequestedBlendWeight = decision.adaptationTrace.requestedBlendWeight.toString
+    val cfrEffectiveBlendWeight = decision.adaptationTrace.effectiveBlendWeight.toString
+    val cfrChosenActionRegret = decision.adaptationTrace.baselineChosenActionRegret.toString
     val cfrLocalExploitability = decision.equilibriumBaseline.map(_.localExploitability.toString).getOrElse("")
     val cfrRootGap = decision.equilibriumBaseline.map(_.rootDeviationGap.toString).getOrElse("")
     val cfrVillainGap = decision.equilibriumBaseline.map(_.villainDeviationGap.toString).getOrElse("")
@@ -449,6 +460,11 @@ object AlwaysOnDecisionLoop:
       decision.archetypeMap.toString,
       modelId,
       event.occurredAtEpochMillis.toString,
+      decisionAttribution,
+      decisionAttributionReason,
+      cfrRequestedBlendWeight,
+      cfrEffectiveBlendWeight,
+      cfrChosenActionRegret,
       cfrLocalExploitability,
       cfrRootGap,
       cfrVillainGap
@@ -553,11 +569,17 @@ object AlwaysOnDecisionLoop:
         _ <- if cfrIterations >= 0 then Right(()) else Left("--cfrIterations must be >= 0")
         cfrBlend <- CliHelpers.parseDoubleOptionEither(options, "cfrBlend", 0.35, "a double")
         _ <- if cfrBlend >= 0.0 && cfrBlend <= 1.0 then Right(()) else Left("--cfrBlend must be in [0,1]")
+        cfrMaxLocalExploitability <- CliHelpers.parseDoubleOptionEither(options, "cfrMaxLocalExploitability", -1.0, "a double")
+        _ <- if cfrMaxLocalExploitability >= 0.0 || cfrMaxLocalExploitability == -1.0 then Right(())
+          else Left("--cfrMaxLocalExploitability must be >= 0 or -1 to disable")
+        cfrMaxBaselineActionRegret <- CliHelpers.parseDoubleOptionEither(options, "cfrMaxBaselineActionRegret", -1.0, "a double")
+        _ <- if cfrMaxBaselineActionRegret >= 0.0 || cfrMaxBaselineActionRegret == -1.0 then Right(())
+          else Left("--cfrMaxBaselineActionRegret must be >= 0 or -1 to disable")
         cfrVillainHands <- CliHelpers.parseIntOptionEither(options, "cfrVillainHands", 96)
         _ <- if cfrVillainHands > 0 then Right(()) else Left("--cfrVillainHands must be > 0")
         cfrEquityTrials <- CliHelpers.parseIntOptionEither(options, "cfrEquityTrials", 4000)
         _ <- if cfrEquityTrials > 0 then Right(()) else Left("--cfrEquityTrials must be > 0")
-        cfrVillainReraises <- CliHelpers.parseStrictBooleanOptionEither(options, "cfrVillainReraises", true)
+        cfrVillainReraises <- CliHelpers.parseBooleanOptionEither(options, "cfrVillainReraises", true)
         opponentStore <- parseOptionalOpponentStore(options)
         opponentSite = options.get("opponentSite").map(_.trim).filter(_.nonEmpty)
         opponentName = options.get("opponentName").map(_.trim).filter(_.nonEmpty)
@@ -591,6 +613,8 @@ object AlwaysOnDecisionLoop:
         retrainFailOnGate = retrainFailOnGate,
         cfrIterations = cfrIterations,
         cfrBlend = cfrBlend,
+        cfrMaxLocalExploitability = cfrMaxLocalExploitability,
+        cfrMaxBaselineActionRegret = cfrMaxBaselineActionRegret,
         cfrVillainHands = cfrVillainHands,
         cfrEquityTrials = cfrEquityTrials,
         cfrVillainReraises = cfrVillainReraises,
@@ -631,6 +655,9 @@ object AlwaysOnDecisionLoop:
 
   private def parseStringOption(options: Map[String, String], key: String, default: String): Either[String, String] =
     Right(options.getOrElse(key, default))
+
+  private def disabledThreshold(raw: Double): Double =
+    if raw < 0.0 then Double.PositiveInfinity else raw
 
   private def parseTableFormatOption(options: Map[String, String], key: String, default: TableFormat): Either[String, TableFormat] =
     options.get(key) match
@@ -688,6 +715,8 @@ object AlwaysOnDecisionLoop:
       |Equilibrium baseline (optional CFR):
       |  --cfrIterations=<int>             Default 0 (disabled)
       |  --cfrBlend=<double>               Default 0.35 (0..1)
+      |  --cfrMaxLocalExploitability=<double> Default -1 (disabled; trust gate for CFR solve quality)
+      |  --cfrMaxBaselineActionRegret=<double> Default -1 (disabled; clamps actions that drift too far from CFR-best EV)
       |  --cfrVillainHands=<int>           Default 96
       |  --cfrEquityTrials=<int>           Default 4000
       |  --cfrVillainReraises=<true|false> Default true

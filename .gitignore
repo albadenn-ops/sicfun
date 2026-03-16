@@ -36,8 +36,6 @@ bin/
 /nbdist/
 /.nb-gradle/
 build/
-!**/src/main/**/build/
-!**/src/test/**/build/
 
 ### VS Code ###
 .vscode/
@@ -62,6 +60,7 @@ data/_*.out
 data/_*.html
 data/_*.py
 data/tmp-*.tbl
+data/tmp-*/
 data/tmp/
 data/cuda-visibility-test.tbl
 data/*-check*.bin
@@ -77,6 +76,7 @@ data/runtime-classpath.txt
 
 ### Build artifacts ###
 HeadsUpOpenCLBindings.obj
+src/main/native/build/
 
 ### Generated test/benchmark data ###
 data/playing-hall-*/
@@ -99,6 +99,13 @@ scripts/__pycache__/
 third_party/**/__pycache__/
 third_party/**/*.pyc
 .worktrees/
+
+### JVM crash logs ###
+hs_err_pid*.log
+
+### Agent system state ###
+.agent-system/
+.agent-system-failed-*/
 
 ### Local scratch output ###
 test-output*.txt

@@ -21,14 +21,17 @@ class BunchingEffectTest extends FunSuite:
     HoleCards.from(Vector(card(a), card(b)))
 
   test("table format preflop orders and folds-before-opener are consistent") {
+    assertEquals(TableFormat.forPlayerCount(2), TableFormat.HeadsUp)
+    assertEquals(TableFormat.forPlayerCount(6), TableFormat.SixMax)
+    assertEquals(TableFormat.forPlayerCount(9), TableFormat.NineMax)
     assertEquals(TableFormat.HeadsUp.preflopOrder.length, 2)
     assertEquals(TableFormat.SixMax.preflopOrder.length, 6)
-    assertEquals(TableFormat.NineMax.preflopOrder.length, 8)
+    assertEquals(TableFormat.NineMax.preflopOrder.length, 9)
 
     val foldsToCutoff9 = TableFormat.NineMax.foldsBeforeOpener(Position.Cutoff)
     assertEquals(
       foldsToCutoff9,
-      Vector(Position.UTG, Position.UTG1, Position.UTG2, Position.Middle)
+      Vector(Position.UTG, Position.UTG1, Position.UTG2, Position.Middle, Position.Hijack)
     )
 
     val foldsToButton6 = TableFormat.SixMax.foldsBeforeOpener(Position.Button)
@@ -143,6 +146,7 @@ class BunchingEffectTest extends FunSuite:
       PreflopFold(Position.UTG1),
       PreflopFold(Position.UTG2),
       PreflopFold(Position.Middle),
+      PreflopFold(Position.Hijack),
       PreflopFold(Position.Cutoff)
     )
 
@@ -200,6 +204,7 @@ class BunchingEffectTest extends FunSuite:
         PreflopFold(Position.UTG1),
         PreflopFold(Position.UTG2),
         PreflopFold(Position.Middle),
+        PreflopFold(Position.Hijack),
         PreflopFold(Position.Cutoff),
         PreflopFold(Position.Button),
         PreflopFold(Position.SmallBlind)

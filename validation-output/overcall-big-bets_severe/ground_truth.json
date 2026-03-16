@@ -1,0 +1,10 @@
+{
+  "leakId": "overcall-big-bets",
+  "leakDescription": "Calls large bets with weak/air hands when GTO should fold",
+  "severity": 0.9,
+  "baselineNoise": 0.03,
+  "totalHands": 10000,
+  "leakFiredCount": 2136,
+  "leakApplicableSpots": 5864,
+  "heroNetBbPer100": 248.1638121599995
+}

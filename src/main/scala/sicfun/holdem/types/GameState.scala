@@ -12,10 +12,10 @@ enum Street(val expectedBoardSize: Int):
 
 /** Table position of a player, ordered from earliest to latest to act.
   *
-  * Ordinal values (0-7) are normalized to [0, 1] when used as features.
+  * Ordinal values (0-8) are normalized to [0, 1] when used as features.
   */
 enum Position:
-  case SmallBlind, BigBlind, UTG, UTG1, UTG2, Middle, Cutoff, Button
+  case SmallBlind, BigBlind, UTG, UTG1, UTG2, Middle, Hijack, Cutoff, Button
 
 /** A single recorded action within a betting round, attributed to a player index.
   *

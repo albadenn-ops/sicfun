@@ -21,6 +21,12 @@ Available providers:
 
 All providers are read-only helpers by contract. Codex remains responsible for edits, verification, and final judgment.
 
+Shared contract:
+
+- Common sidecar rules live in `AI_ENTRYPOINT.md`.
+- Provider-specific role overlays live in `GEMINI.md`, `CLAUDE.md`, and `GPT.md`.
+- The wrappers inject the shared contract plus the provider overlay into delegated prompts.
+
 ## Actions
 
 Health check across all providers:
@@ -119,10 +125,12 @@ Gemini:
 - The existing provider-specific wrapper remains `scripts/gemini-sidecar.ps1`.
 - `scripts/ai-minion.ps1` forwards auth and normal delegated runs to that wrapper.
 - Gemini-specific setup details remain in `docs/GEMINI_MINION.md`.
+- Use Gemini for bounded exploration, extraction, summarization, and support execution. Treat its inference as low-trust and verify it elsewhere.
 
 Claude:
 
 - `claude auth status --json` is used for health checks.
+- Use Claude first for planning, contradiction hunting, and fact-checking when available.
 - Claude inlines requested `-ContextPath` file contents into the delegated prompt because the wrapper disables Claude tools for read-only runs.
 - If you omit `-InjectContext`, the wrapper still forces inline context for Claude and prints a note so the provider-specific behavior is visible.
 - Passing `-InjectContext` to Claude is currently redundant, but it can make your command intent clearer when you want provider-agnostic examples.
@@ -132,6 +140,7 @@ Claude:
 GPT:
 
 - GPT sidecar is implemented with the official OpenAI Codex CLI (`@openai/codex`).
+- Use GPT for implementation-oriented collaboration after scope and facts are set.
 - Browser auth uses ChatGPT sign-in. If your ChatGPT account uses Google login, that browser flow uses the same account path.
 - `-NoBrowser` maps to Codex device auth.
 - On this machine the Windows shim was missing, so the wrapper launches `node ...@openai/codex/bin/codex.js` directly.
@@ -140,5 +149,6 @@ GPT:
 
 - Keep `-ContextPath` narrow. In practice, 1-5 focused files produce better results than broad directory-scale requests.
 - If a delegated run times out or returns weak output, retry once with a smaller file set and a sharper task prompt before switching providers.
-- Prefer `gemini` or `gpt` for routine delegated work.
-- Use `claude` as an additional reviewer or fallback when you want a second opinion from a different model family.
+- Prefer `claude` for planning and fact-checking when available.
+- Prefer `gpt` for implementation-oriented work after scope is set.
+- Use `gemini` as a bounded support worker, not as the source of final judgment.

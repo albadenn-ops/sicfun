@@ -213,6 +213,36 @@ function Get-DefaultArtifactPath {
   return Join-Path $sidecarCacheDir ("$timestamp-$Mode.$Suffix")
 }
 
+function Get-SharedContractPath {
+  return Join-Path $repoRoot "AI_ENTRYPOINT.md"
+}
+
+function Get-ProviderContractPath {
+  return Join-Path $repoRoot "GEMINI.md"
+}
+
+function Get-ContractText {
+  param(
+    [string]$Path,
+    [string]$Label
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path)) {
+    return "${Label}: <missing>"
+  }
+
+  $content = Get-Content -Raw $Path -ErrorAction SilentlyContinue
+  if ([string]::IsNullOrWhiteSpace($content)) {
+    return "${Label}: <empty>"
+  }
+
+  $repoPath = Get-RepoRelativePath -AbsolutePath $Path
+  return @(
+    "$Label ($repoPath):"
+    $content.Trim()
+  ) -join "`n`n"
+}
+
 function Get-ModeContract {
   param([string]$CurrentMode)
 
@@ -266,15 +296,24 @@ function New-DelegationPrompt {
   }
 
   $contractLines = (Get-ModeContract -CurrentMode $CurrentMode) -join "`n"
+  $sharedContractBlock = Get-ContractText -Path (Get-SharedContractPath) -Label "Shared repository contract"
+  $providerContractBlock = Get-ContractText -Path (Get-ProviderContractPath) -Label "Provider role overlay"
 
   return @"
 You are a delegated worker running inside the SICFUN repository.
 
+Provider: gemini
 Mode: $CurrentMode
 Working directory: $repoRoot
 
 Task:
 $CurrentTask
+
+Shared contract:
+$sharedContractBlock
+
+Provider overlay:
+$providerContractBlock
 
 Rules:
 - Stay read-only. Do not edit files and do not claim to have edited files.
@@ -294,7 +333,8 @@ function Show-Doctor {
   $npmPath = Find-CommandPath -Name "npm"
   $settingsPath = Get-GeminiSettingsPath
   $selectedAuthType = Get-GeminiSelectedAuthType
-  $geminiMdPath = Join-Path $repoRoot "GEMINI.md"
+  $sharedContractPath = Get-SharedContractPath
+  $geminiMdPath = Get-ProviderContractPath
 
   Write-Host "[gemini-sidecar] repo root: $repoRoot"
   Write-Host "[gemini-sidecar] node: $(if ($nodePath) { $nodePath } else { '<missing>' })"
@@ -312,6 +352,7 @@ function Show-Doctor {
 
   Write-Host "[gemini-sidecar] settings path: $settingsPath"
   Write-Host "[gemini-sidecar] selected auth type: $(if ($selectedAuthType) { $selectedAuthType } else { '<unset>' })"
+  Write-Host "[gemini-sidecar] shared contract: $(if (Test-Path $sharedContractPath) { $sharedContractPath } else { '<missing>' })"
   Write-Host "[gemini-sidecar] repo GEMINI.md: $(if (Test-Path $geminiMdPath) { $geminiMdPath } else { '<missing>' })"
   Write-Host "[gemini-sidecar] cache dir: $sidecarCacheDir"
 }

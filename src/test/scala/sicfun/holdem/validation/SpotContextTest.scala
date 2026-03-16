@@ -61,19 +61,21 @@ class SpotContextTest extends FunSuite:
   // ── PotGeometry ──
 
   test("PotGeometry from GameState"):
+    // pot=175 includes opponent's bet of 75 into a pot of 100
+    // betToPotRatio = 75 / (175 - 75) = 75/100 = 0.75
     val gs = GameState(
       street = Street.River,
       board = Board.empty,
-      pot = 100.0,
+      pot = 175.0,
       toCall = 75.0,
       position = Position.Button,
       stackSize = 150.0,
       betHistory = Vector.empty
     )
     val pg = PotGeometry.from(gs)
-    assertEqualsDouble(pg.spr, 1.5, 0.01)           // 150/100
-    assertEqualsDouble(pg.potOdds, 0.4286, 0.01)     // 75/(100+75)
-    assertEqualsDouble(pg.betToPotRatio, 0.75, 0.01)  // 75/100
+    assertEqualsDouble(pg.spr, 150.0 / 175.0, 0.01)
+    assertEqualsDouble(pg.potOdds, 75.0 / 250.0, 0.01)
+    assertEqualsDouble(pg.betToPotRatio, 0.75, 0.01)  // 75/(175-75)=75/100
 
   test("PotGeometry with zero pot"):
     val gs = GameState(Street.Preflop, Board.empty, 0.0, 1.0, Position.BigBlind, 100.0, Vector.empty)

@@ -54,7 +54,8 @@ This reports:
 - Gemini CLI entrypoint and version
 - `~/.gemini/settings.json`
 - current selected auth type
-- whether the repo-level `GEMINI.md` contract is present
+- whether the shared `AI_ENTRYPOINT.md` contract is present
+- whether the repo-level `GEMINI.md` overlay is present
 
 ## Delegate A Task
 
@@ -108,8 +109,8 @@ For each delegate run it saves:
 
 ## Usage Notes
 
-- Delegated runs are read-only by contract through the prompt and `GEMINI.md`, not by Gemini CLI approval mode.
-- `GEMINI.md` at the repo root provides a persistent repo-specific contract so repeated tasks do not need to restate basic instructions.
+- Delegated runs are read-only by contract through the prompt, the shared `AI_ENTRYPOINT.md` contract, and the `GEMINI.md` role overlay, not by Gemini CLI approval mode.
+- `AI_ENTRYPOINT.md` carries the common SICFUN sidecar rules. `GEMINI.md` adds the Gemini-specific low-trust support role.
 - If you need Gemini to inspect paths outside the repository root, pass them through `-IncludeDirectories`.
 - Gemini CLI may emit status lines such as `Loaded cached credentials.`; the wrapper preserves successful runs instead of treating that stderr noise as failure.
 
@@ -120,4 +121,4 @@ For each delegate run it saves:
 - For larger investigations, split the work into multiple passes such as:
   - `analysis` on the small context needed to understand the area
   - `review` on the exact files you touched or the exact diff under scrutiny
-- Use Gemini as a synthesizer and reviewer, not as the source of final judgment. The primary agent should still inspect code, run tests, and decide what lands.
+- Use Gemini as a bounded support worker and extractor, not as the source of final judgment. The primary agent should still inspect code, run tests, and decide what lands.

@@ -31,8 +31,7 @@ class HeadsUpSimulatorTest extends FunSuite:
       seed = seed
     )
     new HeadsUpSimulator(
-      heroEngine = makeEngine(),
-      villainEngine = makeEngine(),
+      heroEngine = Some(makeEngine()),
       villain = villain,
       seed = seed,
       equityTrialsForCategory = 100,

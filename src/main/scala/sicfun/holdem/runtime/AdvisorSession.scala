@@ -78,7 +78,7 @@ final case class HandSnapshot(
     toCall: Double = 0.0,
     heroCommittedThisStreet: Double = 0.0,
     villainCommittedThisStreet: Double = 0.0,
-    heroPosition: Position = Position.SmallBlind,
+    heroPosition: Position = Position.Button,
     villainPosition: Position = Position.BigBlind,
     betHistory: Vector[BetAction] = Vector.empty,
     villainObservations: Vector[VillainObservation] = Vector.empty,
@@ -150,20 +150,20 @@ final class AdvisorSession(
     // Alternate positions
     val heroPos =
       prevHand match
-        case Some(h) => if h.heroPosition == Position.SmallBlind then Position.BigBlind else Position.SmallBlind
-        case None    => if config.heroStartsAsSB then Position.SmallBlind else Position.BigBlind
-    val villainPos = if heroPos == Position.SmallBlind then Position.BigBlind else Position.SmallBlind
+        case Some(h) => if h.heroPosition == Position.Button then Position.BigBlind else Position.Button
+        case None    => if config.heroStartsAsSB then Position.Button else Position.BigBlind
+    val villainPos = if heroPos == Position.Button then Position.BigBlind else Position.Button
 
     // Post blinds
-    val heroBlind = if heroPos == Position.SmallBlind then config.smallBlind else config.bigBlind
-    val villainBlind = if villainPos == Position.SmallBlind then config.smallBlind else config.bigBlind
+    val heroBlind = if heroPos == Position.Button then config.smallBlind else config.bigBlind
+    val villainBlind = if villainPos == Position.Button then config.smallBlind else config.bigBlind
     val pot = heroBlind + villainBlind
     val heroStack = config.startingStack - heroBlind
     val villainStack = config.startingStack - villainBlind
 
-    // In HU preflop, SB acts first. toCall = difference between blinds for the SB player.
+    // In HU preflop, the dealer posts the small blind and acts first.
     val toCall =
-      if heroPos == Position.SmallBlind then config.bigBlind - config.smallBlind
+      if heroPos == Position.Button then config.bigBlind - config.smallBlind
       else 0.0 // BB has option to check (or raise)
 
     val snapshot = HandSnapshot(
@@ -185,7 +185,7 @@ final class AdvisorSession(
 
     engine.clearInferenceCache()
 
-    val posStr = if heroPos == Position.SmallBlind then "SB" else "BB"
+    val posStr = if heroPos == Position.Button then "BTN/SB" else "BB"
     val out = Vector(
       s"--- Hand #$newNumber --- Hero: $posStr",
       f"Blinds posted. Pot: ${pot}%.1f. Hero stack: ${heroStack}%.1f. Villain stack: ${villainStack}%.1f."
@@ -480,7 +480,7 @@ final class AdvisorSession(
             val candidates = buildCandidateActions(h)
             // Folds before the opener: use the table format to determine which
             // positions folded before the button opened.
-            val openerPos = if h.heroPosition == Position.SmallBlind then Position.Button else Position.BigBlind
+            val openerPos = Position.Button
             val folds = tableRanges.format.foldsBeforeOpener(openerPos).map(PreflopFold(_))
 
             val result = engine.decide(
@@ -524,15 +524,15 @@ final class AdvisorSession(
           )
 
           val recommended = result.decision.recommendation.bestAction
-          val recCategory = recommended.category
-          val actCategory = dec.actualAction.category
-          val mark = if recCategory == actCategory then "OK" else "MISTAKE"
-
           val recEv = result.decision.recommendation.actionEvaluations
             .find(_.action == recommended).map(_.expectedValue).getOrElse(0.0)
-          val actEv = result.decision.recommendation.actionEvaluations
-            .find(e => e.action.category == actCategory).map(_.expectedValue).getOrElse(0.0)
-          val evDiff = (actEv - recEv) / config.bigBlind
+          val actEv = HandHistoryAnalyzer.expectedValueForObservedAction(
+            result.decision.recommendation.actionEvaluations,
+            dec.actualAction
+          )
+          val evDiffChips = actEv - recEv
+          val evDiff = evDiffChips / config.bigBlind
+          val mark = if math.round(evDiffChips * 100.0) < 0 then "MISTAKE" else "OK"
 
           out += f"  ${dec.street}: Actual=${renderAction(dec.actualAction)} Recommended=${renderAction(recommended)} ${evDiff}%+.1fbb $mark"
         }
@@ -808,6 +808,12 @@ final class AdvisorSession(
         .mkString(" | ")
       out += s"  Eq(CFR): $mix"
     }
+    val adaptation = result.adaptationTrace
+    val adaptationReason = adaptation.reason.getOrElse("ok")
+    out +=
+      f"  Adaptation: ${adaptation.source} requested=${adaptation.requestedBlendWeight}%.2f " +
+        f"effective=${adaptation.effectiveBlendWeight}%.2f regret=${adaptation.baselineChosenActionRegret}%.3f " +
+        s"reason=$adaptationReason"
 
     // Top posterior hands
     val posteriorWeights = result.decision.posteriorInference.posterior.weights

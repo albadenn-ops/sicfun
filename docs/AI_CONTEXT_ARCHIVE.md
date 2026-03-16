@@ -86,6 +86,13 @@ Files: docs/AI_CONTEXT_ARCHIVE.md
 Validation: N/A (documentation only)
 Risks: Must be kept append-only and actively maintained after major architecture changes.
 
+## 2026-03-11T22:32:23Z - Shared AI sidecar entrypoint and role overlays
+Summary: Added a shared `AI_ENTRYPOINT.md` contract for all delegated AI workers, converted `GEMINI.md`/`CLAUDE.md`/`GPT.md` into role overlays, and wired the prompt builders to inject the shared contract plus the provider overlay into delegated runs.
+Why: The sidecar role files had drifted and some delegated paths were not actually receiving the repo-specific contract, which made the role split more documentary than real.
+Files: AI_ENTRYPOINT.md,GEMINI.md,CLAUDE.md,GPT.md,scripts/ai-minion.ps1,scripts/gemini-sidecar.ps1,scripts/gemini_cli.py,AGENTS.md,docs/AI_MINIONS.md,docs/GEMINI_MINION.md,docs/OPERATOR_RUNBOOK.md,docs/AI_CONTEXT_ARCHIVE.md
+Validation: powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action doctor -Provider gpt; powershell -ExecutionPolicy Bypass -File scripts/gemini-sidecar.ps1 -Action doctor; powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action delegate -Provider gpt -Mode analysis -Task "Sanity-check prompt assembly only." -ContextPath AI_ENTRYPOINT.md,GPT.md -OutputPath .tool-cache/ai-minions/gpt/sanity.txt -WhatIf; powershell -ExecutionPolicy Bypass -File scripts/gemini-sidecar.ps1 -Action delegate -Mode analysis -Task "Sanity-check prompt assembly only." -ContextPath AI_ENTRYPOINT.md,GEMINI.md -OutputPath .tool-cache/gemini-sidecar/sanity.txt -WhatIf
+Risks: Claude delegated runs are currently flaky on this machine, and Gemini prompt assembly still lives in two wrappers (`scripts/ai-minion.ps1` for injected-mode Gemini and `scripts/gemini-sidecar.ps1` for forwarded runs), which leaves some maintenance duplication.
+
 ## 2026-03-04T03:24:52Z - Always-on loop + context continuity
 Summary: Added continuous decision loop runtime, scheduled retraining hook, and context archive tooling.
 Why: Project outgrew roadmap-only tracking and needed runtime + memory continuity for future AI sessions.

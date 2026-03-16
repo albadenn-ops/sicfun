@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 660" role="img" aria-labelledby="title desc">
+  <title id="title">Poker hand review schematic</title>
+  <desc id="desc">A stylized interface with hero cards, board cards, an action timeline, and an estimated EV loss.</desc>
+  <defs>
+    <linearGradient id="glow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#4af626" stop-opacity="0.1"/>
+      <stop offset="100%" stop-color="#4af626" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="920" height="660" fill="#0b120f"/>
+  <g stroke="#1f3527" stroke-width="1">
+    <path d="M0 60H920M0 120H920M0 180H920M0 240H920M0 300H920M0 360H920M0 420H920M0 480H920M0 540H920M0 600H920"/>
+    <path d="M80 0V660M160 0V660M240 0V660M320 0V660M400 0V660M480 0V660M560 0V660M640 0V660M720 0V660M800 0V660"/>
+  </g>
+
+  <text x="42" y="48" fill="#4af626" font-family="Consolas, monospace" font-size="20">[HAND_REVIEW]</text>
+  <text x="760" y="48" fill="#8b9794" font-family="Consolas, monospace" font-size="18">TRACE=COMPLETE</text>
+
+  <g transform="translate(46 88)">
+    <rect width="96" height="132" fill="#122018" stroke="#4af626" stroke-width="2"/>
+    <text x="18" y="18" fill="#4af626" font-family="Consolas, monospace" font-size="10">ID:AS-001</text>
+    <text x="20" y="42" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="42" font-weight="700">A</text>
+    <text x="60" y="42" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="28">&#9824;</text>
+    <text x="20" y="110" fill="#8b9794" font-family="Consolas, monospace" font-size="16">HERO</text>
+  </g>
+  <g transform="translate(156 88)">
+    <rect width="96" height="132" fill="#122018" stroke="#4af626" stroke-width="2"/>
+    <text x="18" y="18" fill="#4af626" font-family="Consolas, monospace" font-size="10">ID:7C-002</text>
+    <text x="20" y="42" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="42" font-weight="700">7</text>
+    <text x="60" y="42" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="28">&#9827;</text>
+    <text x="20" y="110" fill="#8b9794" font-family="Consolas, monospace" font-size="16">HERO</text>
+  </g>
+
+  <g transform="translate(48 278)">
+    <text x="0" y="-18" fill="#8b9794" font-family="Consolas, monospace" font-size="18">BOARD</text>
+    <g transform="translate(0 0)">
+      <rect width="84" height="118" fill="#151d19" stroke="#2d4634" stroke-width="2"/>
+      <text x="12" y="18" fill="#8b9794" font-family="Consolas, monospace" font-size="9">ID:KS-049</text>
+      <text x="16" y="38" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="38" font-weight="700">K</text>
+      <text x="56" y="38" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="24">&#9824;</text>
+    </g>
+    <g transform="translate(98 0)">
+      <rect width="84" height="118" fill="#151d19" stroke="#2d4634" stroke-width="2"/>
+      <text x="12" y="18" fill="#8b9794" font-family="Consolas, monospace" font-size="9">ID:9D-114</text>
+      <text x="16" y="38" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="38" font-weight="700">9</text>
+      <text x="56" y="38" fill="#ff4d00" font-family="Arial Narrow, sans-serif" font-size="24">&#9830;</text>
+    </g>
+    <g transform="translate(196 0)">
+      <rect width="84" height="118" fill="#151d19" stroke="#2d4634" stroke-width="2"/>
+      <text x="12" y="18" fill="#8b9794" font-family="Consolas, monospace" font-size="9">ID:3H-176</text>
+      <text x="16" y="38" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="38" font-weight="700">3</text>
+      <text x="56" y="38" fill="#ff4d00" font-family="Arial Narrow, sans-serif" font-size="24">&#9829;</text>
+    </g>
+    <g transform="translate(294 0)">
+      <rect width="84" height="118" fill="#151d19" stroke="#2d4634" stroke-width="2"/>
+      <text x="12" y="18" fill="#8b9794" font-family="Consolas, monospace" font-size="9">ID:QC-087</text>
+      <text x="16" y="38" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="38" font-weight="700">Q</text>
+      <text x="56" y="38" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="24">&#9827;</text>
+    </g>
+    <g transform="translate(392 0)">
+      <rect width="84" height="118" fill="#151d19" stroke="#2d4634" stroke-width="2"/>
+      <text x="12" y="18" fill="#8b9794" font-family="Consolas, monospace" font-size="9">ID:2S-211</text>
+      <text x="16" y="38" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="38" font-weight="700">2</text>
+      <text x="56" y="38" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="24">&#9824;</text>
+    </g>
+  </g>
+
+  <g transform="translate(566 88)">
+    <rect width="306" height="176" fill="#101915" stroke="#4af626" stroke-width="2"/>
+    <text x="18" y="32" fill="#8b9794" font-family="Consolas, monospace" font-size="18">DECISION</text>
+    <text x="18" y="70" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="28" font-weight="700">Hero action: Call river</text>
+    <text x="18" y="108" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="28" font-weight="700">Recommended: Fold river</text>
+    <rect x="18" y="126" width="182" height="34" fill="#1a110d" stroke="#ff4d00" stroke-width="2"/>
+    <text x="30" y="149" fill="#ff4d00" font-family="Consolas, monospace" font-size="20">EV_DELTA = -2.3 BB</text>
+  </g>
+
+  <g transform="translate(566 292)">
+    <rect width="306" height="162" fill="#101915" stroke="#2d4634" stroke-width="2"/>
+    <text x="18" y="30" fill="#8b9794" font-family="Consolas, monospace" font-size="18">RANGE TRACE</text>
+    <rect x="20" y="48" width="264" height="16" fill="#112118" stroke="#2d4634"/>
+    <rect x="20" y="48" width="210" height="16" fill="url(#glow)"/>
+    <rect x="20" y="80" width="264" height="16" fill="#112118" stroke="#2d4634"/>
+    <rect x="20" y="80" width="164" height="16" fill="url(#glow)"/>
+    <rect x="20" y="112" width="264" height="16" fill="#112118" stroke="#2d4634"/>
+    <rect x="20" y="112" width="98" height="16" fill="#ff4d00" fill-opacity="0.28"/>
+    <text x="20" y="154" fill="#edf6f0" font-family="Consolas, monospace" font-size="18">VALUE CLUSTER PRESERVED</text>
+  </g>
+
+  <g transform="translate(48 466)">
+    <text x="0" y="0" fill="#8b9794" font-family="Consolas, monospace" font-size="18">ACTION PATH</text>
+    <path d="M0 54H800" stroke="#2d4634" stroke-width="2"/>
+    <circle cx="42" cy="54" r="8" fill="#4af626"/>
+    <circle cx="220" cy="54" r="8" fill="#4af626"/>
+    <circle cx="398" cy="54" r="8" fill="#4af626"/>
+    <circle cx="576" cy="54" r="8" fill="#ff4d00"/>
+    <circle cx="754" cy="54" r="8" fill="#ff4d00"/>
+    <text x="14" y="88" fill="#edf6f0" font-family="Consolas, monospace" font-size="16">BTN_OPEN</text>
+    <text x="188" y="88" fill="#edf6f0" font-family="Consolas, monospace" font-size="16">BB_CALL</text>
+    <text x="352" y="88" fill="#edf6f0" font-family="Consolas, monospace" font-size="16">CBET</text>
+    <text x="532" y="88" fill="#edf6f0" font-family="Consolas, monospace" font-size="16">TURN_CHECK</text>
+    <text x="714" y="88" fill="#edf6f0" font-family="Consolas, monospace" font-size="16">RIVER_CALL</text>
+  </g>
+</svg>

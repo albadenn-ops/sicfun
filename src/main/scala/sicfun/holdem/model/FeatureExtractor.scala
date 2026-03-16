@@ -21,7 +21,7 @@ final case class ObservableFeatures(values: Vector[Double]):
   *   - '''potOdds''' -- `toCall / (pot + toCall)`, naturally in [0, 1)
   *   - '''stackToPot''' -- SPR clamped to [0, 10], then divided by 10
   *   - '''streetOrdinal''' -- street ordinal / 3 (Preflop=0.0 .. River=1.0)
-  *   - '''positionOrdinal''' -- position ordinal / 7 (SB=0.0 .. BTN=1.0)
+  *   - '''positionOrdinal''' -- normalized position ordinal (SB=0.0 .. BTN=1.0)
   *   - '''boardSize''' -- number of community cards / 5 (0.0 .. 1.0)
   *   - '''toCallOverStack''' -- `toCall / stack`, clamped to [0, 1] (1.0 if all-in)
   *   - '''decisionTime''' -- thinking time in seconds, clamped to [0, 30], then / 30
@@ -58,7 +58,7 @@ object FeatureExtractor:
       math.min(ratio, 10.0) / 10.0  // clamp SPR at 10, normalize to [0, 1]
 
     val streetOrdinal = event.street.ordinal.toDouble / 3.0       // Preflop=0.0, River=1.0
-    val positionOrdinal = event.position.ordinal.toDouble / 7.0   // SB=0.0, BTN=1.0
+    val positionOrdinal = event.position.ordinal.toDouble / (Position.values.length.toDouble - 1.0)
     val boardSize = event.board.size.toDouble / 5.0               // 0..5 cards -> [0, 1]
     val toCallOverStack =
       if event.stackBefore <= 0.0 then 1.0  // effectively all-in

@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 460" role="img" aria-labelledby="title desc">
+  <title id="title">Decision node diagram</title>
+  <desc id="desc">A branching poker decision diagram showing hero and villain actions with expected value numbers.</desc>
+  <rect width="760" height="460" fill="#0b120f"/>
+  <g stroke="#1f3527" stroke-width="1">
+    <path d="M0 60H760M0 120H760M0 180H760M0 240H760M0 300H760M0 360H760M0 420H760"/>
+    <path d="M80 0V460M160 0V460M240 0V460M320 0V460M400 0V460M480 0V460M560 0V460M640 0V460"/>
+  </g>
+
+  <text x="26" y="36" fill="#4af626" font-family="Consolas, monospace" font-size="18">[DECISION_NODE]</text>
+
+  <g>
+    <rect x="292" y="48" width="176" height="56" fill="#111a16" stroke="#4af626" stroke-width="2"/>
+    <text x="336" y="83" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="28" font-weight="700">HERO TO ACT</text>
+  </g>
+
+  <g stroke="#4af626" stroke-width="2" fill="none">
+    <path d="M380 104V162"/>
+    <path d="M380 162H162"/>
+    <path d="M380 162H380"/>
+    <path d="M380 162H598"/>
+  </g>
+
+  <g>
+    <rect x="92" y="162" width="140" height="54" fill="#101915" stroke="#2d4634" stroke-width="2"/>
+    <text x="128" y="196" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="26" font-weight="700">FOLD</text>
+    <rect x="310" y="162" width="140" height="54" fill="#101915" stroke="#2d4634" stroke-width="2"/>
+    <text x="346" y="196" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="26" font-weight="700">CALL</text>
+    <rect x="528" y="162" width="140" height="54" fill="#101915" stroke="#2d4634" stroke-width="2"/>
+    <text x="560" y="196" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="26" font-weight="700">RAISE</text>
+  </g>
+
+  <g stroke="#2d4634" stroke-width="2" fill="none">
+    <path d="M162 216V276"/>
+    <path d="M380 216V276"/>
+    <path d="M598 216V276"/>
+  </g>
+
+  <g>
+    <rect x="70" y="276" width="184" height="74" fill="#0f1714" stroke="#2d4634" stroke-width="2"/>
+    <text x="92" y="306" fill="#8b9794" font-family="Consolas, monospace" font-size="16">LINE</text>
+    <text x="92" y="336" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="24" font-weight="700">Exit now</text>
+    <text x="92" y="364" fill="#ff4d00" font-family="Consolas, monospace" font-size="18">EV = -0.2 BB</text>
+  </g>
+
+  <g>
+    <rect x="288" y="276" width="184" height="74" fill="#0f1714" stroke="#4af626" stroke-width="2"/>
+    <text x="310" y="306" fill="#8b9794" font-family="Consolas, monospace" font-size="16">LINE</text>
+    <text x="310" y="336" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="24" font-weight="700">Passive continue</text>
+    <text x="310" y="364" fill="#edf6f0" font-family="Consolas, monospace" font-size="18">EV = +0.4 BB</text>
+  </g>
+
+  <g>
+    <rect x="506" y="276" width="184" height="74" fill="#0f1714" stroke="#ff4d00" stroke-width="2"/>
+    <text x="528" y="306" fill="#8b9794" font-family="Consolas, monospace" font-size="16">LINE</text>
+    <text x="528" y="336" fill="#edf6f0" font-family="Arial Narrow, sans-serif" font-size="24" font-weight="700">Aggressive branch</text>
+    <text x="528" y="364" fill="#ff4d00" font-family="Consolas, monospace" font-size="18">EV = -1.1 BB</text>
+  </g>
+
+  <g transform="translate(58 390)">
+    <rect width="644" height="42" fill="#0e1513" stroke="#2d4634"/>
+    <text x="16" y="27" fill="#edf6f0" font-family="Consolas, monospace" font-size="18">RECOMMENDED NODE: CALL // STABLE POSITIVE EV // LOWER VOLATILITY</text>
+  </g>
+</svg>
