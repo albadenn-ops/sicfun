@@ -5,6 +5,8 @@ import sicfun.holdem.equity.{TableFormat, TableRanges}
 import sicfun.holdem.history.{HandHistoryImport, HandHistorySite, OpponentProfile}
 import sicfun.holdem.model.{PokerActionModel, PokerActionModelArtifactIO}
 
+import sicfun.holdem.web.HandHistoryReviewServer
+
 import java.nio.file.{Files, Path, Paths}
 
 /** Orchestrates the full profiling validation pipeline:
@@ -48,7 +50,11 @@ object ValidationRunner:
 
   def main(args: Array[String]): Unit =
     val config = parseConfig(args)
-    run(config)
+    if args.contains("--web-spotcheck") then
+      val results = run(config)
+      runWebSpotCheck(config, results)
+    else
+      run(config)
 
   def run(config: Config): Vector[PlayerValidationResult] =
     Files.createDirectories(config.outputDir)
@@ -128,10 +134,10 @@ object ValidationRunner:
       Files.writeString(playerDir.resolve(f"chunk_${chunk.chunkIndex}%04d.txt"), chunk.text)
     }
 
-    // Count leak firings
+    // Count leak firings and actual applicable spots
     val leakActions = records.flatMap(_.actions).filter(_.leakId.contains(leak.id))
     val firedCount = leakActions.size
-    val applicableEstimate = if leak.severity > 0 then math.round(firedCount / leak.severity).toInt else firedCount
+    val applicableCount = records.map(_.leakApplicableSpots).sum
 
     // Hero EV
     val heroTotalNet = records.map(_.heroNet).sum
@@ -145,7 +151,7 @@ object ValidationRunner:
       "baselineNoise" -> ujson.Num(0.03),
       "totalHands" -> ujson.Num(config.handsPerPlayer.toDouble),
       "leakFiredCount" -> ujson.Num(firedCount.toDouble),
-      "leakApplicableSpots" -> ujson.Num(applicableEstimate.toDouble),
+      "leakApplicableSpots" -> ujson.Num(applicableCount.toDouble),
       "heroNetBbPer100" -> ujson.Num(heroNetBbPer100)
     )
     Files.writeString(playerDir.resolve("ground_truth.json"), ujson.write(groundTruth, indent = 2))
@@ -183,7 +189,7 @@ object ValidationRunner:
       leakId = leak.id,
       severity = leak.severity,
       totalHands = config.handsPerPlayer,
-      leakApplicableSpots = applicableEstimate,
+      leakApplicableSpots = applicableCount,
       leakFiredCount = firedCount,
       heroNetBbPer100 = heroNetBbPer100,
       convergence = tracker.summary(config.chunkSize),
@@ -191,6 +197,54 @@ object ValidationRunner:
       archetypeConvergenceChunk = archetypeStableChunk,
       clusterId = None
     )
+
+  /** Start the web review server with sample validation chunks for visual spot-checking.
+    *
+    * After a validation run, this picks one "severe" player per leak type and
+    * serves their chunk files through HandHistoryReviewServer so the user can
+    * visually inspect profiling reports in the browser.
+    */
+  def runWebSpotCheck(config: Config, results: Vector[PlayerValidationResult]): Unit =
+    // Pick severe variants for spot-checking (most visible leaks)
+    val severeResults = results.filter(_.severity >= 0.9)
+    if severeResults.isEmpty then
+      println("No severe-severity players to spot-check.")
+      return
+
+    // Copy sample chunks to a spot-check directory the web UI can reference
+    val spotCheckDir = config.outputDir.resolve("spot-check")
+    Files.createDirectories(spotCheckDir)
+    severeResults.foreach { r =>
+      val playerDir = config.outputDir.resolve(r.villainName)
+      val chunkFile = playerDir.resolve("chunk_0000.txt")
+      if Files.exists(chunkFile) then
+        val dest = spotCheckDir.resolve(s"${r.villainName}_chunk_0000.txt")
+        Files.copy(chunkFile, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+
+    println()
+    println("=== Web Spot-Check Mode ===")
+    println(s"Starting HandHistoryReviewServer...")
+    println(s"Upload files from: ${spotCheckDir.toAbsolutePath.normalize()}")
+    println()
+
+    val serverArgs = Array(
+      s"--port=8090",
+      s"--staticDir=docs/site-preview-hybrid",
+      s"--bunchingTrials=${config.bunchingTrials}",
+      s"--equityTrials=${config.equityTrials}",
+      s"--budgetMs=${config.budgetMs}"
+    )
+    HandHistoryReviewServer.start(serverArgs) match
+      case Right(server) =>
+        println(s"Web server running at http://127.0.0.1:8090/")
+        println(s"Upload the chunk files above to analyze in the browser.")
+        println("Press Ctrl+C to stop.")
+        try Thread.currentThread().join()
+        catch case _: InterruptedException => ()
+        finally server.close()
+      case Left(err) =>
+        println(s"Failed to start web server: $err")
 
   /** Check if any exploit hint text matches the injected leak concept. */
   private def hintMatchesLeak(hints: Vector[String], leakId: String): Boolean =

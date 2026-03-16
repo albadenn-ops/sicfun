@@ -28,7 +28,8 @@ final case class HandRecord(
     board: Board,
     actions: Vector[RecordedAction],
     heroNet: Double,
-    streetsPlayed: Int
+    streetsPlayed: Int,
+    leakApplicableSpots: Int = 0
 )
 
 /** Focused heads-up hand simulator for validation.
@@ -65,6 +66,7 @@ final class HeadsUpSimulator(
     val actions = mutable.ArrayBuffer.empty[RecordedAction]
     val villainObs = mutable.ArrayBuffer.empty[VillainObservation]
     val villainLine = mutable.ArrayBuffer.empty[PokerAction]
+    var applicableSpots = 0
     var heroStack = startingStack
     var villainStack = startingStack
     var pot = 0.0
@@ -86,6 +88,9 @@ final class HeadsUpSimulator(
     for street <- streets if !handOver do
       streetsPlayed += 1
       val board = boardForStreet(street)
+      // Track per-street commitments to compute correct toCall after raises
+      var heroCommitted = if street == Street.Preflop then smallBlind else 0.0
+      var villainCommitted = if street == Street.Preflop then bigBlind else 0.0
       var toCall = if street == Street.Preflop then bigBlind - smallBlind else 0.0
       var streetDone = false
       var actionsThisStreet = 0
@@ -109,14 +114,17 @@ final class HeadsUpSimulator(
               val callAmt = math.min(toCall, heroStack)
               heroStack -= callAmt
               pot += callAmt
+              heroCommitted += callAmt
               toCall = 0.0
               actionsThisStreet += 1
               if actionsThisStreet >= 2 then streetDone = true
             case PokerAction.Raise(amount) =>
-              val totalCommit = math.min(amount, heroStack)
-              heroStack -= totalCommit
-              pot += totalCommit
-              toCall = totalCommit // villain needs to match this
+              // amount = net new chips from stack (what buildCandidates computes)
+              val netCost = math.min(amount, heroStack)
+              heroStack -= netCost
+              pot += netCost
+              heroCommitted += netCost
+              toCall = heroCommitted - villainCommitted
               actionsThisStreet += 1
         else
           val gs = GameState(street, board, pot, toCall, Position.BigBlind, villainStack, Vector.empty)
@@ -132,6 +140,7 @@ final class HeadsUpSimulator(
             facingAction
           )
           val result = villain.decide(gtoAction, spot)
+          if result.leakApplicable then applicableSpots += 1
 
           actions += RecordedAction(street, villain.name, result.action, pot, toCall, villainStack,
             result.leakFired, result.leakId)
@@ -151,14 +160,16 @@ final class HeadsUpSimulator(
               val callAmt = math.min(toCall, villainStack)
               villainStack -= callAmt
               pot += callAmt
+              villainCommitted += callAmt
               toCall = 0.0
               actionsThisStreet += 1
               if actionsThisStreet >= 2 then streetDone = true
             case PokerAction.Raise(amount) =>
-              val totalCommit = math.min(amount, villainStack)
-              villainStack -= totalCommit
-              pot += totalCommit
-              toCall = totalCommit
+              val netCost = math.min(amount, villainStack)
+              villainStack -= netCost
+              pot += netCost
+              villainCommitted += netCost
+              toCall = villainCommitted - heroCommitted
               actionsThisStreet += 1
 
         heroTurn = !heroTurn
@@ -194,7 +205,8 @@ final class HeadsUpSimulator(
       board = finalBoard,
       actions = actions.toVector,
       heroNet = heroNet,
-      streetsPlayed = streetsPlayed
+      streetsPlayed = streetsPlayed,
+      leakApplicableSpots = applicableSpots
     )
 
   private def decideHero(

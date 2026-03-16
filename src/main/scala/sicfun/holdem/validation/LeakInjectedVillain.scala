@@ -7,7 +7,8 @@ import scala.util.Random
 final case class VillainDecisionResult(
     action: PokerAction,
     leakFired: Boolean,
-    leakId: Option[String]
+    leakId: Option[String],
+    leakApplicable: Boolean = false
 )
 
 /** A simulated opponent that plays a noised GTO baseline with optional injected leaks.
@@ -36,8 +37,10 @@ final case class LeakInjectedVillain(
     * leak fires, baseline noise is applied.
     */
   def decide(gtoAction: PokerAction, spot: SpotContext): VillainDecisionResult =
-    val leakResult = leaks.iterator
-      .filter(_.applies(spot))
+    val applicableLeaks = leaks.filter(_.applies(spot))
+    val anyApplicable = applicableLeaks.nonEmpty
+
+    val leakResult = applicableLeaks.iterator
       .map { leak =>
         val deviated = leak.deviate(gtoAction, spot, rng)
         (leak, deviated, deviated != gtoAction)
@@ -46,10 +49,10 @@ final case class LeakInjectedVillain(
 
     leakResult match
       case Some((leak, deviatedAction, _)) =>
-        VillainDecisionResult(deviatedAction, leakFired = true, leakId = Some(leak.id))
+        VillainDecisionResult(deviatedAction, leakFired = true, leakId = Some(leak.id), leakApplicable = true)
       case None =>
         val noisedAction = applyNoise(gtoAction, spot)
-        VillainDecisionResult(noisedAction, leakFired = false, leakId = None)
+        VillainDecisionResult(noisedAction, leakFired = false, leakId = None, leakApplicable = anyApplicable)
 
   /** Small random perturbation: with probability `baselineNoise`, swap to a random
     * alternative action from {Fold, Check, Call} excluding the current action type.
