@@ -162,10 +162,17 @@ object ValidationRunner:
     var archetypeStableChunk: Option[Int] = None
     var prevArchetype = ""
 
+    var parseFailures = 0
     val accumulatedText = new StringBuilder
     chunks.foreach { chunk =>
       accumulatedText.append(chunk.text)
       val parsed = HandHistoryImport.parseText(accumulatedText.toString(), Some(HandHistorySite.PokerStars), Some("Hero"))
+      parsed match
+        case Left(err) =>
+          parseFailures += 1
+          if parseFailures <= 3 then
+            System.err.println(s"  [WARN] Parse failure at chunk ${chunk.chunkIndex} for $villainName: $err")
+        case _ => ()
       parsed.foreach { hands =>
         val profiles = OpponentProfile.fromImportedHands("simulated", hands, Set("Hero"))
         profiles.headOption.foreach { profile =>
