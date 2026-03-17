@@ -101,7 +101,7 @@ object HandHistoryImport:
   )
   private val HashTokenRegex = """#([A-Za-z0-9\-]+)""".r
   private val LeadingAmountRegex = """^\s*([$€£¥]?\s*-?\d[\d\s.,]*[$€£¥]?)""".r
-  private val ShowdownPattern = """^(.+?):\s+shows?\s+\[([^\]]+)\].*""".r
+  private val ShowdownPattern = """(?i)^(.+?)(?::)?\s+(?:shows?|showed)\s+\[([^\]]+)\].*""".r
   private val PlayerActionTokens = Vector(
     "posts small blind ",
     "posts big blind ",

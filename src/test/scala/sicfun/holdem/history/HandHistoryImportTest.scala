@@ -258,8 +258,8 @@ class HandHistoryImportTest extends FunSuite:
     val parsed = HandHistoryImport.parseText(text, Some(HandHistorySite.PokerStars), Some("Hero"))
     assert(parsed.isRight, s"parse failed: ${parsed.left.getOrElse("")}")
     val hand = parsed.toOption.get.head
-    assertEquals(hand.showdownCards.get("Villain"), Some(HoleCards(Card(Rank.Queen, Suit.Hearts), Card(Rank.Queen, Suit.Spades))))
-    assertEquals(hand.showdownCards.get("Hero"), Some(HoleCards(Card(Rank.Ace, Suit.Clubs), Card(Rank.King, Suit.Hearts))))
+    assertEquals(hand.showdownCards.get("Villain"), Some(HoleCards.from(Seq(Card(Rank.Queen, Suit.Hearts), Card(Rank.Queen, Suit.Spades)))))
+    assertEquals(hand.showdownCards.get("Hero"), Some(HoleCards.from(Seq(Card(Rank.Ace, Suit.Clubs), Card(Rank.King, Suit.Hearts)))))
     assertEquals(hand.showdownCards.size, 2)
 
   test("parseText handles hand with no showdown (fold before river)"):
@@ -268,3 +268,34 @@ class HandHistoryImportTest extends FunSuite:
     assert(parsed.isRight)
     val hand = parsed.toOption.get.head
     assert(hand.showdownCards.isEmpty)
+
+  test("parseText ignores mucked hands in showdown"):
+    val text = """PokerStars Hand #997: Hold'em No Limit ($1/$2) - 2025/01/01 12:00:00 ET
+      |Table 'TestTable' 2-max Seat #1 is the button
+      |Seat 1: Hero ($200 in chips)
+      |Seat 2: Villain ($200 in chips)
+      |Hero: posts small blind $1
+      |Villain: posts big blind $2
+      |*** HOLE CARDS ***
+      |Dealt to Hero [Ac Kh]
+      |Hero: raises $4 to $6
+      |Villain: calls $4
+      |*** FLOP *** [Ts 9h 8d]
+      |Hero: bets $8
+      |Villain: calls $8
+      |*** TURN *** [Ts 9h 8d] [2c]
+      |Hero: checks
+      |Villain: checks
+      |*** RIVER *** [Ts 9h 8d 2c] [3s]
+      |Hero: bets $10
+      |Villain: folds
+      |Uncalled bet ($10) returned to Hero
+      |Hero collected $28 from pot
+      |Hero: doesn't show hand
+      |*** SUMMARY ***
+      |Total pot $28 | Rake $0
+      |""".stripMargin
+    val parsed = HandHistoryImport.parseText(text, Some(HandHistorySite.PokerStars), Some("Hero"))
+    assert(parsed.isRight)
+    val hand = parsed.toOption.get.head
+    assert(hand.showdownCards.isEmpty, "muck/doesn't show should not produce entries")
