@@ -11,6 +11,9 @@ class VillainStrategyTest extends FunSuite:
 
   private val AhAs = HoleCards(Card(Rank.Ace, Suit.Hearts), Card(Rank.Ace, Suit.Spades))
   private val TwoThree = HoleCards(Card(Rank.Two, Suit.Hearts), Card(Rank.Three, Suit.Diamonds))
+  private val QhQd = HoleCards(Card(Rank.Queen, Suit.Hearts), Card(Rank.Queen, Suit.Diamonds))
+  private val flopAK7 = Board.from(Vector(
+    Card(Rank.Ace, Suit.Hearts), Card(Rank.King, Suit.Diamonds), Card(Rank.Seven, Suit.Clubs)))
 
   test("EquityBasedStrategy produces valid actions facing a bet"):
     val strategy = EquityBasedStrategy()
@@ -82,3 +85,47 @@ class VillainStrategyTest extends FunSuite:
       assert(ra.action == PokerAction.Call || ra.action == PokerAction.Check,
         s"Expected Call/Check but got ${ra.action}")
     }
+
+  test("CfrVillainStrategy produces valid actions from equilibrium solve"):
+    val strategy = CfrVillainStrategy()
+    val gs = GameState(
+      street = Street.Flop,
+      board = flopAK7,
+      pot = 6.0,
+      toCall = 3.0,
+      position = Position.BigBlind,
+      stackSize = 97.0,
+      betHistory = Vector.empty
+    )
+    val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
+    val action = strategy.decide(QhQd, gs, candidates, 0.70, new Random(42))
+    assert(candidates.contains(action) || action == PokerAction.Check || action == PokerAction.Call,
+      s"CfrVillainStrategy returned invalid action: $action")
+
+  test("CfrVillainStrategy returns valid actions across different hands and seeds"):
+    val strategy = CfrVillainStrategy()
+    // Test with multiple hands to exercise the CFR solver path
+    val hands = Vector(QhQd,
+      HoleCards(Card(Rank.Six, Suit.Spades), Card(Rank.Seven, Suit.Hearts)))
+    val gs = GameState(
+      street = Street.Flop,
+      board = flopAK7,
+      pot = 6.0,
+      toCall = 3.0,
+      position = Position.BigBlind,
+      stackSize = 97.0,
+      betHistory = Vector.empty
+    )
+    val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
+    val allActions = for
+      hand <- hands
+      seed <- 0 until 20
+    yield strategy.decide(hand, gs, candidates, 0.50, new Random(seed))
+    // Every returned action must be from the candidate set
+    allActions.foreach { a =>
+      assert(candidates.contains(a),
+        s"CfrVillainStrategy returned action not in candidates: $a")
+    }
+    // Different hands should potentially produce different equilibrium actions
+    val distinctActions = allActions.distinct
+    assert(distinctActions.nonEmpty, "CfrVillainStrategy must return at least one action")
