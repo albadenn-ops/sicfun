@@ -339,14 +339,11 @@ object OpponentProfile:
         if turnRaiseRate >= 0.25 then
           hints += "Very aggressive on the turn; bluff-catch more selectively against turn barrels."
 
-      // Passive in big pots: checks strong spots when they could bet (toCall = 0, SPR < 4)
-      val bigPotCanBet = events.filter(e =>
-        e.potBefore > 0 && e.stackBefore / e.potBefore < 4.0 && e.toCall == 0
-      )
-      if bigPotCanBet.size >= 5 then
-        val bigPotCheckRate = bigPotCanBet.count(_.action == PokerAction.Check).toDouble / bigPotCanBet.size
-        if bigPotCheckRate >= 0.75 then
-          hints += "Plays passive in big pots; Respect their sudden aggression when they do bet large."
+      // Big pot passivity removed (2026-03-17, CFR calibration):
+      // HU equilibrium play checks ~100% in big pots (SPR < 4, toCall = 0) — checking
+      // to induce, protect range, and manage pot is the GTO strategy. The PassiveInBigPots
+      // leak (checking strong hands) is not distinguishable from GTO by action frequency
+      // alone — it requires hand-strength-aware analysis.
 
       // Preflop fold rate — baseline ~13%, anything above 20% is exploitably tight
       val preflopEvents = events.filter(_.street == Street.Preflop)

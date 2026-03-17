@@ -285,7 +285,9 @@ object ValidationRunner:
       case "overbluff-turn-barrel" =>
         hints.exists(_.contains("Very aggressive on the turn"))
       case "passive-big-pots" =>
-        hints.exists(_.contains("Plays passive in big pots"))
+        // Not detectable by action frequency — GTO checks ~100% in big pots.
+        // Requires hand-strength-aware analysis to distinguish from equilibrium.
+        false
       case "preflop-too-loose" =>
         hints.exists(_.contains("Calls too loose preflop"))
       case "preflop-too-tight" =>
@@ -293,7 +295,7 @@ object ValidationRunner:
       case "gto-baseline" =>
         // False positive check: does the profiler incorrectly match ANY leak pattern?
         val leakIds = Vector("overfold-river-aggression", "overcall-big-bets", "overbluff-turn-barrel",
-          "passive-big-pots", "preflop-too-loose", "preflop-too-tight")
+          "preflop-too-loose", "preflop-too-tight")
         leakIds.exists(id => hintMatchesLeak(hints, id))
       case _ => false
 

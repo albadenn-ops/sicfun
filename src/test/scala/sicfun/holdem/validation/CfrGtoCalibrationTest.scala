@@ -114,7 +114,7 @@ class CfrGtoCalibrationTest extends FunSuite:
       case "overbluff-turn-barrel" =>
         hints.exists(_.contains("Very aggressive on the turn"))
       case "passive-big-pots" =>
-        hints.exists(_.contains("Plays passive in big pots"))
+        false // Not detectable by action frequency — GTO checks ~100% in big pots
       case "preflop-too-loose" =>
         hints.exists(_.contains("Calls too loose preflop"))
       case "preflop-too-tight" =>
