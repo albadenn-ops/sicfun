@@ -58,7 +58,8 @@ final case class ImportedHand(
     players: Vector[ImportedPlayer],
     heroName: Option[String],
     heroHoleCards: Option[HoleCards],
-    events: Vector[PokerEvent]
+    events: Vector[PokerEvent],
+    showdownCards: Map[String, HoleCards] = Map.empty
 ):
   require(handId.trim.nonEmpty, "handId must be non-empty")
   require(tableName.trim.nonEmpty, "tableName must be non-empty")
@@ -100,6 +101,7 @@ object HandHistoryImport:
   )
   private val HashTokenRegex = """#([A-Za-z0-9\-]+)""".r
   private val LeadingAmountRegex = """^\s*([$€£¥]?\s*-?\d[\d\s.,]*[$€£¥]?)""".r
+  private val ShowdownPattern = """^(.+?):\s+shows?\s+\[([^\]]+)\].*""".r
   private val PlayerActionTokens = Vector(
     "posts small blind ",
     "posts big blind ",
@@ -286,10 +288,20 @@ object HandHistoryImport:
       val heroCards = heroFromCards.map(_._2)
 
       var summaryReached = false
+      var showdownReached = false
+      val showdownMap = mutable.Map.empty[String, HoleCards]
       lines.tail.foreach { line =>
         if !summaryReached then
           val upper = line.toUpperCase
           if upper == "*** SUMMARY ***" then summaryReached = true
+          else if upper == "*** SHOW DOWN ***" then showdownReached = true
+          else if showdownReached then
+            line match
+              case ShowdownPattern(name, cardsStr) =>
+                val cards = cardsStr.trim.split("\\s+").flatMap(Card.parse)
+                if cards.length == 2 then
+                  showdownMap += (name.trim -> HoleCards.from(cards.toIndexedSeq))
+              case _ => ()
           else if upper.startsWith("*** HOLE CARDS ***") || upper.startsWith("*** PRE-FLOP ***") || upper.startsWith("*** ANTE/BLINDS ***") then
             state.beginStreet(Street.Preflop, Board.empty)
           else if upper.startsWith("*** FLOP ***") then
@@ -311,7 +323,8 @@ object HandHistoryImport:
           players = players,
           heroName = heroName,
           heroHoleCards = heroCards,
-          events = state.events
+          events = state.events,
+          showdownCards = showdownMap.toMap
         )
       )
     catch
