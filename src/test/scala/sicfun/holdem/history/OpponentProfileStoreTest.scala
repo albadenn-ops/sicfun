@@ -183,6 +183,103 @@ class OpponentProfileStoreTest extends FunSuite:
     assertEquals(remembered.profileUid, Some(beta.profileUid))
   }
 
+  private def showdownHand(handId: Int, minute: Int): String =
+    f"""PokerStars Hand #$handId%d:  Hold'em No Limit ($$0.50/$$1.00 USD) - 2026/03/10 12:$minute%02d:00 ET
+       |Table 'Alpha' 2-max Seat #1 is the button
+       |Seat 1: Hero ($$100.00 in chips)
+       |Seat 2: Villain ($$100.00 in chips)
+       |Hero: posts small blind $$0.50
+       |Villain: posts big blind $$1.00
+       |*** HOLE CARDS ***
+       |Dealt to Hero [Ac Kh]
+       |Hero: raises $$2.50 to $$3.00
+       |Villain: calls $$2.00
+       |*** FLOP *** [Ts 9h 8d]
+       |Hero: bets $$4.00
+       |Villain: calls $$4.00
+       |*** TURN *** [Ts 9h 8d] [2c]
+       |Hero: checks
+       |Villain: checks
+       |*** RIVER *** [Ts 9h 8d 2c] [3s]
+       |Hero: checks
+       |Villain: checks
+       |*** SHOW DOWN ***
+       |Villain: shows [Qh Qs] (a pair of Queens)
+       |Hero: shows [Ac Kh] (high card Ace)
+       |Villain collected $$14.00 from pot
+       |*** SUMMARY ***
+       |""".stripMargin
+
+  test("OpponentProfile tracks showdown-revealed hands") {
+    val text = showdownHand(3001, 10)
+    val parsed = HandHistoryImport.parseText(
+      text,
+      site = Some(HandHistorySite.PokerStars),
+      heroName = Some("Hero")
+    )
+    assert(parsed.isRight, s"parse failed: $parsed")
+    val hands = parsed.toOption.get
+    assert(hands.head.showdownCards.nonEmpty, s"showdownCards should be populated by parser: ${hands.head.showdownCards}")
+
+    val profiles = OpponentProfile.fromImportedHands("pokerstars", hands, Set("Hero"))
+    assert(profiles.nonEmpty, "should have villain profile")
+    val villainProfile = profiles.find(_.playerName == "Villain").get
+    assert(villainProfile.showdownHands.nonEmpty, "should have showdown records")
+    assertEquals(villainProfile.showdownHands.head.handId, "3001")
+    assertEquals(
+      villainProfile.showdownHands.head.cards,
+      HoleCards.from(Seq(card("Qh"), card("Qs")))
+    )
+  }
+
+  test("showdown hands survive merge") {
+    val text = Vector(showdownHand(3001, 10), showdownHand(3002, 11)).mkString("\n")
+    val parsed = HandHistoryImport.parseText(
+      text,
+      site = Some(HandHistorySite.PokerStars),
+      heroName = Some("Hero")
+    )
+    assert(parsed.isRight, s"parse failed: $parsed")
+    val hands = parsed.toOption.get
+
+    val profilesA = OpponentProfile.fromImportedHands("pokerstars", hands.take(1), Set("Hero"))
+    val profilesB = OpponentProfile.fromImportedHands("pokerstars", hands.drop(1), Set("Hero"))
+    val merged = OpponentProfile.merge(profilesA.head, profilesB.head)
+    assertEquals(merged.showdownHands.length, 2)
+    assertEquals(merged.showdownHands.map(_.handId).toSet, Set("3001", "3002"))
+  }
+
+  test("showdown hands survive JSON roundtrip") {
+    val text = showdownHand(3001, 10)
+    val parsed = HandHistoryImport.parseText(
+      text,
+      site = Some(HandHistorySite.PokerStars),
+      heroName = Some("Hero")
+    )
+    assert(parsed.isRight, s"parse failed: $parsed")
+    val profiles = OpponentProfile.fromImportedHands("pokerstars", parsed.toOption.get, Set("Hero"))
+    val store = OpponentProfileStore.empty.upsertAll(profiles)
+
+    val dir = Files.createTempDirectory("showdown-roundtrip-")
+    val path = dir.resolve("profiles.json")
+    try
+      OpponentProfileStore.save(path, store)
+      val loaded = OpponentProfileStore.load(path)
+      val loadedVillain = loaded.find("pokerstars", "Villain").getOrElse(fail("missing villain after reload"))
+      assertEquals(loadedVillain.showdownHands.length, 1)
+      assertEquals(loadedVillain.showdownHands.head.handId, "3001")
+      assertEquals(
+        loadedVillain.showdownHands.head.cards,
+        HoleCards.from(Seq(card("Qh"), card("Qs")))
+      )
+    finally
+      val stream = Files.walk(dir)
+      try
+        stream.iterator().asScala.toVector.sortBy(_.toString.length).reverse.foreach(path => Files.deleteIfExists(path))
+      finally
+        stream.close()
+  }
+
   test("manual player collapse can also collapse profiles and survives JSON roundtrip") {
     val canonical = OpponentProfile(
       site = "pokerstars",

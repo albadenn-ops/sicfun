@@ -3,7 +3,7 @@ import sicfun.holdem.analysis.*
 import sicfun.holdem.engine.*
 import sicfun.holdem.types.*
 
-import sicfun.core.Metrics
+import sicfun.core.{Card, Metrics}
 
 import ujson.{Arr, Num, Obj, Str, Value}
 
@@ -69,6 +69,11 @@ final case class StabilitySnapshot(
   require(maxDrift >= 0.0, "maxDrift must be non-negative")
   require(meanDrift >= 0.0, "meanDrift must be non-negative")
 
+final case class ShowdownRecord(
+    handId: String,
+    cards: HoleCards
+)
+
 final case class OpponentProfile(
     site: String,
     playerName: String,
@@ -79,6 +84,7 @@ final case class OpponentProfile(
     raiseResponses: RaiseResponseCounts,
     recentEvents: Vector[PokerEvent],
     seenHandIds: Vector[String],
+    showdownHands: Vector[ShowdownRecord] = Vector.empty,
     playerUid: Option[String] = None,
     profileUid: Option[String] = None,
     behaviorUid: Option[String] = None,
@@ -155,6 +161,11 @@ object OpponentProfile:
         if event.action.category == PokerAction.Category.Raise then
           raiseSeenByStreet.update(event.street, true)
       }
+      hand.showdownCards.foreach { (playerName, cards) =>
+        if !excludePlayers.contains(playerName) then
+          val builder = builders.getOrElseUpdate(playerName, new ProfileBuilder(site, playerName))
+          builder.addShowdownRecord(hand.handId, cards)
+      }
     }
     builders.valuesIterator.map(_.build()).toVector.sortBy(profile => (-profile.handsObserved, profile.playerName))
 
@@ -182,6 +193,7 @@ object OpponentProfile:
         ),
         recentEvents = mergedEvents,
         seenHandIds = mergedSeen,
+        showdownHands = (existing.showdownHands ++ incoming.showdownHands).distinctBy(_.handId),
         playerUid =
           if existing.playerUid == incoming.playerUid then existing.playerUid
           else existing.playerUid.orElse(incoming.playerUid),
@@ -225,6 +237,7 @@ object OpponentProfile:
         seenHandIds =
           if isNewHand then (profile.seenHandIds :+ event.handId).takeRight(MaxSeenHandIds)
           else profile.seenHandIds,
+        showdownHands = profile.showdownHands,
         playerUid = profile.playerUid,
         profileUid = profile.profileUid,
         behaviorUid = profile.behaviorUid,
@@ -239,6 +252,7 @@ object OpponentProfile:
     private var raiseResponses = RaiseResponseCounts()
     private val seenHandIds = mutable.LinkedHashSet.empty[String]
     private val recentEvents = mutable.ArrayBuffer.empty[PokerEvent]
+    private val showdownRecords = mutable.ArrayBuffer.empty[ShowdownRecord]
 
     def observeHand(handId: String, occurredAtEpochMillis: Long): Unit =
       if seenHandIds.add(handId) then
@@ -255,6 +269,9 @@ object OpponentProfile:
     def observeRaiseResponse(action: PokerAction): Unit =
       raiseResponses = raiseResponses.observe(action)
 
+    def addShowdownRecord(handId: String, cards: HoleCards): Unit =
+      showdownRecords += ShowdownRecord(handId, cards)
+
     def build(): OpponentProfile =
       OpponentProfile(
         site = OpponentIdentity.normalizeSite(site),
@@ -265,7 +282,8 @@ object OpponentProfile:
         actionSummary = actionSummary,
         raiseResponses = raiseResponses,
         recentEvents = recentEvents.toVector,
-        seenHandIds = seenHandIds.toVector.takeRight(MaxSeenHandIds)
+        seenHandIds = seenHandIds.toVector.takeRight(MaxSeenHandIds),
+        showdownHands = showdownRecords.toVector
       )
 
   private def dedupePreserveOrder(values: Seq[String]): Vector[String] =
@@ -922,6 +940,9 @@ object OpponentProfileStore:
       ),
       "recentEvents" -> Arr.from(profile.recentEvents.map(writeEvent)),
       "seenHandIds" -> Arr.from(profile.seenHandIds.map(Str(_))),
+      "showdownHands" -> Arr.from(profile.showdownHands.map(record =>
+        Obj("handId" -> Str(record.handId), "cards" -> Str(record.cards.toToken))
+      )),
       "playerUid" -> profile.playerUid.map(Str(_)).getOrElse(ujson.Null),
       "profileUid" -> profile.profileUid.map(Str(_)).getOrElse(ujson.Null),
       "behaviorUid" -> profile.behaviorUid.map(Str(_)).getOrElse(ujson.Null),
@@ -956,6 +977,14 @@ object OpponentProfileStore:
       },
       recentEvents = obj.get("recentEvents").map(_.arr.toVector.map(readEvent)).getOrElse(Vector.empty),
       seenHandIds = obj.get("seenHandIds").map(_.arr.toVector.map(_.str)).getOrElse(Vector.empty),
+      showdownHands = obj.get("showdownHands").map(_.arr.toVector.map { recordJson =>
+        val recordObj = recordJson.obj
+        val token = recordObj("cards").str
+        val cards = Card.parseAll(Seq(token.substring(0, 2), token.substring(2, 4))).map(HoleCards.from).getOrElse(
+          throw new IllegalArgumentException(s"invalid showdown cards token: $token")
+        )
+        ShowdownRecord(handId = recordObj("handId").str, cards = cards)
+      }).getOrElse(Vector.empty),
       playerUid = obj.get("playerUid").filterNot(_ == ujson.Null).map(_.str),
       profileUid = obj.get("profileUid").filterNot(_ == ujson.Null).map(_.str),
       behaviorUid = obj.get("behaviorUid").filterNot(_ == ujson.Null).map(_.str),
