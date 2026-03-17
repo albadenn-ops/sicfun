@@ -49,7 +49,8 @@ final class HeadsUpSimulator(
     startingStack: Double = 100.0,
     smallBlind: Double = 0.5,
     bigBlind: Double = 1.0,
-    budgetMs: Long = 50L
+    budgetMs: Long = 50L,
+    villainStrategy: VillainStrategy = EquityBasedStrategy()
 ):
   private val rng = new Random(seed)
   private val heroName = "Hero"
@@ -256,7 +257,7 @@ final class HeadsUpSimulator(
   ): PokerAction =
     val candidates = buildCandidates(gs)
     if candidates.size <= 1 then return candidates.headOption.getOrElse(PokerAction.Check)
-    equityBasedDecision(equity, gs, street, candidates)
+    villainStrategy.decide(villainHand, gs, candidates, equity, new Random(rng.nextLong()))
 
   /** Equity-based action decision shared by fast hero and villain GTO paths. */
   private def equityBasedDecision(

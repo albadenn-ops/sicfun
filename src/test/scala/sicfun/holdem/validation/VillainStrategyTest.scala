@@ -3,6 +3,7 @@ package sicfun.holdem.validation
 import munit.FunSuite
 import sicfun.core.{Card, Rank, Suit}
 import sicfun.holdem.types.*
+import sicfun.holdem.validation.{LeakInjectedVillain, NoLeak}
 
 import scala.util.Random
 
@@ -61,3 +62,23 @@ class VillainStrategyTest extends FunSuite:
         case _ => false
     }
     assert(betCount >= 50, s"Strong hand should bet often when checked to, only bet $betCount/100 times")
+
+  test("HeadsUpSimulator uses pluggable VillainStrategy"):
+    val callStrategy = new VillainStrategy:
+      def decide(hand: HoleCards, state: GameState, candidates: Vector[PokerAction],
+                 equityVsRandom: Double, rng: Random): PokerAction =
+        if state.toCall > 0 then PokerAction.Call else PokerAction.Check
+
+    val villain = LeakInjectedVillain("test", Vector(NoLeak()), 0.0, 42L)
+    val sim = new HeadsUpSimulator(
+      heroEngine = None,
+      villain = villain,
+      seed = 42L,
+      villainStrategy = callStrategy
+    )
+    val record = sim.playHand(1)
+    val villainActions = record.actions.filter(_.player == villain.name)
+    villainActions.foreach { ra =>
+      assert(ra.action == PokerAction.Call || ra.action == PokerAction.Check,
+        s"Expected Call/Check but got ${ra.action}")
+    }
