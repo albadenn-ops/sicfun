@@ -43,6 +43,7 @@ private[holdem] object MatchRunnerSupport:
     private var bigBlindNetChips = 0.0
 
     def currentHandsPlayed: Int = handsPlayed
+    def currentHeroNetChips: Double = heroNetChips
 
     def recordOutcome(heroPosition: Position, heroNetChips: Double): Unit =
       this.handsPlayed += 1
