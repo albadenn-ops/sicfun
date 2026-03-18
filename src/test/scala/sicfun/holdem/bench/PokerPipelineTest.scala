@@ -4,7 +4,7 @@ import sicfun.holdem.*
 import sicfun.holdem.model.*
 
 import munit.FunSuite
-import sicfun.core.{BayesianRange, Card, CollapseMetrics, DiscreteDistribution, MultinomialLogistic}
+import sicfun.core.{BayesianRange, CollapseMetrics, DiscreteDistribution, MultinomialLogistic}
 import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 class PokerPipelineTest extends FunSuite:

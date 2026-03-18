@@ -5,7 +5,6 @@ import sicfun.holdem.io.*
 import sicfun.holdem.model.*
 
 import munit.FunSuite
-import sicfun.core.Card
 import sicfun.holdem.bench.BenchSupport.card
 
 import java.nio.charset.StandardCharsets
