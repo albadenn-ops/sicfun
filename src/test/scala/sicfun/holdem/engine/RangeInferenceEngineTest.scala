@@ -279,6 +279,43 @@ class RangeInferenceEngineTest extends FunSuite:
     assertEquals(result.recommendation.bestAction, PokerAction.Fold)
   }
 
+  test("inferPosterior with revealed cards produces delta distribution") {
+    val hero = hole("Ah", "Kh")
+    val revealed = hole("Qh", "Qs")
+    val result = RangeInferenceEngine.inferPosterior(
+      hero = hero,
+      board = Board.empty,
+      folds = Vector.empty,
+      tableRanges = TableRanges.defaults(TableFormat.HeadsUp),
+      villainPos = Position.BigBlind,
+      observations = Seq.empty,
+      actionModel = PokerActionModel.uniform,
+      revealedCards = Some(revealed),
+      useCache = false
+    )
+    val prob = result.posterior.probabilityOf(revealed)
+    assert(prob > 0.99, s"expected ~1.0 for revealed hand, got $prob")
+    assertEquals(result.posterior.support.size, 1)
+    assertEquals(result.prior.support.size, 1)
+    assertEquals(result.collapse.effectiveSupportPosterior, 1.0)
+    assertEquals(result.collapse.collapseRatio, 1.0 / 1326.0)
+  }
+
+  test("inferPosterior without revealed cards works as before (regression)") {
+    val hero = hole("Ah", "Kh")
+    val result = RangeInferenceEngine.inferPosterior(
+      hero = hero,
+      board = Board.empty,
+      folds = Vector.empty,
+      tableRanges = TableRanges.defaults(TableFormat.HeadsUp),
+      villainPos = Position.BigBlind,
+      observations = Seq.empty,
+      actionModel = PokerActionModel.uniform,
+      useCache = false
+    )
+    assert(result.posterior.support.size > 10, s"expected broad support, got ${result.posterior.support.size}")
+  }
+
   test("validation rejects invalid trials and empty candidate action sets") {
     val hero = hole("As", "Kd")
     val board = Board.empty

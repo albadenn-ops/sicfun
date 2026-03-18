@@ -194,44 +194,62 @@ object RangeInferenceEngine:
       actionModel: PokerActionModel,
       bunchingTrials: Int = 10_000,
       rng: Random = new Random(),
-      useCache: Boolean = true
+      useCache: Boolean = true,
+      revealedCards: Option[HoleCards] = None
   ): PosteriorInferenceResult =
-    require(bunchingTrials > 0, "bunchingTrials must be positive")
-    val ddreConfig = HoldemDdreProvider.configuredConfig()
-    def computeResult: PosteriorInferenceResult =
-      computePosterior(
-        hero,
-        board,
-        folds,
-        tableRanges,
-        villainPos,
-        observations,
-        actionModel,
-        bunchingTrials,
-        rng,
-        ddreConfig
-      )
+    revealedCards match
+      case Some(cards) =>
+        val delta = DiscreteDistribution(Map(cards -> 1.0))
+        PosteriorInferenceResult(
+          prior = delta,
+          posterior = delta,
+          compact = None,
+          logEvidence = 0.0,
+          collapse = PosteriorCollapse(
+            entropyReduction = Double.PositiveInfinity,
+            klDivergence = Double.PositiveInfinity,
+            effectiveSupportPrior = 1326.0,
+            effectiveSupportPosterior = 1.0,
+            collapseRatio = 1.0 / 1326.0
+          )
+        )
+      case None =>
+        require(bunchingTrials > 0, "bunchingTrials must be positive")
+        val ddreConfig = HoldemDdreProvider.configuredConfig()
+        def computeResult: PosteriorInferenceResult =
+          computePosterior(
+            hero,
+            board,
+            folds,
+            tableRanges,
+            villainPos,
+            observations,
+            actionModel,
+            bunchingTrials,
+            rng,
+            ddreConfig
+          )
 
-    if useCache then
-      val cacheKey = PosteriorCacheKey(
-        hero = hero,
-        board = board,
-        folds = folds,
-        villainPos = villainPos,
-        observations = observations,
-        ddreMode = ddreConfig.mode,
-        ddreProvider = ddreConfig.provider,
-        ddreAlpha = ddreConfig.alpha,
-        ddreMinEntropyBits = ddreConfig.minEntropyBits,
-        ddreTimeoutMillis = ddreConfig.timeoutMillis
-      )
-      cachedOrCompute(
-        cache = posteriorCache,
-        key = cacheKey,
-        maxSize = MaxPosteriorCacheSize,
-        mutationLock = posteriorCacheMutationLock
-      )(computeResult)
-    else computeResult
+        if useCache then
+          val cacheKey = PosteriorCacheKey(
+            hero = hero,
+            board = board,
+            folds = folds,
+            villainPos = villainPos,
+            observations = observations,
+            ddreMode = ddreConfig.mode,
+            ddreProvider = ddreConfig.provider,
+            ddreAlpha = ddreConfig.alpha,
+            ddreMinEntropyBits = ddreConfig.minEntropyBits,
+            ddreTimeoutMillis = ddreConfig.timeoutMillis
+          )
+          cachedOrCompute(
+            cache = posteriorCache,
+            key = cacheKey,
+            maxSize = MaxPosteriorCacheSize,
+            mutationLock = posteriorCacheMutationLock
+          )(computeResult)
+        else computeResult
 
   private def computePosterior(
       hero: HoleCards,

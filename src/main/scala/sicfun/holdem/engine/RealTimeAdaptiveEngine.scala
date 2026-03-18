@@ -274,35 +274,51 @@ final class RealTimeAdaptiveEngine(
       candidateActions: Vector[PokerAction],
       actionValueModel: ActionValueModel = ActionValueModel.ChipEv(),
       decisionBudgetMillis: Option[Long] = None,
-      rng: Random = new Random()
+      rng: Random = new Random(),
+      revealedCards: Option[HoleCards] = None
   ): AdaptiveDecisionResult =
     val startedAt = System.nanoTime()
-    val effectiveBunching = effectiveBunchingTrials(decisionBudgetMillis)
-    val useLowLatencyPosterior =
-      effectiveBunching <= 1 &&
-        actionModel.isEffectivelyUniform &&
-        HoldemDdreProvider.configuredConfig().mode == HoldemDdreProvider.Mode.Off
-    val observationsHash =
-      if useLowLatencyPosterior then 0 else MurmurHash3.seqHash(observations)
-    val posteriorInference = cachedPosteriorInference(
-      key = InferenceCacheKey(
-        hero = hero,
-        board = state.board,
-        folds = folds,
-        villainPos = villainPos,
-        observationsHash = observationsHash,
-        tableRangesIdentity = tableRangesIdentity,
-        bunchingTrials = effectiveBunching
-      ),
-      hero = hero,
-      state = state,
-      folds = folds,
-      villainPos = villainPos,
-      observations = observations,
-      effectiveBunching = effectiveBunching,
-      useLowLatencyPosterior = useLowLatencyPosterior,
-      rng = rng
-    )
+    val posteriorInference = revealedCards match
+      case Some(_) =>
+        RangeInferenceEngine.inferPosterior(
+          hero = hero,
+          board = state.board,
+          folds = folds,
+          tableRanges = tableRanges,
+          villainPos = villainPos,
+          observations = observations,
+          actionModel = actionModel,
+          bunchingTrials = 1,
+          useCache = false,
+          revealedCards = revealedCards
+        )
+      case None =>
+        val effectiveBunching = effectiveBunchingTrials(decisionBudgetMillis)
+        val useLowLatencyPosterior =
+          effectiveBunching <= 1 &&
+            actionModel.isEffectivelyUniform &&
+            HoldemDdreProvider.configuredConfig().mode == HoldemDdreProvider.Mode.Off
+        val observationsHash =
+          if useLowLatencyPosterior then 0 else MurmurHash3.seqHash(observations)
+        cachedPosteriorInference(
+          key = InferenceCacheKey(
+            hero = hero,
+            board = state.board,
+            folds = folds,
+            villainPos = villainPos,
+            observationsHash = observationsHash,
+            tableRangesIdentity = tableRangesIdentity,
+            bunchingTrials = effectiveBunching
+          ),
+          hero = hero,
+          state = state,
+          folds = folds,
+          villainPos = villainPos,
+          observations = observations,
+          effectiveBunching = effectiveBunching,
+          useLowLatencyPosterior = useLowLatencyPosterior,
+          rng = rng
+        )
 
     val inferenceElapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
     val trials = effectiveEquityTrials(decisionBudgetMillis, inferenceElapsedMs)
