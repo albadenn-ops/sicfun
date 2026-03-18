@@ -1,9 +1,9 @@
 package sicfun.holdem.runtime
 
 import sicfun.core.Card
-import sicfun.holdem.cfr.{HoldemCfrConfig, HoldemCfrSolver}
+import sicfun.holdem.cfr.HoldemCfrConfig
 import sicfun.holdem.cli.CliHelpers
-import sicfun.holdem.engine.{RangeInferenceEngine, RealTimeAdaptiveEngine, VillainObservation}
+import sicfun.holdem.engine.{HeroDecisionPipeline, VillainObservation}
 import sicfun.holdem.equity.{PreflopFold, TableFormat, TableRanges}
 import sicfun.holdem.model.{CalibrationGate, CalibrationSummary, ModelVersion, PokerActionModel, PokerActionModelArtifactIO, TrainedPokerActionModel}
 import sicfun.holdem.types.*
@@ -371,21 +371,6 @@ object SlumbotMatchRunner:
       timeoutMillis: Long
   )
 
-  final case class RunSummary(
-      handsPlayed: Int,
-      heroNetChips: Int,
-      heroBbPer100: Double,
-      heroWins: Int,
-      heroTies: Int,
-      heroLosses: Int,
-      buttonHands: Int,
-      buttonNetChips: Int,
-      bigBlindHands: Int,
-      bigBlindNetChips: Int,
-      modelId: String,
-      outDir: Path
-  )
-
   private final case class SlumbotApiResponse(
       oldAction: String,
       action: String,
@@ -479,15 +464,15 @@ object SlumbotMatchRunner:
       case Right(summary) =>
         println("=== Slumbot Match Runner ===")
         println(s"handsPlayed: ${summary.handsPlayed}")
-        println(s"heroNetChips: ${summary.heroNetChips}")
-        println(s"heroBbPer100: ${fmt(summary.heroBbPer100, 3)}")
+        println(s"heroNetChips: ${summary.heroNetChips.toInt}")
+        println(s"heroBbPer100: ${PokerFormatting.fmtDouble(summary.heroBbPer100, 3)}")
         println(s"heroWins: ${summary.heroWins}")
         println(s"heroTies: ${summary.heroTies}")
         println(s"heroLosses: ${summary.heroLosses}")
         println(s"buttonHands: ${summary.buttonHands}")
-        println(s"buttonNetChips: ${summary.buttonNetChips}")
+        println(s"buttonNetChips: ${summary.buttonNetChips.toInt}")
         println(s"bigBlindHands: ${summary.bigBlindHands}")
-        println(s"bigBlindNetChips: ${summary.bigBlindNetChips}")
+        println(s"bigBlindNetChips: ${summary.bigBlindNetChips.toInt}")
         println(s"modelId: ${summary.modelId}")
         println(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
       case Left(error) =>
@@ -496,7 +481,7 @@ object SlumbotMatchRunner:
           System.err.println(error)
           sys.exit(1)
 
-  def run(args: Array[String]): Either[String, RunSummary] =
+  def run(args: Array[String]): Either[String, MatchRunnerSupport.RunSummary] =
     parseArgs(args).flatMap(config => new Runner(config).run())
 
   private final class Runner(config: Config):
@@ -511,20 +496,18 @@ object SlumbotMatchRunner:
     private var handsWriterOpt = Option.empty[BufferedWriter]
     private var decisionsWriterOpt = Option.empty[BufferedWriter]
 
-    private var heroNetChips = 0
-    private var heroWins = 0
-    private var heroTies = 0
-    private var heroLosses = 0
-    private var buttonHands = 0
-    private var buttonNetChips = 0
-    private var bigBlindHands = 0
-    private var bigBlindNetChips = 0
+    private val stats = new MatchRunnerSupport.MatchStatistics()
 
     private val (artifact, modelId) = loadArtifact(config)
-    private val engine = newAdaptiveEngine(artifact.model)
+    private val engine = HeroDecisionPipeline.newAdaptiveEngine(
+      tableRanges = tableRanges,
+      model = artifact.model,
+      bunchingTrials = config.bunchingTrials,
+      equityTrials = config.equityTrials
+    )
     private val api = new SlumbotApiClient(config.baseUrl, config.timeoutMillis)
 
-    def run(): Either[String, RunSummary] =
+    def run(): Either[String, MatchRunnerSupport.RunSummary] =
       try
         Files.createDirectories(config.outDir)
         handsWriterOpt = Some(Files.newBufferedWriter(handsPath, StandardCharsets.UTF_8))
@@ -638,105 +621,48 @@ object SlumbotMatchRunner:
         villainObservations: Vector[VillainObservation],
         candidates: Vector[PokerAction]
     ): PokerAction =
-      config.heroMode match
-        case HeroMode.Adaptive =>
-          engine
-            .decide(
-              hero = hero,
-              state = state,
-              folds = folds,
-              villainPos = villainPosition,
-              observations = villainObservations,
-              candidateActions = candidates,
-              decisionBudgetMillis = Some(1L),
-              rng = new Random(rng.nextLong())
-            )
-            .decision
-            .recommendation
-            .bestAction
-        case HeroMode.Gto =>
-          val posterior = RangeInferenceEngine
-            .inferPosterior(
-              hero = hero,
-              board = state.board,
-              folds = folds,
-              tableRanges = tableRanges,
-              villainPos = villainPosition,
-              observations = villainObservations,
-              actionModel = artifact.model,
-              bunchingTrials = config.bunchingTrials,
-              rng = new Random(rng.nextLong())
-            )
-            .posterior
-          HoldemCfrSolver
-            .solveShallowDecisionPolicy(
-              hero = hero,
-              state = state,
-              villainPosterior = posterior,
-              candidateActions = candidates,
-              config = HoldemCfrConfig(
-                iterations = config.cfrIterations,
-                maxVillainHands = config.cfrVillainHands,
-                equityTrials = config.cfrEquityTrials,
-                rngSeed = rng.nextLong()
-              )
-            )
-            .bestAction
+      HeroDecisionPipeline.decideHero(
+        config.heroMode,
+        HeroDecisionPipeline.HeroDecisionContext(
+          hero = hero,
+          state = state,
+          folds = folds,
+          tableRanges = tableRanges,
+          villainPos = villainPosition,
+          observations = villainObservations,
+          candidates = candidates,
+          engine = engine,
+          actionModel = artifact.model,
+          bunchingTrials = config.bunchingTrials,
+          cfrConfig = HoldemCfrConfig(
+            iterations = config.cfrIterations,
+            maxVillainHands = config.cfrVillainHands,
+            equityTrials = config.cfrEquityTrials,
+            rngSeed = rng.nextLong()
+          ),
+          rng = new java.util.Random(rng.nextLong())
+        )
+      )
 
     private def heroCandidates(parsed: SlumbotActionCodec.ParsedActionState): Vector[PokerAction] =
       val raises = legalRaiseCandidates(parsed)
-      if parsed.toCallChips <= 0 then Vector(PokerAction.Check) ++ raises
-      else Vector(PokerAction.Fold, PokerAction.Call) ++ raises
+      HeroDecisionPipeline.heroCandidates(toCallChips = parsed.toCallChips, raises = raises)
 
     private def legalRaiseCandidates(parsed: SlumbotActionCodec.ParsedActionState): Vector[PokerAction] =
-      val remaining = parsed.stackRemainingChips
-      val toCall = parsed.toCallChips
-      val maxIncrement = remaining - toCall
-      if maxIncrement <= 0 then Vector.empty
-      else
-        val minIncrement =
-          math.min(
-            maxIncrement,
-            if parsed.lastBetSizeChips > 0 then math.max(SlumbotActionCodec.BigBlindChips, parsed.lastBetSizeChips)
-            else SlumbotActionCodec.BigBlindChips
-          )
-        val rawIncrements =
-          if parsed.currentStreet == Street.Preflop && parsed.toCallChips > 0 && parsed.streetLastBetToChips == SlumbotActionCodec.BigBlindChips then
-            Vector(150, 200)
-          else if parsed.currentStreet == Street.Preflop && parsed.toCallChips == 0 && parsed.streetLastBetToChips == SlumbotActionCodec.BigBlindChips then
-            Vector(200, 300)
-          else if parsed.toCallChips <= 0 then
-            Vector(
-              roundedChips(parsed.potChips * 0.50),
-              roundedChips(parsed.potChips * 0.75)
-            )
-          else
-            Vector(
-              minIncrement,
-              roundedChips(parsed.potChips * 0.75)
-            )
-        rawIncrements
-          .map(value => math.max(minIncrement, math.min(maxIncrement, value)))
-          .distinct
-          .sorted
-          .map(value => PokerAction.Raise(SlumbotActionCodec.chipsToBb(value)))
-          .toVector
+      HeroDecisionPipeline.legalRaiseCandidates(
+        HeroDecisionPipeline.RaiseSizingContext(
+          stackRemainingChips = parsed.stackRemainingChips,
+          toCallChips = parsed.toCallChips,
+          lastBetSizeChips = parsed.lastBetSizeChips,
+          potChips = parsed.potChips,
+          currentStreet = parsed.currentStreet,
+          streetLastBetToChips = parsed.streetLastBetToChips,
+          bigBlindChips = SlumbotActionCodec.BigBlindChips
+        )
+      )
 
     private def recordOutcome(outcome: HandOutcome): Unit =
-      heroNetChips += outcome.winningsChips
-      if outcome.winningsChips > 0 then heroWins += 1
-      else if outcome.winningsChips < 0 then heroLosses += 1
-      else heroTies += 1
-
-      outcome.heroPosition match
-        case Position.Button =>
-          buttonHands += 1
-          buttonNetChips += outcome.winningsChips
-        case Position.BigBlind =>
-          bigBlindHands += 1
-          bigBlindNetChips += outcome.winningsChips
-        case other =>
-          throw new IllegalStateException(s"unexpected hero position in Slumbot runner: $other")
+      stats.recordOutcome(outcome.heroPosition, outcome.winningsChips.toDouble)
 
     private def appendHandLog(handNo: Int, outcome: HandOutcome): Unit =
       writeLine(
@@ -747,7 +673,7 @@ object SlumbotMatchRunner:
           outcome.heroHole.toToken,
           outcome.board.cards.map(_.toToken).mkString,
           outcome.winningsChips.toString,
-          fmt(outcome.winningsChips.toDouble / SlumbotActionCodec.BigBlindChips.toDouble, 3),
+          PokerFormatting.fmtDouble(outcome.winningsChips.toDouble / SlumbotActionCodec.BigBlindChips.toDouble, 3),
           outcome.decisionCount.toString,
           outcome.villainObservationCount.toString,
           outcome.finalAction
@@ -762,78 +688,27 @@ object SlumbotMatchRunner:
         chosenAction: PokerAction,
         apiAction: String
     ): Unit =
-      writeLine(
-        decisionsWriter,
-        Vector(
-          handNo.toString,
-          decisionIndex.toString,
-          state.street.toString,
-          state.position.toString,
-          fmt(state.pot, 3),
-          fmt(state.toCall, 3),
-          fmt(state.stackSize, 3),
-          candidates.map(renderAction).mkString(","),
-          renderAction(chosenAction),
-          apiAction
-        ).mkString("\t")
+      MatchRunnerSupport.appendDecisionLog(
+        writer = decisionsWriter,
+        handId = handNo,
+        decisionIndex = decisionIndex,
+        state = state,
+        candidates = candidates,
+        chosenAction = chosenAction,
+        wireAction = apiAction
       )
 
     private def maybeReport(handNo: Int): Unit =
       if config.reportEvery > 0 && (handNo % config.reportEvery == 0 || handNo == config.hands) then
-        val bbPer100 =
-          if handNo > 0 then
-            (heroNetChips.toDouble / SlumbotActionCodec.BigBlindChips.toDouble / handNo.toDouble) * 100.0
-          else 0.0
         println(
-          f"[slumbot] hand=$handNo%,d netChips=$heroNetChips%,d bb100=$bbPer100%.2f mode=${heroModeLabel(config.heroMode)} model=$modelId"
+          s"[slumbot] hands=${stats.currentHandsPlayed} netChips=${stats.currentHeroNetChips.toInt} bb100=${PokerFormatting.fmtDouble(stats.currentBbPer100(SlumbotActionCodec.BigBlindChips.toDouble), 3)} mode=${PokerFormatting.heroModeLabel(config.heroMode)} model=$modelId"
         )
 
-    private def buildSummary(): RunSummary =
-      val bbPer100 =
-        if config.hands > 0 then
-          (heroNetChips.toDouble / SlumbotActionCodec.BigBlindChips.toDouble / config.hands.toDouble) * 100.0
-        else 0.0
-      RunSummary(
-        handsPlayed = config.hands,
-        heroNetChips = heroNetChips,
-        heroBbPer100 = bbPer100,
-        heroWins = heroWins,
-        heroTies = heroTies,
-        heroLosses = heroLosses,
-        buttonHands = buttonHands,
-        buttonNetChips = buttonNetChips,
-        bigBlindHands = bigBlindHands,
-        bigBlindNetChips = bigBlindNetChips,
-        modelId = modelId,
-        outDir = config.outDir
-      )
+    private def buildSummary(): MatchRunnerSupport.RunSummary =
+      stats.buildSummary(heroMode = config.heroMode, modelId = modelId, outDir = config.outDir, bigBlindChips = SlumbotActionCodec.BigBlindChips)
 
-    private def writeSummary(summary: RunSummary): Unit =
-      val lines = Vector(
-        "=== Slumbot Match Runner ===",
-        s"handsPlayed: ${summary.handsPlayed}",
-        s"heroNetChips: ${summary.heroNetChips}",
-        s"heroBbPer100: ${fmt(summary.heroBbPer100, 3)}",
-        s"heroWins: ${summary.heroWins}",
-        s"heroTies: ${summary.heroTies}",
-        s"heroLosses: ${summary.heroLosses}",
-        s"buttonHands: ${summary.buttonHands}",
-        s"buttonNetChips: ${summary.buttonNetChips}",
-        s"bigBlindHands: ${summary.bigBlindHands}",
-        s"bigBlindNetChips: ${summary.bigBlindNetChips}",
-        s"heroMode: ${heroModeLabel(config.heroMode)}",
-        s"modelId: ${summary.modelId}"
-      )
-      Files.write(summaryPath, lines.mkString(System.lineSeparator()).getBytes(StandardCharsets.UTF_8))
-
-    private def newAdaptiveEngine(model: PokerActionModel): RealTimeAdaptiveEngine =
-      new RealTimeAdaptiveEngine(
-        tableRanges = tableRanges,
-        actionModel = model,
-        bunchingTrials = config.bunchingTrials,
-        defaultEquityTrials = config.equityTrials,
-        minEquityTrials = math.max(8, math.min(config.equityTrials, config.equityTrials / 10))
-      )
+    private def writeSummary(summary: MatchRunnerSupport.RunSummary): Unit =
+      MatchRunnerSupport.writeSummary(summaryPath, "Slumbot Match Runner", summary)
 
     private def handsWriter: BufferedWriter =
       handsWriterOpt.getOrElse(throw new IllegalStateException("hands writer not initialized"))
@@ -894,24 +769,6 @@ object SlumbotMatchRunner:
     writer.write(line)
     writer.newLine()
     writer.flush()
-
-  private def roundedChips(value: Double): Int =
-    math.max(50, math.round(value / 50.0).toInt * 50)
-
-  private def renderAction(action: PokerAction): String =
-    action match
-      case PokerAction.Fold => "Fold"
-      case PokerAction.Check => "Check"
-      case PokerAction.Call => "Call"
-      case PokerAction.Raise(amount) => s"Raise:${fmt(amount, 2)}"
-
-  private def fmt(value: Double, digits: Int): String =
-    String.format(Locale.ROOT, s"%.${digits}f", java.lang.Double.valueOf(value))
-
-  private def heroModeLabel(mode: HeroMode): String =
-    mode match
-      case HeroMode.Adaptive => "adaptive"
-      case HeroMode.Gto      => "gto"
 
   private def parseArgs(args: Array[String]): Either[String, Config] =
     if args.contains("--help") || args.contains("-h") then Left(usage)
