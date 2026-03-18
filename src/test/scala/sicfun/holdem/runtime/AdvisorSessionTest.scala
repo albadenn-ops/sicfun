@@ -444,3 +444,41 @@ class AdvisorSessionTest extends FunSuite:
     val r = s.execute(AdvisorCommand.Unknown("asdf", "unrecognized"))
     assert(r.output.exists(_.contains("Unknown")))
   }
+
+  test("villain showdown records revealed cards on hand snapshot") {
+    val s = freshSession()
+    val r1 = s.execute(AdvisorCommand.NewHand)
+    val hc = CliHelpers.parseHoleCards("AcKh")
+    val r2 = r1.session.execute(AdvisorCommand.HeroCards(hc))
+    val r3 = r2.session.execute(AdvisorCommand.HeroAction(PokerAction.Raise(6.0)))
+    val r4 = r3.session.execute(AdvisorCommand.VillainAction(PokerAction.Call))
+    val villainCards = CliHelpers.parseHoleCards("QhQs")
+    val r5 = r4.session.execute(AdvisorCommand.VillainShowdown(villainCards))
+    assertEquals(r5.session.hand.get.villainRevealedCards, Some(villainCards))
+    assert(r5.output.exists(_.contains("showed")))
+    assert(r5.output.exists(_.contains("collapsed")))
+  }
+
+  test("villain showdown rejects cards that overlap with hero cards") {
+    val s = freshSession()
+    val r1 = s.execute(AdvisorCommand.NewHand)
+    val hc = CliHelpers.parseHoleCards("AcKh")
+    val r2 = r1.session.execute(AdvisorCommand.HeroCards(hc))
+    val overlapping = CliHelpers.parseHoleCards("AcQs")
+    val r3 = r2.session.execute(AdvisorCommand.VillainShowdown(overlapping))
+    assert(r3.output.exists(_.contains("overlap")))
+    assertEquals(r3.session.hand.get.villainRevealedCards, None)
+  }
+
+  test("villain showdown without active hand returns error") {
+    val s = freshSession()
+    val villainCards = CliHelpers.parseHoleCards("QhQs")
+    val r = s.execute(AdvisorCommand.VillainShowdown(villainCards))
+    assert(r.output.exists(_.contains("No hand in progress")))
+  }
+
+  test("help output includes showdown command") {
+    val s = freshSession()
+    val r = s.execute(AdvisorCommand.Help)
+    assert(r.output.exists(_.contains("v show")), s"help should mention showdown: ${r.output}")
+  }

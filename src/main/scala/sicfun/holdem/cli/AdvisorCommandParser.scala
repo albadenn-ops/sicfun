@@ -15,6 +15,7 @@ enum AdvisorCommand:
   case SessionStats
   case Undo
   case Help
+  case VillainShowdown(cards: sicfun.holdem.types.HoleCards)
   case Quit
   case Unknown(input: String, reason: String)
 
@@ -25,6 +26,7 @@ enum AdvisorCommand:
   *   hero AcKh / h AcKh              → HeroCards
   *   h raise 6 / h call / h fold     → HeroAction
   *   v bet 8 / v call / v raise 20   → VillainAction (bet = raise)
+  *   v show QhQs / v show Qh Qs     → VillainShowdown
   *   board Ts9h8d / board Ts 9h 8d   → DealBoard
   *   ? / advise                       → Advise
   *   review                           → Review
@@ -91,8 +93,16 @@ object AdvisorCommandParser:
       case "call"          => AdvisorCommand.VillainAction(PokerAction.Call)
       case "fold"          => AdvisorCommand.VillainAction(PokerAction.Fold)
       case "check"         => AdvisorCommand.VillainAction(PokerAction.Check)
+      case "show" | "shows" | "showdown" =>
+        if tokens.tail.isEmpty then
+          AdvisorCommand.Unknown(s"v ${tokens.mkString(" ")}", "showdown requires cards (e.g., v show QhQs)")
+        else
+          val cardStr = tokens.tail.mkString("")
+          tryParseHoleCards(cardStr) match
+            case Some(hc) => AdvisorCommand.VillainShowdown(hc)
+            case None => AdvisorCommand.Unknown(s"v ${tokens.mkString(" ")}", s"invalid hole cards: ${tokens.tail.mkString(" ")}")
       case _ =>
-        AdvisorCommand.Unknown(s"v ${tokens.mkString(" ")}", "expected: raise|bet|call|fold|check")
+        AdvisorCommand.Unknown(s"v ${tokens.mkString(" ")}", "expected: raise|bet|call|fold|check|show")
 
   // ---- Board sub-command ----
 

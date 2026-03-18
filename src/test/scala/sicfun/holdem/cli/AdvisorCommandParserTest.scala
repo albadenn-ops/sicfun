@@ -229,6 +229,54 @@ class AdvisorCommandParserTest extends FunSuite:
       case other => fail(s"expected Unknown, got $other")
   }
 
+  // ---- Villain showdown ----
+
+  test("parses 'v show QhQs' as VillainShowdown") {
+    val cmd = AdvisorCommandParser.parse("v show QhQs")
+    cmd match
+      case AdvisorCommand.VillainShowdown(cards) =>
+        assertEquals(cards.toToken, "QhQs")
+      case other => fail(s"expected VillainShowdown, got $other")
+  }
+
+  test("parses 'v show Qh Qs' (spaced) as VillainShowdown") {
+    val cmd = AdvisorCommandParser.parse("v show Qh Qs")
+    cmd match
+      case AdvisorCommand.VillainShowdown(cards) =>
+        assertEquals(cards.toToken, "QhQs")
+      case other => fail(s"expected VillainShowdown, got $other")
+  }
+
+  test("parses 'v shows QhQs' as VillainShowdown") {
+    assertEquals(
+      AdvisorCommandParser.parse("v shows QhQs"),
+      AdvisorCommandParser.parse("v show QhQs")
+    )
+  }
+
+  test("parses 'v showdown QhQs' as VillainShowdown") {
+    assertEquals(
+      AdvisorCommandParser.parse("v showdown QhQs"),
+      AdvisorCommandParser.parse("v show QhQs")
+    )
+  }
+
+  test("v show without cards produces Unknown") {
+    val cmd = AdvisorCommandParser.parse("v show")
+    cmd match
+      case AdvisorCommand.Unknown(_, reason) =>
+        assert(reason.contains("showdown requires cards"), s"reason was: $reason")
+      case other => fail(s"expected Unknown, got $other")
+  }
+
+  test("v show with invalid cards produces Unknown") {
+    val cmd = AdvisorCommandParser.parse("v show XxYy")
+    cmd match
+      case AdvisorCommand.Unknown(_, reason) =>
+        assert(reason.contains("invalid hole cards"), s"reason was: $reason")
+      case other => fail(s"expected Unknown, got $other")
+  }
+
   // ---- Edge cases ----
 
   test("empty input produces Unknown with empty input reason") {

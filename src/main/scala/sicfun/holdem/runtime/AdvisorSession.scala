@@ -86,7 +86,8 @@ final case class HandSnapshot(
     eventLog: Vector[HandEvent] = Vector.empty,
     lastHeroActionWasRaise: Boolean = false,
     finished: Boolean = false,
-    heroNetResult: Double = 0.0
+    heroNetResult: Double = 0.0,
+    villainRevealedCards: Option[HoleCards] = None
 )
 
 /** Result of executing a single command. */
@@ -125,6 +126,7 @@ final class AdvisorSession(
       case AdvisorCommand.HeroCards(cards) => doHeroCards(cards)
       case AdvisorCommand.HeroAction(a)    => doAction(isHero = true, a)
       case AdvisorCommand.VillainAction(a) => doAction(isHero = false, a)
+      case AdvisorCommand.VillainShowdown(cards) => doVillainShowdown(cards)
       case AdvisorCommand.DealBoard(cards) => doDealBoard(cards)
       case AdvisorCommand.Advise           => doAdvise()
       case AdvisorCommand.Review           => doReview()
@@ -405,6 +407,27 @@ final class AdvisorSession(
       out.result()
     )
 
+  // ---- Villain showdown ----
+
+  private def doVillainShowdown(cards: HoleCards): CommandResult =
+    hand match
+      case None => CommandResult(this, Vector("No hand in progress. Type 'new' to start."))
+      case Some(h) =>
+        val boardCards = h.board.asSet
+        val heroCards = h.heroCards.map(_.asSet).getOrElse(Set.empty)
+        val dead = boardCards ++ heroCards
+        if cards.asSet.exists(dead.contains) then
+          CommandResult(this, Vector("Showdown cards overlap with board or hero cards."))
+        else
+          val updatedSnapshot = h.copy(villainRevealedCards = Some(cards))
+          CommandResult(
+            updated(newHand = Some(updatedSnapshot), newStats = stats),
+            Vector(
+              s"Villain showed ${cards.first.toToken}${cards.second.toToken}.",
+              "Range posterior collapsed to revealed hand."
+            )
+          )
+
   // ---- Deal board ----
 
   private def doDealBoard(cards: Vector[Card]): CommandResult =
@@ -491,7 +514,8 @@ final class AdvisorSession(
               observations = combinedVillainObservations(h.villainObservations),
               candidateActions = candidates,
               decisionBudgetMillis = Some(config.decisionBudgetMillis),
-              rng = new Random(rng.nextLong())
+              rng = new Random(rng.nextLong()),
+              revealedCards = h.villainRevealedCards
             )
 
             val out = formatAdvice(result, h)
@@ -520,7 +544,8 @@ final class AdvisorSession(
             observations = dec.villainObservations,
             candidateActions = candidates,
             decisionBudgetMillis = Some(config.decisionBudgetMillis),
-            rng = new Random(rng.nextLong())
+            rng = new Random(rng.nextLong()),
+            revealedCards = h.villainRevealedCards
           )
 
           val recommended = result.decision.recommendation.bestAction
@@ -654,6 +679,7 @@ final class AdvisorSession(
       "  h AcKh / hero AcKh         Set hero hole cards",
       "  h raise 6 / h call / h fold / h check   Record hero action",
       "  v raise 8 / v call / v fold / v check    Record villain action",
+      "  v show QhQs                              Record villain showdown cards (collapses range)",
       "  board Ts9h8d / board Ts 9h 8d            Deal community cards",
       "  ? / advise                  Get recommendation",
       "  review                      Review hero decisions in current hand",
