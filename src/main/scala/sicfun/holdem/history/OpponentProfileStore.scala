@@ -72,7 +72,8 @@ final case class StabilitySnapshot(
 final case class ShowdownRecord(
     handId: String,
     cards: HoleCards
-)
+):
+  require(handId.trim.nonEmpty, "handId must be non-empty")
 
 final case class OpponentProfile(
     site: String,
@@ -980,6 +981,7 @@ object OpponentProfileStore:
       showdownHands = obj.get("showdownHands").map(_.arr.toVector.map { recordJson =>
         val recordObj = recordJson.obj
         val token = recordObj("cards").str
+        if token.length != 4 then throw new IllegalArgumentException(s"invalid showdown card token length: $token")
         val cards = Card.parseAll(Seq(token.substring(0, 2), token.substring(2, 4))).map(HoleCards.from).getOrElse(
           throw new IllegalArgumentException(s"invalid showdown cards token: $token")
         )
