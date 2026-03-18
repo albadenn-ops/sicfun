@@ -410,3 +410,37 @@ class RealTimeAdaptiveEngineTest extends FunSuite:
     finally
       threads.foreach(_.interrupt())
   }
+
+  test("decide with revealedCards produces delta posterior") {
+    val hero = hole("Ac", "Kh")
+    val state = GameState(
+      street = Street.Preflop,
+      board = Board.empty,
+      pot = 6.0,
+      toCall = 2.0,
+      position = Position.Button,
+      stackSize = 194.0,
+      betHistory = Vector.empty
+    )
+    val revealed = hole("Qh", "Qs")
+    val engine = new RealTimeAdaptiveEngine(
+      tableRanges = TableRanges.defaults(TableFormat.HeadsUp),
+      actionModel = model,
+      bunchingTrials = 150,
+      defaultEquityTrials = 1500,
+      minEquityTrials = 300
+    )
+    val result = engine.decide(
+      hero = hero,
+      state = state,
+      folds = Vector.empty,
+      villainPos = Position.BigBlind,
+      observations = Seq.empty,
+      candidateActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(6.0)),
+      revealedCards = Some(revealed),
+      rng = new Random(42)
+    )
+    val prob = result.decision.posteriorInference.posterior.probabilityOf(revealed)
+    assert(prob > 0.99, s"expected ~1.0 for revealed hand, got $prob")
+    assertEquals(result.decision.posteriorInference.posterior.support.size, 1)
+  }
