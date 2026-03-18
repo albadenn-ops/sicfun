@@ -8,6 +8,7 @@ import sicfun.holdem.model.*
 import sicfun.holdem.cli.*
 
 import sicfun.core.{Card, DiscreteDistribution}
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 import scala.collection.mutable
 
@@ -516,12 +517,6 @@ object HoldemDdreParityBenchmark:
       onnxArtifactDir = options.get("onnxArtifactDir"),
       onnxAllowExperimental = CliHelpers.requireBooleanOption(options, "onnxAllowExperimental", false)
     )
-
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card token: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
 
   private def withSystemProperties[A](updates: Seq[(String, Option[String])])(thunk: => A): A =
     val previous = updates.map { case (key, _) => key -> sys.props.get(key) }.toMap

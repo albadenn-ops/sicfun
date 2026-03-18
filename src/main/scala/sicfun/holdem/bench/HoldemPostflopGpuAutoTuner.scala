@@ -5,7 +5,7 @@ import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.cli.*
 
-import sicfun.core.Card
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 import java.io.{File, FileOutputStream}
 import java.util.Properties
@@ -259,12 +259,6 @@ object HoldemPostflopGpuAutoTuner:
     finally out.close()
 
   private def buildSpot(villainCount: Int, seedBase: Long): Spot =
-    def card(token: String): Card =
-      Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card token: $token"))
-
-    def hole(a: String, b: String): HoleCards =
-      HoleCards.from(Vector(card(a), card(b)))
-
     val hero = hole("Ac", "Kh")
     val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
     val dead = (hero.toVector ++ board.cards).map(sicfun.core.CardId.toId).toSet

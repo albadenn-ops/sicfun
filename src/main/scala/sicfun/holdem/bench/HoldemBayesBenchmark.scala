@@ -8,7 +8,7 @@ import sicfun.holdem.provider.*
 import sicfun.holdem.model.*
 import sicfun.holdem.cli.*
 
-import sicfun.core.Card
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 import scala.util.Random
 
@@ -215,12 +215,6 @@ object HoldemBayesBenchmark:
     )
 
   private def buildContext(seed: Long): BenchmarkContext =
-    def card(token: String): Card =
-      Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card token: $token"))
-
-    def hole(a: String, b: String): HoleCards =
-      HoleCards.from(Vector(card(a), card(b)))
-
     val hero = hole("Ac", "Kh")
     val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
     val state = GameState(

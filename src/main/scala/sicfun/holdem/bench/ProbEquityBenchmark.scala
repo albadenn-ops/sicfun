@@ -3,6 +3,7 @@ package sicfun.holdem.bench
 import sicfun.core.{Card, Deck, DiscreteDistribution}
 import sicfun.holdem.types.*
 import sicfun.holdem.equity.{HoldemEquity, HoldemCombinator}
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 /** A/B benchmark: equityExact (Double) vs equityExactProb (Int32 fixed-point).
   *
@@ -10,12 +11,6 @@ import sicfun.holdem.equity.{HoldemEquity, HoldemCombinator}
   *   mode: "turn" (default) or "flop"
   */
 object ProbEquityBenchmark:
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(throw new IllegalArgumentException(s"bad card: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
-
   private def board(tokens: String*): Board =
     Board.from(tokens.map(card))
 

@@ -1,8 +1,9 @@
 package sicfun.holdem.bench
 
-import sicfun.core.{Card, DiscreteDistribution}
+import sicfun.core.DiscreteDistribution
 import sicfun.holdem.cfr.{HoldemCfrConfig, HoldemCfrDecisionPolicy, HoldemCfrNativeRuntime, HoldemCfrSolution, HoldemCfrSolver}
 import sicfun.holdem.types.*
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 /** A/B benchmark: Holdem native double vs native fixed-point for CPU or CUDA-compiled CFR providers.
   *
@@ -33,12 +34,6 @@ object HoldemCfrNativeFixedBenchmark:
       config: HoldemCfrConfig,
       label: String
   )
-
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
 
   def main(args: Array[String]): Unit =
     val warmup = if args.length > 0 then args(0).toInt else 3

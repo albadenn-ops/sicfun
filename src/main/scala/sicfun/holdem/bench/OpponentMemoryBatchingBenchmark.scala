@@ -5,7 +5,7 @@ import sicfun.holdem.model.{PokerActionModel, PokerActionModelArtifactIO}
 import sicfun.holdem.runtime.AlwaysOnDecisionLoop
 import sicfun.holdem.types.*
 
-import sicfun.core.Card
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 import java.nio.file.{Files, Path, StandardCopyOption}
 import scala.jdk.CollectionConverters.*
@@ -343,12 +343,6 @@ object OpponentMemoryBatchingBenchmark:
     raw.toIntOption match
       case Some(value) if value >= 0 => Right(value)
       case _ => Left(s"$flag must be >= 0")
-
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card token: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
 
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
