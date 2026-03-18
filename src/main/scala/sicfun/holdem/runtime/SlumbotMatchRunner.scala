@@ -355,10 +355,6 @@ private[holdem] object SlumbotActionCodec:
     if actualActor == heroActual then 0 else 1
 
 object SlumbotMatchRunner:
-  private enum HeroMode:
-    case Adaptive
-    case Gto
-
   private final case class Config(
       hands: Int,
       reportEvery: Int,

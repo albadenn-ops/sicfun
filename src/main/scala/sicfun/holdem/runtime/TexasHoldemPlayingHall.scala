@@ -26,10 +26,6 @@ import scala.util.Random
   *  - periodically retrains villain action model from generated data
   */
 object TexasHoldemPlayingHall:
-  private enum HeroMode:
-    case Adaptive
-    case Gto
-
   private enum GtoMode:
     case Fast
     case Exact

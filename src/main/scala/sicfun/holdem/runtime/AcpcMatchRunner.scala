@@ -549,10 +549,6 @@ private[holdem] object AcpcActionCodec:
 object AcpcMatchRunner:
   private val ProtocolVersion = "VERSION:2.0.0"
 
-  private enum HeroMode:
-    case Adaptive
-    case Gto
-
   private final case class Config(
       server: String,
       port: Int,
