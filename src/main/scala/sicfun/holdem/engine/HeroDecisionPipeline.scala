@@ -40,8 +40,10 @@ private[holdem] object HeroDecisionPipeline:
       engine: RealTimeAdaptiveEngine,
       actionModel: PokerActionModel,
       bunchingTrials: Int,
-      cfrConfig: HoldemCfrConfig,
-      rng: Random
+      cfrIterations: Int,
+      cfrVillainHands: Int,
+      cfrEquityTrials: Int,
+      rng: scala.util.Random
   )
 
   def decideHero(mode: HeroMode, ctx: HeroDecisionContext): PokerAction =
@@ -62,6 +64,7 @@ private[holdem] object HeroDecisionPipeline:
           .recommendation
           .bestAction
       case HeroMode.Gto =>
+        val gtoRng = new Random(ctx.rng.nextLong())
         val posterior = RangeInferenceEngine
           .inferPosterior(
             hero = ctx.hero,
@@ -72,7 +75,7 @@ private[holdem] object HeroDecisionPipeline:
             observations = ctx.observations,
             actionModel = ctx.actionModel,
             bunchingTrials = ctx.bunchingTrials,
-            rng = new Random(ctx.rng.nextLong())
+            rng = gtoRng
           )
           .posterior
         HoldemCfrSolver
@@ -81,7 +84,12 @@ private[holdem] object HeroDecisionPipeline:
             state = ctx.state,
             villainPosterior = posterior,
             candidateActions = ctx.candidates,
-            config = ctx.cfrConfig
+            config = HoldemCfrConfig(
+              iterations = ctx.cfrIterations,
+              maxVillainHands = ctx.cfrVillainHands,
+              equityTrials = ctx.cfrEquityTrials,
+              rngSeed = ctx.rng.nextLong()
+            )
           )
           .bestAction
 

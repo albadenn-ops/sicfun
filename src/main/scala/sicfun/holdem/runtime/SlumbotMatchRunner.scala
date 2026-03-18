@@ -1,7 +1,6 @@
 package sicfun.holdem.runtime
 
 import sicfun.core.Card
-import sicfun.holdem.cfr.HoldemCfrConfig
 import sicfun.holdem.cli.CliHelpers
 import sicfun.holdem.engine.{HeroDecisionPipeline, VillainObservation}
 import sicfun.holdem.equity.{PreflopFold, TableFormat, TableRanges}
@@ -634,13 +633,10 @@ object SlumbotMatchRunner:
           engine = engine,
           actionModel = artifact.model,
           bunchingTrials = config.bunchingTrials,
-          cfrConfig = HoldemCfrConfig(
-            iterations = config.cfrIterations,
-            maxVillainHands = config.cfrVillainHands,
-            equityTrials = config.cfrEquityTrials,
-            rngSeed = rng.nextLong()
-          ),
-          rng = new java.util.Random(rng.nextLong())
+          cfrIterations = config.cfrIterations,
+          cfrVillainHands = config.cfrVillainHands,
+          cfrEquityTrials = config.cfrEquityTrials,
+          rng = rng
         )
       )
 
