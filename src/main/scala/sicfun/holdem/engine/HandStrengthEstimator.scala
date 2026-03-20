@@ -1,6 +1,6 @@
 package sicfun.holdem.engine
 
-import sicfun.core.{Card, HandEvaluator}
+import sicfun.core.HandEvaluator
 import sicfun.holdem.types.*
 import sicfun.holdem.equity.HoldemCombinator
 
