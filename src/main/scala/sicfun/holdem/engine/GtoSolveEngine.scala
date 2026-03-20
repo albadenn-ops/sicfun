@@ -68,7 +68,7 @@ private[holdem] object GtoSolveEngine:
     * @param opponentPosterior opponent's range (caller passes tableRanges.rangeFor(opponentPosition))
     * @param perspective 0 for hero, 1 for villain (used in cache key and RNG seed)
     */
-  def gtoResponds(
+  private[holdem] def gtoResponds(
       hand: HoleCards,
       state: GameState,
       candidates: Vector[PokerAction],
