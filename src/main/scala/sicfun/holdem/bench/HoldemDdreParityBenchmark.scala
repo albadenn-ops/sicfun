@@ -7,7 +7,7 @@ import sicfun.holdem.provider.*
 import sicfun.holdem.model.*
 import sicfun.holdem.cli.*
 
-import sicfun.core.{Card, DiscreteDistribution}
+import sicfun.core.DiscreteDistribution
 import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 import scala.collection.mutable

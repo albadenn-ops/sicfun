@@ -1,6 +1,6 @@
 package sicfun.holdem.bench
 
-import sicfun.core.{Card, Deck, DiscreteDistribution}
+import sicfun.core.{Deck, DiscreteDistribution}
 import sicfun.holdem.types.*
 import sicfun.holdem.equity.{HoldemEquity, HoldemCombinator}
 import sicfun.holdem.bench.BenchSupport.{card, hole}
