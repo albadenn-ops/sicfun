@@ -50,6 +50,7 @@ param(
   [string]$OutputPath,
   [switch]$InjectContext,
   [switch]$NoBrowser,
+  [switch]$Writable,
   [switch]$WhatIf
 )
 
@@ -340,7 +341,8 @@ function New-DelegationPrompt {
     [string]$CurrentTask,
     [string[]]$ResolvedContextPaths,
     [switch]$InjectContextBlock,
-    [switch]$NoTools
+    [switch]$NoTools,
+    [switch]$WritableMode
   )
 
   $contextBlock = if ($InjectContextBlock -and $ResolvedContextPaths.Count -gt 0) {
@@ -383,7 +385,13 @@ Provider overlay:
 $providerContractBlock
 
 Rules:
-- Stay read-only. Do not edit files and do not claim to have edited files.
+$(if ($WritableMode) {
+"- You have WRITE and EXECUTE access. You may create files, edit files, create branches, and run shell commands.
+- Use write_file, edit_file, and run_shell_command tools to implement changes.
+- Commit your work to a dedicated branch. Do not push unless asked."
+} else {
+"- Stay read-only. Do not edit files and do not claim to have edited files."
+})
 - Prefer concrete repository evidence over guesses.
 - Keep the response concise and directly usable by another coding agent.
 - Use repo-relative file paths when you reference code or docs.
@@ -485,7 +493,7 @@ function Invoke-GeminiDelegate {
   if ($InjectContext) {
     $nodePath = Resolve-NodePath
     $entrypoint = Resolve-GeminiEntrypoint
-    $prompt = New-DelegationPrompt -ProviderName "gemini" -CurrentMode $Mode -CurrentTask $Task -ResolvedContextPaths $ResolvedContextPaths -InjectContextBlock
+    $prompt = New-DelegationPrompt -ProviderName "gemini" -CurrentMode $Mode -CurrentTask $Task -ResolvedContextPaths $ResolvedContextPaths -InjectContextBlock -WritableMode:$Writable
     $promptPath = [System.IO.Path]::ChangeExtension($ResolvedOutputPath, "prompt.txt")
     Write-Utf8NoBom -Path $promptPath -Value $prompt
 
@@ -495,6 +503,9 @@ function Invoke-GeminiDelegate {
       "--output-format", $OutputFormat,
       "-p", "Answer the task above."
     )
+    if ($Writable) {
+      $cliArgs += @("--approval-mode", "yolo")
+    }
     if (-not [string]::IsNullOrWhiteSpace($Model)) {
       $cliArgs += @("-m", $Model)
     }
