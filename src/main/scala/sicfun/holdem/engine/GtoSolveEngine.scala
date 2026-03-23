@@ -30,6 +30,7 @@ private[holdem] object GtoSolveEngine:
       toCallBits: Long,
       stackBits: Long,
       candidateHash: Int,
+      opponentPosteriorHash: Long,
       baseEquityTrials: Int
   )
 
@@ -120,6 +121,7 @@ private[holdem] object GtoSolveEngine:
       hand = hand,
       state = state,
       candidates = candidates,
+      opponentPosterior = villainPosterior,
       baseEquityTrials = baseEquityTrials,
       canonicalSignature = canonicalSignature
     )
@@ -136,6 +138,7 @@ private[holdem] object GtoSolveEngine:
           iterations = gtoIterations(state.street, baseEquityTrials, candidates.length),
           maxVillainHands = gtoMaxVillainHands(state.street, candidates.length),
           equityTrials = gtoEquityTrials(state.street, baseEquityTrials, candidates.length),
+          postflopLookahead = state.street != Street.Preflop && state.street != Street.River,
           rngSeed = exactEquitySeed(
             perspective = perspective,
             baseEquityTrials = baseEquityTrials,
@@ -295,11 +298,12 @@ private[holdem] object GtoSolveEngine:
 
   // --- Cache key construction ---
 
-  private def buildGtoSolveCacheKey(
+  private[holdem] def buildGtoSolveCacheKey(
       perspective: Int,
       hand: HoleCards,
       state: GameState,
       candidates: Vector[PokerAction],
+      opponentPosterior: DiscreteDistribution[HoleCards],
       baseEquityTrials: Int,
       canonicalSignature: (Long, Long)
   ): GtoSolveCacheKey =
@@ -313,8 +317,24 @@ private[holdem] object GtoSolveEngine:
       toCallBits = java.lang.Double.doubleToLongBits(state.toCall),
       stackBits = java.lang.Double.doubleToLongBits(state.stackSize),
       candidateHash = hashActions(candidates),
+      opponentPosteriorHash = hashPosterior(opponentPosterior),
       baseEquityTrials = baseEquityTrials
     )
+
+  private[holdem] def hashPosterior(
+      posterior: DiscreteDistribution[HoleCards]
+  ): Long =
+    posterior.weights.iterator
+      .collect { case (hand, probability) if probability > 0.0 =>
+        (hand, probability)
+      }
+      .toVector
+      .sortBy { case (hand, _) => (hand.first.id, hand.second.id) }
+      .foldLeft(0xCBF29CE484222325L) { case (acc, (hand, probability)) =>
+        val withFirst = mix64(acc ^ hand.first.id.toLong)
+        val withSecond = mix64(withFirst ^ hand.second.id.toLong)
+        mix64(withSecond ^ java.lang.Double.doubleToLongBits(probability))
+      }
 
   private def exactEquitySeed(
       perspective: Int,

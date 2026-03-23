@@ -123,7 +123,7 @@ final case class OpponentProfile(
     OpponentIdentity.ensureProfileIdentity(this)
 
 object OpponentProfile:
-  val MaxRecentEvents = 256
+  val MaxRecentEvents = 1024
   val MaxSeenHandIds = 2048
 
   def fromSingleEvent(

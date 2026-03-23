@@ -14,7 +14,12 @@ class HoldemCfrSolverTest extends FunSuite:
   private def hole(a: String, b: String): HoleCards =
     HoleCards.from(Vector(card(a), card(b)))
 
-  private def withSystemProperties(properties: Map[String, String])(thunk: => Unit): Unit =
+  private def defaultSpot(id: String): HoldemCfrApproximationReport.DiagnosticSpot =
+    HoldemCfrApproximationReport.DefaultSuite.find(_.id == id).getOrElse(
+      fail(s"missing default diagnostic spot: $id")
+    )
+
+  private def withSystemProperties[A](properties: Map[String, String])(thunk: => A): A =
     val previous = properties.keys.iterator.map { key =>
       key -> sys.props.get(key)
     }.toVector
@@ -469,57 +474,68 @@ class HoldemCfrSolverTest extends FunSuite:
     )
   }
 
-  test("shallow decision solver bypasses CFR on one-reraise hall tree") {
-    val hero = hole("Ac", "Kd")
-    val state = GameState(
-      street = Street.Turn,
-      board = Board.from(Vector(card("2c"), card("7d"), card("Jh"), card("Qc"))),
-      pot = 18.0,
-      toCall = 4.0,
-      position = Position.Button,
-      stackSize = 82.0,
-      betHistory = Vector(BetAction(1, PokerAction.Raise(4.0)))
-    )
-    val posterior = DiscreteDistribution(
-      Map(
-        hole("As", "Qd") -> 0.35,
-        hole("Ts", "9s") -> 0.30,
-        hole("Qh", "Js") -> 0.20,
-        hole("7c", "7s") -> 0.15
+  test("shallow decision solver preserves decision-only CFR root policy on one-reraise hall tree") {
+    withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
+      val hero = hole("Ac", "Kd")
+      val state = GameState(
+        street = Street.Turn,
+        board = Board.from(Vector(card("2c"), card("7d"), card("Jh"), card("Qc"))),
+        pot = 18.0,
+        toCall = 4.0,
+        position = Position.Button,
+        stackSize = 82.0,
+        betHistory = Vector(BetAction(1, PokerAction.Raise(4.0)))
       )
-    )
-    val candidateActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
-    val config = HoldemCfrConfig(
-      iterations = 2_000,
-      averagingDelay = 100,
-      maxVillainHands = 32,
-      equityTrials = 700,
-      preferNativeBatch = true,
-      rngSeed = 23L
-    )
+      val posterior = DiscreteDistribution(
+        Map(
+          hole("As", "Qd") -> 0.35,
+          hole("Ts", "9s") -> 0.30,
+          hole("Qh", "Js") -> 0.20,
+          hole("7c", "7s") -> 0.15
+        )
+      )
+      val candidateActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
+      val config = HoldemCfrConfig(
+        iterations = 3_000,
+        averagingDelay = 100,
+        maxVillainHands = 32,
+        equityTrials = 700,
+        includeVillainReraises = true,
+        villainReraiseMultipliers = Vector(1.5, 2.0, 2.5),
+        preferNativeBatch = true,
+        rngSeed = 23L
+      )
 
-    val full = HoldemCfrSolver.solve(
-      hero = hero,
-      state = state,
-      villainPosterior = posterior,
-      candidateActions = candidateActions,
-      config = config
-    )
-    val direct = HoldemCfrSolver.solveShallowDecisionPolicy(
-      hero = hero,
-      state = state,
-      villainPosterior = posterior,
-      candidateActions = candidateActions,
-      config = config
-    )
+      val decisionOnly = HoldemCfrSolver.solveDecisionPolicy(
+        hero = hero,
+        state = state,
+        villainPosterior = posterior,
+        candidateActions = candidateActions,
+        config = config
+      )
+      val shallow = HoldemCfrSolver.solveShallowDecisionPolicy(
+        hero = hero,
+        state = state,
+        villainPosterior = posterior,
+        candidateActions = candidateActions,
+        config = config
+      )
 
-    assertEquals(direct.provider, "direct-shallow")
-    val probabilitySum = direct.actionProbabilities.values.sum
-    assert(math.abs(probabilitySum - 1.0) < 1e-9, s"policy must sum to 1, got $probabilitySum")
-    assertEquals(direct.bestAction, full.bestAction)
+      val probabilitySum = shallow.actionProbabilities.values.sum
+      assert(math.abs(probabilitySum - 1.0) < 1e-9, s"policy must sum to 1, got $probabilitySum")
+      assertEquals(shallow.provider, decisionOnly.provider)
+      assertEquals(shallow.bestAction, decisionOnly.bestAction)
+      candidateActions.foreach { action =>
+        assertEqualsDouble(
+          shallow.actionProbabilities.getOrElse(action, 0.0),
+          decisionOnly.actionProbabilities.getOrElse(action, 0.0),
+          1e-9
+        )
+      }
+    }
   }
 
-  test("shallow decision solver supports multiple reraises without CFR fallback") {
+  test("shallow decision solver preserves decision-only CFR root policy with multiple reraises") {
     withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
       val hero = hole("Ac", "Kd")
       val state = GameState(
@@ -551,14 +567,14 @@ class HoldemCfrSolverTest extends FunSuite:
         rngSeed = 29L
       )
 
-      val full = HoldemCfrSolver.solve(
+      val decisionOnly = HoldemCfrSolver.solveDecisionPolicy(
         hero = hero,
         state = state,
         villainPosterior = posterior,
         candidateActions = candidateActions,
         config = config
       )
-      val direct = HoldemCfrSolver.solveShallowDecisionPolicy(
+      val shallow = HoldemCfrSolver.solveShallowDecisionPolicy(
         hero = hero,
         state = state,
         villainPosterior = posterior,
@@ -566,10 +582,17 @@ class HoldemCfrSolverTest extends FunSuite:
         config = config
       )
 
-      assertEquals(direct.provider, "direct-shallow")
-      val probabilitySum = direct.actionProbabilities.values.sum
+      val probabilitySum = shallow.actionProbabilities.values.sum
       assert(math.abs(probabilitySum - 1.0) < 1e-9, s"policy must sum to 1, got $probabilitySum")
-      assertEquals(direct.bestAction, full.bestAction)
+      assertEquals(shallow.provider, decisionOnly.provider)
+      assertEquals(shallow.bestAction, decisionOnly.bestAction)
+      candidateActions.foreach { action =>
+        assertEqualsDouble(
+          shallow.actionProbabilities.getOrElse(action, 0.0),
+          decisionOnly.actionProbabilities.getOrElse(action, 0.0),
+          1e-9
+        )
+      }
     }
   }
 
@@ -622,4 +645,131 @@ class HoldemCfrSolverTest extends FunSuite:
         s"river exact equity mismatch for ${villain.toToken}: observed=$observed exact=$exact"
       )
     }
+  }
+
+  test("postflop lookahead flips the turn probe benchmark from call to fold") {
+    withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
+      val spot = defaultSpot("hu_turn_button_vs_probe")
+      val baseConfig = HoldemCfrConfig(
+        iterations = 1_200,
+        averagingDelay = 100,
+        maxVillainHands = 32,
+        equityTrials = 700,
+        includeVillainReraises = true,
+        villainReraiseMultipliers = Vector(1.5, 2.0),
+        preferNativeBatch = false,
+        rngSeed = 29L
+      )
+
+      val shallow = HoldemCfrSolver.solve(
+        hero = spot.hero,
+        state = spot.state,
+        villainPosterior = spot.villainRange,
+        candidateActions = spot.candidateActions,
+        config = baseConfig
+      )
+      val lookahead = HoldemCfrSolver.solve(
+        hero = spot.hero,
+        state = spot.state,
+        villainPosterior = spot.villainRange,
+        candidateActions = spot.candidateActions,
+        config = baseConfig.copy(postflopLookahead = true)
+      )
+
+      assertEquals(shallow.bestAction, PokerAction.Call)
+      assertEquals(lookahead.bestAction, PokerAction.Fold)
+      assert(
+        lookahead.actionProbabilities.getOrElse(PokerAction.Fold, 0.0) >
+          lookahead.actionProbabilities.getOrElse(PokerAction.Call, 0.0),
+        s"expected lookahead to prefer fold, got ${lookahead.actionProbabilities}"
+      )
+    }
+  }
+
+  test("postflop lookahead is a no-op on river spots") {
+    withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
+      val spot = defaultSpot("hu_river_bluffcatch")
+      val baseConfig = HoldemCfrConfig(
+        iterations = 900,
+        averagingDelay = 100,
+        maxVillainHands = 32,
+        equityTrials = 700,
+        preferNativeBatch = false,
+        rngSeed = 31L
+      )
+
+      val baseline = HoldemCfrSolver.solveDecisionPolicy(
+        hero = spot.hero,
+        state = spot.state,
+        villainPosterior = spot.villainRange,
+        candidateActions = spot.candidateActions,
+        config = baseConfig
+      )
+      val lookahead = HoldemCfrSolver.solveDecisionPolicy(
+        hero = spot.hero,
+        state = spot.state,
+        villainPosterior = spot.villainRange,
+        candidateActions = spot.candidateActions,
+        config = baseConfig.copy(postflopLookahead = true)
+      )
+
+      assertEquals(lookahead.provider, baseline.provider)
+      assertEquals(lookahead.bestAction, baseline.bestAction)
+      spot.candidateActions.foreach { action =>
+        assertEqualsDouble(
+          lookahead.actionProbabilities.getOrElse(action, 0.0),
+          baseline.actionProbabilities.getOrElse(action, 0.0),
+          1e-9
+        )
+      }
+    }
+  }
+
+  test("postflop lookahead can run on native CPU and stays close to scala") {
+    val availability = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Cpu)
+    if availability.available then
+      val spot = defaultSpot("hu_turn_button_vs_probe")
+      val config = HoldemCfrConfig(
+        iterations = 1_200,
+        averagingDelay = 100,
+        maxVillainHands = 32,
+        equityTrials = 700,
+        includeVillainReraises = true,
+        villainReraiseMultipliers = Vector(1.5, 2.0),
+        postflopLookahead = true,
+        preferNativeBatch = false,
+        rngSeed = 37L
+      )
+
+      val scalaSolution =
+        withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
+          HoldemCfrSolver.solve(
+            hero = spot.hero,
+            state = spot.state,
+            villainPosterior = spot.villainRange,
+            candidateActions = spot.candidateActions,
+            config = config
+          )
+        }
+
+      val nativeSolution =
+        withSystemProperties(Map("sicfun.cfr.provider" -> "native-cpu")) {
+          HoldemCfrSolver.solve(
+            hero = spot.hero,
+            state = spot.state,
+            villainPosterior = spot.villainRange,
+            candidateActions = spot.candidateActions,
+            config = config
+          )
+        }
+
+      assertEquals(nativeSolution.provider, "native-cpu")
+      assertEquals(nativeSolution.bestAction, scalaSolution.bestAction)
+      spot.candidateActions.foreach { action =>
+        assertEqualsDouble(
+          nativeSolution.actionProbabilities.getOrElse(action, 0.0),
+          scalaSolution.actionProbabilities.getOrElse(action, 0.0),
+          5e-4
+        )
+      }
   }

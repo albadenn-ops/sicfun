@@ -5,14 +5,14 @@ import sicfun.holdem.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
 
-import sicfun.core.{Card, CardId, DiscreteDistribution, FixedVal, HandEvaluator, Prob}
+import sicfun.core.{Card, CardId, Deck, DiscreteDistribution, FixedVal, HandEvaluator, Prob}
 
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
-import scala.collection.mutable.ArrayBuffer
+import scala.collection.mutable.{ArrayBuffer, HashMap}
 import scala.util.Random
 
-/** Configuration for one-street Hold'em CFR solves. */
+/** Configuration for decision-time Hold'em CFR solves. */
 final case class HoldemCfrConfig(
     iterations: Int = 1_500,
     cfrPlus: Boolean = true,
@@ -22,6 +22,8 @@ final case class HoldemCfrConfig(
     equityTrials: Int = 4_000,
     includeVillainReraises: Boolean = true,
     villainReraiseMultipliers: Vector[Double] = Vector(2.0),
+    postflopLookahead: Boolean = false,
+    postflopBetFractions: Vector[Double] = Vector(0.75),
     preferNativeBatch: Boolean = true,
     rngSeed: Long = 1L
 ):
@@ -32,6 +34,14 @@ final case class HoldemCfrConfig(
   require(
     villainReraiseMultipliers.forall(m => m > 1.0 && m.isFinite),
     "villainReraiseMultipliers must be finite and > 1.0"
+  )
+  require(
+    postflopBetFractions.forall(fraction => fraction > 0.0 && fraction.isFinite),
+    "postflopBetFractions must be finite and > 0.0"
+  )
+  require(
+    !postflopLookahead || postflopBetFractions.nonEmpty,
+    "postflopBetFractions must be non-empty when postflopLookahead is enabled"
   )
 
 /** Solved CFR baseline for a single decision point. */
@@ -74,11 +84,15 @@ final case class HoldemCfrDecisionPolicy(
   require(villainSupport > 0, "villainSupport must be positive")
   require(provider.trim.nonEmpty, "provider must be non-empty")
 
-/** CFR baseline solver for a heads-up, one-street action abstraction.
+/** CFR baseline solver for a heads-up decision abstraction.
   *
   * This module integrates with existing project equity engines:
   *  - preflop: optional native/hybrid batch path via [[HeadsUpGpuRuntime]]
   *  - fallback and postflop: [[HoldemEquity.equityMonteCarlo]]
+  *
+  * Optional postflop lookahead adds one future betting round after a root
+  * check/call before falling back to equity realization on the resulting
+  * board.
   */
 object HoldemCfrSolver:
   private val Epsilon = 1e-12
@@ -88,6 +102,8 @@ object HoldemCfrSolver:
   private val CfrAutoBenchmarkIterationsEnv = "sicfun_CFR_AUTO_BENCHMARK_ITERATIONS"
   private val CfrAutoMinSpeedupProperty = "sicfun.cfr.auto.nativeMinSpeedup"
   private val CfrAutoMinSpeedupEnv = "sicfun_CFR_AUTO_NATIVE_MIN_SPEEDUP"
+  private val CfrDirectShallowApproximationProperty = "sicfun.cfr.directShallowApproximation"
+  private val CfrDirectShallowApproximationEnv = "sicfun_CFR_DIRECT_SHALLOW_APPROXIMATION"
   private val DefaultAutoBenchmarkIterations = 240
   private val DefaultAutoMinSpeedup = 1.02
   private val MaxEquityLookupCacheEntries = 8_192
@@ -126,6 +142,12 @@ object HoldemCfrSolver:
       heroActions: Vector[PokerAction],
       villainSupport: Vector[(HoleCards, Double)],
       game: HoldemDecisionGame
+  )
+
+  private final case class ContinuationChanceCacheKey(
+      villainId: Int,
+      heroInvestmentBits: Long,
+      villainInvestmentBits: Long
   )
 
   private final case class DirectShallowMixedReraise(
@@ -291,6 +313,18 @@ object HoldemCfrSolver:
       (hero, prepared)
     }
 
+    if preparedSpecs.exists { case (_, prepared) => !prepared.game.supportsNativeBatch } then
+      return preparedSpecs.map { case (hero, _) =>
+        val policy = solveDecisionPolicy(
+          hero = hero,
+          state = state,
+          villainPosterior = villainPosterior,
+          candidateActions = candidateActions,
+          config = config
+        )
+        (hero, policy)
+      }
+
     // Try GPU batch path
     val batchResult = tryGpuBatch(preparedSpecs, config)
     batchResult match
@@ -375,6 +409,7 @@ object HoldemCfrSolver:
     val batchSize = specs.length
     specs.indices.foreach { i =>
       val s = specs(i)
+      require(s.rootInfoSetIndex == template.rootInfoSetIndex, s"tree $i rootInfoSetIndex differs")
       require(s.nodeTypes.length == nodeCount, s"tree $i nodeCount mismatch")
       require(s.edgeChildIds.length == edgeCount, s"tree $i edgeCount mismatch")
       require(java.util.Arrays.equals(s.nodeTypes, template.nodeTypes), s"tree $i nodeTypes differ")
@@ -382,6 +417,7 @@ object HoldemCfrSolver:
       require(java.util.Arrays.equals(s.nodeCounts, template.nodeCounts), s"tree $i nodeCounts differ")
       require(java.util.Arrays.equals(s.nodeInfosets, template.nodeInfosets), s"tree $i nodeInfosets differ")
       require(java.util.Arrays.equals(s.edgeChildIds, template.edgeChildIds), s"tree $i edgeChildIds differ")
+      require(java.util.Arrays.equals(s.infosetPlayers, template.infosetPlayers), s"tree $i infosetPlayers differ")
       require(java.util.Arrays.equals(s.infosetActionCounts, template.infosetActionCounts),
         s"tree $i infosetActionCounts differ")
     }
@@ -437,13 +473,11 @@ object HoldemCfrSolver:
     )
 
   /** Direct solver for the shallow hall/action-abstraction tree.
-    *
-    * This bypasses iterative CFR when the tree shape is:
-    * - hero root actions are terminal except optional raises
-    * - villain responses may include multiple re-raise sizes
-    * - hero can only fold/call versus each re-raise
-    *
-    * Falls back to [[solveDecisionPolicy]] when the abstraction is richer.
+   *
+    * This preserves the exact terminal-root shortcut for spots with no raise
+    * branch. When raises are available, it delegates to [[solveDecisionPolicy]]
+    * so callers retain the CFR root mixed strategy instead of collapsing to a
+    * deterministic argmax shortcut.
     */
   def solveShallowDecisionPolicy(
       hero: HoleCards,
@@ -463,32 +497,30 @@ object HoldemCfrSolver:
       case Some(policy) =>
         policy
       case None =>
-        maybeSolveDirectShallowPolicyFast(
-          hero = hero,
-          state = state,
-          villainPosterior = villainPosterior,
-          heroActions = sanitizedHeroActions,
-          config = config
-        )
-          .getOrElse {
-            val prepared = prepareGame(
+        if configuredDirectShallowApproximationEnabled then
+          maybeSolveDirectShallowPolicyFast(
+            hero = hero,
+            state = state,
+            villainPosterior = villainPosterior,
+            heroActions = sanitizedHeroActions,
+            config = config
+          ).getOrElse(
+            solveDecisionPolicy(
               hero = hero,
               state = state,
               villainPosterior = villainPosterior,
               candidateActions = sanitizedHeroActions,
               config = config
             )
-            maybeSolveDirectShallowPolicy(prepared.game, prepared.heroActions, prepared.villainSupport.length)
-              .getOrElse(
-                solveDecisionPolicy(
-                  hero = hero,
-                  state = state,
-                  villainPosterior = villainPosterior,
-                  candidateActions = sanitizedHeroActions,
-                  config = config
-                )
-              )
-          }
+          )
+        else
+          solveDecisionPolicy(
+            hero = hero,
+            state = state,
+            villainPosterior = villainPosterior,
+            candidateActions = sanitizedHeroActions,
+            config = config
+          )
 
   private def maybeSolveDirectShallowPolicyFast(
       hero: HoleCards,
@@ -497,6 +529,7 @@ object HoldemCfrSolver:
       heroActions: Vector[PokerAction],
       config: HoldemCfrConfig
   ): Option[HoldemCfrDecisionPolicy] =
+    if postflopLookaheadEnabled(state, config) then return None
     val deadMask = deadCardMask(hero, state.board)
     val villainSupport = trimVillainSupport(villainPosterior, deadMask, config.maxVillainHands)
     val equityByVillain = buildEquityLookup(
@@ -672,25 +705,6 @@ object HoldemCfrSolver:
     else
       directShallowMultiMixedReraiseValue(probabilities, baseValues, mixedReraises.toVector)
 
-  private def maybeSolveDirectShallowPolicy(
-      game: HoldemDecisionGame,
-      heroActions: Vector[PokerAction],
-      villainSupportSize: Int
-  ): Option[HoldemCfrDecisionPolicy] =
-    maybeSolveDirectShallowPolicy(
-      context = DirectShallowContext(
-        publicState = game.publicState,
-        villainDistribution = game.villainDistribution,
-        villainResponseByRaise = game.villainResponseByRaise,
-        heroResponseByReraise = game.heroResponseByReraise,
-        equityByVillain = game.equityByVillain,
-        weightedEquity = weightedEquity(game),
-        infoSetKey = game.heroRootInfoSetKey
-      ),
-      heroActions = heroActions,
-      villainSupportSize = villainSupportSize
-    )
-
   private def maybeSolveTerminalRootPolicy(
       hero: HoleCards,
       state: GameState,
@@ -698,7 +712,7 @@ object HoldemCfrSolver:
       heroActions: Vector[PokerAction],
       config: HoldemCfrConfig
   ): Option[HoldemCfrDecisionPolicy] =
-    if heroActions.isEmpty then None
+    if heroActions.isEmpty || postflopLookaheadEnabled(state, config) then None
     else if heroActions.exists {
         case PokerAction.Raise(_) => true
         case _                    => false
@@ -957,9 +971,6 @@ object HoldemCfrSolver:
       idx += 1
     total
 
-  private def weightedEquity(game: HoldemDecisionGame): Double =
-    weightedEquity(game.villainDistribution, game.equityByVillain)
-
   private def weightedEquity(
       villainDistribution: Vector[(HoleCards, Double)],
       equityByVillain: Array[Double]
@@ -1020,7 +1031,12 @@ object HoldemCfrSolver:
       heroActions = heroActions,
       villainResponseByRaise = villainResponseByRaise,
       heroResponseByReraise = heroResponsesByReraise,
-      equityByVillain = equityByVillain
+      equityByVillain = equityByVillain,
+      equityTrials = config.equityTrials,
+      preferNativeBatch = config.preferNativeBatch,
+      rngSeed = config.rngSeed,
+      postflopLookahead = postflopLookaheadEnabled(state, config),
+      postflopBetFractions = sanitizePostflopBetFractions(config.postflopBetFractions)
     )
     PreparedGame(
       heroActions = heroActions,
@@ -1078,6 +1094,12 @@ object HoldemCfrSolver:
       config: CfrSolver.Config
   ): PolicySolveResult =
     val configured = resolveConfiguredProvider()
+    if game.requiresScalaOnly then
+      configured match
+        case Provider.ScalaFixed | Provider.NativeCpuFixed | Provider.NativeGpuFixed =>
+          return solveWithScalaFixed(game, config)
+        case _ =>
+          return solveWithScala(game, config)
     configured match
       case Provider.Scala =>
         solveWithScala(game, config)
@@ -1105,6 +1127,12 @@ object HoldemCfrSolver:
       config: CfrSolver.Config
   ): RootPolicySolveResult =
     val configured = resolveConfiguredProvider()
+    if game.requiresScalaOnly then
+      configured match
+        case Provider.ScalaFixed | Provider.NativeCpuFixed | Provider.NativeGpuFixed =>
+          return solveRootWithScalaFixed(game, config)
+        case _ =>
+          return solveRootWithScala(game, config)
     configured match
       case Provider.Scala =>
         solveRootWithScala(game, config)
@@ -1592,7 +1620,12 @@ object HoldemCfrSolver:
       heroActions = heroActions,
       villainResponseByRaise = villainResponseByRaise,
       heroResponseByReraise = heroResponseByReraise,
-      equityByVillain = equityByVillain
+      equityByVillain = equityByVillain,
+      equityTrials = 256,
+      preferNativeBatch = false,
+      rngSeed = 1L,
+      postflopLookahead = false,
+      postflopBetFractions = Vector(0.75)
     )
 
   private def benchmarkNanos(thunk: => Any): Long =
@@ -1622,6 +1655,25 @@ object HoldemCfrSolver:
       .flatMap(_.toDoubleOption)
       .filter(value => value > 1.0 && value.isFinite)
       .getOrElse(DefaultAutoMinSpeedup)
+
+  private def configuredDirectShallowApproximationEnabled: Boolean =
+    GpuRuntimeSupport
+      .resolveNonEmptyLower(CfrDirectShallowApproximationProperty, CfrDirectShallowApproximationEnv)
+      .exists {
+        case "1" | "true" | "yes" | "on" => true
+        case _                           => false
+      }
+
+  private def postflopLookaheadEnabled(
+      state: GameState,
+      config: HoldemCfrConfig
+  ): Boolean =
+    config.postflopLookahead && state.street != Street.Preflop && state.street != Street.River
+
+  private def sanitizePostflopBetFractions(
+      fractions: Vector[Double]
+  ): Vector[Double] =
+    fractions.distinct.sorted
 
   private def sanitizeHeroActions(
       state: GameState,
@@ -1992,7 +2044,12 @@ object HoldemCfrSolver:
       heroActions: Vector[PokerAction],
       villainResponseByRaise: Map[Double, Vector[PokerAction]],
       heroResponseByReraise: Map[(Double, Double), Vector[PokerAction]],
-      equityByVillain: Array[Double]
+      equityByVillain: Array[Double],
+      equityTrials: Int,
+      preferNativeBatch: Boolean,
+      rngSeed: Long,
+      postflopLookahead: Boolean,
+      postflopBetFractions: Vector[Double]
   ) extends CfrSolver.ExtensiveFormGame[HoldemDecisionGame.Node, PokerAction]:
     import HoldemDecisionGame.*
 
@@ -2001,9 +2058,21 @@ object HoldemCfrSolver:
       else publicState.board.cards.map(_.toToken).mkString("")
     private val stateToken =
       s"${publicState.street}|$boardToken|${amountKey(publicState.pot)}|${amountKey(publicState.toCall)}|${amountKey(publicState.stackSize)}"
+    private val heroActsFirstPostflop =
+      publicState.position == Position.BigBlind
+    private val villainHands =
+      villainDistribution.map(_._1)
+    private val equityByBoardCache =
+      HashMap[Long, Array[Double]](packBoard(publicState.board) -> equityByVillain)
+    private val continuationChanceCache =
+      HashMap.empty[ContinuationChanceCacheKey, Vector[(Node, Double)]]
 
     val heroRootInfoSetKey: String =
       s"hero:${hero.toToken}|root|$stateToken"
+    val requiresScalaOnly: Boolean =
+      false
+    val supportsNativeBatch: Boolean =
+      !shouldContinueRootNonFold
 
     // Pre-computed chance outcomes cached once during construction.
     // Without this, chanceOutcomes creates a new Vector via .map on every
@@ -2034,16 +2103,177 @@ object HoldemCfrSolver:
       }
       builder.result()
 
+    private def shouldContinueRootNonFold: Boolean =
+      postflopLookahead && publicState.street != Street.Preflop && publicState.street != Street.River
+
+    private def terminalNode(
+        villain: HoleCards,
+        board: Board,
+        heroInvestment: Double,
+        villainInvestment: Double,
+        winnerByFold: Option[Int]
+    ): Terminal =
+      Terminal(
+        villain = villain,
+        board = board,
+        heroInvestment = heroInvestment,
+        villainInvestment = villainInvestment,
+        winnerByFold = winnerByFold
+      )
+
+    private def rootContinuationNode(
+        villain: HoleCards,
+        heroInvestment: Double,
+        villainInvestment: Double
+    ): Node =
+      if shouldContinueRootNonFold then
+        RootContinuationChance(
+          villain = villain,
+          heroInvestment = heroInvestment,
+          villainInvestment = villainInvestment
+        )
+      else
+        terminalNode(
+          villain = villain,
+          board = publicState.board,
+          heroInvestment = heroInvestment,
+          villainInvestment = villainInvestment,
+          winnerByFold = None
+        )
+
+    private def basePot(heroInvestment: Double, villainInvestment: Double): Double =
+      publicState.pot + heroInvestment + villainInvestment
+
+    private def heroRemaining(heroInvestment: Double): Double =
+      math.max(0.0, publicState.stackSize - heroInvestment)
+
+    private def villainRemaining(villainInvestment: Double): Double =
+      math.max(0.0, (publicState.stackSize - publicState.toCall) - villainInvestment)
+
+    private def continuationBetActions(
+        actor: Int,
+        heroInvestment: Double,
+        villainInvestment: Double
+    ): Vector[PokerAction] =
+      val remaining =
+        if actor == 0 then heroRemaining(heroInvestment)
+        else villainRemaining(villainInvestment)
+      if remaining <= Epsilon then Vector.empty
+      else
+        postflopBetFractions.iterator
+          .map { fraction =>
+            val rounded = roundToHalf(math.max(0.5, basePot(heroInvestment, villainInvestment) * fraction))
+            math.min(remaining, rounded)
+          }
+          .filter(amount => amount > Epsilon && amount.isFinite)
+          .toVector
+          .distinct
+          .sorted
+          .map(PokerAction.Raise.apply)
+
+    private def continuationChanceOutcomes(
+        villain: HoleCards,
+        heroInvestment: Double,
+        villainInvestment: Double
+    ): Vector[(Node, Double)] =
+      val key = ContinuationChanceCacheKey(
+        villainId = holeCardsId(villain),
+        heroInvestmentBits = java.lang.Double.doubleToLongBits(heroInvestment),
+        villainInvestmentBits = java.lang.Double.doubleToLongBits(villainInvestment)
+      )
+      continuationChanceCache.getOrElseUpdate(
+        key,
+        {
+          val dead =
+            hero.asSet ++ villain.asSet ++ publicState.board.asSet
+          val available = Deck.full.filterNot(dead.contains)
+          val probability =
+            if available.isEmpty then 0.0 else 1.0 / available.length.toDouble
+          available.map { card =>
+            val board = Board.from(publicState.board.cards :+ card)
+            val child =
+              if heroActsFirstPostflop then
+                HeroFutureStart(villain, board, heroInvestment, villainInvestment)
+              else
+                VillainFutureStart(villain, board, heroInvestment, villainInvestment)
+            child -> probability
+          }
+        }
+      )
+
+    private def continuationStateToken(
+        board: Board,
+        heroInvestment: Double,
+        villainInvestment: Double
+    ): String =
+      val boardToken =
+        if board.cards.isEmpty then "preflop"
+        else board.cards.map(_.toToken).mkString("")
+      val streetToken =
+        board.size match
+          case 0 => Street.Preflop
+          case 3 => Street.Flop
+          case 4 => Street.Turn
+          case 5 => Street.River
+          case size =>
+            throw new IllegalStateException(s"unsupported continuation board size: $size")
+      s"$streetToken|$boardToken|pot=${amountKey(basePot(heroInvestment, villainInvestment))}|hero=${amountKey(heroRemaining(heroInvestment))}|villain=${amountKey(villainRemaining(villainInvestment))}"
+
+    private def continuationInfoSetKey(
+        actor: Int,
+        villain: HoleCards,
+        board: Board,
+        heroInvestment: Double,
+        villainInvestment: Double,
+        stage: String
+    ): String =
+      val owner =
+        if actor == 0 then s"hero:${hero.toToken}"
+        else s"villain:${villain.toToken}"
+      s"$owner|lookahead:$stage|${continuationStateToken(board, heroInvestment, villainInvestment)}"
+
+    private def equityForBoard(villain: HoleCards, board: Board): Double =
+      val lookup =
+        equityByBoardCache.getOrElseUpdate(
+          packBoard(board),
+          {
+            val deadMask = deadCardMask(hero, board)
+            val compatibleVillains =
+              villainHands.filter { hand =>
+                val mask = cardMask(hand.first) | cardMask(hand.second)
+                (mask & deadMask) == 0L
+              }
+            buildEquityLookup(
+              hero = hero,
+              board = board,
+              villains = compatibleVillains,
+              trials = equityTrials,
+              preferNativeBatch = preferNativeBatch,
+              rngSeed = mixSeed(rngSeed, packBoard(board))
+            )
+          }
+        )
+      requireEquityLookup(lookup, villain)
+
     override def root: Node =
       RootChance
 
     override def actor(state: Node): CfrSolver.Actor =
       state match
-        case RootChance              => CfrSolver.Actor.Chance
-        case _: HeroRoot             => CfrSolver.Actor.Player0
-        case _: VillainFacingRaise   => CfrSolver.Actor.Player1
-        case _: HeroFacingReraise    => CfrSolver.Actor.Player0
-        case _: Terminal             => CfrSolver.Actor.Terminal
+        case RootChance | _: RootContinuationChance => CfrSolver.Actor.Chance
+        case _: HeroRoot |
+            _: HeroFacingReraise |
+            _: HeroFutureStart |
+            _: HeroFutureAfterCheck |
+            _: HeroFutureFacingBet =>
+          CfrSolver.Actor.Player0
+        case _: VillainFacingRaise |
+            _: VillainFutureStart |
+            _: VillainFutureAfterCheck |
+            _: VillainFutureFacingBet =>
+          CfrSolver.Actor.Player1
+        case _: Terminal =>
+          CfrSolver.Actor.Terminal
 
     override def legalActions(state: Node): Vector[PokerAction] =
       state match
@@ -2053,6 +2283,32 @@ object HoldemCfrSolver:
           villainResponseByRaise.getOrElse(heroRaise, Vector(PokerAction.Fold, PokerAction.Call))
         case HeroFacingReraise(_, heroRaise, villainRaise) =>
           heroResponseByReraise.getOrElse((heroRaise, villainRaise), Vector(PokerAction.Fold))
+        case HeroFutureStart(_, _, heroInvestment, villainInvestment) =>
+          Vector(PokerAction.Check) ++ continuationBetActions(
+            actor = 0,
+            heroInvestment = heroInvestment,
+            villainInvestment = villainInvestment
+          )
+        case VillainFutureStart(_, _, heroInvestment, villainInvestment) =>
+          Vector(PokerAction.Check) ++ continuationBetActions(
+            actor = 1,
+            heroInvestment = heroInvestment,
+            villainInvestment = villainInvestment
+          )
+        case HeroFutureAfterCheck(_, _, heroInvestment, villainInvestment) =>
+          Vector(PokerAction.Check) ++ continuationBetActions(
+            actor = 0,
+            heroInvestment = heroInvestment,
+            villainInvestment = villainInvestment
+          )
+        case VillainFutureAfterCheck(_, _, heroInvestment, villainInvestment) =>
+          Vector(PokerAction.Check) ++ continuationBetActions(
+            actor = 1,
+            heroInvestment = heroInvestment,
+            villainInvestment = villainInvestment
+          )
+        case _: HeroFutureFacingBet | _: VillainFutureFacingBet =>
+          Vector(PokerAction.Fold, PokerAction.Call)
         case _ =>
           Vector.empty
 
@@ -2070,6 +2326,20 @@ object HoldemCfrSolver:
             (heroRaise, villainRaise),
             s"hero:${hero.toToken}|vs3bet:${amountKey(heroRaise)}:${amountKey(villainRaise)}|$stateToken"
           )
+        case HeroFutureStart(villain, board, heroInvestment, villainInvestment) if player == 0 =>
+          continuationInfoSetKey(0, villain, board, heroInvestment, villainInvestment, "start")
+        case VillainFutureStart(villain, board, heroInvestment, villainInvestment) if player == 1 =>
+          continuationInfoSetKey(1, villain, board, heroInvestment, villainInvestment, "start")
+        case HeroFutureAfterCheck(villain, board, heroInvestment, villainInvestment) if player == 0 =>
+          continuationInfoSetKey(0, villain, board, heroInvestment, villainInvestment, "after-check")
+        case VillainFutureAfterCheck(villain, board, heroInvestment, villainInvestment) if player == 1 =>
+          continuationInfoSetKey(1, villain, board, heroInvestment, villainInvestment, "after-check")
+        case HeroFutureFacingBet(villain, board, heroInvestment, villainInvestment, toCall, afterCheck) if player == 0 =>
+          val stagePrefix = if afterCheck then "facing-delayed" else "facing-lead"
+          continuationInfoSetKey(0, villain, board, heroInvestment, villainInvestment, s"$stagePrefix-${amountKey(toCall)}")
+        case VillainFutureFacingBet(villain, board, heroInvestment, villainInvestment, toCall, afterCheck) if player == 1 =>
+          val stagePrefix = if afterCheck then "facing-delayed" else "facing-lead"
+          continuationInfoSetKey(1, villain, board, heroInvestment, villainInvestment, s"$stagePrefix-${amountKey(toCall)}")
         case _ =>
           throw new IllegalArgumentException("invalid infoset query for node/player")
 
@@ -2078,19 +2348,19 @@ object HoldemCfrSolver:
         case HeroRoot(villain) =>
           action match
             case PokerAction.Fold =>
-              Terminal(villain, heroInvestment = 0.0, villainInvestment = 0.0, winnerByFold = Some(1))
+              terminalNode(villain, publicState.board, heroInvestment = 0.0, villainInvestment = 0.0, winnerByFold = Some(1))
             case PokerAction.Check =>
-              Terminal(villain, heroInvestment = 0.0, villainInvestment = 0.0, winnerByFold = None)
+              rootContinuationNode(villain, heroInvestment = 0.0, villainInvestment = 0.0)
             case PokerAction.Call =>
-              Terminal(villain, heroInvestment = publicState.toCall, villainInvestment = 0.0, winnerByFold = None)
+              rootContinuationNode(villain, heroInvestment = publicState.toCall, villainInvestment = 0.0)
             case PokerAction.Raise(raiseAmount) =>
               VillainFacingRaise(villain, raiseAmount)
         case VillainFacingRaise(villain, heroRaise) =>
           action match
             case PokerAction.Fold =>
-              Terminal(villain, heroInvestment = heroRaise, villainInvestment = 0.0, winnerByFold = Some(0))
+              terminalNode(villain, publicState.board, heroInvestment = heroRaise, villainInvestment = 0.0, winnerByFold = Some(0))
             case PokerAction.Call =>
-              Terminal(villain, heroInvestment = heroRaise, villainInvestment = heroRaise, winnerByFold = None)
+              terminalNode(villain, publicState.board, heroInvestment = heroRaise, villainInvestment = heroRaise, winnerByFold = None)
             case PokerAction.Raise(villainRaise) =>
               HeroFacingReraise(villain, heroRaise, villainRaise)
             case PokerAction.Check =>
@@ -2098,27 +2368,77 @@ object HoldemCfrSolver:
         case HeroFacingReraise(villain, heroRaise, villainRaise) =>
           action match
             case PokerAction.Fold =>
-              Terminal(villain, heroInvestment = heroRaise, villainInvestment = villainRaise, winnerByFold = Some(1))
+              terminalNode(villain, publicState.board, heroInvestment = heroRaise, villainInvestment = villainRaise, winnerByFold = Some(1))
             case PokerAction.Call =>
-              Terminal(villain, heroInvestment = villainRaise, villainInvestment = villainRaise, winnerByFold = None)
+              terminalNode(villain, publicState.board, heroInvestment = villainRaise, villainInvestment = villainRaise, winnerByFold = None)
             case _ =>
               throw new IllegalArgumentException("hero can only fold/call versus 3-bet in this abstraction")
-        case RootChance | _: Terminal =>
+        case HeroFutureStart(villain, board, heroInvestment, villainInvestment) =>
+          action match
+            case PokerAction.Check =>
+              VillainFutureAfterCheck(villain, board, heroInvestment, villainInvestment)
+            case PokerAction.Raise(amount) =>
+              VillainFutureFacingBet(villain, board, heroInvestment + amount, villainInvestment, amount, afterCheck = false)
+            case _ =>
+              throw new IllegalArgumentException("future street opener can only check or bet")
+        case VillainFutureStart(villain, board, heroInvestment, villainInvestment) =>
+          action match
+            case PokerAction.Check =>
+              HeroFutureAfterCheck(villain, board, heroInvestment, villainInvestment)
+            case PokerAction.Raise(amount) =>
+              HeroFutureFacingBet(villain, board, heroInvestment, villainInvestment + amount, amount, afterCheck = false)
+            case _ =>
+              throw new IllegalArgumentException("future street opener can only check or bet")
+        case HeroFutureAfterCheck(villain, board, heroInvestment, villainInvestment) =>
+          action match
+            case PokerAction.Check =>
+              terminalNode(villain, board, heroInvestment, villainInvestment, winnerByFold = None)
+            case PokerAction.Raise(amount) =>
+              VillainFutureFacingBet(villain, board, heroInvestment + amount, villainInvestment, amount, afterCheck = true)
+            case _ =>
+              throw new IllegalArgumentException("future street second actor can only check or bet")
+        case VillainFutureAfterCheck(villain, board, heroInvestment, villainInvestment) =>
+          action match
+            case PokerAction.Check =>
+              terminalNode(villain, board, heroInvestment, villainInvestment, winnerByFold = None)
+            case PokerAction.Raise(amount) =>
+              HeroFutureFacingBet(villain, board, heroInvestment, villainInvestment + amount, amount, afterCheck = true)
+            case _ =>
+              throw new IllegalArgumentException("future street second actor can only check or bet")
+        case HeroFutureFacingBet(villain, board, heroInvestment, villainInvestment, toCall, _) =>
+          action match
+            case PokerAction.Fold =>
+              terminalNode(villain, board, heroInvestment, villainInvestment, winnerByFold = Some(1))
+            case PokerAction.Call =>
+              terminalNode(villain, board, heroInvestment + toCall, villainInvestment, winnerByFold = None)
+            case _ =>
+              throw new IllegalArgumentException("hero can only fold/call facing a future bet")
+        case VillainFutureFacingBet(villain, board, heroInvestment, villainInvestment, toCall, _) =>
+          action match
+            case PokerAction.Fold =>
+              terminalNode(villain, board, heroInvestment, villainInvestment, winnerByFold = Some(0))
+            case PokerAction.Call =>
+              terminalNode(villain, board, heroInvestment, villainInvestment + toCall, winnerByFold = None)
+            case _ =>
+              throw new IllegalArgumentException("villain can only fold/call facing a future bet")
+        case RootChance | _: RootContinuationChance | _: Terminal =>
           throw new IllegalArgumentException("transition requested from non-action node")
 
     override def chanceOutcomes(state: Node): Vector[(Node, Double)] =
       state match
         case RootChance =>
           cachedRootChanceOutcomes
+        case RootContinuationChance(villain, heroInvestment, villainInvestment) =>
+          continuationChanceOutcomes(villain, heroInvestment, villainInvestment)
         case _ =>
           Vector.empty
 
     override def terminalUtilityPlayer0(state: Node): Double =
       state match
-        case Terminal(villain, heroInvestment, villainInvestment, winnerByFold) =>
+        case Terminal(villain, board, heroInvestment, villainInvestment, winnerByFold) =>
           val equity =
             if winnerByFold.isEmpty then
-              requireEquityLookup(equityByVillain, villain)
+              equityForBoard(villain, board)
             else 0.0
           terminalUtilityForEquity(equity, heroInvestment, villainInvestment, winnerByFold)
         case _ =>
@@ -2182,6 +2502,8 @@ object HoldemCfrSolver:
       )
 
     def toNativeTreeSpec: HoldemCfrNativeRuntime.NativeTreeSpec =
+      if shouldContinueRootNonFold then
+        return buildTraversedNativeTreeSpec()
       val villainCount = villainDistribution.length
       require(villainCount > 0, "native tree spec missing villain support")
 
@@ -2514,6 +2836,156 @@ object HoldemCfrSolver:
         infosetActionCounts = infosetActionCounts
       )
 
+    private def buildTraversedNativeTreeSpec(): HoldemCfrNativeRuntime.NativeTreeSpec =
+      require(villainDistribution.nonEmpty, "native tree spec missing villain support")
+
+      val nodeTypes = ArrayBuffer.empty[Int]
+      val nodeInfosets = ArrayBuffer.empty[Int]
+      val nodeTerminalUtilities = ArrayBuffer.empty[Double]
+      val nodeChildren = ArrayBuffer.empty[Array[Int]]
+      val nodeProbabilities = ArrayBuffer.empty[Array[Double]]
+
+      val infosetKeys = ArrayBuffer.empty[String]
+      val infosetPlayers = ArrayBuffer.empty[Int]
+      val infosetActions = ArrayBuffer.empty[Vector[PokerAction]]
+      val infosetActionCounts = ArrayBuffer.empty[Int]
+      val infosetIndexByKey = HashMap.empty[(Int, String), Int]
+
+      def reserveNode(): Int =
+        val nodeId = nodeTypes.length
+        nodeTypes += -1
+        nodeInfosets += -1
+        nodeTerminalUtilities += 0.0
+        nodeChildren += Array.emptyIntArray
+        nodeProbabilities += Array.emptyDoubleArray
+        nodeId
+
+      def registerInfoset(
+          key: String,
+          player: Int,
+          actions: Vector[PokerAction]
+      ): Int =
+        infosetIndexByKey.getOrElseUpdate(
+          (player, key),
+          {
+            val idx = infosetKeys.length
+            infosetKeys += key
+            infosetPlayers += player
+            infosetActions += actions
+            infosetActionCounts += actions.length
+            idx
+          }
+        )
+
+      def ensureMatchingActions(
+          infosetIdx: Int,
+          actions: Vector[PokerAction],
+          key: String
+      ): Unit =
+        require(
+          infosetActions(infosetIdx) == actions,
+          s"native infoset action mismatch for '$key'"
+        )
+
+      def buildNode(state: Node): Int =
+        val nodeId = reserveNode()
+        actor(state) match
+          case CfrSolver.Actor.Terminal =>
+            nodeTypes(nodeId) = 0
+            nodeInfosets(nodeId) = -1
+            nodeTerminalUtilities(nodeId) = terminalUtilityPlayer0(state)
+          case CfrSolver.Actor.Chance =>
+            val outcomes = chanceOutcomes(state)
+            val childIds = new Array[Int](outcomes.length)
+            val probabilities = new Array[Double](outcomes.length)
+            var idx = 0
+            while idx < outcomes.length do
+              val (child, probability) = outcomes(idx)
+              childIds(idx) = buildNode(child)
+              probabilities(idx) = probability
+              idx += 1
+            nodeTypes(nodeId) = 1
+            nodeInfosets(nodeId) = -1
+            nodeChildren(nodeId) = childIds
+            nodeProbabilities(nodeId) = probabilities
+          case CfrSolver.Actor.Player0 =>
+            val actions = legalActions(state)
+            val key = informationSetKey(state, player = 0)
+            val infosetIdx = registerInfoset(key, 0, actions)
+            ensureMatchingActions(infosetIdx, actions, key)
+            val childIds = new Array[Int](actions.length)
+            var idx = 0
+            while idx < actions.length do
+              childIds(idx) = buildNode(transition(state, actions(idx)))
+              idx += 1
+            nodeTypes(nodeId) = 2
+            nodeInfosets(nodeId) = infosetIdx
+            nodeChildren(nodeId) = childIds
+            nodeProbabilities(nodeId) = Array.fill(actions.length)(0.0)
+          case CfrSolver.Actor.Player1 =>
+            val actions = legalActions(state)
+            val key = informationSetKey(state, player = 1)
+            val infosetIdx = registerInfoset(key, 1, actions)
+            ensureMatchingActions(infosetIdx, actions, key)
+            val childIds = new Array[Int](actions.length)
+            var idx = 0
+            while idx < actions.length do
+              childIds(idx) = buildNode(transition(state, actions(idx)))
+              idx += 1
+            nodeTypes(nodeId) = 3
+            nodeInfosets(nodeId) = infosetIdx
+            nodeChildren(nodeId) = childIds
+            nodeProbabilities(nodeId) = Array.fill(actions.length)(0.0)
+
+        nodeId
+
+      val rootNodeId = buildNode(root)
+      val nodeCount = nodeTypes.length
+      val edgeCount = nodeChildren.iterator.map(_.length).sum
+      val nodeStarts = new Array[Int](nodeCount)
+      val nodeCounts = new Array[Int](nodeCount)
+      val edgeChildIds = new Array[Int](edgeCount)
+      val edgeProbabilities = new Array[Double](edgeCount)
+      val terminalStart = edgeCount
+
+      var edgeCursor = 0
+      var nodeIdx = 0
+      while nodeIdx < nodeCount do
+        val children = nodeChildren(nodeIdx)
+        val count = children.length
+        nodeCounts(nodeIdx) = count
+        if count == 0 then
+          nodeStarts(nodeIdx) = terminalStart
+        else
+          nodeStarts(nodeIdx) = edgeCursor
+          System.arraycopy(children, 0, edgeChildIds, edgeCursor, count)
+          System.arraycopy(nodeProbabilities(nodeIdx), 0, edgeProbabilities, edgeCursor, count)
+          edgeCursor += count
+        nodeIdx += 1
+
+      require(edgeCursor == edgeCount, s"native tree spec edge count mismatch: $edgeCursor != $edgeCount")
+      val rootInfoSetIndex =
+        infosetIndexByKey.getOrElse(
+          (0, heroRootInfoSetKey),
+          throw new IllegalStateException("missing hero root infoset in native tree spec")
+        )
+
+      HoldemCfrNativeRuntime.NativeTreeSpec(
+        rootNodeId = rootNodeId,
+        rootInfoSetIndex = rootInfoSetIndex,
+        nodeTypes = nodeTypes.toArray,
+        nodeStarts = nodeStarts,
+        nodeCounts = nodeCounts,
+        nodeInfosets = nodeInfosets.toArray,
+        edgeChildIds = edgeChildIds,
+        edgeProbabilities = edgeProbabilities,
+        terminalUtilities = nodeTerminalUtilities.toArray,
+        infosetKeys = infosetKeys.toVector,
+        infosetPlayers = infosetPlayers.toArray,
+        infosetActions = infosetActions.toVector,
+        infosetActionCounts = infosetActionCounts.toArray
+      )
+
     def evaluateRootAction(
         heroAction: PokerAction,
         averagePolicy: Map[String, Map[PokerAction, Double]]
@@ -2668,8 +3140,54 @@ object HoldemCfrSolver:
     final case class HeroRoot(villain: HoleCards) extends Node
     final case class VillainFacingRaise(villain: HoleCards, heroRaise: Double) extends Node
     final case class HeroFacingReraise(villain: HoleCards, heroRaise: Double, villainRaise: Double) extends Node
+    final case class RootContinuationChance(
+        villain: HoleCards,
+        heroInvestment: Double,
+        villainInvestment: Double
+    ) extends Node
+    final case class HeroFutureStart(
+        villain: HoleCards,
+        board: Board,
+        heroInvestment: Double,
+        villainInvestment: Double
+    ) extends Node
+    final case class VillainFutureStart(
+        villain: HoleCards,
+        board: Board,
+        heroInvestment: Double,
+        villainInvestment: Double
+    ) extends Node
+    final case class HeroFutureAfterCheck(
+        villain: HoleCards,
+        board: Board,
+        heroInvestment: Double,
+        villainInvestment: Double
+    ) extends Node
+    final case class VillainFutureAfterCheck(
+        villain: HoleCards,
+        board: Board,
+        heroInvestment: Double,
+        villainInvestment: Double
+    ) extends Node
+    final case class HeroFutureFacingBet(
+        villain: HoleCards,
+        board: Board,
+        heroInvestment: Double,
+        villainInvestment: Double,
+        toCall: Double,
+        afterCheck: Boolean
+    ) extends Node
+    final case class VillainFutureFacingBet(
+        villain: HoleCards,
+        board: Board,
+        heroInvestment: Double,
+        villainInvestment: Double,
+        toCall: Double,
+        afterCheck: Boolean
+    ) extends Node
     final case class Terminal(
         villain: HoleCards,
+        board: Board,
         heroInvestment: Double,
         villainInvestment: Double,
         winnerByFold: Option[Int]

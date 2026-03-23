@@ -3,6 +3,8 @@ package sicfun.holdem.engine
 import munit.FunSuite
 import sicfun.holdem.types.*
 
+import java.util.Random
+
 class HeroDecisionPipelineTest extends FunSuite:
 
   private def ctx(
@@ -71,3 +73,27 @@ class HeroDecisionPipelineTest extends FunSuite:
     val raises = Vector(PokerAction.Raise(4.0))
     val result = HeroDecisionPipeline.heroCandidates(toCallChips = 200, raises = raises)
     assertEquals(result, Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(4.0)))
+
+  test("sampleActionByPolicy falls back to highest-probability action when no mass is assigned"):
+    val action = HeroDecisionPipeline.sampleActionByPolicy(
+      probabilities = Map.empty,
+      candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(4.0)),
+      rng = new Random(0L)
+    )
+    assertEquals(action, PokerAction.Fold)
+
+  test("sampleActionByPolicy can realize multiple actions from a mixed policy"):
+    val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(4.0))
+    val probabilities = Map(
+      PokerAction.Fold -> 0.20,
+      PokerAction.Call -> 0.35,
+      PokerAction.Raise(4.0) -> 0.45
+    )
+    val rng = new Random(7L)
+    val observed =
+      Vector.fill(64) {
+        HeroDecisionPipeline.sampleActionByPolicy(probabilities, candidates, rng)
+      }.toSet
+
+    assert(observed.contains(PokerAction.Call), s"expected call to be sampled, got $observed")
+    assert(observed.contains(PokerAction.Raise(4.0)), s"expected raise to be sampled, got $observed")

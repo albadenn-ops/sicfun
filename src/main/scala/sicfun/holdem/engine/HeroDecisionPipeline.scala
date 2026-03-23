@@ -78,7 +78,7 @@ private[holdem] object HeroDecisionPipeline:
             rng = gtoRng
           )
           .posterior
-        HoldemCfrSolver
+        val policy = HoldemCfrSolver
           .solveShallowDecisionPolicy(
             hero = ctx.hero,
             state = ctx.state,
@@ -88,10 +88,15 @@ private[holdem] object HeroDecisionPipeline:
               iterations = ctx.cfrIterations,
               maxVillainHands = ctx.cfrVillainHands,
               equityTrials = ctx.cfrEquityTrials,
+              postflopLookahead = ctx.state.street != Street.Preflop && ctx.state.street != Street.River,
               rngSeed = ctx.rng.nextLong()
             )
           )
-          .bestAction
+        sampleActionByPolicy(
+          probabilities = policy.actionProbabilities,
+          candidates = ctx.candidates,
+          rng = gtoRng
+        )
 
   def legalRaiseCandidates(ctx: RaiseSizingContext): Vector[PokerAction] =
     val remaining = ctx.stackRemainingChips
@@ -130,6 +135,22 @@ private[holdem] object HeroDecisionPipeline:
   def heroCandidates(toCallChips: Int, raises: Vector[PokerAction]): Vector[PokerAction] =
     if toCallChips <= 0 then Vector(PokerAction.Check) ++ raises
     else Vector(PokerAction.Fold, PokerAction.Call) ++ raises
+
+  private[holdem] def sampleActionByPolicy(
+      probabilities: Map[PokerAction, Double],
+      candidates: Vector[PokerAction],
+      rng: Random
+  ): PokerAction =
+    val roll = rng.nextDouble()
+    var cumulative = 0.0
+    var idx = 0
+    while idx < candidates.length do
+      cumulative += math.max(0.0, probabilities.getOrElse(candidates(idx), 0.0))
+      if roll < cumulative then return candidates(idx)
+      idx += 1
+
+    candidates
+      .maxBy(action => probabilities.getOrElse(action, 0.0))
 
   def newAdaptiveEngine(
       tableRanges: TableRanges,
