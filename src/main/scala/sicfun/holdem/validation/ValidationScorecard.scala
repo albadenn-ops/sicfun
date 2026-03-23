@@ -24,6 +24,7 @@ object ValidationScorecard:
     sb.append("=== PROFILING VALIDATION SCORECARD ===\n\n")
 
     results.foreach { r =>
+      val gtoCanary = isGtoCanary(r)
       sb.append(s"Player: ${r.villainName} (severity=${r.severity})\n")
       sb.append(s"  Hands played:     ${fmt(r.totalHands)}\n")
       sb.append(s"  Leak fired:       ${fmt(r.leakFiredCount)} / ${fmt(r.leakApplicableSpots)} applicable spots")
@@ -34,12 +35,20 @@ object ValidationScorecard:
       sb.append(s"  Hero net EV:      ${fmtD(r.heroNetBbPer100, "%+.1f")} bb/100\n")
       sb.append("\n")
 
-      sb.append("  PRIMARY: Leak Detection\n")
-      val detected = if r.convergence.detected then "DETECTED" else "NOT DETECTED"
-      sb.append(s"    Status:         $detected\n")
-      r.convergence.handsToDetect.foreach(h => sb.append(s"    Hands to detect: ${fmt(h)}\n"))
-      sb.append(s"    Confidence:     ${fmtD(r.convergence.finalConfidence, "%.2f")}\n")
-      sb.append(s"    False positives: ${r.convergence.totalFalsePositives}\n")
+      if gtoCanary then
+        sb.append("  PRIMARY: False Positive Canary\n")
+        val status = if r.convergence.detected then "FAIL" else "PASS"
+        sb.append(s"    Status:         $status\n")
+        r.convergence.handsToDetect.foreach(h => sb.append(s"    Hands to false-positive: ${fmt(h)}\n"))
+        sb.append(s"    Confidence:     ${fmtD(r.convergence.finalConfidence, "%.2f")}\n")
+        sb.append(s"    False positives: ${r.convergence.totalFalsePositives}\n")
+      else
+        sb.append("  PRIMARY: Leak Detection\n")
+        val detected = if r.convergence.detected then "DETECTED" else "NOT DETECTED"
+        sb.append(s"    Status:         $detected\n")
+        r.convergence.handsToDetect.foreach(h => sb.append(s"    Hands to detect: ${fmt(h)}\n"))
+        sb.append(s"    Confidence:     ${fmtD(r.convergence.finalConfidence, "%.2f")}\n")
+        sb.append(s"    False positives: ${r.convergence.totalFalsePositives}\n")
       sb.append("\n")
 
       sb.append("  SECONDARY: Archetype Classification\n")
@@ -54,23 +63,39 @@ object ValidationScorecard:
     // Aggregate
     val total = results.length
     if total > 0 then
-      val detected = results.count(_.convergence.detected)
-      val medianHands = results.flatMap(_.convergence.handsToDetect).sorted
+      val leakResults = results.filterNot(isGtoCanary)
+      val canaryResults = results.filter(isGtoCanary)
+      val detected = leakResults.count(_.convergence.detected)
+      val medianHands = leakResults.flatMap(_.convergence.handsToDetect).sorted
       val median = if medianHands.nonEmpty then medianHands(medianHands.length / 2) else 0
       val avgFP = results.map(_.convergence.totalFalsePositives).sum.toDouble / total
-      val avgWinrate = results.map(_.heroNetBbPer100).sum / total
+      val winratePopulation = if leakResults.nonEmpty then leakResults else results
+      val avgWinrate = winratePopulation.map(_.heroNetBbPer100).sum / winratePopulation.size.toDouble
 
       sb.append("=== AGGREGATE ===\n")
       sb.append(s"  Players:          $total\n")
-      sb.append(s"  Leaks detected:   $detected/$total (${fmtD(detected.toDouble / total * 100, "%.1f")}%)\n")
-      sb.append(s"  Median hands-to-detect: ${fmt(median)}\n")
+      if leakResults.nonEmpty then
+        sb.append(s"  Leak players:     ${leakResults.size}\n")
+        sb.append(s"  Leaks detected:   $detected/${leakResults.size} (${fmtD(detected.toDouble / leakResults.size * 100, "%.1f")}%)\n")
+        sb.append(s"  Median hands-to-detect: ${fmt(median)}\n")
+      if canaryResults.nonEmpty then
+        val passing = canaryResults.count(r => !r.convergence.detected)
+        sb.append(
+          s"  GTO canaries passing: $passing/${canaryResults.size} " +
+            s"(${fmtD(passing.toDouble / canaryResults.size * 100, "%.1f")}%)\n"
+        )
       sb.append(s"  Avg false positives: ${fmtD(avgFP, "%.1f")} per player\n")
-      sb.append(s"  Hero winrate:     ${fmtD(avgWinrate, "%+.1f")} bb/100 avg")
-      if avgWinrate > 0 then sb.append(" (adaptive beats exploitable: CONFIRMED)")
-      else sb.append(" (adaptive does NOT beat exploitable: INVESTIGATE)")
+      val winrateLabel = if leakResults.nonEmpty then "Hero winrate vs leak players" else "Hero winrate"
+      sb.append(s"  $winrateLabel: ${fmtD(avgWinrate, "%+.1f")} bb/100 avg")
+      if leakResults.nonEmpty then
+        if avgWinrate > 0 then sb.append(" (adaptive beats exploitable: CONFIRMED)")
+        else sb.append(" (adaptive does NOT beat exploitable: INVESTIGATE)")
       sb.append("\n")
 
     sb.toString()
+
+  private def isGtoCanary(result: PlayerValidationResult): Boolean =
+    result.leakId == NoLeak.Id
 
   private def fmt(n: Int): String =
     String.format(Locale.ROOT, "%,d", Integer.valueOf(n))

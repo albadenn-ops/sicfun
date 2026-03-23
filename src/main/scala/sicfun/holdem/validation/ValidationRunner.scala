@@ -53,6 +53,10 @@ object ValidationRunner:
     // GTO control: no leak, no noise — false positive canary
     leakyPlayers :+ (NoLeak(), "gto-baseline")
 
+  private[validation] def villainStrategyFor(leak: InjectedLeak): VillainStrategy =
+    if leak.id == "gto-baseline" then CfrVillainStrategy(allowHeuristicFallback = false)
+    else EquityBasedStrategy()
+
   def main(args: Array[String]): Unit =
     val config = parseConfig(args)
     if args.contains("--web-spotcheck") then
@@ -120,7 +124,8 @@ object ValidationRunner:
       heroEngine = heroEngine,
       villain = villainPlayer,
       seed = playerSeed,
-      budgetMs = config.budgetMs
+      budgetMs = config.budgetMs,
+      villainStrategy = villainStrategyFor(leak)
     )
 
     // Simulate all hands

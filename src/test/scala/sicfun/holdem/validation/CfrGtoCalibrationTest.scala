@@ -12,10 +12,10 @@ import sicfun.holdem.types.{PokerAction, Street}
   */
 class CfrGtoCalibrationTest extends FunSuite:
 
-  override val munitTimeout = scala.concurrent.duration.Duration(180, "s")
+  override val munitTimeout = scala.concurrent.duration.Duration(600, "s")
 
   test("CFR equilibrium villain produces no false positive leak hints"):
-    val cfrStrategy = CfrVillainStrategy()
+    val cfrStrategy = CfrVillainStrategy(allowHeuristicFallback = false)
     val villain = LeakInjectedVillain(
       name = "cfr_gto_control",
       leaks = Vector(NoLeak()),

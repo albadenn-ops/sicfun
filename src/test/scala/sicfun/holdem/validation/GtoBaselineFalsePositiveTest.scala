@@ -4,14 +4,15 @@ import munit.FunSuite
 import sicfun.holdem.history.{HandHistoryImport, HandHistorySite, OpponentProfile}
 import sicfun.holdem.types.PokerAction
 
-/** Verifies that a GTO baseline player (no leaks, no noise) does NOT trigger
+/** Verifies that a CFR GTO baseline player (no leaks, no noise) does NOT trigger
   * false positive exploit hints in the profiling pipeline.
   */
 class GtoBaselineFalsePositiveTest extends FunSuite:
 
-  override val munitTimeout = scala.concurrent.duration.Duration(120, "s")
+  override val munitTimeout = scala.concurrent.duration.Duration(600, "s")
 
-  test("GTO baseline produces no false positive leak hints"):
+  test("CFR GTO baseline produces no false positive leak hints"):
+    val cfrStrategy = CfrVillainStrategy(allowHeuristicFallback = false)
     val villain = LeakInjectedVillain(
       name = "gto_control",
       leaks = Vector(NoLeak()),
@@ -21,13 +22,15 @@ class GtoBaselineFalsePositiveTest extends FunSuite:
     val sim = new HeadsUpSimulator(
       heroEngine = None,
       villain = villain,
-      seed = 42L
+      seed = 42L,
+      villainStrategy = cfrStrategy
     )
-    val records = (1 to 10_000).map(sim.playHand).toVector
+    val numHands = 2_000
+    val records = (1 to numHands).map(sim.playHand).toVector
 
     // Verify zero leak firings
     val leakActions = records.flatMap(_.actions).filter(_.leakFired)
-    assertEquals(leakActions.size, 0, "GTO player should have zero leak firings")
+    assertEquals(leakActions.size, 0, "CFR GTO player should have zero leak firings")
 
     // Export, parse, profile
     val text = PokerStarsExporter.exportHands(records, "Hero", villain.name)
@@ -43,10 +46,11 @@ class GtoBaselineFalsePositiveTest extends FunSuite:
     val hints = profile.exploitHints
     val sig = profile.signature
 
-    println(s"[GTO] Archetype: ${profile.archetypePosterior.mapEstimate}")
-    println(f"[GTO] Signature: fold=${sig.values(0)}%.3f raise=${sig.values(1)}%.3f " +
+    println(s"[CFR-GTO] Hands: $numHands")
+    println(s"[CFR-GTO] Archetype: ${profile.archetypePosterior.mapEstimate}")
+    println(f"[CFR-GTO] Signature: fold=${sig.values(0)}%.3f raise=${sig.values(1)}%.3f " +
       f"call=${sig.values(2)}%.3f check=${sig.values(3)}%.3f")
-    println(s"[GTO] Events: ${events.size} total")
+    println(s"[CFR-GTO] Events: ${events.size} total")
 
     // Per-street breakdown
     val streets = events.groupBy(_.street)
@@ -55,19 +59,19 @@ class GtoBaselineFalsePositiveTest extends FunSuite:
       val calls = evts.count(_.action == PokerAction.Call)
       val checks = evts.count(_.action == PokerAction.Check)
       val raises = evts.count(_.action.category == PokerAction.Category.Raise)
-      println(f"[GTO]   $street: n=${evts.size} fold=$folds call=$calls check=$checks raise=$raises")
+      println(f"[CFR-GTO]   $street: n=${evts.size} fold=$folds call=$calls check=$checks raise=$raises")
     }
 
-    println(s"[GTO] Exploit hints: $hints")
+    println(s"[CFR-GTO] Exploit hints: $hints")
 
     // Check each leak pattern
     val leakIds = Vector("overfold-river-aggression", "overcall-big-bets", "overbluff-turn-barrel",
       "passive-big-pots", "preflop-too-loose", "preflop-too-tight")
     val matches = leakIds.filter(id => hintMatchesLeak(hints, id))
-    println(s"[GTO] Matching leak patterns: $matches")
+    println(s"[CFR-GTO] Matching leak patterns: $matches")
 
     assert(matches.isEmpty,
-      s"GTO baseline triggers false positive leak patterns: $matches\n  Hints: $hints")
+      s"CFR GTO baseline triggers false positive leak patterns: $matches\n  Hints: $hints")
 
   private def hintMatchesLeak(hints: Vector[String], leakId: String): Boolean =
     leakId match

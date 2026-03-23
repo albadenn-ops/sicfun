@@ -20,8 +20,7 @@ The profiler (`OpponentProfileStore.exploitHintsFor`) uses hardcoded thresholds 
 |--------|------|----------------|
 | Create | `src/main/scala/sicfun/holdem/validation/VillainStrategy.scala` | Trait + EquityBased + CfrBased implementations |
 | Modify | `src/main/scala/sicfun/holdem/validation/HeadsUpSimulator.scala` | Accept `VillainStrategy` parameter, delegate GTO decision |
-| Modify | `src/main/scala/sicfun/holdem/validation/ValidationRunner.scala` | Pass strategy to simulator |
-| Modify | `src/main/scala/sicfun/holdem/history/OpponentProfileStore.scala` | Calibrate thresholds from measured rates |
+| Modify | `src/main/scala/sicfun/holdem/history/OpponentProfileStore.scala` | Calibrate thresholds from measured rates (conditional on Task 4 results) |
 | Create | `src/test/scala/sicfun/holdem/validation/VillainStrategyTest.scala` | Unit tests for both strategies |
 | Create | `src/test/scala/sicfun/holdem/validation/CfrGtoCalibrationTest.scala` | Integration test: CFR villain produces zero false positive hints + calibration data |
 
@@ -53,11 +52,15 @@ The trait interface needs:
 package sicfun.holdem.validation
 
 import munit.FunSuite
+import sicfun.core.{Card, Rank, Suit}
 import sicfun.holdem.types.*
 
 import scala.util.Random
 
 class VillainStrategyTest extends FunSuite:
+
+  private val AhAs = HoleCards(Card(Rank.Ace, Suit.Hearts), Card(Rank.Ace, Suit.Spades))
+  private val TwoThree = HoleCards(Card(Rank.Two, Suit.Hearts), Card(Rank.Three, Suit.Diamonds))
 
   test("EquityBasedStrategy produces valid actions facing a bet"):
     val strategy = EquityBasedStrategy()
@@ -72,7 +75,7 @@ class VillainStrategyTest extends FunSuite:
     )
     val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(20.0))
     // Strong hand equity — should not fold
-    val action = strategy.decide(HoleCards.parse("AhAs").get, gs, candidates, 0.85, new Random(42))
+    val action = strategy.decide(AhAs, gs, candidates, 0.85, new Random(42))
     assert(action != PokerAction.Fold, s"Strong hand should not fold, got $action")
 
   test("EquityBasedStrategy folds weak hands facing a bet"):
@@ -89,7 +92,7 @@ class VillainStrategyTest extends FunSuite:
     val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(26.0))
     // Run 100 trials — should fold most of the time with equity = 0.10
     val foldCount = (0 until 100).count { i =>
-      strategy.decide(HoleCards.parse("2h3d").get, gs, candidates, 0.10, new Random(i)) == PokerAction.Fold
+      strategy.decide(TwoThree, gs, candidates, 0.10, new Random(i)) == PokerAction.Fold
     }
     assert(foldCount >= 50, s"Weak hand should fold often, only folded $foldCount/100 times")
 
@@ -107,7 +110,9 @@ class VillainStrategyTest extends FunSuite:
     val candidates = Vector(PokerAction.Check, PokerAction.Raise(13.2), PokerAction.Raise(20.0))
     // Strong hand — should bet most of the time
     val betCount = (0 until 100).count { i =>
-      strategy.decide(HoleCards.parse("AhAs").get, gs, candidates, 0.85, new Random(i)).isRaise
+      strategy.decide(AhAs, gs, candidates, 0.85, new Random(i)) match
+        case PokerAction.Raise(_) => true
+        case _ => false
     }
     assert(betCount >= 50, s"Strong hand should bet often when checked to, only bet $betCount/100 times")
 ```
@@ -222,7 +227,6 @@ git commit -m "feat: extract VillainStrategy trait and EquityBasedStrategy"
 
 **Files:**
 - Modify: `src/main/scala/sicfun/holdem/validation/HeadsUpSimulator.scala`
-- Modify: `src/main/scala/sicfun/holdem/validation/ValidationRunner.scala`
 
 #### Context
 
@@ -230,7 +234,6 @@ git commit -m "feat: extract VillainStrategy trait and EquityBasedStrategy"
 1. Add a `villainStrategy: VillainStrategy = EquityBasedStrategy()` constructor parameter
 2. Delegate `decideVillainGto` to `villainStrategy.decide(...)`
 3. Keep `equityBasedDecision` for the fast hero path (hero uses it when `heroEngine = None`)
-4. Update `ValidationRunner` to pass the strategy through
 
 - [ ] **Step 1: Write the failing test**
 
@@ -331,9 +334,9 @@ git commit -m "refactor: wire HeadsUpSimulator to accept pluggable VillainStrate
 
 #### Context
 
-`HoldemCfrSolver` (in `sicfun.holdem.cfr`) exposes:
+`HoldemCfrSolver` (in `sicfun.holdem.cfr`) is a Scala **object** (singleton), not a class. Its methods are called directly:
 ```scala
-def solveDecisionPolicy(
+HoldemCfrSolver.solveDecisionPolicy(
     hero: HoleCards,          // the player making the decision
     state: GameState,         // current pot/board/toCall/position/stack
     villainPosterior: DiscreteDistribution[HoleCards],  // opponent's range
@@ -362,12 +365,18 @@ The CFR villain samples from the mixed strategy. For speed, use reduced config:
 ```scala
 // Add to VillainStrategyTest.scala
 
+  private val QhQd = HoleCards(Card(Rank.Queen, Suit.Hearts), Card(Rank.Queen, Suit.Diamonds))
+  private val NineNine = HoleCards(Card(Rank.Nine, Suit.Hearts), Card(Rank.Nine, Suit.Diamonds))
+  private val flopAK7 = Board.from(Vector(
+    Card(Rank.Ace, Suit.Hearts), Card(Rank.King, Suit.Diamonds), Card(Rank.Seven, Suit.Clubs)))
+  private val flopT85 = Board.from(Vector(
+    Card(Rank.Ten, Suit.Hearts), Card(Rank.Eight, Suit.Diamonds), Card(Rank.Five, Suit.Clubs)))
+
   test("CfrVillainStrategy produces valid actions from equilibrium solve"):
-    val solver = new sicfun.holdem.cfr.HoldemCfrSolver()
-    val strategy = CfrVillainStrategy(solver)
+    val strategy = CfrVillainStrategy()
     val gs = GameState(
       street = Street.Flop,
-      board = Board.parse("Ah Kd 7c").get,
+      board = flopAK7,
       pot = 6.0,
       toCall = 3.0,
       position = Position.BigBlind,
@@ -375,17 +384,15 @@ The CFR villain samples from the mixed strategy. For speed, use reduced config:
       betHistory = Vector.empty
     )
     val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
-    val hand = HoleCards.parse("QhQd").get
-    val action = strategy.decide(hand, gs, candidates, 0.70, new Random(42))
+    val action = strategy.decide(QhQd, gs, candidates, 0.70, new Random(42))
     assert(candidates.contains(action) || action == PokerAction.Check || action == PokerAction.Call,
       s"CfrVillainStrategy returned invalid action: $action")
 
   test("CfrVillainStrategy produces mixed strategy (not deterministic)"):
-    val solver = new sicfun.holdem.cfr.HoldemCfrSolver()
-    val strategy = CfrVillainStrategy(solver)
+    val strategy = CfrVillainStrategy()
     val gs = GameState(
       street = Street.Flop,
-      board = Board.parse("Th 8d 5c").get,
+      board = flopT85,
       pot = 6.0,
       toCall = 3.0,
       position = Position.BigBlind,
@@ -394,9 +401,8 @@ The CFR villain samples from the mixed strategy. For speed, use reduced config:
     )
     val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
     // Medium-strength hand — equilibrium should mix between actions
-    val hand = HoleCards.parse("9h9d").get
     val actions = (0 until 50).map(i =>
-      strategy.decide(hand, gs, candidates, 0.60, new Random(i))
+      strategy.decide(NineNine, gs, candidates, 0.60, new Random(i))
     )
     val distinct = actions.distinct
     // With a medium hand on a wet board, CFR should use at least 2 different actions
@@ -424,11 +430,12 @@ import sicfun.holdem.equity.HoldemEquity
   * actual equilibrium play, making it the correct GTO baseline for profiler
   * calibration.
   *
-  * @param solver  shared HoldemCfrSolver instance (thread-safe, stateless)
+  * NOTE: HoldemCfrSolver is a Scala `object` (singleton), not a class.
+  * All calls go through `HoldemCfrSolver.solveDecisionPolicy(...)`.
+  *
   * @param config  CFR config — use reduced iterations/trials for simulation speed
   */
 final class CfrVillainStrategy(
-    solver: HoldemCfrSolver,
     config: HoldemCfrConfig = HoldemCfrConfig(
       iterations = 300,
       equityTrials = 500,
@@ -449,7 +456,7 @@ final class CfrVillainStrategy(
       // From the villain's perspective: "hero" = villain (decision-maker),
       // "villainPosterior" = opponent's (hero's) range = uniform excluding our cards + board
       val opponentRange = HoldemEquity.fullRange(hand, state.board)
-      val policy = solver.solveDecisionPolicy(
+      val policy = HoldemCfrSolver.solveDecisionPolicy(
         hero = hand,
         state = state,
         villainPosterior = opponentRange,
@@ -516,7 +523,6 @@ Additionally, this test measures the CFR villain's actual rates for each profile
 package sicfun.holdem.validation
 
 import munit.FunSuite
-import sicfun.holdem.cfr.{HoldemCfrConfig, HoldemCfrSolver}
 import sicfun.holdem.history.{HandHistoryImport, HandHistorySite, OpponentProfile}
 import sicfun.holdem.types.{PokerAction, Street}
 
@@ -531,8 +537,7 @@ class CfrGtoCalibrationTest extends FunSuite:
   override val munitTimeout = scala.concurrent.duration.Duration(180, "s")
 
   test("CFR equilibrium villain produces no false positive leak hints"):
-    val solver = new HoldemCfrSolver()
-    val cfrStrategy = CfrVillainStrategy(solver)
+    val cfrStrategy = CfrVillainStrategy()
     val villain = LeakInjectedVillain(
       name = "cfr_gto_control",
       leaks = Vector(NoLeak()),
