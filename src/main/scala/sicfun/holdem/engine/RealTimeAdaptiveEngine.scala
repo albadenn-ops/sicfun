@@ -1,4 +1,5 @@
 package sicfun.holdem.engine
+import sicfun.holdem.history.ShowdownRecord
 import sicfun.holdem.types.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.model.*
@@ -167,6 +168,7 @@ final class RealTimeAdaptiveEngine(
       folds: Vector[PreflopFold],
       villainPos: Position,
       observationsHash: Int,
+      showdownHistoryHash: Int,
       tableRangesIdentity: Int,
       bunchingTrials: Int
   )
@@ -275,7 +277,8 @@ final class RealTimeAdaptiveEngine(
       actionValueModel: ActionValueModel = ActionValueModel.ChipEv(),
       decisionBudgetMillis: Option[Long] = None,
       rng: Random = new Random(),
-      revealedCards: Option[HoleCards] = None
+      revealedCards: Option[HoleCards] = None,
+      showdownHistory: Vector[ShowdownRecord] = Vector.empty
   ): AdaptiveDecisionResult =
     val startedAt = System.nanoTime()
     val posteriorInference = revealedCards match
@@ -290,16 +293,20 @@ final class RealTimeAdaptiveEngine(
           actionModel = actionModel,
           bunchingTrials = 1,
           useCache = false,
-          revealedCards = revealedCards
+          revealedCards = revealedCards,
+          showdownHistory = showdownHistory
         )
       case None =>
         val effectiveBunching = effectiveBunchingTrials(decisionBudgetMillis)
         val useLowLatencyPosterior =
           effectiveBunching <= 1 &&
             actionModel.isEffectivelyUniform &&
-            HoldemDdreProvider.configuredConfig().mode == HoldemDdreProvider.Mode.Off
+            HoldemDdreProvider.configuredConfig().mode == HoldemDdreProvider.Mode.Off &&
+            showdownHistory.isEmpty
         val observationsHash =
           if useLowLatencyPosterior then 0 else MurmurHash3.seqHash(observations)
+        val showdownHistoryHash =
+          if useLowLatencyPosterior then 0 else RangeInferenceEngine.showdownHistoryHash(showdownHistory)
         cachedPosteriorInference(
           key = InferenceCacheKey(
             hero = hero,
@@ -307,6 +314,7 @@ final class RealTimeAdaptiveEngine(
             folds = folds,
             villainPos = villainPos,
             observationsHash = observationsHash,
+            showdownHistoryHash = showdownHistoryHash,
             tableRangesIdentity = tableRangesIdentity,
             bunchingTrials = effectiveBunching
           ),
@@ -317,6 +325,7 @@ final class RealTimeAdaptiveEngine(
           observations = observations,
           effectiveBunching = effectiveBunching,
           useLowLatencyPosterior = useLowLatencyPosterior,
+          showdownHistory = showdownHistory,
           rng = rng
         )
 
@@ -376,6 +385,7 @@ final class RealTimeAdaptiveEngine(
       observations: Seq[VillainObservation],
       effectiveBunching: Int,
       useLowLatencyPosterior: Boolean,
+      showdownHistory: Vector[ShowdownRecord],
       rng: Random
   ): PosteriorInferenceResult =
     val cached = inferenceCache.get(key)
@@ -394,6 +404,7 @@ final class RealTimeAdaptiveEngine(
           observations = observations,
           effectiveBunching = effectiveBunching,
           useLowLatencyPosterior = useLowLatencyPosterior,
+          showdownHistory = showdownHistory,
           rng = rng
         )
       )
@@ -406,6 +417,7 @@ final class RealTimeAdaptiveEngine(
       observations: Seq[VillainObservation],
       effectiveBunching: Int,
       useLowLatencyPosterior: Boolean,
+      showdownHistory: Vector[ShowdownRecord],
       rng: Random
   ): PosteriorInferenceResult =
     if useLowLatencyPosterior then
@@ -420,7 +432,8 @@ final class RealTimeAdaptiveEngine(
         observations = observations,
         actionModel = actionModel,
         bunchingTrials = effectiveBunching,
-        rng = new Random(rng.nextLong())
+        rng = new Random(rng.nextLong()),
+        showdownHistory = showdownHistory
       )
 
   private def publishInference(

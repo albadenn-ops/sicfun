@@ -94,6 +94,29 @@ class AdvisorSessionTest extends FunSuite:
     )
     OpponentProfileStore.save(path, OpponentProfileStore(Vector(profile)))
 
+  private def seedOpponentStore(path: Path, showdownHands: Vector[ShowdownRecord]): Unit =
+    val profile = OpponentProfile(
+      site = "pokerstars",
+      playerName = "Villain",
+      handsObserved = 2 + showdownHands.size,
+      firstSeenEpochMillis = 1_700_000_000_000L,
+      lastSeenEpochMillis = 1_700_000_000_100L + showdownHands.size,
+      actionSummary = OpponentActionSummary(folds = 1, raises = 1, calls = 1, checks = 0),
+      raiseResponses = RaiseResponseCounts(folds = 0, calls = 1, raises = 0),
+      recentEvents = Vector.empty,
+      seenHandIds = Vector("mem-1", "mem-2") ++ showdownHands.map(_.handId),
+      showdownHands = showdownHands
+    )
+    OpponentProfileStore.save(path, OpponentProfileStore(Vector(profile)))
+
+  private def topVillainLine(output: Vector[String]): String =
+    output.find(_.contains("Top villain:")).getOrElse(fail(s"missing top villain line: $output"))
+
+  private def advisePreflop(session: AdvisorSession): CommandResult =
+    val r1 = session.execute(AdvisorCommand.NewHand)
+    val r2 = r1.session.execute(AdvisorCommand.HeroCards(CliHelpers.parseHoleCards("AcKh")))
+    r2.session.execute(AdvisorCommand.Advise)
+
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)
@@ -363,6 +386,31 @@ class AdvisorSessionTest extends FunSuite:
 
     assert(r7.output.exists(_.contains("Equity")), s"expected equity output, got: ${r7.output}")
     assert(r7.output.exists(_.contains("Villain")), s"expected archetype output, got: ${r7.output}")
+  }
+
+  test("advise uses remembered showdown history when building villain range") {
+    engine.clearInferenceCache()
+    RangeInferenceEngine.clearPosteriorCache()
+
+    val root = Files.createTempDirectory("advisor-showdown-memory-")
+    val storePath = root.resolve("profiles.json")
+    val premiumShowdowns = Vector.tabulate(10) { idx =>
+      ShowdownRecord(s"sd-${idx + 1}", CliHelpers.parseHoleCards("AhAs"))
+    }
+
+    try
+      seedOpponentStore(storePath, premiumShowdowns)
+
+      val withoutMemory = advisePreflop(freshSession())
+      val withMemory = advisePreflop(freshSessionWithMemory(storePath))
+
+      val withoutTop = topVillainLine(withoutMemory.output)
+      val withTop = topVillainLine(withMemory.output)
+
+      assertNotEquals(withTop, withoutTop)
+      assert(withTop.contains("AhAs"), s"expected premium showdown history to surface AhAs in top range: $withTop")
+    finally
+      deleteRecursively(root)
   }
 
   test("advise without hero cards returns error") {

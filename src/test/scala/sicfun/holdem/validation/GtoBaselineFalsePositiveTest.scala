@@ -63,6 +63,10 @@ class GtoBaselineFalsePositiveTest extends FunSuite:
     }
 
     println(s"[CFR-GTO] Exploit hints: $hints")
+    assert(
+      !hints.exists(showdownHint),
+      s"CFR GTO baseline should not trigger showdown-specific hints: $hints"
+    )
 
     // Check each leak pattern
     val leakIds = Vector("overfold-river-aggression", "overcall-big-bets", "overbluff-turn-barrel",
@@ -78,7 +82,11 @@ class GtoBaselineFalsePositiveTest extends FunSuite:
       case "overfold-river-aggression" =>
         hints.exists(_.contains("Over-folds on the river"))
       case "overcall-big-bets" =>
-        hints.exists(h => h.contains("calling station") || h.contains("Calls too often facing large bets"))
+        hints.exists(h =>
+          h.contains("calling station") ||
+            h.contains("Calls too often facing large bets") ||
+            h.contains("shown down weak hands")
+        )
       case "overbluff-turn-barrel" =>
         hints.exists(_.contains("Very aggressive on the turn"))
       case "passive-big-pots" =>
@@ -88,3 +96,8 @@ class GtoBaselineFalsePositiveTest extends FunSuite:
       case "preflop-too-tight" =>
         hints.exists(_.contains("Over-folds preflop"))
       case _ => false
+
+  private def showdownHint(hint: String): Boolean =
+    hint.contains("shown down") ||
+      hint.contains("premium hands frequently") ||
+      hint.contains("pair-heavy")

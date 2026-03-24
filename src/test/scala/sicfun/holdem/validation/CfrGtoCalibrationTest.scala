@@ -94,6 +94,10 @@ class CfrGtoCalibrationTest extends FunSuite:
     // === False positive check ===
     val hints = profile.exploitHints
     println(s"[CFR-CAL] Exploit hints: $hints")
+    assert(
+      !hints.exists(showdownHint),
+      s"CFR equilibrium villain should not trigger showdown-specific hints: $hints"
+    )
 
     val leakIds = Vector("overfold-river-aggression", "overcall-big-bets", "overbluff-turn-barrel",
       "passive-big-pots", "preflop-too-loose", "preflop-too-tight")
@@ -110,7 +114,11 @@ class CfrGtoCalibrationTest extends FunSuite:
       case "overfold-river-aggression" =>
         hints.exists(_.contains("Over-folds on the river"))
       case "overcall-big-bets" =>
-        hints.exists(h => h.contains("calling station") || h.contains("Calls too often facing large bets"))
+        hints.exists(h =>
+          h.contains("calling station") ||
+            h.contains("Calls too often facing large bets") ||
+            h.contains("shown down weak hands")
+        )
       case "overbluff-turn-barrel" =>
         hints.exists(_.contains("Very aggressive on the turn"))
       case "passive-big-pots" =>
@@ -120,3 +128,8 @@ class CfrGtoCalibrationTest extends FunSuite:
       case "preflop-too-tight" =>
         hints.exists(_.contains("Over-folds preflop"))
       case _ => false
+
+  private def showdownHint(hint: String): Boolean =
+    hint.contains("shown down") ||
+      hint.contains("premium hands frequently") ||
+      hint.contains("pair-heavy")

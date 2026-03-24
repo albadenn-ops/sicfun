@@ -1,4 +1,5 @@
 package sicfun.holdem.engine
+import sicfun.holdem.history.ShowdownRecord
 import sicfun.holdem.types.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.model.*
@@ -11,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.mutable
 import scala.util.Random
+import scala.util.hashing.MurmurHash3
 
 /** Observed villain action with the corresponding public game state. */
 final case class VillainObservation(action: PokerAction, state: GameState)
@@ -132,6 +134,7 @@ object RangeInferenceEngine:
       folds: Vector[PreflopFold],
       villainPos: Position,
       observations: Seq[VillainObservation],
+      showdownHistoryHash: Int,
       ddreMode: HoldemDdreProvider.Mode,
       ddreProvider: HoldemDdreProvider.Provider,
       ddreAlpha: Double,
@@ -158,6 +161,9 @@ object RangeInferenceEngine:
   def clearPosteriorCache(): Unit =
     posteriorCache.clear()
     priorCache.clear()
+
+  private[engine] def showdownHistoryHash(showdownHistory: Vector[ShowdownRecord]): Int =
+    MurmurHash3.seqHash(showdownHistory.map(record => (record.handId, record.cards.toToken)))
 
   private def cachedOrCompute[K, V](
       cache: ConcurrentHashMap[K, V],
@@ -195,7 +201,8 @@ object RangeInferenceEngine:
       bunchingTrials: Int = 10_000,
       rng: Random = new Random(),
       useCache: Boolean = true,
-      revealedCards: Option[HoleCards] = None
+      revealedCards: Option[HoleCards] = None,
+      showdownHistory: Vector[ShowdownRecord] = Vector.empty
   ): PosteriorInferenceResult =
     revealedCards match
       case Some(cards) =>
@@ -227,7 +234,8 @@ object RangeInferenceEngine:
             actionModel,
             bunchingTrials,
             rng,
-            ddreConfig
+            ddreConfig,
+            showdownHistory
           )
 
         if useCache then
@@ -237,6 +245,7 @@ object RangeInferenceEngine:
             folds = folds,
             villainPos = villainPos,
             observations = observations,
+            showdownHistoryHash = showdownHistoryHash(showdownHistory),
             ddreMode = ddreConfig.mode,
             ddreProvider = ddreConfig.provider,
             ddreAlpha = ddreConfig.alpha,
@@ -261,7 +270,8 @@ object RangeInferenceEngine:
       actionModel: PokerActionModel,
       bunchingTrials: Int,
       rng: Random,
-      ddreConfig: HoldemDdreProvider.Config
+      ddreConfig: HoldemDdreProvider.Config,
+      showdownHistory: Vector[ShowdownRecord]
   ): PosteriorInferenceResult =
     // priorForContext always returns a normalized range.
     val normalizedPrior = priorForContext(
@@ -272,6 +282,11 @@ object RangeInferenceEngine:
       villainPos = villainPos,
       bunchingTrials = bunchingTrials,
       rng = rng
+    )
+    val effectivePrior = ShowdownPriorBias.applyBias(
+      prior = normalizedPrior,
+      showdowns = showdownHistory,
+      deadCards = hero.asSet ++ board.asSet
     )
     val observationsForBayes = observations.map(o => o.action -> o.state).toVector
     val canSkipBayesUpdate =
@@ -286,7 +301,7 @@ object RangeInferenceEngine:
         resolveDecisionPosterior(
           hero = hero,
           board = board,
-          prior = normalizedPrior,
+          prior = effectivePrior,
           bayesPosterior = bayesPosterior,
           observations = observationsForBayes,
           actionModel = actionModel,
@@ -295,12 +310,12 @@ object RangeInferenceEngine:
 
     val (posterior, logEvidence, compact) =
       if observationsForBayes.isEmpty then
-        (resolveDecisionPosteriorFor(normalizedPrior), 0.0, None)
+        (resolveDecisionPosteriorFor(effectivePrior), 0.0, None)
       else if canSkipBayesUpdate then
-        (resolveDecisionPosteriorFor(normalizedPrior), 0.0, None)
+        (resolveDecisionPosteriorFor(effectivePrior), 0.0, None)
       else
         val bayesUpdate = HoldemBayesProvider.updatePosterior(
-          prior = normalizedPrior,
+          prior = effectivePrior,
           observations = observationsForBayes,
           actionModel = actionModel
         )
@@ -312,12 +327,12 @@ object RangeInferenceEngine:
         (resolved, bayesUpdate.logEvidence, compactOption)
 
     PosteriorInferenceResult(
-      normalizedPrior,
+      effectivePrior,
       posterior,
       compact,
       logEvidence,
       {
-        val collapseSummary = CollapseMetrics.summary(normalizedPrior, posterior)
+        val collapseSummary = CollapseMetrics.summary(effectivePrior, posterior)
         PosteriorCollapse(
           entropyReduction = collapseSummary.entropyReduction,
           klDivergence = collapseSummary.klDivergence,
