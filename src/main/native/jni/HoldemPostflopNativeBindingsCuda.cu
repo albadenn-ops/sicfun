@@ -47,7 +47,7 @@ bool check_and_clear_exception(JNIEnv* env) {
 }
 
 HD_FORCE bool is_valid_card_id(const int card_id) {
-  return card_id >= 0 && card_id < kDeckSize;
+  return static_cast<unsigned int>(card_id) < static_cast<unsigned int>(kDeckSize);
 }
 
 std::string normalize_token(const std::string& raw) {
@@ -133,18 +133,7 @@ bool try_read_system_property(JNIEnv* env, const char* key, std::string& out) {
 }
 
 int normalize_cuda_block_size(const int raw) {
-  int block = raw;
-  if (block < 32) {
-    block = 32;
-  }
-  if (block > 1024) {
-    block = 1024;
-  }
-  block = (block / 32) * 32;
-  if (block < 32) {
-    block = 32;
-  }
-  return block;
+  return std::clamp(raw, 32, 1024) & ~31;
 }
 
 int resolve_cuda_threads_per_block(JNIEnv* env) {
@@ -166,17 +155,7 @@ int normalize_cuda_max_chunk(const int raw, const int entries) {
   if (entries <= 0) {
     return 1;
   }
-  int chunk = raw;
-  if (chunk <= 0) {
-    chunk = kDefaultCudaMaxChunkMatchups;
-  }
-  if (chunk > entries) {
-    chunk = entries;
-  }
-  if (chunk < 1) {
-    chunk = 1;
-  }
-  return chunk;
+  return std::clamp(raw > 0 ? raw : kDefaultCudaMaxChunkMatchups, 1, entries);
 }
 
 int resolve_cuda_max_chunk_matchups(JNIEnv* env, const int entries) {
@@ -198,17 +177,7 @@ int normalize_cuda_max_trials_per_launch(const int raw, const int trials) {
   if (trials <= 0) {
     return 1;
   }
-  int chunk_trials = raw;
-  if (chunk_trials <= 0) {
-    chunk_trials = kDefaultCudaMaxTrialsPerLaunch;
-  }
-  if (chunk_trials > trials) {
-    chunk_trials = trials;
-  }
-  if (chunk_trials < 1) {
-    chunk_trials = 1;
-  }
-  return chunk_trials;
+  return std::clamp(raw > 0 ? raw : kDefaultCudaMaxTrialsPerLaunch, 1, trials);
 }
 
 int resolve_cuda_max_trials_per_launch(JNIEnv* env, const int trials) {
@@ -237,25 +206,25 @@ HD_FORCE int card_suit(const int card_id) {
 HD_FORCE uint32_t encode_score(const int category, const int* tiebreak, const int tiebreak_size) {
   uint32_t score = static_cast<uint32_t>(category) << 24;
   for (int i = 0; i < tiebreak_size && i < 5; ++i) {
-    score |= (static_cast<uint32_t>(tiebreak[i] & 0x0F) << (20 - (i * 4)));
+    score |= (static_cast<uint32_t>(tiebreak[i] & 0x0F) << (20 - (i << 2)));
   }
   return score;
 }
 
 HD_FORCE uint32_t evaluate5_score(const int cards[5]) {
-  int suits[5];
+  uint8_t suits[5];
   int rank_counts[kMaxRankValue + 1];
   for (int rank = 0; rank <= kMaxRankValue; ++rank) {
     rank_counts[rank] = 0;
   }
-  for (int i = 0; i < 5; ++i) {
+  for (uint8_t i = 0; i < 5; ++i) {
     const int rank = card_rank(cards[i]);
-    suits[i] = card_suit(cards[i]);
+    suits[i] = static_cast<uint8_t>(card_suit(cards[i]));
     ++rank_counts[rank];
   }
 
   bool is_flush = true;
-  for (int i = 1; i < 5; ++i) {
+  for (uint8_t i = 1; i < 5; ++i) {
     if (suits[i] != suits[0]) {
       is_flush = false;
       break;
@@ -355,7 +324,7 @@ HD_FORCE uint32_t evaluate5_score(const int cards[5]) {
     tiebreak[3] = singles[2];
     return encode_score(1, tiebreak, 4);
   }
-  for (int i = 0; i < 5; ++i) {
+  for (uint8_t i = 0; i < 5; ++i) {
     tiebreak[i] = singles[i];
   }
   return encode_score(0, tiebreak, 5);
@@ -412,13 +381,7 @@ HD_FORCE int compare_showdown(
       villain_first, villain_second, board[0], board[1], board[2], board[3], board[4]};
   const uint32_t hero_score = evaluate7_score(hero_cards);
   const uint32_t villain_score = evaluate7_score(villain_cards);
-  if (hero_score > villain_score) {
-    return 1;
-  }
-  if (hero_score < villain_score) {
-    return -1;
-  }
-  return 0;
+  return (hero_score > villain_score) - (hero_score < villain_score);
 }
 
 HD_FORCE uint64_t mix64(uint64_t value) {
@@ -472,20 +435,20 @@ __global__ void postflop_monte_carlo_kernel(
     return;
   }
 
-  const int villain_first = villain_first_cards[idx];
-  const int villain_second = villain_second_cards[idx];
+  const int villain_first = __ldg(&villain_first_cards[idx]);
+  const int villain_second = __ldg(&villain_second_cards[idx]);
   uint64_t dead_mask =
       (1ULL << static_cast<uint64_t>(hero_first)) |
       (1ULL << static_cast<uint64_t>(hero_second)) |
       (1ULL << static_cast<uint64_t>(villain_first)) |
       (1ULL << static_cast<uint64_t>(villain_second));
   for (int b = 0; b < board_size; ++b) {
-    dead_mask |= (1ULL << static_cast<uint64_t>(board_cards[b]));
+    dead_mask |= (1ULL << static_cast<uint64_t>(__ldg(&board_cards[b])));
   }
 
   int remaining[kMaxRemainingDeck];
-  int rem_count = 0;
-  for (int card = 0; card < kDeckSize; ++card) {
+  uint8_t rem_count = 0;
+  for (uint8_t card = 0; card < kDeckSize; ++card) {
     const uint64_t bit = (1ULL << static_cast<uint64_t>(card));
     if ((dead_mask & bit) == 0ULL) {
       remaining[rem_count++] = card;
@@ -494,7 +457,7 @@ __global__ void postflop_monte_carlo_kernel(
 
   int board[kBoardCardCount];
   for (int b = 0; b < board_size; ++b) {
-    board[b] = board_cards[b];
+    board[b] = __ldg(&board_cards[b]);
   }
 
   const int cards_needed = kBoardCardCount - board_size;
@@ -517,7 +480,7 @@ __global__ void postflop_monte_carlo_kernel(
     return;
   }
 
-  uint64_t rng_state = mix64(seeds[idx] ^ 0xD6E8FEB86659FD93ULL);
+  uint64_t rng_state = mix64(__ldg(&seeds[idx]) ^ 0xD6E8FEB86659FD93ULL);
   if (rng_state == 0ULL) {
     rng_state = 0x9E3779B97F4A7C15ULL;
   }
@@ -527,7 +490,7 @@ __global__ void postflop_monte_carlo_kernel(
   int loss_count = 0;
   for (int t = 0; t < trials; ++t) {
     uint64_t used = 0ULL;
-    int filled = 0;
+    uint8_t filled = 0;
     while (filled < cards_needed) {
       const int ri = bounded_rand(rng_state, rem_count);
       const uint64_t bit = (1ULL << static_cast<uint64_t>(ri));
@@ -842,7 +805,7 @@ Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_computePostflopBatchMonteCarl
     loss_buf[idx] = loss_count / total_trials;
     const double mean = (win_count + (0.5 * tie_count)) / total_trials;
     const double ex2 = (win_count + (0.25 * tie_count)) / total_trials;
-    const double variance_population = std::max(0.0, ex2 - (mean * mean));
+    const double variance_population = fmax(0.0, ex2 - (mean * mean));
     const double variance_sample =
         trials > 1 ? (variance_population * total_trials / static_cast<double>(trials - 1)) : 0.0;
     stderr_buf[idx] = sqrt(variance_sample / total_trials);

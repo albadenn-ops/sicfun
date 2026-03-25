@@ -11,29 +11,27 @@ constexpr int kMaxInlineActions = 8;
 
 __device__ __forceinline__ void regret_matching_f(
     const float* cumulative_regret,
-    int start, int count,
+    int start, uint8_t count,
     float* out_strategy)
 {
   float positive_sum = 0.0f;
-  for (int i = 0; i < count; ++i) {
-    float pos = cumulative_regret[start + i] > 0.0f ? cumulative_regret[start + i] : 0.0f;
+  for (uint8_t i = 0; i < count; ++i) {
+    float pos = fmaxf(cumulative_regret[start + i], 0.0f);
     out_strategy[i] = pos;
     positive_sum += pos;
   }
-  if (positive_sum > 0.0f) {
-    float inv = 1.0f / positive_sum;
-    for (int i = 0; i < count; ++i) out_strategy[i] *= inv;
-  } else {
-    float uniform = 1.0f / static_cast<float>(count);
-    for (int i = 0; i < count; ++i) out_strategy[i] = uniform;
+  float has_pos = (positive_sum > 0.0f) ? 1.0f : 0.0f;
+  float inv = has_pos / (positive_sum + (1.0f - has_pos));
+  float uniform = (1.0f - has_pos) / static_cast<float>(count);
+  for (uint8_t i = 0; i < count; ++i) {
+    out_strategy[i] = out_strategy[i] * inv + uniform;
   }
 }
 
 __device__ inline int averaging_weight(
     int iteration, int averaging_delay, bool linear_averaging)
 {
-  if (iteration <= averaging_delay) return 0;
-  return linear_averaging ? (iteration - averaging_delay) : 1;
+  return (iteration > averaging_delay) * (linear_averaging ? (iteration - averaging_delay) : 1);
 }
 
 // ---- batch kernel ----
@@ -99,33 +97,33 @@ __global__ void cfr_batch_kernel(
     stack[0].action_idx = 0;
     stack[0].node_value = 0.0f;
 
-    int node_type = node_types[root_node_id];
-    int count = node_counts[root_node_id];
+    int node_type = __ldg(&node_types[root_node_id]);
+    int count = __ldg(&node_counts[root_node_id]);
 
     // Pre-compute strategy for root if player node
     if (node_type == 2 || node_type == 3) {
-      int infoset = node_infosets[root_node_id];
-      int is_start = infoset_offsets[infoset];
-      regret_matching_f(cum_regret, is_start, count, stack[0].strategy);
+      int infoset = __ldg(&node_infosets[root_node_id]);
+      int is_start = __ldg(&infoset_offsets[infoset]);
+      regret_matching_f(cum_regret, is_start, static_cast<uint8_t>(count), stack[0].strategy);
     }
 
     while (depth >= 0) {
       Frame& f = stack[depth];
-      int ntype = node_types[f.node_id];
-      int nstart = node_starts[f.node_id];
-      int ncount = node_counts[f.node_id];
+      int ntype = __ldg(&node_types[f.node_id]);
+      int nstart = __ldg(&node_starts[f.node_id]);
+      int ncount = __ldg(&node_counts[f.node_id]);
 
       if (ntype == 0) {
         // Terminal node
-        float value = terminal_utilities[f.node_id];
+        float value = __ldg(&terminal_utilities[f.node_id]);
         depth--;
         if (depth >= 0) {
           Frame& parent = stack[depth];
           int pidx = parent.action_idx - 1;
           parent.action_values[pidx] = value;
-          int ptype = node_types[parent.node_id];
+          int ptype = __ldg(&node_types[parent.node_id]);
           if (ptype == 1) { // chance
-            parent.node_value += chance_weights[node_starts[parent.node_id] + pidx] * value;
+            parent.node_value += chance_weights[__ldg(&node_starts[parent.node_id]) + pidx] * value;
           } else {
             parent.node_value += parent.strategy[pidx] * value;
           }
@@ -139,13 +137,13 @@ __global__ void cfr_batch_kernel(
       if (f.action_idx < ncount) {
         // Push next child
         int edge = nstart + f.action_idx;
-        int child_id = edge_child_ids[edge];
+        int child_id = __ldg(&edge_child_ids[edge]);
         f.action_idx++;
 
         float child_reach_p0 = f.reach_p0;
         float child_reach_p1 = f.reach_p1;
         if (ntype == 1) { // chance
-          float w = chance_weights[edge];
+          float w = __ldg(&chance_weights[edge]);
           child_reach_p0 *= w;
           child_reach_p1 *= w;
         } else if (ntype == 2) { // player 0
@@ -162,12 +160,12 @@ __global__ void cfr_batch_kernel(
         child.action_idx = 0;
         child.node_value = 0.0f;
 
-        int ctype = node_types[child_id];
+        int ctype = __ldg(&node_types[child_id]);
         if (ctype == 2 || ctype == 3) {
-          int cinfoset = node_infosets[child_id];
-          int cis_start = infoset_offsets[cinfoset];
-          int ccount = node_counts[child_id];
-          regret_matching_f(cum_regret, cis_start, ccount, child.strategy);
+          int cinfoset = __ldg(&node_infosets[child_id]);
+          int cis_start = __ldg(&infoset_offsets[cinfoset]);
+          int ccount = __ldg(&node_counts[child_id]);
+          regret_matching_f(cum_regret, cis_start, static_cast<uint8_t>(ccount), child.strategy);
         }
         continue;
       }
@@ -176,23 +174,23 @@ __global__ void cfr_batch_kernel(
       float node_value = f.node_value;
 
       if (ntype == 2 || ntype == 3) {
-        int infoset = node_infosets[f.node_id];
-        int is_start = infoset_offsets[infoset];
+        int infoset = __ldg(&node_infosets[f.node_id]);
+        int is_start = __ldg(&infoset_offsets[infoset]);
 
         if (ntype == 2) { // player 0
           float strategy_scale = static_cast<float>(avg_weight) * f.reach_p0;
-          for (int i = 0; i < ncount; ++i) {
+          for (uint8_t i = 0; i < static_cast<uint8_t>(ncount); ++i) {
             float regret_delta = f.reach_p1 * (f.action_values[i] - node_value);
             float updated = cum_regret[is_start + i] + regret_delta;
-            cum_regret[is_start + i] = (cfr_plus && updated < 0.0f) ? 0.0f : updated;
+            cum_regret[is_start + i] = cfr_plus ? fmaxf(updated, 0.0f) : updated;
             cum_strategy[is_start + i] += strategy_scale * f.strategy[i];
           }
         } else { // player 1
           float strategy_scale = static_cast<float>(avg_weight) * f.reach_p1;
-          for (int i = 0; i < ncount; ++i) {
+          for (uint8_t i = 0; i < static_cast<uint8_t>(ncount); ++i) {
             float regret_delta = f.reach_p0 * (node_value - f.action_values[i]);
             float updated = cum_regret[is_start + i] + regret_delta;
-            cum_regret[is_start + i] = (cfr_plus && updated < 0.0f) ? 0.0f : updated;
+            cum_regret[is_start + i] = cfr_plus ? fmaxf(updated, 0.0f) : updated;
             cum_strategy[is_start + i] += strategy_scale * f.strategy[i];
           }
         }
@@ -203,9 +201,9 @@ __global__ void cfr_batch_kernel(
         Frame& parent = stack[depth];
         int pidx = parent.action_idx - 1;
         parent.action_values[pidx] = node_value;
-        int ptype = node_types[parent.node_id];
+        int ptype = __ldg(&node_types[parent.node_id]);
         if (ptype == 1) {
-          parent.node_value += chance_weights[node_starts[parent.node_id] + pidx] * node_value;
+          parent.node_value += chance_weights[__ldg(&node_starts[parent.node_id]) + pidx] * node_value;
         } else {
           parent.node_value += parent.strategy[pidx] * node_value;
         }
@@ -218,16 +216,16 @@ __global__ void cfr_batch_kernel(
   float* out_strat = all_out_strategies + tree_id * strategy_size;
 
   for (int is = 0; is < infoset_count; ++is) {
-    int is_start = infoset_offsets[is];
-    int is_count = infoset_action_counts[is];
+    int is_start = __ldg(&infoset_offsets[is]);
+    int is_count = __ldg(&infoset_action_counts[is]);
     float sum = 0.0f;
-    for (int i = 0; i < is_count; ++i) sum += cum_strategy[is_start + i];
+    for (uint8_t i = 0; i < static_cast<uint8_t>(is_count); ++i) sum += cum_strategy[is_start + i];
     if (sum > 0.0f) {
       float inv = 1.0f / sum;
-      for (int i = 0; i < is_count; ++i)
+      for (uint8_t i = 0; i < static_cast<uint8_t>(is_count); ++i)
         out_strat[is_start + i] = cum_strategy[is_start + i] * inv;
     } else {
-      regret_matching_f(cum_regret, is_start, is_count, out_strat + is_start);
+      regret_matching_f(cum_regret, is_start, static_cast<uint8_t>(is_count), out_strat + is_start);
     }
   }
 }

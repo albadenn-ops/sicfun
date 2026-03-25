@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <vector>
 
@@ -37,10 +39,10 @@ inline bool valid_lengths(const int observation_count, const int hypothesis_coun
   if (observation_count < 0 || hypothesis_count <= 0) {
     return false;
   }
-  const long long obs = static_cast<long long>(observation_count);
-  const long long hyp = static_cast<long long>(hypothesis_count);
-  const long long product = obs * hyp;
-  return product >= 0 && product <= static_cast<long long>(std::numeric_limits<int>::max());
+  const int64_t obs = static_cast<int64_t>(observation_count);
+  const int64_t hyp = static_cast<int64_t>(hypothesis_count);
+  const int64_t product = obs * hyp;
+  return product >= 0 && product <= static_cast<int64_t>(std::numeric_limits<int>::max());
 }
 
 inline int infer_posterior_raw(
@@ -57,7 +59,7 @@ inline int infer_posterior_raw(
   }
 
   constexpr double kMinLikelihood = 1e-6;
-  const int effective_observation_count = observation_count > 0 ? observation_count : 1;
+  const int effective_observation_count = std::max(observation_count, 1);
   const double inverse_observation_count = 1.0 / static_cast<double>(effective_observation_count);
 
   double total = 0.0;
@@ -80,9 +82,8 @@ inline int infer_posterior_raw(
     if (!std::isfinite(score) || score < 0.0) {
       return kStatusInvalidLikelihood;
     }
-    const double clipped = std::max(score, kMinLikelihood);
-    posterior[hypothesis] = clipped;
-    total += clipped;
+    posterior[hypothesis] = std::max(score, kMinLikelihood);
+    total += posterior[hypothesis];
   }
 
   if (!std::isfinite(total) || !(total > 0.0)) {

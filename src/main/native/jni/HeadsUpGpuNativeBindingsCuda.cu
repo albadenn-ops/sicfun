@@ -9,6 +9,9 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -503,27 +506,22 @@ HD_FORCE int highest_bit_index_16(const uint16_t mask) {
   }
 #if defined(__CUDA_ARCH__)
   return 31 - __clz(static_cast<unsigned int>(mask));
+#elif defined(_MSC_VER)
+  unsigned long idx;
+  _BitScanReverse(&idx, static_cast<unsigned long>(mask));
+  return static_cast<int>(idx);
 #else
-  for (int bit = 15; bit >= 0; --bit) {
-    if ((mask & (static_cast<uint16_t>(1) << bit)) != 0) {
-      return bit;
-    }
-  }
-  return -1;
+  return 31 - __builtin_clz(static_cast<unsigned int>(mask));
 #endif
 }
 
 HD_FORCE int popcount_16(const uint16_t mask) {
 #if defined(__CUDA_ARCH__)
   return __popc(static_cast<unsigned int>(mask));
+#elif defined(_MSC_VER)
+  return static_cast<int>(__popcnt16(mask));
 #else
-  int count = 0;
-  uint16_t value = mask;
-  while (value != 0) {
-    value = static_cast<uint16_t>(value & static_cast<uint16_t>(value - 1));
-    ++count;
-  }
-  return count;
+  return __builtin_popcount(static_cast<unsigned int>(mask));
 #endif
 }
 
@@ -557,13 +555,12 @@ HD uint32_t evaluate7_score_from_masks(
     const uint16_t quad_mask,
     const uint8_t suit_counts[4],
     const uint16_t suit_rank_mask[4]) {
+  // Branchless flush suit detection: scan all 4 suits, last match wins (at most one can have >=5)
   int flush_suit = -1;
-  for (int suit = 0; suit < 4; ++suit) {
-    if (suit_counts[suit] >= 5) {
-      flush_suit = suit;
-      break;
-    }
-  }
+  flush_suit = (suit_counts[0] >= 5) ? 0 : flush_suit;
+  flush_suit = (suit_counts[1] >= 5) ? 1 : flush_suit;
+  flush_suit = (suit_counts[2] >= 5) ? 2 : flush_suit;
+  flush_suit = (suit_counts[3] >= 5) ? 3 : flush_suit;
 
   int tiebreak[5] = {0, 0, 0, 0, 0};
   if (flush_suit >= 0) {
@@ -763,15 +760,12 @@ HD uint32_t evaluate7_score_from_state(
   for (int rank = kMinRankValue; rank <= kMaxRankValue; ++rank) {
     const uint8_t count = rank_counts[rank];
     const uint16_t bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(rank - kMinRankValue);
-    if (count >= 2) {
-      pair_mask = static_cast<uint16_t>(pair_mask | bit);
-    }
-    if (count >= 3) {
-      trip_mask = static_cast<uint16_t>(trip_mask | bit);
-    }
-    if (count == 4) {
-      quad_mask = static_cast<uint16_t>(quad_mask | bit);
-    }
+    const uint16_t pair_bit = static_cast<uint16_t>(-(count >= 2)) & bit;
+    const uint16_t trip_bit = static_cast<uint16_t>(-(count >= 3)) & bit;
+    const uint16_t quad_bit = static_cast<uint16_t>(-(count == 4)) & bit;
+    pair_mask = static_cast<uint16_t>(pair_mask | pair_bit);
+    trip_mask = static_cast<uint16_t>(trip_mask | trip_bit);
+    quad_mask = static_cast<uint16_t>(quad_mask | quad_bit);
   }
   return evaluate7_score_from_masks(
       rank_mask,
@@ -944,18 +938,12 @@ HD void fill_remaining_deck(
     const int villain_first,
     const int villain_second,
     uint8_t remaining[kRemainingAfterHoleCards]) {
-  bool dead[kDeckSize];
-  for (int i = 0; i < kDeckSize; ++i) {
-    dead[i] = false;
-  }
-  dead[hero_first] = true;
-  dead[hero_second] = true;
-  dead[villain_first] = true;
-  dead[villain_second] = true;
-
+  const uint64_t dead_mask =
+      (1ULL << hero_first) | (1ULL << hero_second) |
+      (1ULL << villain_first) | (1ULL << villain_second);
   int idx = 0;
   for (int card = 0; card < kDeckSize; ++card) {
-    if (!dead[card]) {
+    if (!((dead_mask >> card) & 1ULL)) {
       remaining[idx++] = static_cast<uint8_t>(card);
     }
   }
@@ -1091,18 +1079,11 @@ HD_FORCE bool flush_possible_for_board_meta(
     const int board_max_suit_index,
     const int hole_first,
     const int hole_second) {
-  if (board_max_suit_count >= 5) {
-    return true;
-  }
-  const int first_suit = card_suit(hole_first);
-  const int second_suit = card_suit(hole_second);
-  if (board_max_suit_count == 4) {
-    return first_suit == board_max_suit_index || second_suit == board_max_suit_index;
-  }
-  if (board_max_suit_count == 3) {
-    return first_suit == board_max_suit_index && second_suit == board_max_suit_index;
-  }
-  return false;
+  const int first_match = (card_suit(hole_first) == board_max_suit_index);
+  const int second_match = (card_suit(hole_second) == board_max_suit_index);
+  const int hole_matches = first_match + second_match;
+  // Need (board_max_suit_count + hole_matches) >= 5 for a flush to be possible
+  return (board_max_suit_count + hole_matches) >= 5;
 }
 
 HD_FORCE uint32_t rank_lookup_score_for_pattern(
@@ -1133,13 +1114,7 @@ HD_FORCE int compare_showdown_rank_lookup_only(
       rank_lookup_score_for_pattern(rank_pattern_id, hero_first, hero_second, rank_pattern_scores);
   const uint32_t villain_score =
       rank_lookup_score_for_pattern(rank_pattern_id, villain_first, villain_second, rank_pattern_scores);
-  if (hero_score > villain_score) {
-    return 1;
-  }
-  if (hero_score < villain_score) {
-    return -1;
-  }
-  return 0;
+  return (hero_score > villain_score) - (hero_score < villain_score);
 }
 
 HD inline int compare_showdown(
@@ -1183,10 +1158,9 @@ HD inline int compare_showdown(
   }
   for (int suit = 0; suit < 4; ++suit) {
     const int count = static_cast<int>(board_suit_counts[suit]);
-    if (count > board_max_suit_count) {
-      board_max_suit_count = count;
-      board_max_suit_index = suit;
-    }
+    const int is_max = (count > board_max_suit_count);
+    board_max_suit_index = is_max ? suit : board_max_suit_index;
+    board_max_suit_count = is_max ? count : board_max_suit_count;
   }
 
   int sorted_offsets[5] = {0, 0, 0, 0, 0};
@@ -1229,13 +1203,7 @@ HD inline int compare_showdown(
       rank_pattern_scores,
       villain_first,
       villain_second);
-  if (hero_score > villain_score) {
-    return 1;
-  }
-  if (hero_score < villain_score) {
-    return -1;
-  }
-  return 0;
+  return (hero_score > villain_score) - (hero_score < villain_score);
 }
 
 HD uint64_t mix64(uint64_t value) {
@@ -1375,13 +1343,9 @@ EquityResultNative compute_monte_carlo_equity_cpu(
     sample_board_cards(remaining, state, board);
 
     const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-    if (cmp > 0) {
-      ++win_count;
-    } else if (cmp == 0) {
-      ++tie_count;
-    } else {
-      ++loss_count;
-    }
+    win_count  += (cmp > 0);
+    tie_count  += (cmp == 0);
+    loss_count += (cmp < 0);
   }
 
   const double total = static_cast<double>(trials);
@@ -1420,13 +1384,9 @@ EquityResultNative compute_exact_equity_cpu(
             board[4] = remaining[e];
             const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
             ++total;
-            if (cmp > 0) {
-              ++win_count;
-            } else if (cmp == 0) {
-              ++tie_count;
-            } else {
-              ++loss_count;
-            }
+            win_count  += (cmp > 0);
+            tie_count  += (cmp == 0);
+            loss_count += (cmp < 0);
           }
         }
       }
@@ -1561,10 +1521,8 @@ bool try_read_system_property(JNIEnv* env, const char* key, std::string& out) {
 }
 
 int normalize_cuda_block_size(const int raw, const int fallback) {
-  int threads = raw > 0 ? raw : fallback;
-  threads = std::max(32, std::min(1024, threads));
-  threads = (threads / 32) * 32;
-  return threads > 0 ? threads : fallback;
+  const int threads = raw > 0 ? raw : fallback;
+  return std::clamp(threads, 32, 1024) & ~31;
 }
 
 int resolve_cuda_threads_per_block(JNIEnv* env, const jint mode_code) {
@@ -1602,9 +1560,7 @@ int normalize_cuda_max_chunk_matchups(const int raw, const int entries, const in
   if (entries <= 0) {
     return 1;
   }
-  int chunk = raw > 0 ? raw : fallback;
-  chunk = std::max(1, std::min(entries, chunk));
-  return chunk;
+  return std::clamp(raw > 0 ? raw : fallback, 1, entries);
 }
 
 int resolve_cuda_max_chunk_matchups(JNIEnv* env, const int entries, const jint mode_code) {
@@ -2089,13 +2045,9 @@ __global__ void monte_carlo_kernel(
           board,
           rank_pattern_scores);
     }
-    if (cmp > 0) {
-      ++win_count;
-    } else if (cmp == 0) {
-      ++tie_count;
-    } else {
-      ++loss_count;
-    }
+    win_count  += (cmp > 0);
+    tie_count  += (cmp == 0);
+    loss_count += (cmp < 0);
   }
 
   const double total = static_cast<double>(trials);
@@ -2260,13 +2212,9 @@ __global__ void monte_carlo_kernel_parallel_trials(
           board,
           rank_pattern_scores);
     }
-    if (cmp > 0) {
-      ++local_win;
-    } else if (cmp == 0) {
-      ++local_tie;
-    } else {
-      ++local_loss;
-    }
+    local_win  += (cmp > 0);
+    local_tie  += (cmp == 0);
+    local_loss += (cmp < 0);
   }
 
   extern __shared__ unsigned int reduction[];
@@ -2370,13 +2318,9 @@ __global__ void exact_kernel(
     board[4] = remaining[board_combos[base + 4]];
 
     const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-    if (cmp > 0) {
-      ++local_win;
-    } else if (cmp == 0) {
-      ++local_tie;
-    } else {
-      ++local_loss;
-    }
+    local_win  += (cmp > 0);
+    local_tie  += (cmp == 0);
+    local_loss += (cmp < 0);
   }
 
   extern __shared__ unsigned int reduction[];
@@ -2545,13 +2489,9 @@ __global__ void monte_carlo_kernel_packed(
           board,
           rank_pattern_scores);
     }
-    if (cmp > 0) {
-      ++win_count;
-    } else if (cmp == 0) {
-      ++tie_count;
-    } else {
-      ++loss_count;
-    }
+    win_count  += (cmp > 0);
+    tie_count  += (cmp == 0);
+    loss_count += (cmp < 0);
   }
 
   const double total = static_cast<double>(trials);
@@ -2718,13 +2658,9 @@ __global__ void monte_carlo_kernel_packed_parallel_trials(
           board,
           rank_pattern_scores);
     }
-    if (cmp > 0) {
-      ++local_win;
-    } else if (cmp == 0) {
-      ++local_tie;
-    } else {
-      ++local_loss;
-    }
+    local_win  += (cmp > 0);
+    local_tie  += (cmp == 0);
+    local_loss += (cmp < 0);
   }
 
   extern __shared__ unsigned int reduction[];
@@ -2827,13 +2763,9 @@ __global__ void exact_kernel_packed(
     board[4] = remaining[board_combos[base + 4]];
 
     const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-    if (cmp > 0) {
-      ++local_win;
-    } else if (cmp == 0) {
-      ++local_tie;
-    } else {
-      ++local_loss;
-    }
+    local_win  += (cmp > 0);
+    local_tie  += (cmp == 0);
+    local_loss += (cmp < 0);
   }
 
   extern __shared__ unsigned int reduction[];
@@ -3228,13 +3160,9 @@ __global__ void range_monte_carlo_csr_kernel(
   for (int trial = 0; trial < trials; ++trial) {
     sample_board_cards(remaining, state, board);
     const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-    if (cmp > 0) {
-      ++win_count;
-    } else if (cmp == 0) {
-      ++tie_count;
-    } else {
-      ++loss_count;
-    }
+    win_count  += (cmp > 0);
+    tie_count  += (cmp == 0);
+    loss_count += (cmp < 0);
   }
 
   const float total = static_cast<float>(trials);
@@ -3338,13 +3266,9 @@ __global__ void range_monte_carlo_csr_by_hero_kernel(
     for (int trial = 0; trial < trials; ++trial) {
       sample_board_cards(remaining, state, board);
       const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-      if (cmp > 0) {
-        ++win_count;
-      } else if (cmp == 0) {
-        ++tie_count;
-      } else {
-        ++loss_count;
-      }
+      win_count  += (cmp > 0);
+      tie_count  += (cmp == 0);
+      loss_count += (cmp < 0);
     }
 
     const float total = static_cast<float>(trials);

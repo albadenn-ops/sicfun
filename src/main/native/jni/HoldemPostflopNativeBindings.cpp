@@ -90,7 +90,7 @@ inline void add_card_to_state(EvalState& state, const int card) {
 inline EvalState build_eval_state(
     const int first,
     const int second,
-    const int* board_cards,
+    const int* __restrict__ board_cards,
     const int board_size) {
   EvalState state;
   add_card_to_state(state, first);
@@ -109,26 +109,22 @@ inline uint32_t encode_score(const int category, const int* tiebreak, const int 
   return score;
 }
 
-inline int highest_bit_index_16(const uint16_t mask) {
-  if (mask == 0) {
-    return -1;
-  }
-  for (int bit = 15; bit >= 0; --bit) {
-    if ((mask & (static_cast<uint16_t>(1) << bit)) != 0) {
-      return bit;
-    }
-  }
-  return -1;
+#if defined(_MSC_VER)
+#include <intrin.h>
+static inline int popcount_16(uint16_t x) { return static_cast<int>(__popcnt16(x)); }
+static inline int highest_bit_index_16(uint16_t x) {
+  if (x == 0) return -1;
+  unsigned long idx;
+  _BitScanReverse(&idx, static_cast<unsigned long>(x));
+  return static_cast<int>(idx);
 }
-
-inline int popcount_16(uint16_t mask) {
-  int count = 0;
-  while (mask != 0) {
-    mask = static_cast<uint16_t>(mask & static_cast<uint16_t>(mask - 1));
-    ++count;
-  }
-  return count;
+#else
+static inline int popcount_16(uint16_t x) { return __builtin_popcount(x); }
+static inline int highest_bit_index_16(uint16_t x) {
+  if (x == 0) return -1;
+  return 31 - __builtin_clz(static_cast<unsigned int>(x));
 }
+#endif
 
 inline int highest_rank_from_mask(const uint16_t mask) {
   const int bit = highest_bit_index_16(mask);
@@ -158,8 +154,8 @@ uint32_t evaluate7_score_from_masks(
     const uint16_t pair_mask,
     const uint16_t trip_mask,
     const uint16_t quad_mask,
-    const uint8_t suit_counts[4],
-    const uint16_t suit_rank_mask[4]) {
+    const uint8_t* __restrict__ suit_counts,
+    const uint16_t* __restrict__ suit_rank_mask) {
   int flush_suit = -1;
   for (int suit = 0; suit < 4; ++suit) {
     if (suit_counts[suit] >= 5) {
@@ -298,13 +294,7 @@ inline uint32_t evaluate7_score_direct(
 }
 
 inline int compare_scores(const uint32_t hero_score, const uint32_t villain_score) {
-  if (hero_score > villain_score) {
-    return 1;
-  }
-  if (hero_score < villain_score) {
-    return -1;
-  }
-  return 0;
+  return static_cast<int>(hero_score > villain_score) - static_cast<int>(hero_score < villain_score);
 }
 
 inline int compare_completed_states(const EvalState& hero_state, const EvalState& villain_state) {
@@ -356,16 +346,17 @@ jint fill_remaining_deck_postflop(
     const int hero_second,
     const int villain_first,
     const int villain_second,
-    const int* board_cards,
+    const int* __restrict__ board_cards,
     const int board_size,
-    int remaining[kMaxRemainingDeck],
-    int* remaining_count) {
-  bool dead[kDeckSize] = {};
+    int* __restrict__ remaining,
+    int* __restrict__ remaining_count) {
+  uint64_t dead_mask = 0;
   auto mark_dead = [&](const int card_id) -> bool {
-    if (dead[card_id]) {
+    const uint64_t bit = uint64_t(1) << card_id;
+    if (dead_mask & bit) {
       return false;
     }
-    dead[card_id] = true;
+    dead_mask |= bit;
     return true;
   };
 
@@ -383,7 +374,7 @@ jint fill_remaining_deck_postflop(
 
   int idx = 0;
   for (int card = 0; card < kDeckSize; ++card) {
-    if (!dead[card]) {
+    if (!(dead_mask & (uint64_t(1) << card))) {
       remaining[idx++] = card;
     }
   }
@@ -392,11 +383,11 @@ jint fill_remaining_deck_postflop(
 }
 
 void sample_runout_cards(
-    const int* remaining,
+    const int* __restrict__ remaining,
     const int remaining_count,
     const int cards_needed,
     std::mt19937_64& rng,
-    int* runout_cards) {
+    int* __restrict__ runout_cards) {
   if (cards_needed <= 0) {
     return;
   }
@@ -413,13 +404,13 @@ void sample_runout_cards(
 jint compute_postflop_mc_equity_cpu(
     const int hero_first,
     const int hero_second,
-    const int* board_cards,
+    const int* __restrict__ board_cards,
     const int board_size,
     const int villain_first,
     const int villain_second,
     const int trials,
     const uint64_t seed,
-    EquityResultNative* out) {
+    EquityResultNative* __restrict__ out) {
   const int cards_needed = kBoardCardCount - board_size;
   if (cards_needed < 0 || cards_needed > kBoardCardCount) {
     return kStatusInvalidBoardSize;
@@ -461,13 +452,9 @@ jint compute_postflop_mc_equity_cpu(
     int loss_count = 0;
     for (int i = 0; i < remaining_count; ++i) {
       const int cmp = compare_with_one_runout(hero_base, villain_base, remaining[i]);
-      if (cmp > 0) {
-        ++win_count;
-      } else if (cmp == 0) {
-        ++tie_count;
-      } else {
-        ++loss_count;
-      }
+      win_count  += (cmp > 0);
+      tie_count  += (cmp == 0);
+      loss_count += (cmp < 0);
     }
 
     const double total = static_cast<double>(remaining_count);
@@ -632,25 +619,25 @@ Java_sicfun_holdem_HoldemPostflopNativeBindings_computePostflopBatchMonteCarlo(
   if (!is_valid_card_id(hero_first) || !is_valid_card_id(hero_second)) {
     return 125;
   }
-  bool fixed_dead[kDeckSize] = {};
-  if (fixed_dead[hero_first]) {
+  uint64_t fixed_dead = 0;
+  auto fixed_mark_dead = [&](const int card_id) -> bool {
+    const uint64_t bit = uint64_t(1) << card_id;
+    if (fixed_dead & bit) return false;
+    fixed_dead |= bit;
+    return true;
+  };
+  if (!fixed_mark_dead(hero_first) || !fixed_mark_dead(hero_second)) {
     return 127;
   }
-  fixed_dead[hero_first] = true;
-  if (fixed_dead[hero_second]) {
-    return 127;
-  }
-  fixed_dead[hero_second] = true;
 
   for (int b = 0; b < board_size; ++b) {
     const jint card_id = board_buf[static_cast<size_t>(b)];
     if (!is_valid_card_id(card_id)) {
       return 125;
     }
-    if (fixed_dead[card_id]) {
+    if (!fixed_mark_dead(card_id)) {
       return 127;
     }
-    fixed_dead[card_id] = true;
   }
 
   for (jsize i = 0; i < n; ++i) {
@@ -659,7 +646,7 @@ Java_sicfun_holdem_HoldemPostflopNativeBindings_computePostflopBatchMonteCarlo(
     if (!is_valid_card_id(vf) || !is_valid_card_id(vs)) {
       return 125;
     }
-    if (vf == vs || fixed_dead[vf] || fixed_dead[vs]) {
+    if (vf == vs || (fixed_dead & (uint64_t(1) << vf)) || (fixed_dead & (uint64_t(1) << vs))) {
       return 127;
     }
   }
