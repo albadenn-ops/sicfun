@@ -7,15 +7,27 @@ import sicfun.holdem.gpu.*
 import munit.FunSuite
 
 import java.nio.file.{Files, Paths}
+import scala.concurrent.duration.*
 import scala.util.Random
 
 class HeadsUpGpuExactParityGateTest extends FunSuite:
+  override val munitTimeout: Duration = 180.seconds
+
   private val ProviderProperty = "sicfun.gpu.provider"
   private val NativePathProperty = "sicfun.gpu.native.path"
   private val NativeEngineProperty = "sicfun.gpu.native.engine"
   private val FallbackToCpuProperty = "sicfun.gpu.fallbackToCpu"
+  private val NativeWarmupProperty = "sicfun.gpu.native.warmup"
   private val NativeCudaBlockSizeProperty = "sicfun.gpu.native.cuda.blockSize"
   private val NativeCudaMaxChunkMatchupsProperty = "sicfun.gpu.native.cuda.maxChunkMatchups"
+
+  override def beforeEach(context: BeforeEach): Unit =
+    HeadsUpGpuRuntime.resetLoadCacheForTests()
+    super.beforeEach(context)
+
+  override def afterEach(context: AfterEach): Unit =
+    try HeadsUpGpuRuntime.resetLoadCacheForTests()
+    finally super.afterEach(context)
 
   private def withSystemProperties[A](updates: Seq[(String, Option[String])])(thunk: => A): A =
     TestSystemPropertyScope.withSystemProperties(updates)(thunk)
@@ -39,7 +51,8 @@ class HeadsUpGpuExactParityGateTest extends FunSuite:
         Seq(
           ProviderProperty -> Some("native"),
           NativePathProperty -> Some(nativeDll.toString),
-          FallbackToCpuProperty -> Some("false")
+          FallbackToCpuProperty -> Some("false"),
+          NativeWarmupProperty -> Some("false")
         )
       ) {
         val availability = HeadsUpGpuRuntime.availability

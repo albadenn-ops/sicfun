@@ -1,6 +1,7 @@
 package sicfun.holdem.cfr
 
 import munit.FunSuite
+import sicfun.holdem.types.TestSystemPropertyScope
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -8,23 +9,14 @@ import scala.jdk.CollectionConverters.*
 
 class HoldemCfrApproximationReportTest extends FunSuite:
   private def withSystemProperties(properties: Map[String, String])(thunk: => Unit): Unit =
-    val previous = properties.keys.iterator.map { key =>
-      key -> sys.props.get(key)
-    }.toVector
-
-    properties.foreach { case (key, value) =>
-      System.setProperty(key, value)
-    }
-
-    try thunk
-    finally
-      previous.foreach { case (key, oldValue) =>
-        oldValue match
-          case Some(value) => System.setProperty(key, value)
-          case None => System.clearProperty(key)
-      }
+    TestSystemPropertyScope.withSystemProperties(properties.toSeq.map { case (key, value) => key -> Some(value) }) {
       HoldemCfrNativeRuntime.resetLoadCacheForTests()
       HoldemCfrSolver.resetAutoProviderForTests()
+      try thunk
+      finally
+        HoldemCfrNativeRuntime.resetLoadCacheForTests()
+        HoldemCfrSolver.resetAutoProviderForTests()
+    }
 
   test("approximation report writes stable TSV and external comparison exports") {
     withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {

@@ -20,23 +20,14 @@ class HoldemCfrSolverTest extends FunSuite:
     )
 
   private def withSystemProperties[A](properties: Map[String, String])(thunk: => A): A =
-    val previous = properties.keys.iterator.map { key =>
-      key -> sys.props.get(key)
-    }.toVector
-
-    properties.foreach { case (key, value) =>
-      System.setProperty(key, value)
-    }
-
-    try thunk
-    finally
-      previous.foreach { case (key, oldValue) =>
-        oldValue match
-          case Some(value) => System.setProperty(key, value)
-          case None => System.clearProperty(key)
-      }
+    TestSystemPropertyScope.withSystemProperties(properties.toSeq.map { case (key, value) => key -> Some(value) }) {
       HoldemCfrNativeRuntime.resetLoadCacheForTests()
       HoldemCfrSolver.resetAutoProviderForTests()
+      try thunk
+      finally
+        HoldemCfrNativeRuntime.resetLoadCacheForTests()
+        HoldemCfrSolver.resetAutoProviderForTests()
+    }
 
   test("CFR baseline returns normalized policy and non-fold best action for premium hero hand") {
     val hero = hole("Ac", "Ad")

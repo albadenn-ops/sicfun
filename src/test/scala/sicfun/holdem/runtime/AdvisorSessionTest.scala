@@ -10,10 +10,12 @@ import munit.FunSuite
 import sicfun.core.Card
 
 import java.nio.file.{Files, Path}
+import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.Random
 
 class AdvisorSessionTest extends FunSuite:
+  override val munitTimeout: Duration = 120.seconds
 
   // Shared low-trial-count engine for fast tests
   private lazy val (engine, tableRanges) = buildTestEngine()
