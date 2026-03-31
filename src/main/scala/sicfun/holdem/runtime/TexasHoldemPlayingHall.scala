@@ -82,7 +82,8 @@ object TexasHoldemPlayingHall:
       exactGtoCacheHits: Long = 0L,
       exactGtoCacheMisses: Long = 0L,
       exactGtoSolvedByProvider: Map[String, Long] = Map.empty,
-      exactGtoServedByProvider: Map[String, Long] = Map.empty
+      exactGtoServedByProvider: Map[String, Long] = Map.empty,
+      perVillainNetChips: Map[String, Double] = Map.empty
   ):
     def exactGtoCacheTotal: Long = exactGtoCacheHits + exactGtoCacheMisses
     def exactGtoCacheHitRate: Double =
@@ -246,6 +247,7 @@ object TexasHoldemPlayingHall:
     private var heroLosses = 0
     private val actionCounts = mutable.Map.empty[String, Int].withDefaultValue(0)
     private var retrains = 0
+    private val perVillainNet = mutable.HashMap.empty[String, Double].withDefaultValue(0.0)
 
     def run(): Either[String, HallSummary] =
       try
@@ -340,7 +342,7 @@ object TexasHoldemPlayingHall:
 
       recordTrainingSamples(handNo, tableId, result)
       raiseResponseHistory ++= result.raiseResponses
-      recordOutcome(result)
+      recordOutcome(result, tableScenario)
       recordHeroActions(result)
       appendHandLog(
         writer = handsWriter,
@@ -383,11 +385,13 @@ object TexasHoldemPlayingHall:
         ddreWriter.foreach(w => appendDdreTrainingSample(w, handNo, tableId, sample))
       }
 
-    private def recordOutcome(result: HandResult): Unit =
+    private def recordOutcome(result: HandResult, tableScenario: TableScenario): Unit =
       heroNet += result.heroNet
       if result.outcome > 0 then heroWins += 1
       else if result.outcome < 0 then heroLosses += 1
       else heroTies += 1
+      val primaryName = tableScenario.primaryVillainProfile.name
+      perVillainNet.update(primaryName, perVillainNet(primaryName) + result.heroNet)
 
     private def recordHeroActions(result: HandResult): Unit =
       result.heroActions.foreach { action =>
@@ -480,7 +484,8 @@ object TexasHoldemPlayingHall:
         exactGtoCacheHits = exactGtoCacheStats.hits,
         exactGtoCacheMisses = exactGtoCacheStats.misses,
         exactGtoSolvedByProvider = exactGtoCacheStats.solvedByProviderSnapshot,
-        exactGtoServedByProvider = exactGtoCacheStats.servedByProviderSnapshot
+        exactGtoServedByProvider = exactGtoCacheStats.servedByProviderSnapshot,
+        perVillainNetChips = perVillainNet.toMap
       )
 
   private def resolveHand(
