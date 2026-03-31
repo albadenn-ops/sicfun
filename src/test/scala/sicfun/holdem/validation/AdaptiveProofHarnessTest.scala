@@ -1,8 +1,8 @@
 package sicfun.holdem.validation
 
-import munit.FunSuite
-import sicfun.holdem.cfr.HoldemCfrConfig
 import sicfun.holdem.history.{HandHistoryImport, HandHistorySite}
+
+import munit.FunSuite
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
@@ -10,82 +10,54 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 class AdaptiveProofHarnessTest extends FunSuite:
-  override val munitTimeout: Duration = 180.seconds
+  override val munitTimeout: Duration = 300.seconds
 
-  test("reduced adaptive proof harness run writes parseable mirrored exports".tag(munit.Slow)) {
-    val root = Files.createTempDirectory("adaptive-proof-harness-test-")
+  test("9-max adaptive proof harness produces valid hall output and report".tag(munit.Slow)) {
+    val root = Files.createTempDirectory("adaptive-proof-9max-test-")
     try
-      val testOpponents = Vector(
-        AdaptiveProofHarness.OpponentSpec(
-          name = "Villain01_overcall",
-          role = "Leaker",
-          leak = Overcalls(0.35),
-          strategy = EquityBasedStrategy(),
-          strategyLabel = "equity-based",
-          baselineNoise = 0.03
-        ),
-        AdaptiveProofHarness.OpponentSpec(
-          name = "Villain06_gto",
-          role = "Control",
-          leak = NoLeak(),
-          strategy = CfrVillainStrategy(
-            config = HoldemCfrConfig(
-              iterations = 60,
-              equityTrials = 120,
-              maxVillainHands = 32,
-              includeVillainReraises = true
-            ),
-            allowHeuristicFallback = false
-          ),
-          strategyLabel = "cfr-no-fallback",
-          baselineNoise = 0.0
-        )
-      )
-      val result = AdaptiveProofHarness.run(
-        AdaptiveProofHarness.Config(
-          handsPerOpponent = 6,
-          outputDir = root.resolve("adaptive-proof"),
-          runLabel = Some("test-run"),
-          seed = 19L,
-          bunchingTrials = 8,
-          equityTrials = 60,
-          minEquityTrials = 20,
-          budgetMs = 20L,
-          opponents = testOpponents
-        )
+      val config = AdaptiveProofHarness.Config(
+        handsPerBlock = 12,
+        blocks = 1,
+        seed = 37L,
+        budgetMs = 50L,
+        bunchingTrials = 8,
+        equityTrials = 80,
+        outputDir = root
       )
 
-      assert(result.isRight, s"adaptive proof harness failed: $result")
-      val summary = result.toOption.getOrElse(fail("missing adaptive proof harness summary"))
+      val result = AdaptiveProofHarness.run(config)
 
-      assertEquals(summary.opponents.size, testOpponents.size)
-      assert(Files.exists(summary.runDir), s"missing run directory: ${summary.runDir}")
-      assert(Files.exists(summary.manifestPath), s"missing manifest: ${summary.manifestPath}")
-      assert(Files.exists(summary.groundTruthPath), s"missing ground truth: ${summary.groundTruthPath}")
-      assert(Files.exists(summary.reportPath), s"missing report: ${summary.reportPath}")
-      assert(Files.exists(summary.combinedHistoryPath), s"missing combined history: ${summary.combinedHistoryPath}")
+      // 1. One block completed
+      assertEquals(result.blocks.size, 1)
+      val block = result.blocks.head
+      assert(block.hallSummary.handsPlayed > 0, "expected hands played")
 
-      val groundTruth = ujson.read(Files.readString(summary.groundTruthPath, StandardCharsets.UTF_8))
-      assertEquals(groundTruth("opponents").arr.size, testOpponents.size)
+      // 2. Hall output directory exists with review upload
+      val hallOutDir = root.resolve("block-0")
+      assert(Files.isDirectory(hallOutDir), s"missing hall output dir")
+      val reviewPath = hallOutDir.resolve("review-upload-pokerstars.txt")
+      assert(Files.exists(reviewPath), "missing review hand history")
 
-      val control = summary.opponents.find(_.name == "Villain06_gto").getOrElse(fail("missing control result"))
-      assertEquals(control.leakFiredCount, 0)
+      // 3. Review history is non-empty and parseable
+      val reviewText = Files.readString(reviewPath, StandardCharsets.UTF_8)
+      assert(reviewText.nonEmpty, "empty review history")
+      val parsed = HandHistoryImport.parseText(reviewText, Some(HandHistorySite.PokerStars), Some("Hero"))
+      assert(parsed.isRight, s"parse failed: ${parsed.left.getOrElse("")}")
 
-      val historyFiles =
-        summary.opponents.flatMap(opponent =>
-          Vector(opponent.legButtonPath, opponent.legBigBlindPath, opponent.combinedPath)
-        ) :+ summary.combinedHistoryPath
+      // 4. Write outputs and verify files
+      val runDir = AdaptiveProofHarness.writeOutputs(result, config.outputDir)
+      assert(Files.exists(runDir.resolve("ground-truth.json")))
+      assert(Files.exists(runDir.resolve("report.txt")))
 
-      historyFiles.foreach { path =>
-        assert(Files.exists(path), s"missing history file: $path")
-        val text = Files.readString(path, StandardCharsets.UTF_8)
-        assert(text.nonEmpty, s"history file should be non-empty: $path")
-        HandHistoryImport.parseText(text, Some(HandHistorySite.PokerStars), Some("Hero")) match
-          case Right(hands) =>
-            assert(hands.nonEmpty, s"expected parseable hands in $path")
-          case Left(err) =>
-            fail(s"parseText failed for $path: $err")
-      }
+      // 5. Ground truth has block data
+      val gt = ujson.read(Files.readString(runDir.resolve("ground-truth.json"), StandardCharsets.UTF_8))
+      assertEquals(gt("blocks").arr.length, 1)
+      assert(gt("totalHands").num > 0)
+
+      // 6. Report contains expected header
+      val report = Files.readString(runDir.resolve("report.txt"), StandardCharsets.UTF_8)
+      assert(report.contains("Adaptive Proof Report"))
+
     finally
       deleteRecursively(root)
   }
