@@ -8,6 +8,11 @@ import sicfun.holdem.equity.*
 import sicfun.holdem.cli.*
 
 import sicfun.core.{Card, CardId, Deck, DiscreteDistribution, HandEvaluator}
+import sicfun.holdem.validation.{
+  ActionLine, EquityBasedStrategy, InjectedLeak, LeakInjectedVillain,
+  NoLeak, Overcalls, OverbluffsTurnBarrel, OverfoldsToAggression, PassiveInBigPots,
+  PreflopTooLoose, PreflopTooTight, SpotContext
+}
 
 import java.io.BufferedWriter
 import java.net.URLEncoder
@@ -533,6 +538,8 @@ object TexasHoldemPlayingHall:
       mutable.HashMap.from(tableScenario.modeledPositions.map { position =>
         position -> (ReviewStartingStack - contributionByPosition(position))
       })
+    private val actionLineByPosition = mutable.HashMap.empty[Position, Vector[PokerAction]]
+      .withDefaultValue(Vector.empty)
     private val foldedPositions = mutable.HashSet.empty[Position]
     private val allInPositions = mutable.HashSet.empty[Position]
     private val preflopFoldedPositions = mutable.ArrayBuffer.empty[Position]
@@ -935,16 +942,28 @@ object TexasHoldemPlayingHall:
                 exactGtoCacheStats = exactGtoCacheStats
               )
             )
-        case VillainMode.LeakInjected(_, _) =>
-          // Stub: falls back to TAG archetype — replaced by full leak injection in Task 3
-          ArchetypeVillainResponder.villainResponds(
-            hand = deal.holeCardsFor(position),
-            style = PlayerArchetype.Tag,
-            state = state,
-            allowRaise = allowRaise,
-            raiseSize = config.raiseSize,
-            rng = rng
+        case VillainMode.LeakInjected(leakId, severity) =>
+          val villainHand = deal.holeCardsFor(position)
+          val equityVsRandom = estimateEquityVsRandom(villainHand, boardFor(state.street), 50, rng)
+          val equityStrategy = EquityBasedStrategy()
+          val gtoAction = equityStrategy.decide(villainHand, state, candidates, equityVsRandom, rng)
+          val leak = buildInjectedLeak(leakId, severity)
+          val injectedVillain = LeakInjectedVillain(
+            name = villainProfile.name,
+            leaks = Vector(leak),
+            baselineNoise = 0.03,
+            seed = rng.nextLong()
           )
+          val line = ActionLine(actionLineByPosition(position))
+          val spot = SpotContext.build(
+            gs = state,
+            hero = villainHand,
+            line = line,
+            equityVsRandom = equityVsRandom,
+            facingAction = None
+          )
+          val result = injectedVillain.decide(gtoAction, spot)
+          result.action
       val action = normalizeAction(
         action = sampled,
         toCall = toCall,
@@ -1000,6 +1019,7 @@ object TexasHoldemPlayingHall:
         toCallBefore: Double,
         street: Street
     ): Unit =
+      actionLineByPosition.update(position, actionLineByPosition(position) :+ action)
       action match
         case PokerAction.Fold =>
           markFolded(position, street)
@@ -1343,6 +1363,50 @@ object TexasHoldemPlayingHall:
           case "prefloptight"  => Right("preflop-too-tight")
           case _               => Left(s"unknown leak type: $leakType (use: overfold, overcall, turnbluff, passive, prefloploose, prefloptight)")
       yield VillainMode.LeakInjected(leakId, severity)
+
+  private def estimateEquityVsRandom(
+      hand: HoleCards,
+      board: Board,
+      trials: Int,
+      rng: Random
+  ): Double =
+    val handCards = hand.toVector
+    val available = Deck.full.filterNot(c => handCards.contains(c) || board.cards.contains(c))
+    if available.size < 2 then return 0.5
+    val boardSize = board.cards.size
+    val communityNeeded = 5 - boardSize
+    val needed = 2 + communityNeeded
+    var wins = 0
+    var total = 0
+    val arr = available.toArray
+    val n = arr.length
+    for _ <- 0 until trials do
+      var i = 0
+      while i < needed do
+        val j = i + rng.nextInt(n - i)
+        val tmp = arr(i); arr(i) = arr(j); arr(j) = tmp
+        i += 1
+      val fullBoard = if communityNeeded > 0 then
+        board.cards ++ (2 until needed).map(arr(_))
+      else board.cards
+      val heroAll = (handCards ++ fullBoard).take(7)
+      val oppAll = (Vector(arr(0), arr(1)) ++ fullBoard).take(7)
+      if heroAll.size >= 7 && oppAll.size >= 7 then
+        val heroRank = HandEvaluator.evaluate7(heroAll)
+        val oppRank = HandEvaluator.evaluate7(oppAll)
+        if heroRank > oppRank then wins += 1
+        total += 1
+    if total > 0 then wins.toDouble / total.toDouble else 0.5
+
+  private def buildInjectedLeak(leakId: String, severity: Double): InjectedLeak =
+    leakId match
+      case "overfold-river-aggression" => OverfoldsToAggression(severity)
+      case "overcall-big-bets"         => Overcalls(severity)
+      case "overbluff-turn-barrel"     => OverbluffsTurnBarrel(severity)
+      case "passive-big-pots"          => PassiveInBigPots(severity)
+      case "preflop-too-loose"         => PreflopTooLoose(severity)
+      case "preflop-too-tight"         => PreflopTooTight(severity)
+      case _                           => NoLeak()
 
   private def bracketedCards(cards: Seq[Card]): String =
     s"[${cards.map(_.toToken).mkString(" ")}]"
