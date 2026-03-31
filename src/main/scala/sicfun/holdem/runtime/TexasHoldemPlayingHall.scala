@@ -29,6 +29,7 @@ object TexasHoldemPlayingHall:
   private enum VillainMode:
     case Archetype(style: PlayerArchetype)
     case Gto
+    case LeakInjected(leakId: String, severity: Double)
 
   private final case class VillainProfile(
       name: String,
@@ -932,6 +933,16 @@ object TexasHoldemPlayingHall:
                 exactGtoCacheStats = exactGtoCacheStats
               )
             )
+        case VillainMode.LeakInjected(_, _) =>
+          // Stub: falls back to TAG archetype — replaced by full leak injection in Task 3
+          ArchetypeVillainResponder.villainResponds(
+            hand = deal.holeCardsFor(position),
+            style = PlayerArchetype.Tag,
+            state = state,
+            allowRaise = allowRaise,
+            raiseSize = config.raiseSize,
+            rng = rng
+          )
       val action = normalizeAction(
         action = sampled,
         toCall = toCall,
@@ -1265,11 +1276,15 @@ object TexasHoldemPlayingHall:
 
   private def villainModeLabel(mode: VillainMode): String =
     mode match
-      case VillainMode.Archetype(style) => style.toString
-      case VillainMode.Gto              => "gto"
+      case VillainMode.Archetype(style)             => style.toString
+      case VillainMode.Gto                          => "gto"
+      case VillainMode.LeakInjected(leakId, sev)    => s"Leak($leakId@$sev)"
 
   private def villainModeSlug(mode: VillainMode): String =
-    villainModeLabel(mode).toLowerCase(Locale.ROOT)
+    mode match
+      case VillainMode.Archetype(style)             => style.toString.toLowerCase(Locale.ROOT)
+      case VillainMode.Gto                          => "gto"
+      case VillainMode.LeakInjected(leakId, _)      => leakId.replace("-", "").take(12)
 
   private def buildVillainPool(
       fallbackMode: VillainMode,
@@ -1303,8 +1318,29 @@ object TexasHoldemPlayingHall:
       case "station"        => Right(VillainMode.Archetype(PlayerArchetype.CallingStation))
       case "maniac"         => Right(VillainMode.Archetype(PlayerArchetype.Maniac))
       case "gto"            => Right(VillainMode.Gto)
+      case s if s.startsWith("leak:") =>
+        parseLeakToken(s)
       case _ =>
-        Left("style must be one of: nit, tag, lag, callingstation, station, maniac, gto")
+        Left("style must be one of: nit, tag, lag, callingstation, station, maniac, gto, leak:<type>:<severity>")
+
+  private def parseLeakToken(raw: String): Either[String, VillainMode] =
+    val parts = raw.split(":")
+    if parts.length != 3 then Left(s"leak token must be leak:<type>:<severity>, got: $raw")
+    else
+      val leakType = parts(1)
+      val severityStr = parts(2)
+      for
+        severity <- try Right(severityStr.toDouble) catch case _: NumberFormatException =>
+          Left(s"invalid severity: $severityStr")
+        leakId <- leakType match
+          case "overfold"      => Right("overfold-river-aggression")
+          case "overcall"      => Right("overcall-big-bets")
+          case "turnbluff"     => Right("overbluff-turn-barrel")
+          case "passive"       => Right("passive-big-pots")
+          case "prefloploose"  => Right("preflop-too-loose")
+          case "prefloptight"  => Right("preflop-too-tight")
+          case _               => Left(s"unknown leak type: $leakType (use: overfold, overcall, turnbluff, passive, prefloploose, prefloptight)")
+      yield VillainMode.LeakInjected(leakId, severity)
 
   private def bracketedCards(cards: Seq[Card]): String =
     s"[${cards.map(_.toToken).mkString(" ")}]"
