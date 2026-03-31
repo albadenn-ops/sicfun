@@ -1,461 +1,198 @@
 package sicfun.holdem.validation
 
-import sicfun.holdem.engine.RealTimeAdaptiveEngine
-import sicfun.holdem.equity.{TableFormat, TableRanges}
-import sicfun.holdem.model.{PokerActionModel, PokerActionModelArtifactIO}
+import sicfun.holdem.runtime.TexasHoldemPlayingHall
 
+import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
+import java.util.Locale
+import scala.util.Random
 
-/** EV-oriented heads-up proof harness for the adaptive hero. */
+/** 9-max adaptive proof harness orchestrator.
+  *
+  * Runs the adaptive hero against 6 leak-injected villains + 1 shallow-GTO (TAG) +
+  * 1 validatable GTO control in 500-hand blocks via `TexasHoldemPlayingHall.run()`,
+  * with seat reshuffling between blocks.
+  */
 object AdaptiveProofHarness:
-  private val HeroName = "Hero"
-  private val RunLabelFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneOffset.UTC)
-
-  final case class OpponentSpec(
-      name: String,
-      role: String,
-      leak: InjectedLeak,
-      strategy: VillainStrategy,
-      strategyLabel: String,
-      baselineNoise: Double
-  )
-
-  def defaultOpponentMatrix: Vector[OpponentSpec] =
-    Vector(
-      OpponentSpec(
-        name = "Villain01_overfold",
-        role = "Leaker",
-        leak = OverfoldsToAggression(0.20),
-        strategy = EquityBasedStrategy(),
-        strategyLabel = "equity-based",
-        baselineNoise = 0.03
-      ),
-      OpponentSpec(
-        name = "Villain02_overcall",
-        role = "Leaker",
-        leak = Overcalls(0.25),
-        strategy = EquityBasedStrategy(),
-        strategyLabel = "equity-based",
-        baselineNoise = 0.03
-      ),
-      OpponentSpec(
-        name = "Villain03_turnbluff",
-        role = "Leaker",
-        leak = OverbluffsTurnBarrel(0.18),
-        strategy = EquityBasedStrategy(),
-        strategyLabel = "equity-based",
-        baselineNoise = 0.03
-      ),
-      OpponentSpec(
-        name = "Villain04_prefloploose",
-        role = "Leaker",
-        leak = PreflopTooLoose(0.22),
-        strategy = EquityBasedStrategy(),
-        strategyLabel = "equity-based",
-        baselineNoise = 0.03
-      ),
-      OpponentSpec(
-        name = "Villain05_prefloptight",
-        role = "Leaker",
-        leak = PreflopTooTight(0.15),
-        strategy = EquityBasedStrategy(),
-        strategyLabel = "equity-based",
-        baselineNoise = 0.03
-      ),
-      OpponentSpec(
-        name = "Villain06_gto",
-        role = "Control",
-        leak = NoLeak(),
-        strategy = CfrVillainStrategy(allowHeuristicFallback = false),
-        strategyLabel = "cfr-no-fallback",
-        baselineNoise = 0.0
-      )
-    )
 
   final case class Config(
-      handsPerOpponent: Int = 500,
-      outputDir: Path = Paths.get("data", "adaptive-proof"),
-      runLabel: Option[String] = None,
-      modelDir: Option[Path] = None,
-      seed: Long = 42L,
+      handsPerBlock: Int = 500,
+      blocks: Int = 1,
+      seed: Long = System.currentTimeMillis(),
+      budgetMs: Long = 50L,
       bunchingTrials: Int = 100,
       equityTrials: Int = 500,
-      minEquityTrials: Int = 100,
-      budgetMs: Long = 50L,
-      opponents: Vector[OpponentSpec] = defaultOpponentMatrix
+      outputDir: Path = Paths.get("data/adaptive-proof"),
+      modelDir: Option[Path] = None
+  ):
+    def totalHands: Int = handsPerBlock * blocks
+
+  /** The 8-villain pool string for --villainPool. */
+  val defaultVillainPool: String =
+    "leak:overfold:0.20,leak:overcall:0.25,leak:turnbluff:0.18,leak:passive:0.30,leak:prefloploose:0.22,leak:prefloptight:0.15,tag,gto"
+
+  val villainNames: Vector[String] = Vector(
+    "Villain01_overfold",
+    "Villain02_overcall",
+    "Villain03_turnbluff",
+    "Villain04_passive",
+    "Villain05_prefloploose",
+    "Villain06_prefloptight",
+    "Villain07_shallowgto",
+    "Villain08_gto"
   )
 
-  final case class OpponentResult(
-      name: String,
-      role: String,
-      leakId: String,
-      severity: Double,
-      strategy: String,
-      outputDir: Path,
-      legButtonPath: Path,
-      legBigBlindPath: Path,
-      combinedPath: Path,
-      heroNetBbPer100: Double,
-      heroNetBbPer100ByLeg: Map[String, Double],
-      leakFiredCount: Int,
-      leakApplicableSpots: Int,
-      heroRaiseResponseCount: Int
-  )
-
-  final case class RunSummary(
-      runDir: Path,
+  final case class BlockResult(
+      blockIndex: Int,
       seed: Long,
-      handsPerOpponent: Int,
-      opponents: Vector[OpponentResult],
-      manifestPath: Path,
-      groundTruthPath: Path,
-      reportPath: Path,
-      combinedHistoryPath: Path
+      heroPosition: String,
+      hallSummary: TexasHoldemPlayingHall.HallSummary
   )
 
-  private final case class LegResult(
-      label: String,
-      records: Vector[HandRecord],
-      heroNetBbPer100: Double,
-      leakFiredCount: Int,
-      leakApplicableSpots: Int,
-      heroRaiseResponseCount: Int
+  final case class RunResult(
+      config: Config,
+      blocks: Vector[BlockResult]
+  ):
+    def totalHands: Int = blocks.map(_.hallSummary.handsPlayed).sum
+    def aggregateHeroBbPer100: Double =
+      val totalNet = blocks.map(_.hallSummary.heroNetChips).sum
+      if totalHands > 0 then (totalNet / totalHands) * 100.0 else 0.0
+    def perVillainAggregateBbPer100: Map[String, Double] =
+      val merged = scala.collection.mutable.HashMap.empty[String, Double].withDefaultValue(0.0)
+      blocks.foreach { block =>
+        block.hallSummary.perVillainNetChips.foreach { case (name, net) =>
+          merged.update(name, merged(name) + net)
+        }
+      }
+      merged.map { case (name, net) =>
+        name -> (if totalHands > 0 then (net / totalHands) * 100.0 else 0.0)
+      }.toMap
+
+  private val heroPositions9Max = Vector(
+    "UTG", "UTG1", "UTG2", "Middle", "Hijack", "Cutoff", "Button", "SmallBlind", "BigBlind"
   )
 
-  private final case class OpponentRun(
-      result: OpponentResult,
-      combinedRecords: Vector[HandRecord]
-  )
+  def run(config: Config = Config()): RunResult =
+    val rng = new Random(config.seed)
+    println("=== Adaptive Proof Harness (9-Max) ===")
+    println(s"Blocks: ${config.blocks}")
+    println(s"Hands per block: ${config.handsPerBlock}")
+    println(s"Total hands: ${config.totalHands}")
+    println()
 
-  def main(args: Array[String]): Unit =
-    val wantsHelp = args.contains("--help") || args.contains("-h")
-    run(args) match
-      case Right(summary) =>
-        println("=== Adaptive Proof Harness ===")
-        println(s"runDir: ${summary.runDir.toAbsolutePath.normalize()}")
-        println(s"opponents: ${summary.opponents.size}")
-        println(s"handsPerOpponent: ${summary.handsPerOpponent}")
-        println(s"report: ${summary.reportPath.toAbsolutePath.normalize()}")
-      case Left(error) =>
-        if wantsHelp then println(error)
-        else
-          System.err.println(error)
-          sys.exit(1)
+    val results = (0 until config.blocks).map { blockIdx =>
+      val blockSeed = rng.nextLong()
+      val heroPos = heroPositions9Max(rng.nextInt(heroPositions9Max.size))
+      println(s"[Block ${blockIdx + 1}/${config.blocks}] seed=$blockSeed heroPosition=$heroPos")
 
-  def run(args: Array[String]): Either[String, RunSummary] =
-    parseConfig(args).flatMap(config => run(config))
+      val hallOutDir = config.outputDir.resolve(s"block-$blockIdx")
+      val hallArgs = Array(
+        s"--hands=${config.handsPerBlock}",
+        s"--reportEvery=${config.handsPerBlock}",
+        "--learnEveryHands=0",
+        "--learningWindowSamples=50",
+        s"--seed=$blockSeed",
+        s"--outDir=$hallOutDir",
+        "--playerCount=9",
+        s"--heroPosition=$heroPos",
+        "--heroStyle=adaptive",
+        "--gtoMode=exact",
+        s"--villainPool=$defaultVillainPool",
+        "--heroExplorationRate=0.0",
+        "--raiseSize=2.5",
+        s"--bunchingTrials=${config.bunchingTrials}",
+        s"--equityTrials=${config.equityTrials}",
+        "--saveTrainingTsv=false",
+        "--saveDdreTrainingTsv=false",
+        "--saveReviewHandHistory=true",
+        "--fullRing=true"
+      ) ++ config.modelDir.map(p => s"--modelArtifactDir=$p").toArray
 
-  def run(config: Config): Either[String, RunSummary] =
-    validateConfig(config).flatMap { validConfig =>
-      try Right(runConfig(validConfig))
-      catch case err: Exception => Left(s"adaptive proof harness failed: ${err.getMessage}")
-    }
+      val hallResult = TexasHoldemPlayingHall.run(hallArgs)
+      hallResult match
+        case Right(summary) =>
+          println(f"  -> heroNetChips: ${summary.heroNetChips}%.2f  bb/100: ${summary.heroBbPer100}%.1f")
+          BlockResult(blockIdx, blockSeed, heroPos, summary)
+        case Left(error) =>
+          throw new RuntimeException(s"Hall run failed at block $blockIdx: $error")
+    }.toVector
 
-  private def runConfig(config: Config): RunSummary =
-    val runDir = resolveRunDir(config)
+    RunResult(config, results)
+
+  def writeOutputs(result: RunResult, outputDir: Path): Path =
+    val runDir = outputDir.resolve(s"run-${Instant.now().getEpochSecond}-${result.config.seed}")
     Files.createDirectories(runDir)
 
-    val tableRanges = TableRanges.defaults(TableFormat.HeadsUp)
-    val actionModel = loadActionModel(config)
-    val handsButton = config.handsPerOpponent / 2
-    val handsBigBlind = config.handsPerOpponent - handsButton
+    val groundTruth = writeGroundTruthJson(result)
+    Files.writeString(runDir.resolve("ground-truth.json"), groundTruth, StandardCharsets.UTF_8)
 
-    val opponentRuns = config.opponents.zipWithIndex.map { case (opponent, idx) =>
-      val opponentDir = runDir.resolve(opponent.name)
-      Files.createDirectories(opponentDir)
+    val report = formatReport(result)
+    Files.writeString(runDir.resolve("report.txt"), report, StandardCharsets.UTF_8)
+    println()
+    println(report)
 
-      val heroEngine = new RealTimeAdaptiveEngine(
-        tableRanges = tableRanges,
-        actionModel = actionModel,
-        bunchingTrials = config.bunchingTrials,
-        defaultEquityTrials = config.equityTrials,
-        minEquityTrials = config.minEquityTrials
-      )
+    runDir
 
-      val villain = LeakInjectedVillain(
-        name = opponent.name,
-        leaks = Vector(opponent.leak),
-        baselineNoise = opponent.baselineNoise,
-        seed = config.seed + idx.toLong * 1000L
-      )
-
-      val handBase = idx * config.handsPerOpponent
-      val buttonLeg = runLeg(
-        heroEngine = heroEngine,
-        villain = villain,
-        strategy = opponent.strategy,
-        budgetMs = config.budgetMs,
-        handCount = handsButton,
-        handNumberStart = handBase + 1,
-        seed = config.seed + idx.toLong * 1000L,
-        heroIsButton = true
-      )
-      val bigBlindLeg = runLeg(
-        heroEngine = heroEngine,
-        villain = villain,
-        strategy = opponent.strategy,
-        budgetMs = config.budgetMs,
-        handCount = handsBigBlind,
-        handNumberStart = handBase + handsButton + 1,
-        seed = config.seed + idx.toLong * 1000L + 1L,
-        heroIsButton = false
-      )
-
-      val buttonHistory = PokerStarsExporter.exportHands(buttonLeg.records, HeroName, opponent.name)
-      val bigBlindHistory = PokerStarsExporter.exportHands(bigBlindLeg.records, HeroName, opponent.name)
-      val combinedRecords = buttonLeg.records ++ bigBlindLeg.records
-      val combinedHistory = PokerStarsExporter.exportHands(combinedRecords, HeroName, opponent.name)
-
-      val legButtonPath = opponentDir.resolve("leg-button.txt")
-      val legBigBlindPath = opponentDir.resolve("leg-bigblind.txt")
-      val combinedPath = opponentDir.resolve("combined.txt")
-      Files.writeString(legButtonPath, buttonHistory)
-      Files.writeString(legBigBlindPath, bigBlindHistory)
-      Files.writeString(combinedPath, combinedHistory)
-
-      val heroNetBbPer100 =
-        if combinedRecords.nonEmpty then
-          combinedRecords.map(_.heroNet).sum / combinedRecords.size.toDouble * 100.0
-        else 0.0
-      val leakFiredCount = buttonLeg.leakFiredCount + bigBlindLeg.leakFiredCount
-      val leakApplicableSpots = buttonLeg.leakApplicableSpots + bigBlindLeg.leakApplicableSpots
-      val heroRaiseResponseCount = buttonLeg.heroRaiseResponseCount + bigBlindLeg.heroRaiseResponseCount
-
-      OpponentRun(
-        result = OpponentResult(
-          name = opponent.name,
-          role = opponent.role,
-          leakId = opponent.leak.id,
-          severity = opponent.leak.severity,
-          strategy = opponent.strategyLabel,
-          outputDir = opponentDir,
-          legButtonPath = legButtonPath,
-          legBigBlindPath = legBigBlindPath,
-          combinedPath = combinedPath,
-          heroNetBbPer100 = heroNetBbPer100,
-          heroNetBbPer100ByLeg = Map(
-            buttonLeg.label -> buttonLeg.heroNetBbPer100,
-            bigBlindLeg.label -> bigBlindLeg.heroNetBbPer100
-          ),
-          leakFiredCount = leakFiredCount,
-          leakApplicableSpots = leakApplicableSpots,
-          heroRaiseResponseCount = heroRaiseResponseCount
-        ),
-        combinedRecords = combinedRecords
+  private def writeGroundTruthJson(result: RunResult): String =
+    val perVillain = result.perVillainAggregateBbPer100
+    val opponents = perVillain.toVector.sortBy(_._1).map { case (name, bbPer100) =>
+      ujson.Obj(
+        "name" -> ujson.Str(name),
+        "heroNetBbPer100" -> ujson.Num(roundTo2(bbPer100))
       )
     }
-
-    val allRecords = opponentRuns.flatMap(_.combinedRecords).toVector
-    val combinedHistoryPath = runDir.resolve("combined-history.txt")
-    Files.writeString(
-      combinedHistoryPath,
-      PokerStarsExporter.exportHands(allRecords, HeroName, "Villain")
-    )
-
-    val manifestPath = runDir.resolve("manifest.json")
-    Files.writeString(manifestPath, renderManifest(config, runDir, opponentRuns.map(_.result).toVector))
-
-    val groundTruthPath = runDir.resolve("ground-truth.json")
-    Files.writeString(groundTruthPath, renderGroundTruth(config, opponentRuns.map(_.result).toVector))
-
-    val reportPath = runDir.resolve("report.txt")
-    Files.writeString(reportPath, renderReport(config, opponentRuns.map(_.result).toVector))
-
-    RunSummary(
-      runDir = runDir,
-      seed = config.seed,
-      handsPerOpponent = config.handsPerOpponent,
-      opponents = opponentRuns.map(_.result).toVector,
-      manifestPath = manifestPath,
-      groundTruthPath = groundTruthPath,
-      reportPath = reportPath,
-      combinedHistoryPath = combinedHistoryPath
-    )
-
-  private def runLeg(
-      heroEngine: RealTimeAdaptiveEngine,
-      villain: LeakInjectedVillain,
-      strategy: VillainStrategy,
-      budgetMs: Long,
-      handCount: Int,
-      handNumberStart: Int,
-      seed: Long,
-      heroIsButton: Boolean
-  ): LegResult =
-    val simulator = new HeadsUpSimulator(
-      heroEngine = Some(heroEngine),
-      villain = villain,
-      seed = seed,
-      budgetMs = budgetMs,
-      villainStrategy = strategy,
-      heroIsButton = heroIsButton
-    )
-    val records = Vector.newBuilder[HandRecord]
-    var leakFiredCount = 0
-    var leakApplicableSpots = 0
-    var heroRaiseResponseCount = 0
-    var handIdx = 0
-
-    while handIdx < handCount do
-      val record = simulator.playHand(handNumberStart + handIdx)
-      record.heroRaiseResponses.foreach(event => heroEngine.observeVillainResponseToRaise(event.response))
-      records += record
-      leakFiredCount += record.actions.count(_.leakFired)
-      leakApplicableSpots += record.leakApplicableSpots
-      heroRaiseResponseCount += record.heroRaiseResponses.length
-      handIdx += 1
-
-    val recordVector = records.result()
-    val heroNetBbPer100 =
-      if recordVector.nonEmpty then recordVector.map(_.heroNet).sum / recordVector.size.toDouble * 100.0
-      else 0.0
-
-    LegResult(
-      label = if heroIsButton then "button" else "bigBlind",
-      records = recordVector,
-      heroNetBbPer100 = heroNetBbPer100,
-      leakFiredCount = leakFiredCount,
-      leakApplicableSpots = leakApplicableSpots,
-      heroRaiseResponseCount = heroRaiseResponseCount
-    )
-
-  private def resolveRunDir(config: Config): Path =
-    val label = config.runLabel.getOrElse(s"run-${RunLabelFormatter.format(Instant.now())}-${config.seed}")
-    config.outputDir.resolve(label)
-
-  private def loadActionModel(config: Config): PokerActionModel =
-    config.modelDir
-      .map(path => PokerActionModelArtifactIO.load(path).model)
-      .getOrElse(PokerActionModel.uniform)
-
-  private def renderManifest(
-      config: Config,
-      runDir: Path,
-      opponents: Vector[OpponentResult]
-  ): String =
+    val blocks = result.blocks.map { block =>
+      ujson.Obj(
+        "blockIndex" -> ujson.Num(block.blockIndex),
+        "seed" -> ujson.Num(block.seed.toDouble),
+        "heroPosition" -> ujson.Str(block.heroPosition),
+        "heroBbPer100" -> ujson.Num(roundTo2(block.hallSummary.heroBbPer100))
+      )
+    }
     val json = ujson.Obj(
-      "runDir" -> ujson.Str(runDir.toAbsolutePath.normalize().toString),
-      "seed" -> ujson.Num(config.seed.toDouble),
-      "handsPerOpponent" -> ujson.Num(config.handsPerOpponent.toDouble),
-      "legsPerOpponent" -> ujson.Num(2.0),
-      "opponentCount" -> ujson.Num(opponents.size.toDouble),
-      "opponents" -> ujson.Arr.from(opponents.map { opponent =>
-        ujson.Obj(
-          "name" -> ujson.Str(opponent.name),
-          "role" -> ujson.Str(opponent.role),
-          "directory" -> ujson.Str(opponent.outputDir.getFileName.toString),
-          "legButtonFile" -> ujson.Str(opponent.legButtonPath.getFileName.toString),
-          "legBigBlindFile" -> ujson.Str(opponent.legBigBlindPath.getFileName.toString),
-          "combinedFile" -> ujson.Str(opponent.combinedPath.getFileName.toString)
-        )
-      })
+      "totalHands" -> ujson.Num(result.totalHands),
+      "blocks" -> ujson.Arr(blocks*),
+      "perVillainBbPer100" -> ujson.Arr(opponents*)
     )
     ujson.write(json, indent = 2)
 
-  private def renderGroundTruth(config: Config, opponents: Vector[OpponentResult]): String =
-    val json = ujson.Obj(
-      "handsPerOpponent" -> ujson.Num(config.handsPerOpponent.toDouble),
-      "legsPerOpponent" -> ujson.Num(2.0),
-      "opponents" -> ujson.Arr.from(opponents.map { opponent =>
-        ujson.Obj(
-          "name" -> ujson.Str(opponent.name),
-          "role" -> ujson.Str(opponent.role),
-          "leakId" -> ujson.Str(opponent.leakId),
-          "severity" -> ujson.Num(opponent.severity),
-          "strategy" -> ujson.Str(opponent.strategy),
-          "heroNetBbPer100" -> ujson.Num(opponent.heroNetBbPer100),
-          "heroNetBbPer100ByLeg" -> ujson.Obj(
-            "button" -> ujson.Num(opponent.heroNetBbPer100ByLeg.getOrElse("button", 0.0)),
-            "bigBlind" -> ujson.Num(opponent.heroNetBbPer100ByLeg.getOrElse("bigBlind", 0.0))
-          ),
-          "leakFiredCount" -> ujson.Num(opponent.leakFiredCount.toDouble),
-          "leakApplicableSpots" -> ujson.Num(opponent.leakApplicableSpots.toDouble),
-          "heroRaiseResponseCount" -> ujson.Num(opponent.heroRaiseResponseCount.toDouble)
-        )
-      })
-    )
-    ujson.write(json, indent = 2)
-
-  private def renderReport(config: Config, opponents: Vector[OpponentResult]): String =
-    val leakers = opponents.filter(_.role == "Leaker")
-    val leakerAverage =
-      if leakers.nonEmpty then leakers.map(_.heroNetBbPer100).sum / leakers.size.toDouble
-      else 0.0
-    val gtoControl = opponents.find(_.role == "Control").map(_.heroNetBbPer100).getOrElse(0.0)
+  private def formatReport(result: RunResult): String =
     val sb = new StringBuilder
-    sb.append("=== Adaptive Proof Report ===\n")
-    sb.append(s"Run seed: ${config.seed}\n")
-    sb.append(s"Hands per opponent: ${config.handsPerOpponent}\n")
-    sb.append("\n")
-    sb.append("Per-opponent results:\n")
-    opponents.foreach { opponent =>
-      sb.append(
-        f"  ${opponent.name}%-22s bb/100: ${formatSigned(opponent.heroNetBbPer100)}   " +
-          f"button: ${formatSigned(opponent.heroNetBbPer100ByLeg.getOrElse("button", 0.0))}   " +
-          f"bigBlind: ${formatSigned(opponent.heroNetBbPer100ByLeg.getOrElse("bigBlind", 0.0))}\n"
-      )
+    sb.append("=== Adaptive Proof Report (9-Max) ===\n")
+    sb.append(s"Seed: ${result.config.seed}\n")
+    sb.append(s"Blocks: ${result.blocks.size}\n")
+    sb.append(s"Total hands: ${result.totalHands}\n")
+    sb.append(f"\nOverall hero bb/100: ${result.aggregateHeroBbPer100}%+.1f\n")
+    sb.append("\nPer-villain hero bb/100:\n")
+    result.perVillainAggregateBbPer100.toVector.sortBy(_._1).foreach { case (name, bb) =>
+      sb.append(String.format(Locale.ROOT, "  %-28s %+.1f\n", name, bb))
     }
-    sb.append("\n")
-    sb.append(f"Leaker average bb/100: ${formatSigned(leakerAverage)}\n")
-    sb.append(f"GTO control bb/100: ${formatSigned(gtoControl)}\n")
     sb.toString()
 
-  private def formatSigned(value: Double): String =
-    f"$value%+.1f"
+  private def roundTo2(value: Double): Double =
+    math.round(value * 100.0) / 100.0
 
-  private def validateConfig(config: Config): Either[String, Config] =
-    if config.handsPerOpponent < 2 then Left("handsPerOpponent must be at least 2")
-    else if config.opponents.isEmpty then Left("at least one opponent is required")
-    else if config.bunchingTrials <= 0 then Left("bunchingTrials must be positive")
-    else if config.equityTrials <= 0 then Left("equityTrials must be positive")
-    else if config.minEquityTrials <= 0 then Left("minEquityTrials must be positive")
-    else if config.minEquityTrials > config.equityTrials then Left("minEquityTrials must be <= equityTrials")
-    else Right(config)
+  def main(args: Array[String]): Unit =
+    val config = parseArgs(args)
+    val result = run(config)
+    val runDir = writeOutputs(result, config.outputDir)
+    println(s"\nOutputs written to: ${runDir.toAbsolutePath.normalize()}")
 
-  private def parseConfig(args: Array[String]): Either[String, Config] =
-    if args.contains("--help") || args.contains("-h") then Left(usage)
-    else
-      try
-        var config = Config()
-        args.foreach { arg =>
-          if arg.startsWith("--hands=") then
-            config = config.copy(handsPerOpponent = arg.stripPrefix("--hands=").toInt)
-          else if arg.startsWith("--output=") then
-            config = config.copy(outputDir = Paths.get(arg.stripPrefix("--output=")))
-          else if arg.startsWith("--model=") then
-            config = config.copy(modelDir = Some(Paths.get(arg.stripPrefix("--model="))))
-          else if arg.startsWith("--seed=") then
-            config = config.copy(seed = arg.stripPrefix("--seed=").toLong)
-          else if arg.startsWith("--bunchingTrials=") then
-            config = config.copy(bunchingTrials = arg.stripPrefix("--bunchingTrials=").toInt)
-          else if arg.startsWith("--equityTrials=") then
-            config = config.copy(equityTrials = arg.stripPrefix("--equityTrials=").toInt)
-          else if arg.startsWith("--minEquityTrials=") then
-            config = config.copy(minEquityTrials = arg.stripPrefix("--minEquityTrials=").toInt)
-          else if arg.startsWith("--budget=") then
-            config = config.copy(budgetMs = arg.stripPrefix("--budget=").toLong)
-          else if arg.startsWith("--runLabel=") then
-            config = config.copy(runLabel = Some(arg.stripPrefix("--runLabel=")))
-        }
-        Right(config)
-      catch
-        case err: NumberFormatException => Left(s"invalid adaptive proof harness argument: ${err.getMessage}")
-
-  private val usage =
-    """Usage:
-      |  runMain sicfun.holdem.validation.AdaptiveProofHarness [--key=value ...]
-      |
-      |Options:
-      |  --hands=<n>              hands per opponent session (default: 500)
-      |  --output=<path>          output root directory (default: data/adaptive-proof)
-      |  --model=<path>           optional poker action model artifact directory
-      |  --seed=<n>               RNG seed (default: 42)
-      |  --bunchingTrials=<n>     adaptive engine bunching trials
-      |  --equityTrials=<n>       adaptive engine default equity trials
-      |  --minEquityTrials=<n>    adaptive engine minimum equity trials
-      |  --budget=<millis>        per-decision budget passed to the hero engine
-      |  --runLabel=<label>       optional fixed run directory label
-      |""".stripMargin
+  private def parseArgs(args: Array[String]): Config =
+    var config = Config()
+    args.foreach { arg =>
+      if arg.startsWith("--hands=") then
+        config = config.copy(handsPerBlock = arg.stripPrefix("--hands=").toInt)
+      else if arg.startsWith("--blocks=") then
+        config = config.copy(blocks = arg.stripPrefix("--blocks=").toInt)
+      else if arg.startsWith("--seed=") then
+        config = config.copy(seed = arg.stripPrefix("--seed=").toLong)
+      else if arg.startsWith("--budget=") then
+        config = config.copy(budgetMs = arg.stripPrefix("--budget=").toLong)
+      else if arg.startsWith("--output=") then
+        config = config.copy(outputDir = Paths.get(arg.stripPrefix("--output=")))
+      else if arg.startsWith("--model=") then
+        config = config.copy(modelDir = Some(Paths.get(arg.stripPrefix("--model="))))
+    }
+    config
