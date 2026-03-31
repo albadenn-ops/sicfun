@@ -57,7 +57,8 @@ object TexasHoldemPlayingHall:
       equityTrials: Int,
       saveTrainingTsv: Boolean,
       saveDdreTrainingTsv: Boolean,
-      saveReviewHandHistory: Boolean
+      saveReviewHandHistory: Boolean,
+      fullRing: Boolean
   )
 
   final case class HallSummary(
@@ -312,7 +313,8 @@ object TexasHoldemPlayingHall:
         playerCount = config.playerCount,
         heroPosition = config.heroPosition,
         villainPool = config.villainPool,
-        headsUpOnly = config.saveReviewHandHistory,
+        headsUpOnly = config.saveReviewHandHistory && !config.fullRing,
+        forceAllActive = config.fullRing,
         rng = rng
       )
       val deal = dealHand(tableScenario.modeledPositions, rng)
@@ -1524,13 +1526,16 @@ object TexasHoldemPlayingHall:
       heroPosition: Position,
       villainPool: Vector[VillainProfile],
       headsUpOnly: Boolean,
+      forceAllActive: Boolean,
       rng: Random
   ): TableScenario =
     val modeledPositions = modeledPositionsForPlayerCount(playerCount)
     require(modeledPositions.contains(heroPosition), s"hero position $heroPosition is not valid for playerCount=$playerCount")
     val availableVillains = modeledPositions.filterNot(_ == heroPosition)
     val activeVillainPositions =
-      if headsUpOnly then
+      if forceAllActive then
+        availableVillains.sortBy(modeledPositions.indexOf)
+      else if headsUpOnly then
         if heroPosition == Position.BigBlind then
           Vector(availableVillains(rng.nextInt(availableVillains.length)))
         else
@@ -1933,6 +1938,7 @@ object TexasHoldemPlayingHall:
         saveTrainingTsv <- boolOpt(options, "saveTrainingTsv", true)
         saveDdreTrainingTsv <- boolOpt(options, "saveDdreTrainingTsv", false)
         saveReviewHandHistory <- boolOpt(options, "saveReviewHandHistory", false)
+        fullRing <- boolOpt(options, "fullRing", false)
       yield Config(
         hands = hands,
         tableCount = tableCount,
@@ -1953,7 +1959,8 @@ object TexasHoldemPlayingHall:
         equityTrials = equityTrials,
         saveTrainingTsv = saveTrainingTsv,
         saveDdreTrainingTsv = saveDdreTrainingTsv,
-        saveReviewHandHistory = saveReviewHandHistory
+        saveReviewHandHistory = saveReviewHandHistory,
+        fullRing = fullRing
       )
 
   private def intOpt(options: Map[String, String], key: String, default: Int): Either[String, Int] =
@@ -2051,4 +2058,5 @@ object TexasHoldemPlayingHall:
       |  --saveTrainingTsv=<bool>      default true
       |  --saveDdreTrainingTsv=<bool>  default false
       |  --saveReviewHandHistory=<bool> default false
+      |  --fullRing=<bool>             default false (all villains always active)
       |""".stripMargin
