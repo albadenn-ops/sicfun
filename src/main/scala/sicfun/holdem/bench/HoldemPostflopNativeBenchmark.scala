@@ -6,6 +6,7 @@ import sicfun.holdem.gpu.*
 import sicfun.holdem.cli.*
 
 import sicfun.core.{Card, CardId, DiscreteDistribution}
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
@@ -274,12 +275,6 @@ object HoldemPostflopNativeBenchmark:
     )
 
   private def benchmarkSpot(seed: Long, villainCount: Int): BenchmarkSpot =
-    def card(token: String): Card =
-      Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card token: $token"))
-
-    def hole(a: String, b: String): HoleCards =
-      HoleCards.from(Vector(card(a), card(b)))
-
     val hero = hole("Ac", "Kh")
     val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
     val rng = new Random(seed)

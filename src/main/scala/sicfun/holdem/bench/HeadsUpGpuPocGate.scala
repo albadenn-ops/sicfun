@@ -4,6 +4,7 @@ import sicfun.holdem.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.cli.*
+import sicfun.holdem.bench.BenchSupport.{BatchData, loadBatch}
 
 import sicfun.core.HandEvaluator
 
@@ -48,12 +49,6 @@ object HeadsUpGpuPocGate:
 
   private val AllowedOptionKeys =
     Set("table", "mode", "trials", "maxMatchups", "cpuParallelism", "speedupThreshold", "warmupRuns", "runs", "seed")
-
-  private final case class BatchData(
-      packedKeys: Array[Long],
-      keyMaterial: Array[Long]
-  ):
-    def size: Int = packedKeys.length
 
   private final case class ValidationSummary(
       checked: Int,
@@ -134,17 +129,6 @@ object HeadsUpGpuPocGate:
     println(s"gate=${if gatePass then "PASS" else "FAIL"}")
 
     if gatePass then sys.exit(0) else sys.exit(2)
-
-  private def loadBatch(table: String, maxMatchups: Long): BatchData =
-    table.trim.toLowerCase match
-      case "full" =>
-        val batch = HeadsUpEquityTable.selectFullBatch(maxMatchups)
-        BatchData(batch.packedKeys, batch.keyMaterial)
-      case "canonical" =>
-        val batch = HeadsUpEquityCanonicalTable.selectCanonicalBatch(maxMatchups)
-        BatchData(batch.packedKeys, batch.keyMaterial)
-      case other =>
-        throw new IllegalArgumentException(s"unknown table '$other' (expected full or canonical)")
 
   private def runCpu(
       batch: BatchData,

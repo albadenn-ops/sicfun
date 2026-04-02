@@ -44,6 +44,9 @@ object ComparePublishedPreflopVsRandom:
   // Published values from:
   // https://caniwin.com/texasholdem/preflop/heads-up.php
   // The page states values are truncated (not rounded).
+  // Snapshot captured circa 2026-02 from the live page.
+  // As of 2026-03-23, the live page shows slight drift (e.g. AKo: 64.46/1.70 vs 64.55/1.39 here).
+  // Treat as supporting equity evidence, not exact current reference.
   private[holdem] val PublishedTopRows: Vector[PublishedRow] = Vector(
     PublishedRow(1, "AAo", 84.93, 0.54),
     PublishedRow(2, "KKo", 82.11, 0.55),

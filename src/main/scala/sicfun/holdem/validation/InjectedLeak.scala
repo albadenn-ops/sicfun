@@ -107,9 +107,12 @@ final case class PreflopTooTight(severity: Double) extends InjectedLeak:
 
 /** GTO baseline control — no leak, never deviates. Used for false positive testing. */
 final case class NoLeak() extends InjectedLeak:
-  val id = "gto-baseline"
+  val id = NoLeak.Id
   val description = "GTO baseline — no exploitable deviation"
   val severity = 0.0
   def applies(spot: SpotContext): Boolean = false
   def deviate(competentAction: PokerAction, spot: SpotContext, rng: Random): PokerAction =
     competentAction
+
+object NoLeak:
+  val Id = "gto-baseline"

@@ -505,6 +505,7 @@ final class AdvisorSession(
             // positions folded before the button opened.
             val openerPos = Position.Button
             val folds = tableRanges.format.foldsBeforeOpener(openerPos).map(PreflopFold(_))
+            val showdownHistory = rememberedOpponent.map(_.showdownHands).getOrElse(Vector.empty)
 
             val result = engine.decide(
               hero = heroCards,
@@ -515,7 +516,8 @@ final class AdvisorSession(
               candidateActions = candidates,
               decisionBudgetMillis = Some(config.decisionBudgetMillis),
               rng = new Random(rng.nextLong()),
-              revealedCards = h.villainRevealedCards
+              revealedCards = h.villainRevealedCards,
+              showdownHistory = showdownHistory
             )
 
             val out = formatAdvice(result, h)
@@ -535,6 +537,7 @@ final class AdvisorSession(
         h.heroDecisions.zipWithIndex.foreach { case (dec, i) =>
           val candidates = buildCandidateActionsForState(dec.gameState)
           val folds = Vector.empty[PreflopFold]
+          val showdownHistory = rememberedOpponent.map(_.showdownHands).getOrElse(Vector.empty)
 
           val result = engine.decide(
             hero = dec.heroCards,
@@ -545,7 +548,8 @@ final class AdvisorSession(
             candidateActions = candidates,
             decisionBudgetMillis = Some(config.decisionBudgetMillis),
             rng = new Random(rng.nextLong()),
-            revealedCards = h.villainRevealedCards
+            revealedCards = h.villainRevealedCards,
+            showdownHistory = showdownHistory
           )
 
           val recommended = result.decision.recommendation.bestAction
@@ -795,13 +799,18 @@ final class AdvisorSession(
   private def roundChips(v: Double): Double =
     math.round(v * 2.0) / 2.0 // round to nearest 0.5
 
+  private def formatHintMetrics(metrics: Vector[Double]): String =
+    metrics.map(value => f"$value%.3f").mkString("[", ", ", "]")
+
   private def formatAdvice(result: AdaptiveDecisionResult, h: HandSnapshot): Vector[String] =
     val out = Vector.newBuilder[String]
     val bb = config.bigBlind
 
     rememberedOpponent.foreach { profile =>
       out += s"  Memory: ${profile.site}/${profile.playerName} (${profile.handsObserved} hands)"
-      profile.exploitHints.take(2).foreach(hint => out += s"  Exploit: $hint")
+      profile.exploitHintDetails.take(2).foreach { hint =>
+        out += s"  Exploit: ${hint.text} ${formatHintMetrics(hint.metrics)}"
+      }
     }
 
     // Archetype line

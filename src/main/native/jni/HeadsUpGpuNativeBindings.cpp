@@ -35,7 +35,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <random>
 #include <thread>
 #include <vector>
 
@@ -99,6 +98,13 @@ struct EquityResultNative {
   double std_error;
 };
 
+static inline uint64_t xorshift64star(uint64_t& state) {
+  state ^= state >> 12;
+  state ^= state << 25;
+  state ^= state >> 27;
+  return state * 0x2545F4914F6CDD1DULL;
+}
+
 bool check_and_clear_exception(JNIEnv* env) {
   if (!env->ExceptionCheck()) {
     return false;
@@ -133,7 +139,7 @@ const std::array<HoleCards, kHoleCardsCount>& hole_cards_lookup() {
   return lookup;
 }
 
-inline uint32_t encode_score(const int category, const int* tiebreak, const int tiebreak_size) {
+inline uint32_t encode_score(const int category, const int* __restrict__ tiebreak, const int tiebreak_size) {
   uint32_t score = static_cast<uint32_t>(category) << 24;
   for (int i = 0; i < tiebreak_size && i < 5; ++i) {
     score |= (static_cast<uint32_t>(tiebreak[i] & 0x0F) << (20 - (i * 4)));
@@ -141,7 +147,7 @@ inline uint32_t encode_score(const int category, const int* tiebreak, const int 
   return score;
 }
 
-uint32_t evaluate5_score(const int cards[5]) {
+uint32_t evaluate5_score(const int* __restrict__ cards) {
   int ranks[5];
   int suits[5];
   int rank_counts[kMaxRankValue + 1] = {};
@@ -192,12 +198,18 @@ uint32_t evaluate5_score(const int cards[5]) {
       groups[group_count++] = Group{rank_counts[rank], rank};
     }
   }
-  std::sort(groups, groups + group_count, [](const Group& a, const Group& b) {
-    if (a.count != b.count) {
-      return a.count > b.count;
+  // Insertion sort — group_count is 2..5; avoids std::sort overhead entirely.
+  for (int gi = 1; gi < group_count; ++gi) {
+    const Group key = groups[gi];
+    int gj = gi - 1;
+    while (gj >= 0 &&
+           (groups[gj].count < key.count ||
+            (groups[gj].count == key.count && groups[gj].rank < key.rank))) {
+      groups[gj + 1] = groups[gj];
+      --gj;
     }
-    return a.rank > b.rank;
-  });
+    groups[gj + 1] = key;
+  }
 
   int tiebreak[5] = {};
   if (is_flush && straight_high > 0) {
@@ -259,7 +271,7 @@ uint32_t evaluate5_score(const int cards[5]) {
   return encode_score(0, tiebreak, 5);  // HighCard
 }
 
-uint32_t evaluate7_score(const int cards[7]) {
+uint32_t evaluate7_score(const int* __restrict__ cards) {
   int five_cards[5];
   uint32_t best = 0;
   for (int c = 0; c < kCombos7Of5Count; ++c) {
@@ -280,16 +292,16 @@ void fill_remaining_deck(
     const int hero_second,
     const int villain_first,
     const int villain_second,
-    int remaining[kRemainingAfterHoleCards]) {
-  bool dead[kDeckSize] = {};
-  dead[hero_first] = true;
-  dead[hero_second] = true;
-  dead[villain_first] = true;
-  dead[villain_second] = true;
+    int* __restrict__ remaining) {
+  const uint64_t dead_mask =
+      (UINT64_C(1) << hero_first) |
+      (UINT64_C(1) << hero_second) |
+      (UINT64_C(1) << villain_first) |
+      (UINT64_C(1) << villain_second);
 
-  int idx = 0;
-  for (int card = 0; card < kDeckSize; ++card) {
-    if (!dead[card]) {
+  uint8_t idx = 0;
+  for (uint8_t card = 0; card < kDeckSize; ++card) {
+    if (!((dead_mask >> card) & 1)) {
       remaining[idx++] = card;
     }
   }
@@ -300,19 +312,13 @@ inline int compare_showdown(
     const int hero_second,
     const int villain_first,
     const int villain_second,
-    const int board[kBoardCardCount]) {
+    const int* __restrict__ board) {
   int hero_cards[7] = {hero_first, hero_second, board[0], board[1], board[2], board[3], board[4]};
   int villain_cards[7] = {
       villain_first, villain_second, board[0], board[1], board[2], board[3], board[4]};
   const uint32_t hero_score = evaluate7_score(hero_cards);
   const uint32_t villain_score = evaluate7_score(villain_cards);
-  if (hero_score > villain_score) {
-    return 1;
-  }
-  if (hero_score < villain_score) {
-    return -1;
-  }
-  return 0;
+  return static_cast<int>(hero_score > villain_score) - static_cast<int>(hero_score < villain_score);
 }
 
 inline uint64_t mix64(uint64_t value) {
@@ -341,12 +347,12 @@ EquityResultNative compute_monte_carlo_equity(
   double mean = 0.0;
   double m2 = 0.0;
 
-  std::mt19937_64 rng(seed);
-  std::uniform_int_distribution<int> dist;
+  uint64_t rng_state = (seed != 0) ? seed : 1ULL;  // xorshift64* requires non-zero state
   for (int trial = 0; trial < trials; ++trial) {
     std::memcpy(shuffled, remaining, sizeof(shuffled));
     for (int i = 0; i < kBoardCardCount; ++i) {
-      const int j = dist(rng, decltype(dist)::param_type(i, kRemainingAfterHoleCards - 1));
+      const int range = kRemainingAfterHoleCards - i;
+      const int j = i + static_cast<int>(xorshift64star(rng_state) % static_cast<uint64_t>(range));
       std::swap(shuffled[i], shuffled[j]);
       board[i] = shuffled[i];
     }

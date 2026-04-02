@@ -1,7 +1,8 @@
 package sicfun.holdem.validation
 
+import sicfun.core.DiscreteDistribution
 import sicfun.holdem.cfr.{HoldemCfrConfig, HoldemCfrSolver}
-import sicfun.holdem.equity.HoldemEquity
+import sicfun.holdem.equity.{HoldemEquity, RangeParser}
 import sicfun.holdem.types.*
 
 import scala.util.Random
@@ -67,15 +68,30 @@ final class EquityBasedStrategy extends VillainStrategy:
   *
   * Computes Nash equilibrium mixed strategy, then samples an action.
   * Slower than EquityBasedStrategy but produces actual equilibrium play.
+  *
+  * Uses street-appropriate opponent ranges: uniform preflop (opponent could
+  * have anything), narrowed postflop (opponent continued with a preflop-viable
+  * hand). Without narrowing, uniform postflop ranges make aggression dominant
+  * because ~60% of random hands miss the flop and fold to any raise.
   */
 final class CfrVillainStrategy(
     config: HoldemCfrConfig = HoldemCfrConfig(
-      iterations = 300,
-      equityTrials = 500,
-      maxVillainHands = 48,
-      includeVillainReraises = false
-    )
+      iterations = 500,
+      equityTrials = 1_000,
+      maxVillainHands = 64,
+      includeVillainReraises = true
+    ),
+    allowHeuristicFallback: Boolean = true
 ) extends VillainStrategy:
+
+  private[validation] def allowsHeuristicFallback: Boolean = allowHeuristicFallback
+
+  // HU Button opening range — the hands opponent would have opened preflop.
+  // Parsed once and reused across all decisions.
+  private lazy val buttonOpenHands: Set[HoleCards] =
+    RangeParser.parseWithHands(CfrVillainStrategy.HuButtonOpenRange) match
+      case Right(result) => result.hands
+      case Left(_) => Set.empty // fallback: will use fullRange
 
   def decide(
       hand: HoleCards,
@@ -86,8 +102,7 @@ final class CfrVillainStrategy(
   ): PokerAction =
     if candidates.size <= 1 then return candidates.headOption.getOrElse(PokerAction.Check)
     try
-      // "hero" = villain (decision-maker), "villainPosterior" = opponent's range
-      val opponentRange = HoldemEquity.fullRange(hand, state.board)
+      val opponentRange = opponentRangeForStreet(hand, state)
       val policy = HoldemCfrSolver.solveDecisionPolicy(
         hero = hand,
         state = state,
@@ -97,8 +112,27 @@ final class CfrVillainStrategy(
       )
       sampleAction(policy.actionProbabilities, candidates, rng)
     catch
-      case _: Exception =>
-        EquityBasedStrategy().decide(hand, state, candidates, equityVsRandom, rng)
+      case err: Exception =>
+        if allowHeuristicFallback then
+          EquityBasedStrategy().decide(hand, state, candidates, equityVsRandom, rng)
+        else throw err
+
+  /** Preflop: uniform range (opponent could hold anything).
+    * Postflop: narrowed to hands the opponent would have opened/continued with
+    * preflop, excluding dead cards. Falls back to uniform if narrowed range is
+    * too small (< 20 hands).
+    */
+  private def opponentRangeForStreet(
+      hand: HoleCards,
+      state: GameState
+  ): DiscreteDistribution[HoleCards] =
+    if state.street == Street.Preflop || buttonOpenHands.isEmpty then
+      HoldemEquity.fullRange(hand, state.board)
+    else
+      val dead = hand.asSet ++ state.board.asSet
+      val viable = buttonOpenHands.filter(h => !h.toVector.exists(dead.contains)).toSeq
+      if viable.size >= 20 then DiscreteDistribution.uniform(viable)
+      else HoldemEquity.fullRange(hand, state.board)
 
   private def sampleAction(
       probs: Map[PokerAction, Double],
@@ -109,3 +143,9 @@ final class CfrVillainStrategy(
     val cumulativeProbs = candidates.scanLeft(0.0)((acc, a) => acc + probs.getOrElse(a, 0.0)).tail
     val idx = cumulativeProbs.indexWhere(_ > roll)
     if idx >= 0 then candidates(idx) else probs.maxBy(_._2)._1
+
+object CfrVillainStrategy:
+  // Standard HU Button opening range (~85% of hands).
+  // Source: TableFormat.defaultRangeStringsHeadsUp(Position.Button)
+  val HuButtonOpenRange: String =
+    "22+, A2s+, K2s+, Q4s+, J6s+, T6s+, 96s+, 86s+, 76s, 65s, 54s, A2o+, K7o+, Q8o+, J8o+, T8o+, 98o"

@@ -5,16 +5,13 @@ import sicfun.holdem.io.*
 import sicfun.holdem.model.*
 
 import munit.FunSuite
-import sicfun.core.Card
+import sicfun.holdem.bench.BenchSupport.card
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
 
 class OperationalRegressionSuiteTest extends FunSuite:
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(fail(s"invalid card: $token"))
-
   private def event(
       handId: String,
       sequence: Long,

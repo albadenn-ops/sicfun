@@ -2,8 +2,8 @@ package sicfun.holdem.runtime
 import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 import sicfun.holdem.engine.*
+import sicfun.holdem.engine.GtoSolveEngine.{GtoMode, GtoSolveCacheKey, GtoCachedPolicy, GtoCacheStats}
 import sicfun.holdem.provider.*
-import sicfun.holdem.cfr.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.cli.*
 
@@ -26,14 +26,6 @@ import scala.util.Random
   *  - periodically retrains villain action model from generated data
   */
 object TexasHoldemPlayingHall:
-  private enum HeroMode:
-    case Adaptive
-    case Gto
-
-  private enum GtoMode:
-    case Fast
-    case Exact
-
   private enum VillainMode:
     case Archetype(style: PlayerArchetype)
     case Gto
@@ -151,8 +143,6 @@ object TexasHoldemPlayingHall:
       heroPayout: Double
   )
 
-  private final case class VillainStyleProfile(looseness: Double, aggression: Double)
-
   private final case class DdreTrainingSample(
       decisionIndex: Int,
       state: GameState,
@@ -166,51 +156,12 @@ object TexasHoldemPlayingHall:
       bayesLogEvidence: Double
   )
 
-  private final case class GtoSolveCacheKey(
-      perspective: Int,
-      canonicalHeroPacked: Long,
-      streetOrdinal: Int,
-      canonicalBoardPacked: Long,
-      potBits: Long,
-      toCallBits: Long,
-      stackBits: Long,
-      candidateHash: Int,
-      baseEquityTrials: Int
-  )
-
-  private final case class GtoCachedPolicy(
-      orderedActionProbabilities: Vector[(PokerAction, Double)],
-      bestAction: PokerAction,
-      provider: String
-  )
-
-  private final case class GtoCacheStats(
-      var hits: Long = 0L,
-      var misses: Long = 0L,
-      servedByProvider: mutable.Map[String, Long] = mutable.HashMap.empty[String, Long].withDefaultValue(0L),
-      solvedByProvider: mutable.Map[String, Long] = mutable.HashMap.empty[String, Long].withDefaultValue(0L)
-  ):
-    def total: Long = hits + misses
-    def hitRate: Double = if total > 0 then hits.toDouble / total.toDouble else 0.0
-    def recordHit(provider: String): Unit =
-      hits += 1L
-      increment(servedByProvider, provider)
-    def recordMiss(provider: String): Unit =
-      misses += 1L
-      increment(servedByProvider, provider)
-      increment(solvedByProvider, provider)
-    def servedByProviderSnapshot: Map[String, Long] = servedByProvider.toMap
-    def solvedByProviderSnapshot: Map[String, Long] = solvedByProvider.toMap
-    private def increment(counter: mutable.Map[String, Long], provider: String): Unit =
-      counter.update(provider, counter(provider) + 1L)
-
   private[holdem] final case class RaiseResponseEstimate(
       foldProbability: Double,
       continueProbability: Double,
       continuationRange: DiscreteDistribution[HoleCards]
   )
 
-  private val MaxExactGtoCacheEntries = 500000
   private val SmallBlindAmount = 0.5
   private val BigBlindAmount = 1.0
   private val ReviewUploadFileName = "review-upload-pokerstars.txt"
@@ -220,15 +171,6 @@ object TexasHoldemPlayingHall:
   private val MultiwayExactMaxEvaluations = 250_000L
   private val ReviewBaseTimestamp = LocalDateTime.of(2026, 3, 10, 12, 0, 0)
   private val ReviewTimestampFormatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
-  private val SuitPermutations: Array[Array[Int]] =
-    Array(
-      Array(0, 1, 2, 3), Array(0, 1, 3, 2), Array(0, 2, 1, 3), Array(0, 2, 3, 1),
-      Array(0, 3, 1, 2), Array(0, 3, 2, 1), Array(1, 0, 2, 3), Array(1, 0, 3, 2),
-      Array(1, 2, 0, 3), Array(1, 2, 3, 0), Array(1, 3, 0, 2), Array(1, 3, 2, 0),
-      Array(2, 0, 1, 3), Array(2, 0, 3, 1), Array(2, 1, 0, 3), Array(2, 1, 3, 0),
-      Array(2, 3, 0, 1), Array(2, 3, 1, 0), Array(3, 0, 1, 2), Array(3, 0, 2, 1),
-      Array(3, 1, 0, 2), Array(3, 1, 2, 0), Array(3, 2, 0, 1), Array(3, 2, 1, 0)
-    )
 
   def main(args: Array[String]): Unit =
     val wantsHelp = args.contains("--help") || args.contains("-h")
@@ -507,7 +449,7 @@ object TexasHoldemPlayingHall:
       ))
 
     private def trimExactCacheIfNeeded(): Unit =
-      if exactGtoCache.size > MaxExactGtoCacheEntries then
+      if exactGtoCache.size > GtoSolveEngine.MaxGtoCacheEntries then
         exactGtoCache.clear()
 
     private def buildSummary(): HallSummary =
@@ -865,17 +807,15 @@ object TexasHoldemPlayingHall:
             candidateActions = candidates
           ).map(_.bestAction)
             .getOrElse(
-              gtoHeroResponds(
+              GtoSolveEngine.gtoResponds(
                 hand = deal.holeCardsFor(heroPosition),
                 state = state,
-                allowRaise = allowRaise,
-                raiseSize = config.raiseSize,
+                candidates = candidates,
                 mode = config.gtoMode,
-                tableRanges = tableRanges,
+                opponentPosterior = tableRanges.rangeFor(focusVillainPosition),
                 baseEquityTrials = config.equityTrials,
                 rng = rng,
                 perspective = 0,
-                villainPosition = focusVillainPosition,
                 exactGtoCache = exactGtoCache,
                 exactGtoCacheStats = exactGtoCacheStats
               )
@@ -967,7 +907,7 @@ object TexasHoldemPlayingHall:
           case _ => None
       val sampled = villainProfile.mode match
         case VillainMode.Archetype(style) =>
-          villainResponds(
+          ArchetypeVillainResponder.villainResponds(
             hand = deal.holeCardsFor(position),
             style = style,
             state = state,
@@ -979,17 +919,15 @@ object TexasHoldemPlayingHall:
           multiwayRecommendation
             .map(_.bestAction)
             .getOrElse(
-              gtoVillainResponds(
+              GtoSolveEngine.gtoResponds(
                 hand = deal.holeCardsFor(position),
                 state = state,
-                allowRaise = allowRaise,
-                raiseSize = config.raiseSize,
+                candidates = candidates,
                 mode = config.gtoMode,
-                tableRanges = tableRanges,
+                opponentPosterior = tableRanges.rangeFor(heroPosition),
                 baseEquityTrials = config.equityTrials,
                 rng = rng,
                 perspective = 1,
-                heroPosition = heroPosition,
                 exactGtoCache = exactGtoCache,
                 exactGtoCacheStats = exactGtoCacheStats
               )
@@ -1317,460 +1255,6 @@ object TexasHoldemPlayingHall:
       minEquityTrials = minEquityTrials(equityTrials)
     )
 
-  private def villainResponds(
-      hand: HoleCards,
-      style: PlayerArchetype,
-      state: GameState,
-      allowRaise: Boolean,
-      raiseSize: Double,
-      rng: Random
-  ): PokerAction =
-    val profile = styleProfile(style)
-    val strength = streetStrength(hand, state.board, state.street, rng)
-
-    if state.toCall <= 0.0 then
-      if !allowRaise then PokerAction.Check
-      else
-        val betChance = clamp((strength - 0.35) * 0.9 + (profile.aggression * 0.35), 0.02, 0.92)
-        if rng.nextDouble() < betChance then PokerAction.Raise(raiseSize)
-        else PokerAction.Check
-    else
-      val potOdds = state.potOdds
-      val foldThreshold = clamp(potOdds + (0.35 - profile.looseness * 0.2), 0.05, 0.95)
-      val raiseThreshold = clamp(0.68 - profile.aggression * 0.12 + potOdds * 0.2, 0.35, 0.9)
-      if allowRaise && strength >= raiseThreshold && rng.nextDouble() < (0.15 + profile.aggression * 0.55) then
-        PokerAction.Raise(raiseSize)
-      else if strength < foldThreshold then PokerAction.Fold
-      else PokerAction.Call
-
-  private def gtoHeroResponds(
-      hand: HoleCards,
-      state: GameState,
-      allowRaise: Boolean,
-      raiseSize: Double,
-      mode: GtoMode,
-      tableRanges: TableRanges,
-      baseEquityTrials: Int,
-      rng: Random,
-      perspective: Int,
-      villainPosition: Position,
-      exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
-      exactGtoCacheStats: GtoCacheStats
-  ): PokerAction =
-    val candidates = heroCandidates(state, raiseSize, allowRaise)
-    if candidates.length <= 1 then candidates.head
-    else
-      mode match
-        case GtoMode.Fast =>
-          fastGtoResponds(
-            hand = hand,
-            state = state,
-            candidates = candidates,
-            allowRaise = allowRaise,
-            rng = rng
-          )
-        case GtoMode.Exact =>
-          val villainPosterior = villainPosteriorForHeroGto(
-            hero = hand,
-            board = state.board,
-            tableRanges = tableRanges,
-            villainPosition = villainPosition
-          )
-          solveGtoByCfr(
-            hand = hand,
-            state = state,
-            candidates = candidates,
-            villainPosterior = villainPosterior,
-            baseEquityTrials = baseEquityTrials,
-            rng = rng,
-            perspective = perspective,
-            exactGtoCache = exactGtoCache,
-            exactGtoCacheStats = exactGtoCacheStats
-          )
-
-  private def gtoVillainResponds(
-      hand: HoleCards,
-      state: GameState,
-      allowRaise: Boolean,
-      raiseSize: Double,
-      mode: GtoMode,
-      tableRanges: TableRanges,
-      baseEquityTrials: Int,
-      rng: Random,
-      perspective: Int,
-      heroPosition: Position,
-      exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
-      exactGtoCacheStats: GtoCacheStats
-  ): PokerAction =
-    val candidates = heroCandidates(state, raiseSize, allowRaise)
-    if candidates.length <= 1 then candidates.head
-    else
-      mode match
-        case GtoMode.Fast =>
-          fastGtoResponds(
-            hand = hand,
-            state = state,
-            candidates = candidates,
-            allowRaise = allowRaise,
-            rng = rng
-          )
-        case GtoMode.Exact =>
-          val heroPosterior = heroPosteriorForGto(
-            villain = hand,
-            board = state.board,
-            tableRanges = tableRanges,
-            heroPosition = heroPosition
-          )
-          solveGtoByCfr(
-            hand = hand,
-            state = state,
-            candidates = candidates,
-            villainPosterior = heroPosterior,
-            baseEquityTrials = baseEquityTrials,
-            rng = rng,
-            perspective = perspective,
-            exactGtoCache = exactGtoCache,
-            exactGtoCacheStats = exactGtoCacheStats
-          )
-
-  private def solveGtoByCfr(
-      hand: HoleCards,
-      state: GameState,
-      candidates: Vector[PokerAction],
-      villainPosterior: DiscreteDistribution[HoleCards],
-      baseEquityTrials: Int,
-      rng: Random,
-      perspective: Int,
-      exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
-      exactGtoCacheStats: GtoCacheStats
-  ): PokerAction =
-    val canonicalSignature = canonicalHeroBoardSignature(hand = hand, board = state.board)
-    val key = buildGtoSolveCacheKey(
-      perspective = perspective,
-      hand = hand,
-      state = state,
-      candidates = candidates,
-      baseEquityTrials = baseEquityTrials,
-      canonicalSignature = canonicalSignature
-    )
-    exactGtoCache.get(key) match
-      case Some(cached) =>
-        exactGtoCacheStats.recordHit(cached.provider)
-        sampleActionByPolicy(
-          ordered = cached.orderedActionProbabilities,
-          fallback = cached.bestAction,
-          rng = rng
-        )
-      case None =>
-        val config = HoldemCfrConfig(
-          iterations = gtoIterations(state.street, baseEquityTrials, candidates.length),
-          maxVillainHands = gtoMaxVillainHands(state.street, candidates.length),
-          equityTrials = gtoEquityTrials(state.street, baseEquityTrials, candidates.length),
-          rngSeed = exactEquitySeed(
-            perspective = perspective,
-            baseEquityTrials = baseEquityTrials,
-            boardSize = state.board.size,
-            canonicalSignature = canonicalSignature
-          )
-        )
-        try
-          val solution = HoldemCfrSolver.solveShallowDecisionPolicy(
-            hero = hand,
-            state = state,
-            villainPosterior = villainPosterior,
-            candidateActions = candidates,
-            config = config
-          )
-          val orderedActionProbabilities =
-            orderedPositiveProbabilities(
-              actions = candidates,
-              probabilities = solution.actionProbabilities
-            )
-          exactGtoCacheStats.recordMiss(solution.provider)
-          if exactGtoCache.size >= MaxExactGtoCacheEntries then exactGtoCache.clear()
-          exactGtoCache.update(
-            key,
-            GtoCachedPolicy(
-              orderedActionProbabilities = orderedActionProbabilities,
-              bestAction = solution.bestAction,
-              provider = solution.provider
-            )
-          )
-          sampleActionByPolicy(
-            ordered = orderedActionProbabilities,
-            fallback = solution.bestAction,
-            rng = rng
-          )
-        catch
-          case _: Throwable =>
-            // Preserve run continuity if a specific CFR solve fails.
-            exactGtoCacheStats.recordMiss("random-fallback")
-            candidates(rng.nextInt(candidates.length))
-
-  private def fastGtoResponds(
-      hand: HoleCards,
-      state: GameState,
-      candidates: Vector[PokerAction],
-      allowRaise: Boolean,
-      rng: Random
-  ): PokerAction =
-    val strength = fastGtoStrength(hand, state.board, state.street)
-    val raiseCandidate =
-      if allowRaise then candidates.collectFirst { case action @ PokerAction.Raise(_) => action }
-      else None
-    val callCandidate = candidates.find(_ == PokerAction.Call)
-    val foldCandidate = candidates.find(_ == PokerAction.Fold)
-    if state.toCall <= 0.0 then
-      raiseCandidate match
-        case None => PokerAction.Check
-        case Some(raiseAction) =>
-          val pureRaiseThreshold = fastGtoRaiseThreshold(state.street)
-          val mixRaiseThreshold = pureRaiseThreshold - 0.18
-          if strength >= pureRaiseThreshold then raiseAction
-          else if strength >= mixRaiseThreshold then
-            val mix = clamp(0.18 + ((strength - mixRaiseThreshold) * 1.7), 0.05, 0.80)
-            if rng.nextDouble() < mix then raiseAction else PokerAction.Check
-          else PokerAction.Check
-    else
-      val potOdds = state.potOdds
-      val foldThreshold = clamp(potOdds + fastGtoFoldMargin(state.street), 0.06, 0.95)
-      val raiseThreshold = clamp(foldThreshold + fastGtoRaiseGap(state.street), 0.24, 0.98)
-      if raiseCandidate.nonEmpty && strength >= raiseThreshold then
-        val raiseMix = clamp(0.20 + ((strength - raiseThreshold) * 1.3), 0.10, 0.92)
-        if rng.nextDouble() < raiseMix then raiseCandidate.get
-        else callCandidate.getOrElse(PokerAction.Call)
-      else if strength >= foldThreshold then
-        callCandidate.getOrElse(PokerAction.Call)
-      else
-        foldCandidate.getOrElse(PokerAction.Fold)
-
-  private def fastGtoStrength(hand: HoleCards, board: Board, street: Street): Double =
-    val pre = preflopStrength(hand)
-    if street == Street.Preflop || board.cards.isEmpty then pre
-    else
-      val madeWeight =
-        street match
-          case Street.Flop  => 0.50
-          case Street.Turn  => 0.56
-          case Street.River => 0.62
-          case _            => 0.50
-      val categoryScore = bestCategoryStrength(hand, board)
-      val drawBonus = drawPotential(hand, board)
-      clamp(((1.0 - madeWeight) * pre) + (madeWeight * categoryScore) + drawBonus)
-
-  private def fastGtoRaiseThreshold(street: Street): Double =
-    street match
-      case Street.Preflop => 0.78
-      case Street.Flop    => 0.74
-      case Street.Turn    => 0.71
-      case Street.River   => 0.68
-
-  private def fastGtoFoldMargin(street: Street): Double =
-    street match
-      case Street.Preflop => 0.05
-      case Street.Flop    => 0.03
-      case Street.Turn    => 0.01
-      case Street.River   => -0.01
-
-  private def fastGtoRaiseGap(street: Street): Double =
-    street match
-      case Street.Preflop => 0.27
-      case Street.Flop    => 0.24
-      case Street.Turn    => 0.22
-      case Street.River   => 0.20
-
-  private def villainPosteriorForHeroGto(
-      hero: HoleCards,
-      board: Board,
-      tableRanges: TableRanges,
-      villainPosition: Position
-  ): DiscreteDistribution[HoleCards] =
-    tableRanges.rangeFor(villainPosition)
-
-  private def heroPosteriorForGto(
-      villain: HoleCards,
-      board: Board,
-      tableRanges: TableRanges,
-      heroPosition: Position
-  ): DiscreteDistribution[HoleCards] =
-    tableRanges.rangeFor(heroPosition)
-
-  private def gtoIterations(
-      street: Street,
-      baseEquityTrials: Int,
-      candidateCount: Int
-  ): Int =
-    val base = math.max(72, math.min(224, math.round(baseEquityTrials / 3.0).toInt))
-    val streetBase =
-      street match
-        case Street.Preflop => base + 32
-        case Street.Flop    => base
-        case Street.Turn    => math.max(72, math.round(base * 0.85).toInt)
-        case Street.River   => math.max(56, math.round(base * 0.70).toInt)
-    if candidateCount <= 2 then
-      val floor =
-        street match
-          case Street.Preflop => 88
-          case Street.Flop    => 64
-          case Street.Turn    => 56
-          case Street.River   => 48
-      math.max(floor, math.round(streetBase * 0.60).toInt)
-    else
-      streetBase
-
-  private def gtoMaxVillainHands(
-      street: Street,
-      candidateCount: Int
-  ): Int =
-    val base =
-      street match
-        case Street.Preflop => 56
-        case Street.Flop    => 32
-        case Street.Turn    => 24
-        case Street.River   => 16
-    if candidateCount <= 2 then math.max(16, base - 12) else base
-
-  private def gtoEquityTrials(
-      street: Street,
-      baseEquityTrials: Int,
-      candidateCount: Int
-  ): Int =
-    val base =
-      street match
-        case Street.Preflop => math.max(80, baseEquityTrials / 3)
-        case Street.Flop    => math.max(48, baseEquityTrials / 6)
-        case Street.Turn    => math.max(32, baseEquityTrials / 8)
-        case Street.River   => 24
-    if candidateCount <= 2 then
-      val floor =
-        street match
-          case Street.Preflop => 64
-          case Street.Flop    => 36
-          case Street.Turn    => 24
-          case Street.River   => 16
-      math.max(floor, math.round(base * 0.65).toInt)
-    else
-      base
-
-  private def buildGtoSolveCacheKey(
-      perspective: Int,
-      hand: HoleCards,
-      state: GameState,
-      candidates: Vector[PokerAction],
-      baseEquityTrials: Int,
-      canonicalSignature: (Long, Long)
-  ): GtoSolveCacheKey =
-    val (canonicalHeroPacked, canonicalBoardPacked) = canonicalSignature
-    GtoSolveCacheKey(
-      perspective = perspective,
-      canonicalHeroPacked = canonicalHeroPacked,
-      streetOrdinal = state.street.ordinal,
-      canonicalBoardPacked = canonicalBoardPacked,
-      potBits = java.lang.Double.doubleToLongBits(state.pot),
-      toCallBits = java.lang.Double.doubleToLongBits(state.toCall),
-      stackBits = java.lang.Double.doubleToLongBits(state.stackSize),
-      candidateHash = hashActions(candidates),
-      baseEquityTrials = baseEquityTrials
-    )
-
-  private def exactEquitySeed(
-      perspective: Int,
-      baseEquityTrials: Int,
-      boardSize: Int,
-      canonicalSignature: (Long, Long)
-  ): Long =
-    val (canonicalHeroPacked, canonicalBoardPacked) = canonicalSignature
-    mix64(
-      canonicalHeroPacked ^
-        java.lang.Long.rotateLeft(canonicalBoardPacked, 11) ^
-        (perspective.toLong << 48) ^
-        (baseEquityTrials.toLong << 16) ^
-        boardSize.toLong
-    )
-
-  private def canonicalHeroBoardSignature(hand: HoleCards, board: Board): (Long, Long) =
-    val boardSize = board.cards.length
-    val remappedBoardIds = new Array[Int](boardSize)
-    var bestHeroPacked = Long.MaxValue
-    var bestBoardPacked = Long.MaxValue
-    var permIdx = 0
-    while permIdx < SuitPermutations.length do
-      val suitMap = SuitPermutations(permIdx)
-      val heroFirstId = remapCardId(hand.first, suitMap)
-      val heroSecondId = remapCardId(hand.second, suitMap)
-      val lowHero = math.min(heroFirstId, heroSecondId)
-      val highHero = math.max(heroFirstId, heroSecondId)
-      val heroPacked = ((lowHero.toLong << 6) | highHero.toLong) & 0xFFFL
-
-      var idx = 0
-      while idx < boardSize do
-        remappedBoardIds(idx) = remapCardId(board.cards(idx), suitMap)
-        idx += 1
-      java.util.Arrays.sort(remappedBoardIds)
-      var boardPacked = boardSize.toLong
-      idx = 0
-      while idx < boardSize do
-        boardPacked = (boardPacked << 6) | remappedBoardIds(idx).toLong
-        idx += 1
-
-      if heroPacked < bestHeroPacked || (heroPacked == bestHeroPacked && boardPacked < bestBoardPacked) then
-        bestHeroPacked = heroPacked
-        bestBoardPacked = boardPacked
-      permIdx += 1
-    (bestHeroPacked, bestBoardPacked)
-
-  private def remapCardId(card: Card, suitMap: Array[Int]): Int =
-    val mappedSuit = suitMap(card.suit.ordinal)
-    (mappedSuit * 13) + card.rank.ordinal
-
-  private def hashActions(actions: Vector[PokerAction]): Int =
-    var hash = 1
-    var idx = 0
-    while idx < actions.length do
-      hash = 31 * hash + hashAction(actions(idx))
-      idx += 1
-    hash
-
-  private def hashAction(action: PokerAction): Int =
-    action match
-      case PokerAction.Fold => 1
-      case PokerAction.Check => 2
-      case PokerAction.Call => 3
-      case PokerAction.Raise(amount) =>
-        31 * 4 + java.lang.Double.hashCode(amount)
-
-  private def orderedPositiveProbabilities(
-      actions: Vector[PokerAction],
-      probabilities: Map[PokerAction, Double]
-  ): Vector[(PokerAction, Double)] =
-    actions.flatMap { action =>
-      val probability = probabilities.getOrElse(action, 0.0)
-      if probability.isFinite && probability > 0.0 then Some(action -> probability)
-      else None
-    }
-
-  private def sampleActionByPolicy(
-      ordered: Vector[(PokerAction, Double)],
-      fallback: PokerAction,
-      rng: Random
-  ): PokerAction =
-    var total = 0.0
-    var i = 0
-    while i < ordered.length do
-      total += ordered(i)._2
-      i += 1
-    if total <= 0.0 then fallback
-    else
-      val target = rng.nextDouble() * total
-      var cumulative = 0.0
-      var idx = 0
-      while idx < ordered.length do
-        val (action, probability) = ordered(idx)
-        cumulative += probability
-        if target <= cumulative then return action
-        idx += 1
-      ordered.last._1
-
   private def formatLongCountMap(counts: Map[String, Long]): String =
     if counts.isEmpty then "{}"
     else
@@ -1778,102 +1262,6 @@ object TexasHoldemPlayingHall:
         .sortBy { case (provider, count) => (-count, provider) }
         .map { case (provider, count) => s"$provider:$count" }
         .mkString("{", ", ", "}")
-
-  private def mix64(value: Long): Long =
-    var z = value + 0x9E3779B97F4A7C15L
-    z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L
-    z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL
-    z ^ (z >>> 31)
-
-  private def preflopStrength(hand: HoleCards): Double =
-    val r1 = hand.first.rank.value
-    val r2 = hand.second.rank.value
-    val high = math.max(r1, r2).toDouble / 14.0
-    val low = math.min(r1, r2).toDouble / 14.0
-    val pairBonus = if r1 == r2 then 0.30 + (high * 0.20) else 0.0
-    val suitedBonus = if hand.first.suit == hand.second.suit then 0.06 else 0.0
-    val gap = math.abs(r1 - r2)
-    val connectorBonus =
-      if gap == 0 then 0.0
-      else if gap == 1 then 0.08
-      else if gap == 2 then 0.04
-      else 0.0
-    clamp((0.45 * high) + (0.18 * low) + pairBonus + suitedBonus + connectorBonus)
-
-  private def streetStrength(
-      hand: HoleCards,
-      board: Board,
-      street: Street,
-      rng: Random
-  ): Double =
-    val pre = preflopStrength(hand)
-    if street == Street.Preflop || board.cards.isEmpty then
-      clamp(pre + (rng.nextDouble() - 0.5) * 0.04)
-    else
-      val categoryScore = bestCategoryStrength(hand, board)
-      val drawBonus = drawPotential(hand, board)
-      val noise = (rng.nextDouble() - 0.5) * 0.05
-      clamp(0.45 * pre + 0.45 * categoryScore + drawBonus + noise)
-
-  private def bestCategoryStrength(hand: HoleCards, board: Board): Double =
-    val cards = hand.toVector ++ board.cards
-    cards.length match
-      case 5 =>
-        HandEvaluator.evaluate5Cached(cards).category.strength.toDouble / 8.0
-      case 6 =>
-        HoldemCombinator.combinations(cards.toIndexedSeq, 5).map { combo =>
-          HandEvaluator.evaluate5Cached(combo).category.strength.toDouble / 8.0
-        }.max
-      case 7 =>
-        HandEvaluator.evaluate7Cached(cards).category.strength.toDouble / 8.0
-      case _ =>
-        preflopStrength(hand)
-
-  private def drawPotential(hand: HoleCards, board: Board): Double =
-    if board.cards.isEmpty then 0.0
-    else
-      val all = hand.toVector ++ board.cards
-      val bySuit = all.groupBy(_.suit).view.mapValues(_.size).toMap
-      val maxSuit = bySuit.values.max
-      val flushDrawBonus =
-        if maxSuit >= 5 then 0.12
-        else if maxSuit == 4 then 0.08
-        else if maxSuit == 3 && board.size <= 3 then 0.03
-        else 0.0
-
-      val ranks = all.map(_.rank.value).distinct.sorted
-      val straightDrawBonus =
-        if ranks.length >= 4 && hasTightRun(ranks) then 0.05
-        else 0.0
-
-      val pairWithBoardBonus =
-        if board.cards.exists(card => card.rank == hand.first.rank || card.rank == hand.second.rank) then 0.04
-        else 0.0
-
-      flushDrawBonus + straightDrawBonus + pairWithBoardBonus
-
-  private def hasTightRun(sortedRanks: Seq[Int]): Boolean =
-    if sortedRanks.length < 4 then false
-    else
-      val span4 = HoldemCombinator.combinations(sortedRanks.toIndexedSeq, 4).exists { combo =>
-        combo.last - combo.head <= 4
-      }
-      val withWheelAce =
-        if sortedRanks.contains(14) then
-          val lowAce = sortedRanks.map(r => if r == 14 then 1 else r).sorted
-          HoldemCombinator.combinations(lowAce.toIndexedSeq, 4).exists { combo =>
-            combo.last - combo.head <= 4
-          }
-        else false
-      span4 || withWheelAce
-
-  private def styleProfile(archetype: PlayerArchetype): VillainStyleProfile =
-    archetype match
-      case PlayerArchetype.Nit            => VillainStyleProfile(looseness = 0.20, aggression = 0.18)
-      case PlayerArchetype.Tag            => VillainStyleProfile(looseness = 0.45, aggression = 0.40)
-      case PlayerArchetype.Lag            => VillainStyleProfile(looseness = 0.68, aggression = 0.66)
-      case PlayerArchetype.CallingStation => VillainStyleProfile(looseness = 0.86, aggression = 0.24)
-      case PlayerArchetype.Maniac         => VillainStyleProfile(looseness = 0.80, aggression = 0.92)
 
   private def villainModeLabel(mode: VillainMode): String =
     mode match
@@ -2017,9 +1405,6 @@ object TexasHoldemPlayingHall:
       payouts.iterator.map { case (position, amount) =>
         position -> roundMoney(amount)
       }.toMap
-
-  private def clamp(value: Double, lo: Double = 0.0, hi: Double = 1.0): Double =
-    math.max(lo, math.min(hi, value))
 
   private def dealHand(
       modeledPositions: Vector[Position],

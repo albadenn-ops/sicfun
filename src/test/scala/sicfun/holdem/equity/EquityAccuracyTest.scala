@@ -32,6 +32,8 @@ class EquityAccuracyTest extends FunSuite:
   }
 
   // ---- ComparePublishedPreflopVsRandom: 17 rows from caniwin.com ----
+  // Snapshot circa 2026-02; live page shows slight drift as of 2026-03-23.
+  // These are supporting equity evidence, not exact current reference.
 
   // The source table is published with truncated percentages and a model that does not
   // perfectly align with our exact combo-conditioned formulation for every class.

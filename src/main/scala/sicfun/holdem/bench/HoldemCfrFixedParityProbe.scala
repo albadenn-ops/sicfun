@@ -1,8 +1,9 @@
 package sicfun.holdem.bench
 
-import sicfun.core.{Card, DiscreteDistribution}
+import sicfun.core.DiscreteDistribution
 import sicfun.holdem.cfr.{HoldemCfrConfig, HoldemCfrNativeRuntime, HoldemCfrSolver}
 import sicfun.holdem.types.*
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 /** Probes when fixed-point native CFR starts diverging from the JVM fixed baseline. */
 object HoldemCfrFixedParityProbe:
@@ -36,12 +37,6 @@ object HoldemCfrFixedParityProbe:
       bestAction: PokerAction,
       actionProbabilities: Map[PokerAction, Double]
   ) extends ProbeResult
-
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
 
   def main(args: Array[String]): Unit =
     val scenario = if args.length > 0 then args(0).toLowerCase(java.util.Locale.ROOT) else "turn"

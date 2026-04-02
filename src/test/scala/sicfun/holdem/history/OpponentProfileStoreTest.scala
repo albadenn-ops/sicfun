@@ -280,6 +280,68 @@ class OpponentProfileStoreTest extends FunSuite:
         stream.close()
   }
 
+  test("exploit hints include showdown-derived premium hand reads") {
+    val profile = OpponentProfile(
+      site = "pokerstars",
+      playerName = "Villain",
+      handsObserved = 5,
+      firstSeenEpochMillis = 1_700_000_000_000L,
+      lastSeenEpochMillis = 1_700_000_000_500L,
+      actionSummary = OpponentActionSummary(),
+      raiseResponses = RaiseResponseCounts(),
+      recentEvents = Vector.empty,
+      seenHandIds = Vector("sd-1", "sd-2", "sd-3", "sd-4", "sd-5"),
+      showdownHands = Vector(
+        ShowdownRecord("sd-1", HoleCards.from(Vector(card("Ah"), card("As")))),
+        ShowdownRecord("sd-2", HoleCards.from(Vector(card("Kh"), card("Ks")))),
+        ShowdownRecord("sd-3", HoleCards.from(Vector(card("Qh"), card("Qs")))),
+        ShowdownRecord("sd-4", HoleCards.from(Vector(card("Ac"), card("Kd")))),
+        ShowdownRecord("sd-5", HoleCards.from(Vector(card("Jh"), card("Th"))))
+      )
+    )
+
+    val hints = profile.exploitHints
+    val hintDetails = profile.exploitHintDetails
+    assert(
+      hints.exists(_.contains("premium hands frequently")),
+      s"expected premium showdown hint, got: $hints"
+    )
+    val premiumHint = hintDetails.find(_.ruleId == "showdown-premium-heavy").getOrElse(fail(s"missing structured premium hint: $hintDetails"))
+    assertEquals(premiumHint.metrics.length, 4)
+    assert(premiumHint.deviationRatioFromGto > 0.0, s"expected positive deviation metric: ${premiumHint.metrics}")
+  }
+
+  test("exploit hints include showdown-derived weak hand reads") {
+    val profile = OpponentProfile(
+      site = "pokerstars",
+      playerName = "Villain",
+      handsObserved = 5,
+      firstSeenEpochMillis = 1_700_000_000_000L,
+      lastSeenEpochMillis = 1_700_000_000_500L,
+      actionSummary = OpponentActionSummary(calls = 6, raises = 1, checks = 3),
+      raiseResponses = RaiseResponseCounts(calls = 3, folds = 1, raises = 0),
+      recentEvents = Vector.empty,
+      seenHandIds = Vector("sd-w1", "sd-w2", "sd-w3", "sd-w4", "sd-w5"),
+      showdownHands = Vector(
+        ShowdownRecord("sd-w1", HoleCards.from(Vector(card("7c"), card("2d")))),
+        ShowdownRecord("sd-w2", HoleCards.from(Vector(card("6c"), card("3d")))),
+        ShowdownRecord("sd-w3", HoleCards.from(Vector(card("8c"), card("4d")))),
+        ShowdownRecord("sd-w4", HoleCards.from(Vector(card("9c"), card("5d")))),
+        ShowdownRecord("sd-w5", HoleCards.from(Vector(card("Kh"), card("Qs"))))
+      )
+    )
+
+    val hints = profile.exploitHints
+    val hintDetails = profile.exploitHintDetails
+    assert(
+      hints.exists(_.contains("shown down weak hands")),
+      s"expected weak showdown hint, got: $hints"
+    )
+    val weakHint = hintDetails.find(_.ruleId == "showdown-weak-heavy").getOrElse(fail(s"missing structured weak hint: $hintDetails"))
+    assertEquals(weakHint.metrics.length, 4)
+    assert(weakHint.leakDetectionConfidence > 0.0, s"expected positive confidence metric: ${weakHint.metrics}")
+  }
+
   test("manual player collapse can also collapse profiles and survives JSON roundtrip") {
     val canonical = OpponentProfile(
       site = "pokerstars",

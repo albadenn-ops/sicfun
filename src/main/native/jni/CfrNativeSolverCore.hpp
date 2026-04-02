@@ -7,6 +7,12 @@
 #include <limits>
 #include <vector>
 
+#if defined(_MSC_VER) || defined(__CUDACC__)
+#define CFR_FORCE_INLINE __forceinline
+#else
+#define CFR_FORCE_INLINE inline __attribute__((always_inline))
+#endif
+
 namespace cfrnative {
 
 constexpr int kStatusOk = 0;
@@ -185,50 +191,44 @@ inline int validate_tree(const TreeSpec& spec) {
   return kStatusOk;
 }
 
-inline int averaging_weight(const TreeSpec& spec, const int iteration) {
-  if (iteration <= spec.averaging_delay) {
-    return 0;
-  }
-  if (!spec.linear_averaging) {
-    return 1;
-  }
-  return iteration - spec.averaging_delay;
+CFR_FORCE_INLINE int averaging_weight(const TreeSpec& spec, const int iteration) {
+  const int delayed_iteration = iteration - spec.averaging_delay;
+  // Branchless: active=0 when delayed<=0, so whole expression collapses to 0.
+  // When linear_averaging=true: returns delayed_iteration.
+  // When linear_averaging=false: returns 1 (if active).
+  const int active = static_cast<int>(delayed_iteration > 0);
+  return active * (spec.linear_averaging ? delayed_iteration : 1);
 }
 
-inline int averaging_weight(const TreeSpecFixed& spec, const int iteration) {
-  if (iteration <= spec.averaging_delay) {
-    return 0;
-  }
-  if (!spec.linear_averaging) {
-    return 1;
-  }
-  return iteration - spec.averaging_delay;
+CFR_FORCE_INLINE int averaging_weight(const TreeSpecFixed& spec, const int iteration) {
+  const int delayed_iteration = iteration - spec.averaging_delay;
+  const int active = static_cast<int>(delayed_iteration > 0);
+  return active * (spec.linear_averaging ? delayed_iteration : 1);
 }
 
 template <typename F>
-inline void regret_matching_fp(
+CFR_FORCE_INLINE void regret_matching_fp(
     const std::vector<F>& regrets,
     const int start,
     const int count,
-    F* out_strategy) {
+    F* __restrict__ out_strategy) {
   F positive_sum = F(0);
-  const F* regret_ptr = regrets.data() + start;
+  const F* __restrict__ regret_ptr = regrets.data() + start;
   for (int idx = 0; idx < count; ++idx) {
     const F positive = regret_ptr[idx] > F(0) ? regret_ptr[idx] : F(0);
     out_strategy[idx] = positive;
     positive_sum += positive;
   }
 
-  if (positive_sum > F(0)) {
-    const F inv = F(1) / positive_sum;
-    for (int idx = 0; idx < count; ++idx) {
-      out_strategy[idx] *= inv;
-    }
-  } else {
-    const F uniform = F(1) / static_cast<F>(count);
-    for (int idx = 0; idx < count; ++idx) {
-      out_strategy[idx] = uniform;
-    }
+  // Branchless uniform/normalize: compute both paths, select by whether
+  // positive_sum > 0. Avoids branch misprediction on the uniform fallback.
+  const F has_positive = static_cast<F>(positive_sum > F(0));
+  // When positive_sum==0: denominator becomes 1.0 (avoids div-by-zero),
+  // and the positive path contributes 0 since all out_strategy[i]==0.
+  const F inv = has_positive / (positive_sum + (F(1) - has_positive));
+  const F uniform = (F(1) - has_positive) / static_cast<F>(count);
+  for (int idx = 0; idx < count; ++idx) {
+    out_strategy[idx] = out_strategy[idx] * inv + uniform;
   }
 }
 
@@ -236,7 +236,7 @@ inline void regret_matching(
     const std::vector<double>& regrets,
     const int start,
     const int count,
-    double* out_strategy) {
+    double* __restrict__ out_strategy) {
   regret_matching_fp(regrets, start, count, out_strategy);
 }
 
@@ -332,9 +332,7 @@ inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
       for (int idx = 0; idx < count; ++idx) {
         const F regret_delta = reach_p1 * (action_utility[idx] - node_value);
         F updated = cumulative_regret[infoset_start + idx] + regret_delta;
-        if (spec.cfr_plus && updated < F(0)) {
-          updated = F(0);
-        }
+        updated = spec.cfr_plus ? std::max(updated, F(0)) : updated;
         cumulative_regret[infoset_start + idx] = updated;
         cumulative_strategy[infoset_start + idx] += strategy_scale * strategy[idx];
       }
@@ -343,9 +341,7 @@ inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
       for (int idx = 0; idx < count; ++idx) {
         const F regret_delta = reach_p0 * (node_value - action_utility[idx]);
         F updated = cumulative_regret[infoset_start + idx] + regret_delta;
-        if (spec.cfr_plus && updated < F(0)) {
-          updated = F(0);
-        }
+        updated = spec.cfr_plus ? std::max(updated, F(0)) : updated;
         cumulative_regret[infoset_start + idx] = updated;
         cumulative_strategy[infoset_start + idx] += strategy_scale * strategy[idx];
       }
@@ -525,36 +521,43 @@ inline int validate_tree_fixed(const TreeSpecFixed& spec) {
   return kStatusOk;
 }
 
-inline int multiply_prob_raw(const int left, const int right) {
+CFR_FORCE_INLINE int multiply_prob_raw(const int left, const int right) {
   return static_cast<int>((static_cast<int64_t>(left) * static_cast<int64_t>(right)) >> kProbScaleBits);
 }
 
 // Signed round-to-nearest shift by 30 bits. Matches Scala roundShift30Signed:
 // arithmetic right-shift alone biases small negative products toward -infinity,
 // so we round on absolute magnitude before restoring the sign.
-inline int round_shift_30_signed(const int64_t product) {
-  const int64_t abs_product = product >= 0 ? product : -product;
+//
+// Branchless implementation using arithmetic right-shift sign propagation.
+// sign_mask: all-ones (-1) if product < 0, else 0.
+// Branchless abs: (x ^ mask) - mask.
+// Branchless negate: (x ^ mask) - mask applied to rounded result.
+CFR_FORCE_INLINE int round_shift_30_signed(const int64_t product) {
+  const int64_t sign_mask = product >> 63;                      // 0 or -1
+  const int64_t abs_product = (product ^ sign_mask) - sign_mask; // branchless abs
   const int rounded = static_cast<int>((abs_product + (1LL << 29)) >> kProbScaleBits);
-  return product >= 0 ? rounded : -rounded;
+  // Restore sign branchlessly: negate rounded iff sign_mask == -1
+  return (rounded ^ static_cast<int>(sign_mask)) - static_cast<int>(sign_mask);
 }
 
-inline int multiply_fixed_by_prob_raw(const int value_raw, const int probability_raw) {
+CFR_FORCE_INLINE int multiply_fixed_by_prob_raw(const int value_raw, const int probability_raw) {
   return round_shift_30_signed(
       static_cast<int64_t>(value_raw) * static_cast<int64_t>(probability_raw));
 }
 
-inline void write_uniform_probabilities_raw(const int count, int* out_strategy_raw) {
+inline void write_uniform_probabilities_raw(const int count, int* __restrict__ out_strategy_raw) {
   const int base = kProbScale / count;
   const int remainder = kProbScale - (base * count);
   for (int idx = 0; idx < count; ++idx) {
-    out_strategy_raw[idx] = base + (idx < remainder ? 1 : 0);
+    out_strategy_raw[idx] = base + static_cast<int>(idx < remainder);
   }
 }
 
 inline void normalize_non_negative_weights_to_prob_raw(
-    const int64_t* weights,
+    const int64_t* __restrict__ weights,
     const int count,
-    int* out_probabilities_raw) {
+    int* __restrict__ out_probabilities_raw) {
   int64_t sum = 0;
   int last_positive = -1;
   for (int idx = 0; idx < count; ++idx) {
@@ -602,7 +605,7 @@ inline void normalize_non_negative_edge_weights_to_prob_raw(
     const std::vector<int>& weights,
     const int start,
     const int count,
-    int* out_probabilities_raw) {
+    int* __restrict__ out_probabilities_raw) {
   int64_t sum = 0;
   int last_positive = -1;
   for (int idx = 0; idx < count; ++idx) {
@@ -633,21 +636,21 @@ inline void normalize_non_negative_edge_weights_to_prob_raw(
 }
 
 inline int checked_fixed_raw(const int64_t raw) {
-  if (raw < static_cast<int64_t>(INT32_MIN) || raw > static_cast<int64_t>(INT32_MAX)) {
-    return raw > 0 ? INT32_MAX : INT32_MIN;
-  }
-  return static_cast<int>(raw);
+  return static_cast<int>(std::clamp(
+      raw,
+      static_cast<int64_t>(INT32_MIN),
+      static_cast<int64_t>(INT32_MAX)));
 }
 
 inline void halve_int_array(std::vector<int32_t>& values, const int start, const int count) {
   for (int idx = 0; idx < count; ++idx) {
-    values[start + idx] /= 2;
+    values[start + idx] >>= 1;
   }
 }
 
 inline void halve_long_array(std::vector<int64_t>& values, const int start, const int count) {
   for (int idx = 0; idx < count; ++idx) {
-    values[start + idx] /= 2;
+    values[start + idx] >>= 1;
   }
 }
 
@@ -682,11 +685,11 @@ inline bool needs_strategy_emergency_rescale(
   return false;
 }
 
-inline void regret_matching_fixed(
+CFR_FORCE_INLINE void regret_matching_fixed(
     const std::vector<int32_t>& regrets,
     const int start,
     const int count,
-    int* out_strategy_raw) {
+    int* __restrict__ out_strategy_raw) {
   int64_t positive_sum = 0;
   int last_positive = -1;
   for (int idx = 0; idx < count; ++idx) {
@@ -857,9 +860,9 @@ inline int solve_fixed(const TreeSpecFixed& spec, SolveOutputFixed& output) {
       int64_t updated =
           static_cast<int64_t>(cumulative_regret[infoset_start + idx]) +
           static_cast<int64_t>(regret_deltas[idx]);
-      if (spec.cfr_plus && updated < 0) {
-        updated = 0;
-      }
+      // Branchless CFR+ clamp: if cfr_plus, zero out negative values.
+      // updated &= ~(cfr_plus_mask & sign_bit) where cfr_plus_mask = -spec.cfr_plus
+      updated &= ~(static_cast<int64_t>(-static_cast<int>(spec.cfr_plus)) & (updated >> 63));
       cumulative_regret[infoset_start + idx] = checked_fixed_raw(updated);
       if (std::abs(static_cast<int64_t>(cumulative_regret[infoset_start + idx])) >=
           static_cast<int64_t>(kRegretRescaleThreshold)) {
@@ -944,3 +947,5 @@ inline int solve_fixed(const TreeSpecFixed& spec, SolveOutputFixed& output) {
 }
 
 }  // namespace cfrnative
+
+#undef CFR_FORCE_INLINE

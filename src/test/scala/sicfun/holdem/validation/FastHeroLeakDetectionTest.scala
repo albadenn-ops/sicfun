@@ -63,7 +63,11 @@ class FastHeroLeakDetectionTest extends FunSuite:
       case "overfold-river-aggression" =>
         hints.exists(_.contains("Over-folds on the river"))
       case "overcall-big-bets" =>
-        hints.exists(h => h.contains("calling station") || h.contains("Calls too often facing large bets"))
+        hints.exists(h =>
+          h.contains("calling station") ||
+            h.contains("Calls too often facing large bets") ||
+            h.contains("shown down weak hands")
+        )
       case "overbluff-turn-barrel" =>
         hints.exists(_.contains("Very aggressive on the turn"))
       case "passive-big-pots" =>

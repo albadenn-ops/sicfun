@@ -75,6 +75,57 @@ final case class ShowdownRecord(
 ):
   require(handId.trim.nonEmpty, "handId must be non-empty")
 
+final case class ExploitHint(
+    ruleId: String,
+    text: String,
+    metrics: Vector[Double]
+):
+  require(ruleId.trim.nonEmpty, "ruleId must be non-empty")
+  require(text.trim.nonEmpty, "text must be non-empty")
+  require(metrics.length == ExploitHint.MetricCount, s"metrics must contain exactly ${ExploitHint.MetricCount} values")
+  require(metrics.forall(value => value.isFinite && !value.isNaN), "metrics must be finite")
+
+  def deviationRatioFromGto: Double = metrics(0)
+
+  def evLosing: Double = metrics(1)
+
+  def leakDetectionConfidence: Double = metrics(2)
+
+  def exploitEdgeConfidence: Double = metrics(3)
+
+object ExploitHint:
+  val MetricCount = 4
+
+  def fromMetrics(
+      ruleId: String,
+      text: String,
+      deviationRatioFromGto: Double,
+      evLosing: Double,
+      leakDetectionConfidence: Double,
+      exploitEdgeConfidence: Double
+  ): ExploitHint =
+    ExploitHint(
+      ruleId = ruleId,
+      text = text,
+      metrics = Vector(
+        roundMetric(clamp01(deviationRatioFromGto)),
+        roundMetric(clampNonNegative(evLosing)),
+        roundMetric(clamp01(leakDetectionConfidence)),
+        roundMetric(clamp01(exploitEdgeConfidence))
+      )
+    )
+
+  private def clamp01(value: Double): Double =
+    if !value.isFinite || value.isNaN then 0.0
+    else math.max(0.0, math.min(1.0, value))
+
+  private def clampNonNegative(value: Double): Double =
+    if !value.isFinite || value.isNaN then 0.0
+    else math.max(0.0, value)
+
+  private def roundMetric(value: Double): Double =
+    math.round(value * 1000.0) / 1000.0
+
 final case class OpponentProfile(
     site: String,
     playerName: String,
@@ -116,14 +167,17 @@ final case class OpponentProfile(
   def stability: Option[StabilitySnapshot] =
     OpponentProfile.computeStability(recentEvents, playerName)
 
+  def exploitHintDetails: Vector[ExploitHint] =
+    OpponentProfile.exploitHintDetailsFor(this)
+
   def exploitHints: Vector[String] =
-    OpponentProfile.exploitHintsFor(this)
+    exploitHintDetails.map(_.text)
 
   def identified: OpponentProfile =
     OpponentIdentity.ensureProfileIdentity(this)
 
 object OpponentProfile:
-  val MaxRecentEvents = 256
+  val MaxRecentEvents = 1024
   val MaxSeenHandIds = 2048
 
   def fromSingleEvent(
@@ -329,18 +383,27 @@ object OpponentProfile:
       catch
         case _: IllegalArgumentException => None
 
-  private def exploitHintsFor(profile: OpponentProfile): Vector[String] =
-    val hints = Vector.newBuilder[String]
+  private def exploitHintDetailsFor(profile: OpponentProfile): Vector[ExploitHint] =
+    val hints = Vector.newBuilder[ExploitHint]
 
     // ── Per-street / per-context analysis from recent events ──
+    val totalActions = math.max(1, profile.actionSummary.totalActions)
     val events = profile.recentEvents
     if events.size >= 10 then
-      // River fold rate when facing bets — 30%+ is exploitably high in HU
+      // River fold rate when facing bets — CFR equilibrium folds ~39% (MDF-correct
+      // for mixed bet sizings). 45%+ is exploitably high in HU.
       val riverFacingBet = events.filter(e => e.street == Street.River && e.toCall > 0)
       if riverFacingBet.size >= 5 then
         val riverFoldRate = riverFacingBet.count(_.action == PokerAction.Fold).toDouble / riverFacingBet.size
-        if riverFoldRate >= 0.30 then
-          hints += "Over-folds on the river facing aggression; increase bluff pressure on late streets."
+        if riverFoldRate >= 0.45 then
+          hints += exploitHint(
+            ruleId = "overfold-river-aggression",
+            text = "Over-folds on the river facing aggression; increase bluff pressure on late streets.",
+            deviationRatioFromGto = upwardDeviationRatio(riverFoldRate, gtoBaseline = 0.39),
+            sampleSize = riverFacingBet.size,
+            minSample = 5,
+            evScaleBb = 0.95
+          )
 
       // Call rate facing large bets (bet/pot-before-bet >= 0.6)
       val facingLargeBet = events.filter { e =>
@@ -349,14 +412,28 @@ object OpponentProfile:
       if facingLargeBet.size >= 5 then
         val largeBetCallRate = facingLargeBet.count(_.action == PokerAction.Call).toDouble / facingLargeBet.size
         if largeBetCallRate >= 0.60 then
-          hints += "Calls too often facing large bets; value bet thinner and cut bluffs."
+          hints += exploitHint(
+            ruleId = "overcall-big-bets",
+            text = "Calls too often facing large bets; value bet thinner and cut bluffs.",
+            deviationRatioFromGto = upwardDeviationRatio(largeBetCallRate, gtoBaseline = 0.48),
+            sampleSize = facingLargeBet.size,
+            minSample = 5,
+            evScaleBb = 0.9
+          )
 
       // Turn aggression rate — 25%+ suggests excessive turn betting (HU baseline ~20%)
       val turnEvents = events.filter(_.street == Street.Turn)
       if turnEvents.size >= 5 then
         val turnRaiseRate = turnEvents.count(_.action.category == PokerAction.Category.Raise).toDouble / turnEvents.size
         if turnRaiseRate >= 0.25 then
-          hints += "Very aggressive on the turn; bluff-catch more selectively against turn barrels."
+          hints += exploitHint(
+            ruleId = "overbluff-turn-barrel",
+            text = "Very aggressive on the turn; bluff-catch more selectively against turn barrels.",
+            deviationRatioFromGto = upwardDeviationRatio(turnRaiseRate, gtoBaseline = 0.18),
+            sampleSize = turnEvents.size,
+            minSample = 5,
+            evScaleBb = 0.85
+          )
 
       // Big pot passivity removed (2026-03-17, CFR calibration):
       // HU equilibrium play checks ~100% in big pots (SPR < 4, toCall = 0) — checking
@@ -369,11 +446,25 @@ object OpponentProfile:
       if preflopEvents.size >= 8 then
         val preflopFoldRate = preflopEvents.count(_.action == PokerAction.Fold).toDouble / preflopEvents.size
         if preflopFoldRate >= 0.20 then
-          hints += "Over-folds preflop; Open slightly wider against this player."
+          hints += exploitHint(
+            ruleId = "preflop-too-tight",
+            text = "Over-folds preflop; Open slightly wider against this player.",
+            deviationRatioFromGto = upwardDeviationRatio(preflopFoldRate, gtoBaseline = 0.13),
+            sampleSize = preflopEvents.size,
+            minSample = 8,
+            evScaleBb = 0.45
+          )
         // Preflop call rate — HU BB baseline ~55%, 65%+ means too passive/calling
         val preflopCallRate = preflopEvents.count(_.action == PokerAction.Call).toDouble / preflopEvents.size
         if preflopCallRate >= 0.65 then
-          hints += "Calls too loose preflop; value bet wider preflop ranges."
+          hints += exploitHint(
+            ruleId = "preflop-too-loose",
+            text = "Calls too loose preflop; value bet wider preflop ranges.",
+            deviationRatioFromGto = upwardDeviationRatio(preflopCallRate, gtoBaseline = 0.55),
+            sampleSize = preflopEvents.size,
+            minSample = 8,
+            evScaleBb = 0.5
+          )
 
     // ── Aggregate raise response analysis ──
     val signature = profile.signature
@@ -383,11 +474,34 @@ object OpponentProfile:
       val callVsRaise = profile.raiseResponses.calls / responseTotal
       val reraiseVsRaise = profile.raiseResponses.raises / responseTotal
       if foldToRaise >= 0.55 then
-        hints += "Increase bluff pressure when they face a raise."
+        hints += exploitHint(
+          ruleId = "fold-to-raise",
+          text = "Increase bluff pressure when they face a raise.",
+          deviationRatioFromGto = upwardDeviationRatio(foldToRaise, gtoBaseline = 0.45),
+          sampleSize = responseTotal.toInt,
+          minSample = 4,
+          evScaleBb = 0.7
+        )
       if callVsRaise >= 0.55 then
-        hints += "Value bet thinner and cut back low-equity bluffs."
+        hints += exploitHint(
+          ruleId = "call-vs-raise",
+          text = "Value bet thinner and cut back low-equity bluffs.",
+          deviationRatioFromGto = upwardDeviationRatio(callVsRaise, gtoBaseline = 0.45),
+          sampleSize = responseTotal.toInt,
+          minSample = 4,
+          evScaleBb = 0.75
+        )
       if reraiseVsRaise >= 0.28 then
-        hints += "Expect re-raises; trap stronger hands and avoid thin bluffs."
+        hints += exploitHint(
+          ruleId = "reraise-vs-raise",
+          text = "Expect re-raises; trap stronger hands and avoid thin bluffs.",
+          deviationRatioFromGto = upwardDeviationRatio(reraiseVsRaise, gtoBaseline = 0.18),
+          sampleSize = responseTotal.toInt,
+          minSample = 4,
+          evScaleBb = 0.65
+        )
+
+    showdownHintsFor(profile).foreach(hints += _)
 
     // ── Overall signature analysis ──
     val foldRate = signature.values(0)
@@ -395,20 +509,172 @@ object OpponentProfile:
     val callRate = signature.values(2)
     val checkRate = signature.values(3)
     if foldRate >= 0.45 then
-      hints += "Open slightly wider against them; they over-fold overall."
+      hints += exploitHint(
+        ruleId = "overall-overfold",
+        text = "Open slightly wider against them; they over-fold overall.",
+        deviationRatioFromGto = upwardDeviationRatio(foldRate, gtoBaseline = 0.35),
+        sampleSize = totalActions,
+        minSample = 10,
+        evScaleBb = 0.45
+      )
     if callRate >= 0.42 && raiseRate <= 0.12 then
-      hints += "Treat them like a calling station until shown otherwise."
+      hints += exploitHint(
+        ruleId = "calling-station-profile",
+        text = "Treat them like a calling station until shown otherwise.",
+        deviationRatioFromGto = compoundDeviationRatio(
+          upwardDeviationRatio(callRate, gtoBaseline = 0.32),
+          downwardDeviationRatio(raiseRate, gtoBaseline = 0.18)
+        ),
+        sampleSize = totalActions,
+        minSample = 10,
+        evScaleBb = 0.8
+      )
     if raiseRate >= 0.33 then
-      hints += "They choose aggressive lines often; bluff-catch more selectively."
+      hints += exploitHint(
+        ruleId = "aggressive-lines",
+        text = "They choose aggressive lines often; bluff-catch more selectively.",
+        deviationRatioFromGto = upwardDeviationRatio(raiseRate, gtoBaseline = 0.23),
+        sampleSize = totalActions,
+        minSample = 10,
+        evScaleBb = 0.65
+      )
     if checkRate >= 0.30 && raiseRate <= 0.10 then
-      hints += "Respect sudden aggression from their passive lines."
+      hints += exploitHint(
+        ruleId = "passive-lines",
+        text = "Respect sudden aggression from their passive lines.",
+        deviationRatioFromGto = compoundDeviationRatio(
+          upwardDeviationRatio(checkRate, gtoBaseline = 0.20),
+          downwardDeviationRatio(raiseRate, gtoBaseline = 0.16)
+        ),
+        sampleSize = totalActions,
+        minSample = 10,
+        evScaleBb = 0.4
+      )
     profile.stability.foreach { stability =>
       if stability.significantChanges > 0 || stability.meanDrift >= 0.20 then
-        hints += "Profile is drifting; lower exploit confidence and stay closer to baseline."
+        hints += exploitHint(
+          ruleId = "profile-drifting",
+          text = "Profile is drifting; lower exploit confidence and stay closer to baseline.",
+          deviationRatioFromGto = math.max(
+            upwardDeviationRatio(stability.meanDrift, gtoBaseline = 0.10),
+            clamp01(stability.significantChanges.toDouble / math.max(1.0, stability.windowCount.toDouble))
+          ),
+          sampleSize = events.size,
+          minSample = 6,
+          evScaleBb = 0.3
+        )
     }
-    val built = hints.result().distinct
+    val built = hints.result()
+      .distinctBy(_.ruleId)
+      .sortBy(hint => (-hint.leakDetectionConfidence, -hint.exploitEdgeConfidence, hint.ruleId))
     if built.nonEmpty then built.take(5)
-    else Vector("No high-confidence exploit yet; use baseline strategy with mild archetype bias.")
+    else
+      Vector(
+        ExploitHint.fromMetrics(
+          ruleId = "baseline-no-exploit",
+          text = "No high-confidence exploit yet; use baseline strategy with mild archetype bias.",
+          deviationRatioFromGto = 0.0,
+          evLosing = 0.0,
+          leakDetectionConfidence = 0.0,
+          exploitEdgeConfidence = 0.0
+        )
+      )
+
+  private def showdownHintsFor(profile: OpponentProfile): Vector[ExploitHint] =
+    val showdowns = profile.showdownHands
+    if showdowns.size < 3 then Vector.empty
+    else
+      val total = showdowns.size.toDouble
+      val classifications = showdowns.map(record => ShowdownHandClass.classify(record.cards))
+      val hints = Vector.newBuilder[ExploitHint]
+      val premiumRatio = classifications.count(_ == ShowdownHandClass.PremiumPair).toDouble / total
+      val weakRatio = classifications.count(_ == ShowdownHandClass.Weak).toDouble / total
+      val pairRatio = showdowns.count(record => ShowdownHandClass.isPair(record.cards)).toDouble / total
+      val responseTotal = profile.raiseResponses.total.toDouble
+      val callVsRaise =
+        if responseTotal <= 0.0 then 0.0
+        else profile.raiseResponses.calls / responseTotal
+      val callRate = profile.signature.values(2)
+      val raiseRate = profile.signature.values(1)
+      val weakShowdownCorroborated =
+        (responseTotal >= 4.0 && callVsRaise >= 0.45) ||
+          (callRate >= 0.18 && raiseRate <= 0.18)
+
+      if premiumRatio >= 0.5 then
+        hints += exploitHint(
+          ruleId = "showdown-premium-heavy",
+          text = "Shows down premium hands frequently; likely playing a tight value-heavy range.",
+          deviationRatioFromGto = upwardDeviationRatio(premiumRatio, gtoBaseline = 0.25),
+          sampleSize = showdowns.size,
+          minSample = 3,
+          evScaleBb = 0.55
+        )
+
+      if showdowns.size >= 5 && weakRatio >= 0.60 && weakShowdownCorroborated then
+        hints += exploitHint(
+          ruleId = "showdown-weak-heavy",
+          text = "Has shown down weak hands; likely stations or bluffs reaching showdown - value bet thinner.",
+          deviationRatioFromGto = compoundDeviationRatio(
+            upwardDeviationRatio(weakRatio, gtoBaseline = 0.25),
+            math.max(
+              upwardDeviationRatio(callVsRaise, gtoBaseline = 0.30),
+              compoundDeviationRatio(
+                upwardDeviationRatio(callRate, gtoBaseline = 0.12),
+                downwardDeviationRatio(raiseRate, gtoBaseline = 0.22)
+              )
+            )
+          ),
+          sampleSize = showdowns.size,
+          minSample = 5,
+          evScaleBb = 0.8
+        )
+
+      if showdowns.size >= 5 && pairRatio >= 1.0 then
+        hints += exploitHint(
+          ruleId = "showdown-pair-heavy",
+          text = "Showdown history is pair-heavy; range may be set-mining oriented.",
+          deviationRatioFromGto = upwardDeviationRatio(pairRatio, gtoBaseline = 0.20),
+          sampleSize = showdowns.size,
+          minSample = 5,
+          evScaleBb = 0.45
+        )
+
+      hints.result()
+
+  private def exploitHint(
+      ruleId: String,
+      text: String,
+      deviationRatioFromGto: Double,
+      sampleSize: Int,
+      minSample: Int,
+      evScaleBb: Double
+  ): ExploitHint =
+    val normalizedDeviation = clamp01(deviationRatioFromGto)
+    val sampleReliability = clamp01(sampleSize.toDouble / math.max(1.0, minSample.toDouble * 3.0))
+    val detectionConfidence = clamp01(math.sqrt(sampleReliability) * (0.35 + (0.65 * normalizedDeviation)))
+    val exploitEdgeConfidence = clamp01((0.55 * detectionConfidence) + (0.45 * normalizedDeviation))
+    ExploitHint.fromMetrics(
+      ruleId = ruleId,
+      text = text,
+      deviationRatioFromGto = normalizedDeviation,
+      evLosing = evScaleBb * normalizedDeviation * exploitEdgeConfidence,
+      leakDetectionConfidence = detectionConfidence,
+      exploitEdgeConfidence = exploitEdgeConfidence
+    )
+
+  private def upwardDeviationRatio(observed: Double, gtoBaseline: Double): Double =
+    clamp01((observed - gtoBaseline) / math.max(1e-9, 1.0 - gtoBaseline))
+
+  private def downwardDeviationRatio(observed: Double, gtoBaseline: Double): Double =
+    clamp01((gtoBaseline - observed) / math.max(1e-9, gtoBaseline))
+
+  private def compoundDeviationRatio(parts: Double*): Double =
+    if parts.isEmpty then 0.0
+    else clamp01(parts.min)
+
+  private def clamp01(value: Double): Double =
+    if !value.isFinite || value.isNaN then 0.0
+    else math.max(0.0, math.min(1.0, value))
 
   private[history] def eventToGameState(event: PokerEvent): GameState =
     GameState(

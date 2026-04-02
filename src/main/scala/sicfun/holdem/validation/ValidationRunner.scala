@@ -2,7 +2,7 @@ package sicfun.holdem.validation
 
 import sicfun.holdem.engine.RealTimeAdaptiveEngine
 import sicfun.holdem.equity.{TableFormat, TableRanges}
-import sicfun.holdem.history.{HandHistoryImport, HandHistorySite, OpponentProfile}
+import sicfun.holdem.history.{ExploitHint, HandHistoryImport, HandHistorySite, OpponentProfile}
 import sicfun.holdem.model.{PokerActionModel, PokerActionModelArtifactIO}
 import sicfun.holdem.types.{PokerAction, Street}
 import sicfun.holdem.web.HandHistoryReviewServer
@@ -52,6 +52,10 @@ object ValidationRunner:
       (leak, s"${leak.id}_$label")
     // GTO control: no leak, no noise — false positive canary
     leakyPlayers :+ (NoLeak(), "gto-baseline")
+
+  private[validation] def villainStrategyFor(leak: InjectedLeak): VillainStrategy =
+    if leak.id == "gto-baseline" then CfrVillainStrategy(allowHeuristicFallback = false)
+    else EquityBasedStrategy()
 
   def main(args: Array[String]): Unit =
     val config = parseConfig(args)
@@ -120,7 +124,8 @@ object ValidationRunner:
       heroEngine = heroEngine,
       villain = villainPlayer,
       seed = playerSeed,
-      budgetMs = config.budgetMs
+      budgetMs = config.budgetMs,
+      villainStrategy = villainStrategyFor(leak)
     )
 
     // Simulate all hands
@@ -188,15 +193,16 @@ object ValidationRunner:
       val windowHands = parsedHands.take(handsInWindow)
       val profiles = OpponentProfile.fromImportedHands("simulated", windowHands, Set("Hero"))
       profiles.headOption.foreach { profile =>
-        val hints = profile.exploitHints
+        val hints = profile.exploitHintDetails
         val archetype = profile.archetypePosterior.mapEstimate.toString
         lastArchetype = archetype
         if archetypeStableStep.isEmpty && archetype == prevArchetype && prevArchetype.nonEmpty then
           archetypeStableStep = Some(stepIdx)
         prevArchetype = archetype
 
+        val matchedHint = matchingHint(hints, leak.id)
         val detected = hintMatchesLeak(hints, leak.id)
-        val confidence = if detected then 0.8 else 0.1
+        val confidence = math.max(0.1, matchedHint.map(_.leakDetectionConfidence).getOrElse(0.1))
         tracker.recordChunk(stepIdx, detected, confidence, falsePositives = 0)
         // Debug: last step stats for undetected leaks
         if stepIdx == totalSteps - 1 && !detected then
@@ -276,12 +282,48 @@ object ValidationRunner:
     * Uses specific profiler hint phrases — not generic keywords — to avoid
     * false positive matches on normal profiling language.
     */
-  private def hintMatchesLeak(hints: Vector[String], leakId: String): Boolean =
+  private def hintMatchesLeak(hints: Vector[ExploitHint], leakId: String): Boolean =
+    matchingHint(hints, leakId).nonEmpty
+
+  private def matchingHint(hints: Vector[ExploitHint], leakId: String): Option[ExploitHint] =
+    if leakId == "gto-baseline" then
+      val leakIds = Vector("overfold-river-aggression", "overcall-big-bets", "overbluff-turn-barrel",
+        "preflop-too-loose", "preflop-too-tight")
+      leakIds
+        .flatMap(id => matchingHint(hints, id))
+        .sortBy(-_.leakDetectionConfidence)
+        .headOption
+    else
+      val matchingRuleIds = leakId match
+        case "overfold-river-aggression" => Set("overfold-river-aggression")
+        case "overcall-big-bets" => Set("overcall-big-bets", "call-vs-raise", "calling-station-profile", "showdown-weak-heavy")
+        case "overbluff-turn-barrel" => Set("overbluff-turn-barrel")
+        case "passive-big-pots" => Set.empty[String]
+        case "preflop-too-loose" => Set("preflop-too-loose")
+        case "preflop-too-tight" => Set("preflop-too-tight")
+        case _ => Set.empty[String]
+
+      hints
+        .filter(hint => matchingRuleIds.contains(hint.ruleId))
+        .sortBy(-_.leakDetectionConfidence)
+        .headOption
+        .orElse {
+          hints
+            .filter(hint => legacyHintMatchesLeak(Vector(hint.text), leakId))
+            .sortBy(-_.leakDetectionConfidence)
+            .headOption
+        }
+
+  private def legacyHintMatchesLeak(hints: Vector[String], leakId: String): Boolean =
     leakId match
       case "overfold-river-aggression" =>
         hints.exists(_.contains("Over-folds on the river"))
       case "overcall-big-bets" =>
-        hints.exists(h => h.contains("calling station") || h.contains("Calls too often facing large bets"))
+        hints.exists(h =>
+          h.contains("calling station") ||
+            h.contains("Calls too often facing large bets") ||
+            h.contains("shown down weak hands")
+        )
       case "overbluff-turn-barrel" =>
         hints.exists(_.contains("Very aggressive on the turn"))
       case "passive-big-pots" =>
@@ -296,7 +338,7 @@ object ValidationRunner:
         // False positive check: does the profiler incorrectly match ANY leak pattern?
         val leakIds = Vector("overfold-river-aggression", "overcall-big-bets", "overbluff-turn-barrel",
           "preflop-too-loose", "preflop-too-tight")
-        leakIds.exists(id => hintMatchesLeak(hints, id))
+        leakIds.exists(id => legacyHintMatchesLeak(hints, id))
       case _ => false
 
   private def parseConfig(args: Array[String]): Config =

@@ -50,6 +50,16 @@ class ValidationScorecardTest extends FunSuite:
     val text = ValidationScorecard.format(Vector(r))
     assert(text.contains("NOT DETECTED"))
 
+  test("format shows PASS/FAIL semantics for gto canary"):
+    val passing = result(leakId = "gto-baseline", detected = false, handsToDetect = None)
+    val failing = result(leakId = "gto-baseline", detected = true, handsToDetect = Some(1000))
+    val passText = ValidationScorecard.format(Vector(passing))
+    val failText = ValidationScorecard.format(Vector(failing))
+    assert(passText.contains("False Positive Canary"))
+    assert(passText.contains("PASS"))
+    assert(failText.contains("FAIL"))
+    assert(failText.contains("Hands to false-positive"))
+
   test("format includes aggregate section"):
     val results = Vector(
       result(name = "p1", detected = true, heroNet = 10.0),
@@ -74,6 +84,17 @@ class ValidationScorecardTest extends FunSuite:
     val results = Vector(result(heroNet = 15.0))
     val text = ValidationScorecard.format(results)
     assert(text.contains("CONFIRMED"), "positive winrate should confirm adaptive beats exploitable")
+
+  test("format splits leak detection and canary aggregate counts"):
+    val results = Vector(
+      result(name = "leak-player", leakId = "overcall-big-bets", detected = true, heroNet = 20.0),
+      result(name = "gto-control", leakId = "gto-baseline", detected = false, handsToDetect = None, heroNet = -2.0)
+    )
+    val text = ValidationScorecard.format(results)
+    assert(text.contains("Leak players:     1"))
+    assert(text.contains("Leaks detected:   1/1"))
+    assert(text.contains("GTO canaries passing: 1/1"))
+    assert(text.contains("Hero winrate vs leak players"))
 
   test("format shows negative hero winrate warning"):
     val results = Vector(result(heroNet = -15.0))

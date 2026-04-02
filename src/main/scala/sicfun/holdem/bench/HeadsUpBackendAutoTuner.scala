@@ -2,6 +2,7 @@ package sicfun.holdem.bench
 import sicfun.holdem.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
+import sicfun.holdem.bench.BenchSupport.BatchData
 
 import sicfun.core.HandEvaluator
 
@@ -27,12 +28,6 @@ import java.util.Properties
   *   - Invalidated when the workload signature changes (e.g. different native library version)
   */
 object HeadsUpBackendAutoTuner:
-  private final case class BatchData(
-      packedKeys: Array[Long],
-      keyMaterial: Array[Long]
-  ):
-    def size: Int = packedKeys.length
-
   private final case class CudaConfig(
       blockSize: Int,
       maxChunkMatchups: Int

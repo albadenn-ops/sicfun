@@ -4,15 +4,10 @@ import sicfun.holdem.*
 import sicfun.holdem.model.*
 
 import munit.FunSuite
-import sicfun.core.{BayesianRange, Card, CollapseMetrics, DiscreteDistribution, MultinomialLogistic}
+import sicfun.core.{BayesianRange, CollapseMetrics, DiscreteDistribution, MultinomialLogistic}
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 class PokerPipelineTest extends FunSuite:
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(fail(s"invalid card: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
-
   test("uniform model preserves prior") {
     val villainHands = Seq(hole("Ah", "Kh"), hole("7c", "2d"), hole("Qs", "Jd"))
     val prior = DiscreteDistribution.uniform(villainHands)
