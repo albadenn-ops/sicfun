@@ -30,7 +30,35 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
-/** Embedded HTTP server for hand-history review analysis, auth, and static UI hosting. */
+/** Embedded HTTP server for hand-history review analysis, auth, and static UI hosting.
+  *
+  * Built on `com.sun.net.httpserver` for zero external dependencies. Provides:
+  *
+  * '''API endpoints:'''
+  *   - POST /api/analyze-hand-history — submit a hand history for async analysis
+  *   - GET /api/analyze-hand-history/jobs/{id} — poll for analysis job status/result
+  *   - GET/POST /api/auth/&#42; — local password auth, session management, and OIDC callbacks
+  *   - GET /health — liveness probe (always 200)
+  *   - GET /ready — readiness probe (200 when accepting traffic, 503 when draining/overloaded)
+  *
+  * '''Architecture:'''
+  *   - Analysis jobs are submitted to an [[AnalysisJobStore]] backed by an ArrayBlockingQueue
+  *     and processed by a configurable number of worker threads
+  *   - Rate limiting uses per-client-IP sliding window counters (configurable via X-Forwarded-For)
+  *   - Authentication supports Basic auth (for API clients), session cookies (for web UI),
+  *     and optional OIDC providers (Google) via [[PlatformUserAuth]]
+  *   - Static file serving for the web UI with Content-Security-Policy headers
+  *   - Graceful shutdown: stops accepting new jobs, waits for in-flight analysis, then shuts down
+  *
+  * '''Design decisions:'''
+  *   - Async job model avoids holding HTTP connections during long-running analysis
+  *   - Completed jobs are retained for 15 minutes, then purged by a scheduled cleanup task
+  *   - CSRF protection on session-authenticated mutation endpoints
+  *   - All responses include security headers (CSP, X-Content-Type-Options, X-Frame-Options)
+  *
+  * @see [[HandHistoryReviewService]] for the core analysis logic
+  * @see [[PlatformUserAuth]] for the authentication module
+  */
 object HandHistoryReviewServer:
   private val AnalyzeJobPathPrefix = "/api/analyze-hand-history/jobs/"
   private val AuthMePath = "/api/auth/me"
@@ -66,6 +94,20 @@ object HandHistoryReviewServer:
       password: String
   )
 
+  /** Server configuration with sensible defaults for local development.
+    *
+    * @param host                      bind address (default: 127.0.0.1 for local-only access)
+    * @param port                      HTTP port (default: 8080)
+    * @param staticDir                 directory for serving static UI files
+    * @param maxUploadBytes            maximum request body size for hand history uploads
+    * @param analysisTimeoutMs         per-analysis timeout before a job is marked failed
+    * @param maxConcurrentJobs         number of worker threads for analysis processing
+    * @param maxQueuedJobs             maximum pending jobs before rejecting submissions
+    * @param shutdownGraceMs           grace period for in-flight analysis on shutdown
+    * @param rateLimitSubmitsPerMinute  max analysis submissions per client per minute
+    * @param rateLimitStatusPerMinute   max status polls per client per minute
+    * @param rateLimitClientIpHeader    optional header for client IP (e.g. X-Forwarded-For behind proxy)
+    */
   final case class ServerConfig(
       host: String,
       port: Int,
