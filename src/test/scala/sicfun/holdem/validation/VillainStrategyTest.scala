@@ -129,3 +129,28 @@ class VillainStrategyTest extends FunSuite:
     // Different hands should potentially produce different equilibrium actions
     val distinctActions = allActions.distinct
     assert(distinctActions.nonEmpty, "CfrVillainStrategy must return at least one action")
+
+  test("CfrVillainStrategy caches repeated equivalent solve spots"):
+    val strategy = CfrVillainStrategy(allowHeuristicFallback = false)
+    val gs = GameState(
+      street = Street.Flop,
+      board = flopAK7,
+      pot = 6.0,
+      toCall = 3.0,
+      position = Position.BigBlind,
+      stackSize = 97.0,
+      betHistory = Vector.empty
+    )
+    val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
+
+    val firstAction = strategy.decide(QhQd, gs, candidates, 0.70, new Random(42))
+    val afterFirst = strategy.cacheStatsSnapshot
+    val secondAction = strategy.decide(QhQd, gs, candidates, 0.70, new Random(99))
+    val afterSecond = strategy.cacheStatsSnapshot
+
+    assert(candidates.contains(firstAction), s"first action must remain valid, got $firstAction")
+    assert(candidates.contains(secondAction), s"second action must remain valid, got $secondAction")
+    assertEquals(afterFirst.misses, 1L)
+    assertEquals(afterFirst.hits, 0L)
+    assertEquals(afterSecond.misses, 1L)
+    assertEquals(afterSecond.hits, 1L)

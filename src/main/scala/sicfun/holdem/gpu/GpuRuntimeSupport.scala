@@ -1,5 +1,6 @@
 package sicfun.holdem.gpu
 import sicfun.holdem.*
+import sicfun.holdem.types.ScopedRuntimeProperties
 
 import java.io.File
 import java.util.Locale
@@ -16,7 +17,7 @@ private[holdem] object GpuRuntimeSupport:
 
   /** Returns true when info-level output is enabled. */
   private[holdem] def verbose: Boolean =
-    sys.props.get(VerboseProperty).orElse(sys.env.get(VerboseEnv))
+    resolveNonEmpty(VerboseProperty, VerboseEnv)
       .exists(parseTruthy)
 
   /** Info-level log: only prints when `sicfun.verbose=true`. */
@@ -28,11 +29,17 @@ private[holdem] object GpuRuntimeSupport:
     System.err.println(msg)
 
   def resolveNonEmpty(property: String, env: String): Option[String] =
-    sys.props
-      .get(property)
-      .orElse(sys.env.get(env))
-      .map(_.trim)
-      .filter(_.nonEmpty)
+    ScopedRuntimeProperties.get(property) match
+      case Some(Some(value)) =>
+        Option(value).map(_.trim).filter(_.nonEmpty)
+      case Some(None) =>
+        None
+      case None =>
+        sys.props
+          .get(property)
+          .orElse(sys.env.get(env))
+          .map(_.trim)
+          .filter(_.nonEmpty)
 
   def resolveNonEmptyLower(property: String, env: String): Option[String] =
     resolveNonEmpty(property, env).map(_.toLowerCase(Locale.ROOT))

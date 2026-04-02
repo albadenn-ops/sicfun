@@ -3,6 +3,7 @@ import sicfun.holdem.types.*
 
 import sicfun.core.{Card, Rank, Suit, DiscreteDistribution}
 
+/** Parser for poker range notations (`AKs`, `JJ+`, `A5s-A2s`, weighted tokens, etc.). */
 object RangeParser:
   enum Suitedness:
     case Any, Suited, Offsuit

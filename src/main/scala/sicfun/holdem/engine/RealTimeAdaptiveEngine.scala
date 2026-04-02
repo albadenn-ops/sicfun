@@ -148,6 +148,11 @@ final case class AdaptiveDecisionResult(
   *  - learns opponent archetype online from observed response-to-raise behavior
   *  - caches expensive posterior inference for repeated identical contexts
   *  - enforces a simple per-decision latency budget by scaling equity trials
+  *
+  * Latency policy is asymmetric by design:
+  * - Inference can be short-circuited to a compact per-position posterior under a
+  *   strict budget/uniform-model/no-DDRE/no-showdown-history gate.
+  * - Recommendation quality is then scaled via equity trial count.
   */
 final class RealTimeAdaptiveEngine(
     tableRanges: TableRanges,
@@ -356,6 +361,10 @@ final class RealTimeAdaptiveEngine(
   private def blendedRaiseResponse(posterior: ArchetypePosterior): VillainResponseProfile =
     ArchetypeLearning.blendedRaiseResponse(posterior)
 
+  /** Scales equity Monte Carlo trials to fit the remaining decision budget.
+    *
+    * `None` means "use full quality defaults". A budget `<= 1ms` forces the minimum.
+    */
   private def effectiveEquityTrials(
       decisionBudgetMillis: Option[Long],
       inferenceElapsedMs: Long
@@ -376,6 +385,11 @@ final class RealTimeAdaptiveEngine(
       case Some(budget) if budget <= 1L => 1
       case _ => bunchingTrials
 
+  /** Bounded cache lookup for inferred posteriors.
+    *
+    * Keys intentionally include pre-hashed observations/showdown history to keep
+    * lookup overhead stable and avoid storing large vectors in the map.
+    */
   private def cachedPosteriorInference(
       key: InferenceCacheKey,
       hero: HoleCards,
@@ -502,6 +516,10 @@ final class RealTimeAdaptiveEngine(
         i += 1
       DiscreteDistribution(kept.result()).normalized
 
+  /** Optional CFR baseline blend with two trust gates:
+    * 1. local exploitability gate (whether baseline is trusted)
+    * 2. action-regret guardrail (whether blended choice drifts too far from CFR best)
+    */
   private def maybeBlendWithEquilibriumBaseline(
       hero: HoleCards,
       state: GameState,

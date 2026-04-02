@@ -18,6 +18,10 @@ import java.util.concurrent.atomic.AtomicReference
 object HeadsUpRangeGpuRuntime:
   private val ProviderProperty = "sicfun.gpu.provider"
   private val ProviderEnv = "sicfun_GPU_PROVIDER"
+  private val NativePathProperty = "sicfun.gpu.native.path"
+  private val NativePathEnv = "sicfun_GPU_NATIVE_PATH"
+  private val NativeLibProperty = "sicfun.gpu.native.lib"
+  private val NativeLibEnv = "sicfun_GPU_NATIVE_LIB"
   private val RangeAutoTuneProperty = "sicfun.gpu.range.autotune"
   private val RangeAutoTuneEnv = "sicfun_GPU_RANGE_AUTOTUNE"
   private val RangeAutoTuneCachePathProperty = "sicfun.gpu.range.autotune.cachePath"
@@ -28,6 +32,7 @@ object HeadsUpRangeGpuRuntime:
   private val RangeNativeMaxChunkHeroesEnv = "sicfun_GPU_RANGE_CUDA_MAX_CHUNK_HEROES"
   private val RangeNativeMemoryPathProperty = "sicfun.gpu.native.range.memoryPath"
   private val RangeNativeMemoryPathEnv = "sicfun_GPU_RANGE_MEMORY_PATH"
+  private val DefaultNativeLibrary = "sicfun_gpu_kernel"
   private val RangeAutoTuneCacheVersion = "1"
   private val DefaultRangeAutoTuneCachePath = "data/headsup-range-autotune.properties"
   private val appliedRangeTuneFingerprintRef = new AtomicReference[String](null)
@@ -190,13 +195,16 @@ object HeadsUpRangeGpuRuntime:
       if deviceCount <= 0 then ()
       else
         val boundedDeviceIndex = math.max(0, math.min(deviceIndex, deviceCount - 1))
+        val cacheFile = resolvedRangeAutoTuneCacheFile
+        val cacheMtime = if cacheFile.isFile then cacheFile.lastModified() else 0L
         val fingerprint = safeCudaDeviceFingerprint(boundedDeviceIndex)
         if fingerprint.isEmpty then ()
         else
-          val appliedKey = s"$boundedDeviceIndex|$fingerprint"
+          val appliedKey =
+            s"$boundedDeviceIndex|$fingerprint|${cacheFile.getAbsolutePath}|$cacheMtime|$configuredNativeLibraryIdentity"
           if appliedRangeTuneFingerprintRef.get() == appliedKey then ()
           else
-            loadRangeAutoTuneDecision(resolvedRangeAutoTuneCacheFile, boundedDeviceIndex, fingerprint) match
+            loadRangeAutoTuneDecision(cacheFile, boundedDeviceIndex, fingerprint) match
               case Some(decision) =>
                 sys.props.update(RangeNativeBlockSizeProperty, decision.blockSize.toString)
                 sys.props.update(RangeNativeMaxChunkHeroesProperty, decision.maxChunkHeroes.toString)
@@ -230,37 +238,40 @@ object HeadsUpRangeGpuRuntime:
       val version = Option(props.getProperty("version")).map(_.trim).getOrElse("")
       if version != RangeAutoTuneCacheVersion then None
       else
-        val count = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("device.count")).getOrElse(0)
-        if count <= 0 then None
+        val cachedNativeLibraryIdentity = Option(props.getProperty("nativeLibraryIdentity")).map(_.trim).getOrElse("")
+        if cachedNativeLibraryIdentity.isEmpty || cachedNativeLibraryIdentity != configuredNativeLibraryIdentity then None
         else
-          boundary:
-            var idx = 0
-            while idx < count do
-              val prefix = s"device.$idx."
-              val cachedIndex =
-                GpuRuntimeSupport.parseNonNegativeIntOpt(props.getProperty(s"${prefix}index")).getOrElse(-1)
-              val cachedFingerprint = Option(props.getProperty(s"${prefix}fingerprint")).map(_.trim).getOrElse("")
-              if cachedIndex == deviceIndex && cachedFingerprint == fingerprint then
-                val blockSizeOpt = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}blockSize"))
-                val maxChunkOpt = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunkHeroes"))
-                val memoryPathOpt =
-                  Option(props.getProperty(s"${prefix}memoryPath"))
-                    .map(_.trim.toLowerCase)
-                    .filter(path => path == "global" || path == "readonly" || path == "read-only" || path == "ldg")
-                    .map {
-                      case "read-only" | "ldg" => "readonly"
-                      case other => other
-                    }
-                if blockSizeOpt.nonEmpty && maxChunkOpt.nonEmpty && memoryPathOpt.nonEmpty then
-                  break(Some(
-                    RangeAutoTuneDecision(
-                      blockSize = blockSizeOpt.get,
-                      maxChunkHeroes = maxChunkOpt.get,
-                      memoryPath = memoryPathOpt.get
-                    )
-                  ))
-              idx += 1
-            None
+          val count = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("device.count")).getOrElse(0)
+          if count <= 0 then None
+          else
+            boundary:
+              var idx = 0
+              while idx < count do
+                val prefix = s"device.$idx."
+                val cachedIndex =
+                  GpuRuntimeSupport.parseNonNegativeIntOpt(props.getProperty(s"${prefix}index")).getOrElse(-1)
+                val cachedFingerprint = Option(props.getProperty(s"${prefix}fingerprint")).map(_.trim).getOrElse("")
+                if cachedIndex == deviceIndex && cachedFingerprint == fingerprint then
+                  val blockSizeOpt = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}blockSize"))
+                  val maxChunkOpt = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunkHeroes"))
+                  val memoryPathOpt =
+                    Option(props.getProperty(s"${prefix}memoryPath"))
+                      .map(_.trim.toLowerCase)
+                      .filter(path => path == "global" || path == "readonly" || path == "read-only" || path == "ldg")
+                      .map {
+                        case "read-only" | "ldg" => "readonly"
+                        case other => other
+                      }
+                  if blockSizeOpt.nonEmpty && maxChunkOpt.nonEmpty && memoryPathOpt.nonEmpty then
+                    break(Some(
+                      RangeAutoTuneDecision(
+                        blockSize = blockSizeOpt.get,
+                        maxChunkHeroes = maxChunkOpt.get,
+                        memoryPath = memoryPathOpt.get
+                      )
+                    ))
+                idx += 1
+              None
 
   private def resolvedRangeAutoTuneCacheFile: File =
     GpuRuntimeSupport.resolveFile(
@@ -289,6 +300,16 @@ object HeadsUpRangeGpuRuntime:
     try Option(HeadsUpGpuNativeBindings.cudaDeviceInfo(deviceIndex)).map(_.trim).getOrElse("")
     catch
       case _: Throwable => ""
+
+  private def configuredNativeLibraryIdentity: String =
+    GpuRuntimeSupport.resolveNonEmpty(NativePathProperty, NativePathEnv) match
+      case Some(path) =>
+        val file = new File(path)
+        val mtime = if file.exists() then file.lastModified() else 0L
+        s"path=${file.getAbsolutePath}|mtime=$mtime"
+      case None =>
+        val lib = GpuRuntimeSupport.resolveNonEmpty(NativeLibProperty, NativeLibEnv).getOrElse(DefaultNativeLibrary)
+        s"lib=$lib"
 
   private def fromNativeArrays(
       wins: Array[Float],

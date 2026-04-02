@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Locale
 
+/** Canonical remembered-player identity record used across aliases/profiles. */
 final case class RememberedPlayer(
     playerUid: String,
     canonicalSite: String,
@@ -21,6 +22,7 @@ final case class RememberedPlayer(
   modelUid.foreach(value => require(value.trim.nonEmpty, "modelUid must be non-empty when present"))
   behaviorUid.foreach(value => require(value.trim.nonEmpty, "behaviorUid must be non-empty when present"))
 
+/** Alias mapping from site-local name to canonical player UID. */
 final case class PlayerAlias(
     site: String,
     playerName: String,
@@ -31,6 +33,7 @@ final case class PlayerAlias(
   require(playerName.trim.nonEmpty, "playerName must be non-empty")
   require(playerUid.trim.nonEmpty, "playerUid must be non-empty")
 
+/** Player-level collapse assertion (`alias -> canonical`). */
 final case class PlayerCollapse(
     aliasPlayerUid: String,
     canonicalPlayerUid: String,
@@ -41,6 +44,7 @@ final case class PlayerCollapse(
   require(canonicalPlayerUid.trim.nonEmpty, "canonicalPlayerUid must be non-empty")
   require(assertedAtEpochMillis >= 0L, "assertedAtEpochMillis must be non-negative")
 
+/** Profile-level collapse assertion (`alias -> canonical`). */
 final case class ProfileCollapse(
     aliasProfileUid: String,
     canonicalProfileUid: String,
@@ -51,6 +55,7 @@ final case class ProfileCollapse(
   require(canonicalProfileUid.trim.nonEmpty, "canonicalProfileUid must be non-empty")
   require(assertedAtEpochMillis >= 0L, "assertedAtEpochMillis must be non-negative")
 
+/** Stable behavior fingerprint used for identity fallback and dedup support. */
 final case class BehaviorFingerprint(
     uid: String,
     payload: String
@@ -58,6 +63,7 @@ final case class BehaviorFingerprint(
   require(uid.trim.nonEmpty, "uid must be non-empty")
   require(payload.trim.nonEmpty, "payload must be non-empty")
 
+/** Identity normalization and deterministic UID/fingerprint derivation helpers. */
 object OpponentIdentity:
   val SicfunLocalSite = "sicfun@localhost"
 

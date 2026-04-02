@@ -49,7 +49,6 @@ constexpr int kMaxRankValue = 14;           // Rank encoding: 14 = ace.
 constexpr int kHoleCardsCount = 1326;       // C(52,2) canonical hole-card pairs.
 constexpr int kRemainingAfterHoleCards = 48; // 52 - 4 (two hero + two villain).
 constexpr int kBoardCardCount = 5;          // Community board cards.
-constexpr int kCombos7Of5Count = 21;        // C(7,5) five-card sub-hand combos.
 constexpr int kWorkChunkSize = 8;           // Matchups per atomic work-steal chunk.
 constexpr int kIdBits = 11;
 constexpr int kIdMask = (1 << kIdBits) - 1;
@@ -60,31 +59,6 @@ constexpr jint kEngineCpu = 1;
 std::atomic<jint> g_last_engine_code(kEngineUnknown);
 
 int resolve_worker_count(int entries);
-
-// Scala LookupTables.combos7of5 order.
-constexpr std::array<std::array<int, 5>, kCombos7Of5Count> kCombos7Of5 = {{
-    {{0, 1, 2, 3, 4}},
-    {{0, 1, 2, 3, 5}},
-    {{0, 1, 2, 3, 6}},
-    {{0, 1, 2, 4, 5}},
-    {{0, 1, 2, 4, 6}},
-    {{0, 1, 2, 5, 6}},
-    {{0, 1, 3, 4, 5}},
-    {{0, 1, 3, 4, 6}},
-    {{0, 1, 3, 5, 6}},
-    {{0, 1, 4, 5, 6}},
-    {{0, 2, 3, 4, 5}},
-    {{0, 2, 3, 4, 6}},
-    {{0, 2, 3, 5, 6}},
-    {{0, 2, 4, 5, 6}},
-    {{0, 3, 4, 5, 6}},
-    {{1, 2, 3, 4, 5}},
-    {{1, 2, 3, 4, 6}},
-    {{1, 2, 3, 5, 6}},
-    {{1, 2, 4, 5, 6}},
-    {{1, 3, 4, 5, 6}},
-    {{2, 3, 4, 5, 6}},
-}};
 
 struct HoleCards {
   uint8_t first;
@@ -139,7 +113,86 @@ const std::array<HoleCards, kHoleCardsCount>& hole_cards_lookup() {
   return lookup;
 }
 
-inline uint32_t encode_score(const int category, const int* __restrict__ tiebreak, const int tiebreak_size) {
+/* ---- Bitmask-based 7-card hand evaluator --------------------------------- */
+/* Single-pass evaluation using rank/suit bitmasks — replaces the O(21) C(7,5)
+   subset enumeration with direct mask analysis. Identical algorithm to
+   HoldemPostflopNativeBindings. */
+
+inline uint16_t card_rank_bit(const int card_id) {
+  return static_cast<uint16_t>(1) << static_cast<uint16_t>(card_id % kRanksPerSuit);
+}
+
+struct EvalState {
+  uint8_t rank_counts[kMaxRankValue + 1] = {};
+  uint8_t suit_counts[4] = {0, 0, 0, 0};
+  uint16_t rank_mask = 0;
+  uint16_t suit_rank_mask[4] = {0, 0, 0, 0};
+  uint16_t pair_mask = 0;
+  uint16_t trip_mask = 0;
+  uint16_t quad_mask = 0;
+};
+
+inline void add_card_to_state(EvalState& state, const int card) {
+  const int rank = card_rank(card);
+  const int suit = card_suit(card);
+  const uint16_t bit = card_rank_bit(card);
+  const uint8_t count = static_cast<uint8_t>(state.rank_counts[rank] + 1);
+  state.rank_counts[rank] = count;
+  ++state.suit_counts[suit];
+  state.rank_mask = static_cast<uint16_t>(state.rank_mask | bit);
+  state.suit_rank_mask[suit] = static_cast<uint16_t>(state.suit_rank_mask[suit] | bit);
+  if (count >= 2) {
+    state.pair_mask = static_cast<uint16_t>(state.pair_mask | bit);
+  }
+  if (count >= 3) {
+    state.trip_mask = static_cast<uint16_t>(state.trip_mask | bit);
+  }
+  if (count == 4) {
+    state.quad_mask = static_cast<uint16_t>(state.quad_mask | bit);
+  }
+}
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+static inline int popcount_16(uint16_t x) { return static_cast<int>(__popcnt16(x)); }
+static inline int highest_bit_index_16(uint16_t x) {
+  if (x == 0) return -1;
+  unsigned long idx;
+  _BitScanReverse(&idx, static_cast<unsigned long>(x));
+  return static_cast<int>(idx);
+}
+#else
+static inline int popcount_16(uint16_t x) { return __builtin_popcount(x); }
+static inline int highest_bit_index_16(uint16_t x) {
+  if (x == 0) return -1;
+  return 31 - __builtin_clz(static_cast<unsigned int>(x));
+}
+#endif
+
+inline int highest_rank_from_mask(const uint16_t mask) {
+  const int bit = highest_bit_index_16(mask);
+  return bit >= 0 ? (bit + kMinRankValue) : 0;
+}
+
+inline int straight_high_from_rank_mask(const uint16_t rank_mask) {
+  const uint16_t run = static_cast<uint16_t>(
+      rank_mask &
+      static_cast<uint16_t>(rank_mask >> 1) &
+      static_cast<uint16_t>(rank_mask >> 2) &
+      static_cast<uint16_t>(rank_mask >> 3) &
+      static_cast<uint16_t>(rank_mask >> 4));
+  const int start_bit = highest_bit_index_16(run);
+  if (start_bit >= 0) {
+    return start_bit + 6;
+  }
+  const uint16_t wheel_mask =
+      (static_cast<uint16_t>(1) << 12) | (static_cast<uint16_t>(1) << 3) |
+      (static_cast<uint16_t>(1) << 2) | (static_cast<uint16_t>(1) << 1) |
+      (static_cast<uint16_t>(1) << 0);
+  return ((rank_mask & wheel_mask) == wheel_mask) ? 5 : 0;
+}
+
+inline uint32_t encode_score(const int category, const int* tiebreak, const int tiebreak_size) {
   uint32_t score = static_cast<uint32_t>(category) << 24;
   for (int i = 0; i < tiebreak_size && i < 5; ++i) {
     score |= (static_cast<uint32_t>(tiebreak[i] & 0x0F) << (20 - (i * 4)));
@@ -147,144 +200,129 @@ inline uint32_t encode_score(const int category, const int* __restrict__ tiebrea
   return score;
 }
 
-uint32_t evaluate5_score(const int* __restrict__ cards) {
-  int ranks[5];
-  int suits[5];
-  int rank_counts[kMaxRankValue + 1] = {};
-  for (int i = 0; i < 5; ++i) {
-    ranks[i] = card_rank(cards[i]);
-    suits[i] = card_suit(cards[i]);
-    ++rank_counts[ranks[i]];
-  }
-
-  bool is_flush = true;
-  for (int i = 1; i < 5; ++i) {
-    if (suits[i] != suits[0]) {
-      is_flush = false;
+uint32_t evaluate7_score_from_masks(
+    const uint16_t rank_mask,
+    const uint16_t pair_mask,
+    const uint16_t trip_mask,
+    const uint16_t quad_mask,
+    const uint8_t* __restrict__ suit_counts,
+    const uint16_t* __restrict__ suit_rank_mask) {
+  int flush_suit = -1;
+  for (int suit = 0; suit < 4; ++suit) {
+    if (suit_counts[suit] >= 5) {
+      flush_suit = suit;
       break;
     }
   }
 
-  int distinct = 0;
-  for (int rank = kMinRankValue; rank <= kMaxRankValue; ++rank) {
-    if (rank_counts[rank] > 0) {
-      ++distinct;
+  int tiebreak[5] = {0, 0, 0, 0, 0};
+  if (flush_suit >= 0) {
+    const int straight_flush_high = straight_high_from_rank_mask(suit_rank_mask[flush_suit]);
+    if (straight_flush_high > 0) {
+      tiebreak[0] = straight_flush_high;
+      return encode_score(8, tiebreak, 1);
     }
   }
 
-  int straight_high = 0;
-  if (distinct == 5) {
-    for (int high = kMaxRankValue; high >= 5; --high) {
-      if (rank_counts[high] > 0 && rank_counts[high - 1] > 0 && rank_counts[high - 2] > 0 &&
-          rank_counts[high - 3] > 0 && rank_counts[high - 4] > 0) {
-        straight_high = high;
-        break;
-      }
-    }
-    if (straight_high == 0 && rank_counts[14] > 0 && rank_counts[5] > 0 && rank_counts[4] > 0 &&
-        rank_counts[3] > 0 && rank_counts[2] > 0) {
-      straight_high = 5;
+  if (quad_mask != 0) {
+    const int quad_rank = highest_rank_from_mask(quad_mask);
+    const uint16_t quad_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(quad_rank - kMinRankValue);
+    const int kicker = highest_rank_from_mask(static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~quad_bit)));
+    tiebreak[0] = quad_rank;
+    tiebreak[1] = kicker;
+    return encode_score(7, tiebreak, 2);
+  }
+
+  if (trip_mask != 0) {
+    const int top_trip_rank = highest_rank_from_mask(trip_mask);
+    const uint16_t top_trip_bit =
+        static_cast<uint16_t>(1) << static_cast<uint16_t>(top_trip_rank - kMinRankValue);
+    const uint16_t other_trips = static_cast<uint16_t>(trip_mask & static_cast<uint16_t>(~top_trip_bit));
+    const uint16_t full_house_candidates =
+        other_trips != 0 ? other_trips : static_cast<uint16_t>(pair_mask & static_cast<uint16_t>(~top_trip_bit));
+    if (full_house_candidates != 0) {
+      tiebreak[0] = top_trip_rank;
+      tiebreak[1] = highest_rank_from_mask(full_house_candidates);
+      return encode_score(6, tiebreak, 2);
     }
   }
 
-  struct Group {
-    int count;
-    int rank;
-  };
-  Group groups[5];
-  int group_count = 0;
-  for (int rank = kMaxRankValue; rank >= kMinRankValue; --rank) {
-    if (rank_counts[rank] > 0) {
-      groups[group_count++] = Group{rank_counts[rank], rank};
+  if (flush_suit >= 0) {
+    uint16_t mask = suit_rank_mask[flush_suit];
+    for (int idx = 0; idx < 5; ++idx) {
+      const int rank = highest_rank_from_mask(mask);
+      tiebreak[idx] = rank;
+      const uint16_t bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(rank - kMinRankValue);
+      mask = static_cast<uint16_t>(mask & static_cast<uint16_t>(~bit));
     }
-  }
-  // Insertion sort — group_count is 2..5; avoids std::sort overhead entirely.
-  for (int gi = 1; gi < group_count; ++gi) {
-    const Group key = groups[gi];
-    int gj = gi - 1;
-    while (gj >= 0 &&
-           (groups[gj].count < key.count ||
-            (groups[gj].count == key.count && groups[gj].rank < key.rank))) {
-      groups[gj + 1] = groups[gj];
-      --gj;
-    }
-    groups[gj + 1] = key;
+    return encode_score(5, tiebreak, 5);
   }
 
-  int tiebreak[5] = {};
-  if (is_flush && straight_high > 0) {
-    tiebreak[0] = straight_high;
-    return encode_score(8, tiebreak, 1);  // StraightFlush
-  }
-  if (group_count == 2 && groups[0].count == 4) {
-    tiebreak[0] = groups[0].rank;
-    tiebreak[1] = groups[1].rank;
-    return encode_score(7, tiebreak, 2);  // FourOfKind
-  }
-  if (group_count == 2 && groups[0].count == 3 && groups[1].count == 2) {
-    tiebreak[0] = groups[0].rank;
-    tiebreak[1] = groups[1].rank;
-    return encode_score(6, tiebreak, 2);  // FullHouse
-  }
-  if (is_flush) {
-    int idx = 0;
-    for (int rank = kMaxRankValue; rank >= kMinRankValue; --rank) {
-      const int copies = rank_counts[rank];
-      for (int c = 0; c < copies; ++c) {
-        tiebreak[idx++] = rank;
-      }
-    }
-    return encode_score(5, tiebreak, 5);  // Flush
-  }
+  const int straight_high = straight_high_from_rank_mask(rank_mask);
   if (straight_high > 0) {
     tiebreak[0] = straight_high;
-    return encode_score(4, tiebreak, 1);  // Straight
+    return encode_score(4, tiebreak, 1);
   }
-  if (group_count == 3 && groups[0].count == 3) {
-    tiebreak[0] = groups[0].rank;
-    int idx = 1;
-    for (int g = 1; g < group_count; ++g) {
-      tiebreak[idx++] = groups[g].rank;
-    }
-    return encode_score(3, tiebreak, 3);  // ThreeOfKind
+
+  if (trip_mask != 0) {
+    const int trip_rank = highest_rank_from_mask(trip_mask);
+    const uint16_t trip_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(trip_rank - kMinRankValue);
+    uint16_t kick_mask = static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~trip_bit));
+    tiebreak[0] = trip_rank;
+    tiebreak[1] = highest_rank_from_mask(kick_mask);
+    kick_mask = static_cast<uint16_t>(
+        kick_mask & static_cast<uint16_t>(~(static_cast<uint16_t>(1) << static_cast<uint16_t>(tiebreak[1] - kMinRankValue))));
+    tiebreak[2] = highest_rank_from_mask(kick_mask);
+    return encode_score(3, tiebreak, 3);
   }
-  if (group_count == 3 && groups[0].count == 2 && groups[1].count == 2) {
-    tiebreak[0] = groups[0].rank;
-    tiebreak[1] = groups[1].rank;
-    tiebreak[2] = groups[2].rank;
-    return encode_score(2, tiebreak, 3);  // TwoPair
+
+  if (popcount_16(pair_mask) >= 2) {
+    const int high_pair = highest_rank_from_mask(pair_mask);
+    const uint16_t high_pair_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(high_pair - kMinRankValue);
+    const uint16_t remaining_pairs = static_cast<uint16_t>(pair_mask & static_cast<uint16_t>(~high_pair_bit));
+    const int low_pair = highest_rank_from_mask(remaining_pairs);
+    const uint16_t low_pair_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(low_pair - kMinRankValue);
+    const int kicker = highest_rank_from_mask(
+        static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~(high_pair_bit | low_pair_bit))));
+    tiebreak[0] = high_pair;
+    tiebreak[1] = low_pair;
+    tiebreak[2] = kicker;
+    return encode_score(2, tiebreak, 3);
   }
-  if (group_count == 4 && groups[0].count == 2) {
-    tiebreak[0] = groups[0].rank;
-    int idx = 1;
-    for (int g = 1; g < group_count; ++g) {
-      tiebreak[idx++] = groups[g].rank;
-    }
-    return encode_score(1, tiebreak, 4);  // OnePair
+
+  if (pair_mask != 0) {
+    const int pair_rank = highest_rank_from_mask(pair_mask);
+    const uint16_t pair_bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(pair_rank - kMinRankValue);
+    uint16_t kick_mask = static_cast<uint16_t>(rank_mask & static_cast<uint16_t>(~pair_bit));
+    tiebreak[0] = pair_rank;
+    tiebreak[1] = highest_rank_from_mask(kick_mask);
+    kick_mask = static_cast<uint16_t>(
+        kick_mask & static_cast<uint16_t>(~(static_cast<uint16_t>(1) << static_cast<uint16_t>(tiebreak[1] - kMinRankValue))));
+    tiebreak[2] = highest_rank_from_mask(kick_mask);
+    kick_mask = static_cast<uint16_t>(
+        kick_mask & static_cast<uint16_t>(~(static_cast<uint16_t>(1) << static_cast<uint16_t>(tiebreak[2] - kMinRankValue))));
+    tiebreak[3] = highest_rank_from_mask(kick_mask);
+    return encode_score(1, tiebreak, 4);
   }
-  int idx = 0;
-  for (int rank = kMaxRankValue; rank >= kMinRankValue; --rank) {
-    if (rank_counts[rank] > 0) {
-      tiebreak[idx++] = rank;
-    }
+
+  uint16_t mask = rank_mask;
+  for (int idx = 0; idx < 5; ++idx) {
+    const int rank = highest_rank_from_mask(mask);
+    tiebreak[idx] = rank;
+    const uint16_t bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(rank - kMinRankValue);
+    mask = static_cast<uint16_t>(mask & static_cast<uint16_t>(~bit));
   }
-  return encode_score(0, tiebreak, 5);  // HighCard
+  return encode_score(0, tiebreak, 5);
 }
 
-uint32_t evaluate7_score(const int* __restrict__ cards) {
-  int five_cards[5];
-  uint32_t best = 0;
-  for (int c = 0; c < kCombos7Of5Count; ++c) {
-    const auto& combo = kCombos7Of5[static_cast<size_t>(c)];
-    for (int i = 0; i < 5; ++i) {
-      five_cards[i] = cards[combo[static_cast<size_t>(i)]];
-    }
-    const uint32_t score = evaluate5_score(five_cards);
-    if (score > best) {
-      best = score;
-    }
-  }
-  return best;
+inline uint32_t evaluate_state_score(const EvalState& state) {
+  return evaluate7_score_from_masks(
+      state.rank_mask,
+      state.pair_mask,
+      state.trip_mask,
+      state.quad_mask,
+      state.suit_counts,
+      state.suit_rank_mask);
 }
 
 void fill_remaining_deck(
@@ -307,20 +345,6 @@ void fill_remaining_deck(
   }
 }
 
-inline int compare_showdown(
-    const int hero_first,
-    const int hero_second,
-    const int villain_first,
-    const int villain_second,
-    const int* __restrict__ board) {
-  int hero_cards[7] = {hero_first, hero_second, board[0], board[1], board[2], board[3], board[4]};
-  int villain_cards[7] = {
-      villain_first, villain_second, board[0], board[1], board[2], board[3], board[4]};
-  const uint32_t hero_score = evaluate7_score(hero_cards);
-  const uint32_t villain_score = evaluate7_score(villain_cards);
-  return static_cast<int>(hero_score > villain_score) - static_cast<int>(hero_score < villain_score);
-}
-
 inline uint64_t mix64(uint64_t value) {
   uint64_t z = value + 0x9E3779B97F4A7C15ULL;
   z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -339,8 +363,14 @@ EquityResultNative compute_monte_carlo_equity(
   int remaining[kRemainingAfterHoleCards];
   fill_remaining_deck(hero_first, hero_second, villain_first, villain_second, remaining);
 
+  EvalState hero_base{};
+  add_card_to_state(hero_base, hero_first);
+  add_card_to_state(hero_base, hero_second);
+  EvalState villain_base{};
+  add_card_to_state(villain_base, villain_first);
+  add_card_to_state(villain_base, villain_second);
+
   int shuffled[kRemainingAfterHoleCards];
-  int board[kBoardCardCount];
   int win_count = 0;
   int tie_count = 0;
   int loss_count = 0;
@@ -350,14 +380,20 @@ EquityResultNative compute_monte_carlo_equity(
   uint64_t rng_state = (seed != 0) ? seed : 1ULL;  // xorshift64* requires non-zero state
   for (int trial = 0; trial < trials; ++trial) {
     std::memcpy(shuffled, remaining, sizeof(shuffled));
+    EvalState hero_state = hero_base;
+    EvalState villain_state = villain_base;
     for (int i = 0; i < kBoardCardCount; ++i) {
       const int range = kRemainingAfterHoleCards - i;
       const int j = i + static_cast<int>(xorshift64star(rng_state) % static_cast<uint64_t>(range));
       std::swap(shuffled[i], shuffled[j]);
-      board[i] = shuffled[i];
+      add_card_to_state(hero_state, shuffled[i]);
+      add_card_to_state(villain_state, shuffled[i]);
     }
 
-    const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
+    const uint32_t hero_score = evaluate_state_score(hero_state);
+    const uint32_t villain_score = evaluate_state_score(villain_state);
+    const int cmp = static_cast<int>(hero_score > villain_score) -
+                    static_cast<int>(hero_score < villain_score);
     double outcome = 0.0;
     if (cmp > 0) {
       ++win_count;
@@ -395,27 +431,51 @@ EquityResultNative compute_exact_equity(
   int remaining[kRemainingAfterHoleCards];
   fill_remaining_deck(hero_first, hero_second, villain_first, villain_second, remaining);
 
+  EvalState hero_base{};
+  add_card_to_state(hero_base, hero_first);
+  add_card_to_state(hero_base, hero_second);
+  EvalState villain_base{};
+  add_card_to_state(villain_base, villain_first);
+  add_card_to_state(villain_base, villain_second);
+
   uint64_t win_count = 0;
   uint64_t tie_count = 0;
   uint64_t loss_count = 0;
   uint64_t total = 0;
-  int board[kBoardCardCount];
 
+  // Incremental EvalState building: copy parent state and add one card per
+  // nesting level. Avoids rebuilding 7-card state from scratch each board.
   for (int a = 0; a <= (kRemainingAfterHoleCards - 5); ++a) {
-    board[0] = remaining[a];
+    EvalState hero_a = hero_base;
+    EvalState villain_a = villain_base;
+    add_card_to_state(hero_a, remaining[a]);
+    add_card_to_state(villain_a, remaining[a]);
     for (int b = a + 1; b <= (kRemainingAfterHoleCards - 4); ++b) {
-      board[1] = remaining[b];
+      EvalState hero_ab = hero_a;
+      EvalState villain_ab = villain_a;
+      add_card_to_state(hero_ab, remaining[b]);
+      add_card_to_state(villain_ab, remaining[b]);
       for (int c = b + 1; c <= (kRemainingAfterHoleCards - 3); ++c) {
-        board[2] = remaining[c];
+        EvalState hero_abc = hero_ab;
+        EvalState villain_abc = villain_ab;
+        add_card_to_state(hero_abc, remaining[c]);
+        add_card_to_state(villain_abc, remaining[c]);
         for (int d = c + 1; d <= (kRemainingAfterHoleCards - 2); ++d) {
-          board[3] = remaining[d];
+          EvalState hero_abcd = hero_abc;
+          EvalState villain_abcd = villain_abc;
+          add_card_to_state(hero_abcd, remaining[d]);
+          add_card_to_state(villain_abcd, remaining[d]);
           for (int e = d + 1; e <= (kRemainingAfterHoleCards - 1); ++e) {
-            board[4] = remaining[e];
-            const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
+            EvalState hero_final = hero_abcd;
+            EvalState villain_final = villain_abcd;
+            add_card_to_state(hero_final, remaining[e]);
+            add_card_to_state(villain_final, remaining[e]);
+            const uint32_t hero_score = evaluate_state_score(hero_final);
+            const uint32_t villain_score = evaluate_state_score(villain_final);
             ++total;
-            if (cmp > 0) {
+            if (hero_score > villain_score) {
               ++win_count;
-            } else if (cmp == 0) {
+            } else if (hero_score == villain_score) {
               ++tie_count;
             } else {
               ++loss_count;

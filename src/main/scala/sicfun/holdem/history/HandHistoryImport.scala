@@ -9,6 +9,7 @@ import java.time.format.DateTimeFormatter
 import java.time.{Instant, LocalDateTime, ZoneId, ZoneOffset}
 import scala.collection.mutable
 
+/** Supported external hand-history sources for import normalization. */
 enum HandHistorySite:
   case PokerStars
   case Winamax
@@ -67,6 +68,11 @@ final case class ImportedHand(
   require(buttonSeatNumber > 0, "buttonSeatNumber must be positive")
   require(players.nonEmpty, "players must be non-empty")
 
+/** Parses and normalizes raw hand-history text into SICFUN canonical hand/event structures.
+  *
+  * The importer tolerates site-specific formatting variants and preserves enough context
+  * to replay per-street decision states.
+  */
 object HandHistoryImport:
   private val PokerStarsHeaderPrefix = "PokerStars Hand #"
   private val WinamaxHeaderPrefix = "Winamax Poker -"

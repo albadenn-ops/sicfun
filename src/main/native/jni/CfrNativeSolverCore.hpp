@@ -65,6 +65,10 @@ struct SolveOutput {
   double expected_value_player0 = 0.0;
 };
 
+struct RootSolveOutput {
+  std::vector<double> root_strategy;
+};
+
 struct TreeSpecFixed {
   int iterations = 0;
   int averaging_delay = 0;
@@ -212,6 +216,16 @@ CFR_FORCE_INLINE void regret_matching_fp(
     const int start,
     const int count,
     F* __restrict__ out_strategy) {
+  // Guard against out-of-bounds access if upstream validation is bypassed.
+  if (start < 0 || count <= 0 ||
+      static_cast<size_t>(start + count) > regrets.size()) {
+    // Fallback: uniform strategy.
+    const F uniform = F(1) / static_cast<F>(count > 0 ? count : 1);
+    for (int idx = 0; idx < count; ++idx) {
+      out_strategy[idx] = uniform;
+    }
+    return;
+  }
   F positive_sum = F(0);
   const F* __restrict__ regret_ptr = regrets.data() + start;
   for (int idx = 0; idx < count; ++idx) {
@@ -241,23 +255,66 @@ inline void regret_matching(
 }
 
 template <typename F>
-inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
+struct SolveWorkspace {
+  std::vector<int> infoset_offsets;
+  std::vector<F> cumulative_regret;
+  std::vector<F> cumulative_strategy;
+  std::vector<F> chance_edge_weights;
+};
+
+template <typename F>
+inline void materialize_average_strategy_for_infoset(
+    const TreeSpec& spec,
+    const SolveWorkspace<F>& workspace,
+    const int infoset,
+    double* const out_strategy) {
+  const int start = workspace.infoset_offsets[infoset];
+  const int count = spec.infoset_action_counts[infoset];
+  F sum = F(0);
+  for (int idx = 0; idx < count; ++idx) {
+    sum += workspace.cumulative_strategy[start + idx];
+  }
+  if (sum > F(0)) {
+    const F inv = F(1) / sum;
+    for (int idx = 0; idx < count; ++idx) {
+      out_strategy[idx] = static_cast<double>(workspace.cumulative_strategy[start + idx] * inv);
+    }
+    return;
+  }
+
+  std::array<F, kInlineActionBufferSize> fallback_inline{};
+  std::vector<F> fallback_heap;
+  F* fallback = nullptr;
+  if (count <= kInlineActionBufferSize) {
+    fallback = fallback_inline.data();
+  } else {
+    fallback_heap.assign(static_cast<size_t>(count), F(0));
+    fallback = fallback_heap.data();
+  }
+  regret_matching_fp(workspace.cumulative_regret, start, count, fallback);
+  for (int idx = 0; idx < count; ++idx) {
+    out_strategy[idx] = static_cast<double>(fallback[idx]);
+  }
+}
+
+template <typename F>
+inline int train_impl(const TreeSpec& spec, SolveWorkspace<F>& workspace) {
   const int validation = validate_tree(spec);
   if (validation != kStatusOk) {
     return validation;
   }
 
   const int infoset_count = static_cast<int>(spec.infoset_action_counts.size());
-  std::vector<int> infoset_offsets(infoset_count + 1, 0);
+  workspace.infoset_offsets.assign(infoset_count + 1, 0);
   for (int infoset = 0; infoset < infoset_count; ++infoset) {
-    infoset_offsets[infoset + 1] = infoset_offsets[infoset] + spec.infoset_action_counts[infoset];
+    workspace.infoset_offsets[infoset + 1] =
+        workspace.infoset_offsets[infoset] + spec.infoset_action_counts[infoset];
   }
-  const int strategy_size = infoset_offsets[infoset_count];
-  output.average_strategies.assign(strategy_size, 0.0);
+  const int strategy_size = workspace.infoset_offsets[infoset_count];
 
-  std::vector<F> cumulative_regret(strategy_size, F(0));
-  std::vector<F> cumulative_strategy(strategy_size, F(0));
-  std::vector<F> chance_edge_weights(spec.edge_probabilities.size(), F(0));
+  workspace.cumulative_regret.assign(strategy_size, F(0));
+  workspace.cumulative_strategy.assign(strategy_size, F(0));
+  workspace.chance_edge_weights.assign(spec.edge_probabilities.size(), F(0));
 
   const int node_count = static_cast<int>(spec.node_types.size());
   for (int node = 0; node < node_count; ++node) {
@@ -272,7 +329,8 @@ inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
     }
     const F inv_prob_sum = F(1) / prob_sum;
     for (int edge = start; edge < start + count; ++edge) {
-      chance_edge_weights[edge] = static_cast<F>(spec.edge_probabilities[edge]) * inv_prob_sum;
+      workspace.chance_edge_weights[edge] =
+          static_cast<F>(spec.edge_probabilities[edge]) * inv_prob_sum;
     }
   }
 
@@ -289,7 +347,7 @@ inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
     if (node_type == kNodeChance) {
       F value = F(0);
       for (int edge = start; edge < start + count; ++edge) {
-        const F probability = chance_edge_weights[edge];
+        const F probability = workspace.chance_edge_weights[edge];
         const int child = spec.edge_child_ids[edge];
         value += probability * self(self, child, reach_p0 * probability, reach_p1 * probability, avg_weight);
       }
@@ -297,7 +355,7 @@ inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
     }
 
     const int infoset = spec.node_infosets[node_id];
-    const int infoset_start = infoset_offsets[infoset];
+    const int infoset_start = workspace.infoset_offsets[infoset];
 
     std::array<F, kInlineActionBufferSize> strategy_inline{};
     std::array<F, kInlineActionBufferSize> action_utility_inline{};
@@ -314,7 +372,7 @@ inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
       strategy = strategy_heap.data();
       action_utility = action_utility_heap.data();
     }
-    regret_matching_fp(cumulative_regret, infoset_start, count, strategy);
+    regret_matching_fp(workspace.cumulative_regret, infoset_start, count, strategy);
 
     F node_value = F(0);
     for (int idx = 0; idx < count; ++idx) {
@@ -327,23 +385,28 @@ inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
       node_value += strategy[idx] * action_value;
     }
 
+    const bool accumulate_strategy = avg_weight != 0;
     if (node_type == kNodePlayer0) {
       const F strategy_scale = static_cast<F>(avg_weight) * reach_p0;
       for (int idx = 0; idx < count; ++idx) {
         const F regret_delta = reach_p1 * (action_utility[idx] - node_value);
-        F updated = cumulative_regret[infoset_start + idx] + regret_delta;
+        F updated = workspace.cumulative_regret[infoset_start + idx] + regret_delta;
         updated = spec.cfr_plus ? std::max(updated, F(0)) : updated;
-        cumulative_regret[infoset_start + idx] = updated;
-        cumulative_strategy[infoset_start + idx] += strategy_scale * strategy[idx];
+        workspace.cumulative_regret[infoset_start + idx] = updated;
+        if (accumulate_strategy) {
+          workspace.cumulative_strategy[infoset_start + idx] += strategy_scale * strategy[idx];
+        }
       }
     } else {
       const F strategy_scale = static_cast<F>(avg_weight) * reach_p1;
       for (int idx = 0; idx < count; ++idx) {
         const F regret_delta = reach_p0 * (node_value - action_utility[idx]);
-        F updated = cumulative_regret[infoset_start + idx] + regret_delta;
+        F updated = workspace.cumulative_regret[infoset_start + idx] + regret_delta;
         updated = spec.cfr_plus ? std::max(updated, F(0)) : updated;
-        cumulative_regret[infoset_start + idx] = updated;
-        cumulative_strategy[infoset_start + idx] += strategy_scale * strategy[idx];
+        workspace.cumulative_regret[infoset_start + idx] = updated;
+        if (accumulate_strategy) {
+          workspace.cumulative_strategy[infoset_start + idx] += strategy_scale * strategy[idx];
+        }
       }
     }
     return node_value;
@@ -354,33 +417,27 @@ inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
     (void)cfr(cfr, spec.root_node_id, F(1), F(1), avg_weight);
   }
 
+  return kStatusOk;
+}
+
+template <typename F>
+inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
+  SolveWorkspace<F> workspace;
+  const int status = train_impl(spec, workspace);
+  if (status != kStatusOk) {
+    return status;
+  }
+
+  const int infoset_count = static_cast<int>(spec.infoset_action_counts.size());
+  const int strategy_size = workspace.infoset_offsets[infoset_count];
+  output.average_strategies.assign(strategy_size, 0.0);
+
   for (int infoset = 0; infoset < infoset_count; ++infoset) {
-    const int start = infoset_offsets[infoset];
-    const int count = spec.infoset_action_counts[infoset];
-    F sum = F(0);
-    for (int idx = 0; idx < count; ++idx) {
-      sum += cumulative_strategy[start + idx];
-    }
-    if (sum > F(0)) {
-      const F inv = F(1) / sum;
-      for (int idx = 0; idx < count; ++idx) {
-        output.average_strategies[start + idx] = static_cast<double>(cumulative_strategy[start + idx] * inv);
-      }
-    } else {
-      std::array<F, kInlineActionBufferSize> fallback_inline{};
-      std::vector<F> fallback_heap;
-      F* fallback = nullptr;
-      if (count <= kInlineActionBufferSize) {
-        fallback = fallback_inline.data();
-      } else {
-        fallback_heap.assign(static_cast<size_t>(count), F(0));
-        fallback = fallback_heap.data();
-      }
-      regret_matching_fp(cumulative_regret, start, count, fallback);
-      for (int idx = 0; idx < count; ++idx) {
-        output.average_strategies[start + idx] = static_cast<double>(fallback[idx]);
-      }
-    }
+    materialize_average_strategy_for_infoset(
+        spec,
+        workspace,
+        infoset,
+        output.average_strategies.data() + workspace.infoset_offsets[infoset]);
   }
 
   auto expected_value = [&](auto&& self, const int node_id) -> double {
@@ -394,14 +451,14 @@ inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
     if (node_type == kNodeChance) {
       double value = 0.0;
       for (int edge = start; edge < start + count; ++edge) {
-        const double probability = static_cast<double>(chance_edge_weights[edge]);
+        const double probability = static_cast<double>(workspace.chance_edge_weights[edge]);
         value += probability * self(self, spec.edge_child_ids[edge]);
       }
       return value;
     }
 
     const int infoset = spec.node_infosets[node_id];
-    const int infoset_start = infoset_offsets[infoset];
+    const int infoset_start = workspace.infoset_offsets[infoset];
     double value = 0.0;
     for (int idx = 0; idx < count; ++idx) {
       value += output.average_strategies[infoset_start + idx] *
@@ -416,6 +473,33 @@ inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
 
 inline int solve(const TreeSpec& spec, SolveOutput& output) {
   return solve_impl<double>(spec, output);
+}
+
+template <typename F>
+inline int solve_root_impl(const TreeSpec& spec, const int root_infoset_index, RootSolveOutput& output) {
+  SolveWorkspace<F> workspace;
+  const int status = train_impl(spec, workspace);
+  if (status != kStatusOk) {
+    return status;
+  }
+
+  const int infoset_count = static_cast<int>(spec.infoset_action_counts.size());
+  if (root_infoset_index < 0 || root_infoset_index >= infoset_count) {
+    return kStatusInvalidInfoSetIndex;
+  }
+
+  const int count = spec.infoset_action_counts[root_infoset_index];
+  output.root_strategy.assign(static_cast<size_t>(count), 0.0);
+  materialize_average_strategy_for_infoset(
+      spec,
+      workspace,
+      root_infoset_index,
+      output.root_strategy.data());
+  return kStatusOk;
+}
+
+inline int solve_root(const TreeSpec& spec, const int root_infoset_index, RootSolveOutput& output) {
+  return solve_root_impl<double>(spec, root_infoset_index, output);
 }
 
 inline int validate_tree_fixed(const TreeSpecFixed& spec) {
@@ -690,6 +774,12 @@ CFR_FORCE_INLINE void regret_matching_fixed(
     const int start,
     const int count,
     int* __restrict__ out_strategy_raw) {
+  // Guard against out-of-bounds access if upstream validation is bypassed.
+  if (start < 0 || count <= 0 ||
+      static_cast<size_t>(start + count) > regrets.size()) {
+    write_uniform_probabilities_raw(count > 0 ? count : 0, out_strategy_raw);
+    return;
+  }
   int64_t positive_sum = 0;
   int last_positive = -1;
   for (int idx = 0; idx < count; ++idx) {
@@ -813,7 +903,8 @@ inline int solve_fixed(const TreeSpecFixed& spec, SolveOutputFixed& output) {
           static_cast<int64_t>(multiply_fixed_by_prob_raw(action_value_raw, strategy_raw[idx])));
     }
 
-    // Compute regret deltas and strategy deltas into inline buffers.
+    // Compute regret deltas, and strategy deltas only once averaging activates.
+    const bool accumulate_strategy = avg_weight != 0;
     std::array<int, kInlineActionBufferSize> regret_delta_inline{};
     std::array<int64_t, kInlineActionBufferSize> strategy_delta_inline{};
     std::vector<int> regret_delta_heap;
@@ -825,24 +916,32 @@ inline int solve_fixed(const TreeSpecFixed& spec, SolveOutputFixed& output) {
       strategy_deltas = strategy_delta_inline.data();
     } else {
       regret_delta_heap.assign(static_cast<size_t>(count), 0);
-      strategy_delta_heap.assign(static_cast<size_t>(count), 0);
+      if (accumulate_strategy) {
+        strategy_delta_heap.assign(static_cast<size_t>(count), 0);
+      }
       regret_deltas = regret_delta_heap.data();
-      strategy_deltas = strategy_delta_heap.data();
+      strategy_deltas = accumulate_strategy ? strategy_delta_heap.data() : nullptr;
     }
 
     if (node_type == kNodePlayer0) {
       for (int idx = 0; idx < count; ++idx) {
         regret_deltas[idx] =
             multiply_fixed_by_prob_raw(action_utility_raw[idx] - node_value_raw, reach_p1_raw);
-        strategy_deltas[idx] =
-            static_cast<int64_t>(avg_weight) * static_cast<int64_t>(multiply_prob_raw(reach_p0_raw, strategy_raw[idx]));
+        if (accumulate_strategy) {
+          strategy_deltas[idx] =
+              static_cast<int64_t>(avg_weight) *
+              static_cast<int64_t>(multiply_prob_raw(reach_p0_raw, strategy_raw[idx]));
+        }
       }
     } else {
       for (int idx = 0; idx < count; ++idx) {
         regret_deltas[idx] =
             multiply_fixed_by_prob_raw(node_value_raw - action_utility_raw[idx], reach_p0_raw);
-        strategy_deltas[idx] =
-            static_cast<int64_t>(avg_weight) * static_cast<int64_t>(multiply_prob_raw(reach_p1_raw, strategy_raw[idx]));
+        if (accumulate_strategy) {
+          strategy_deltas[idx] =
+              static_cast<int64_t>(avg_weight) *
+              static_cast<int64_t>(multiply_prob_raw(reach_p1_raw, strategy_raw[idx]));
+        }
       }
     }
 
@@ -850,7 +949,8 @@ inline int solve_fixed(const TreeSpecFixed& spec, SolveOutputFixed& output) {
     while (needs_regret_emergency_rescale(cumulative_regret, regret_deltas, infoset_start, count)) {
       halve_int_array(cumulative_regret, infoset_start, count);
     }
-    while (needs_strategy_emergency_rescale(cumulative_strategy, strategy_deltas, infoset_start, count)) {
+    while (accumulate_strategy &&
+           needs_strategy_emergency_rescale(cumulative_strategy, strategy_deltas, infoset_start, count)) {
       halve_long_array(cumulative_strategy, infoset_start, count);
     }
 
@@ -875,10 +975,12 @@ inline int solve_fixed(const TreeSpecFixed& spec, SolveOutputFixed& output) {
 
     // Apply strategy updates with threshold rescaling.
     bool rescale_strategy = false;
-    for (int idx = 0; idx < count; ++idx) {
-      cumulative_strategy[infoset_start + idx] += strategy_deltas[idx];
-      if (cumulative_strategy[infoset_start + idx] >= kStrategyRescaleThreshold) {
-        rescale_strategy = true;
+    if (accumulate_strategy) {
+      for (int idx = 0; idx < count; ++idx) {
+        cumulative_strategy[infoset_start + idx] += strategy_deltas[idx];
+        if (cumulative_strategy[infoset_start + idx] >= kStrategyRescaleThreshold) {
+          rescale_strategy = true;
+        }
       }
     }
     if (rescale_strategy) {

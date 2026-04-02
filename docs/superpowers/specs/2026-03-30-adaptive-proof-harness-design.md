@@ -1,140 +1,319 @@
 # Adaptive Proof Harness Design
 
+**Date**: 2026-03-30
+**Goal**: add a proof harness that demonstrates the adaptive hero can earn positive EV against supported leak-injected opponents in controlled heads-up play, stays near break-even against a CFR control, and emits parseable hand histories that can be reused for UI and profiling spot checks.
+
 ## Problem
 
-The adaptive player (hero) uses Bayesian range inference and CFR-based GTO solving
-to detect and exploit opponent tendencies. We need a reproducible, growable test
-fixture that proves:
+The repo already has two different simulation paths:
 
-1. The adaptive player can pinpoint each villain's leak during live play
-2. The exploits it attempts actually yield positive EV (or at minimum, it's not a losing player)
-3. The edge comes from exploitation, not variance (GTO controls should be ~break-even)
+- `sicfun.holdem.validation` provides a heads-up leak-injection stack:
+  `HeadsUpSimulator`, `InjectedLeak`, `LeakInjectedVillain`, `VillainStrategy`,
+  and `PokerStarsExporter`.
+- `TexasHoldemPlayingHall` provides the larger multiway hall loop.
 
-The hand history persists as a reusable artifact for web UI tests.
+The original version of this spec tried to prove the claim inside
+`TexasHoldemPlayingHall`, but that path currently has several structural mismatches:
 
-## Table Composition (9 players)
+- observations are keyed by seat position, not stable villain identity
+- `RealTimeAdaptiveEngine` stores one shared archetype posterior, not one per villain
+- `buildTableScenario` activates only a subset of villains per hand
+- hall review export and writers assume a single fresh run, not resumable identity-aware sessions
+- per-villain EV attribution is not defined in multiway pots
 
-| Seat | Role | Baseline | Leak | Severity |
-|------|------|----------|------|----------|
-| Hero | Adaptive player | `RealTimeAdaptiveEngine` (CFR internally) | None | — |
-| Villain01 | Leaker | `EquityBasedStrategy` | `OverfoldsToAggression` | 0.20 |
-| Villain02 | Leaker | `EquityBasedStrategy` | `Overcalls` | 0.25 |
-| Villain03 | Leaker | `EquityBasedStrategy` | `OverbluffsTurnBarrel` | 0.18 |
-| Villain04 | Leaker | `EquityBasedStrategy` | `PassiveInBigPots` | 0.30 |
-| Villain05 | Leaker | `EquityBasedStrategy` | `PreflopTooLoose` | 0.22 |
-| Villain06 | Leaker | `EquityBasedStrategy` | `PreflopTooTight` | 0.15 |
-| Villain07 | Shallow GTO | TAG archetype (`ArchetypeVillainResponder`) | None | — |
-| Villain08 | Validatable GTO | `CfrVillainStrategy` (no fallback) | None | — |
+Because of those constraints, v1 should be a heads-up proof harness built on the
+existing validation package. Multiway hall integration is deferred to v2.
 
-- All 6 leakers have one distinct leak type with varying subtle severities (0.15–0.30)
-- Shallow GTO: TAG archetype via `ArchetypeVillainResponder` — no leak injection path, plays
-  a reasonable GTO approximation. "Decent reg" control.
-- Validatable GTO: full CFR equilibrium, no fallback — "provably GTO" control and false-positive canary
+## V1 Scope
 
-## Seat Reshuffling
+V1 proves four narrower claims:
 
-Every 500 hands:
-- All players reshuffle seat positions randomly
-- All stacks reset to 100bb max buy-in (unlimited buyins)
-- Player names and hero's accumulated reads persist across reshuffles
-- Hero's `RealTimeAdaptiveEngine` observations carry over (knowledge follows identity)
+1. The adaptive hero can earn positive or at least non-losing EV against a supported
+   set of leak-injected villains in heads-up play.
+2. The same hero does not show a large artificial edge against a CFR GTO control.
+3. The harness writes PokerStars-format histories that remain parseable by
+   `HandHistoryImport.parseText()`.
+4. The harness records explicit ground truth for the opponent roster and the EV
+   outcome of each session.
 
-## Approach: Thin Adapter on TexasHoldemPlayingHall
+V1 does **not** attempt to prove:
 
-### PlayingHall Extension
+- stable reads across seat reshuffles in a multiway table
+- per-villain attribution inside multiway pots
+- crash-safe resume of an in-progress adaptive session
+- full end-to-end profiler leak classification for every leak type
 
-Minimal changes to `TexasHoldemPlayingHall`:
+`ValidationRunner` already covers the profiler-oriented side of the validation package.
+`AdaptiveProofHarness` is the EV-oriented counterpart.
 
-1. **New enum case:** `VillainMode.LeakInjected(leakId: String, severity: Double)`
+## V1 Opponent Matrix
 
-2. **Extended `parseVillainModeToken`:** New syntax `leak:<type>:<severity>`:
-   - `leak:overfold:0.20` → `VillainMode.LeakInjected("overfold-river-aggression", 0.20)`
-   - `leak:overcall:0.25` → `VillainMode.LeakInjected("overcall-big-bets", 0.25)`
-   - `leak:turnbluff:0.18` → `VillainMode.LeakInjected("overbluff-turn-barrel", 0.18)`
-   - `leak:passive:0.30` → `VillainMode.LeakInjected("passive-big-pots", 0.30)`
-   - `leak:prefloploose:0.22` → `VillainMode.LeakInjected("preflop-too-loose", 0.22)`
-   - `leak:prefloptight:0.15` → `VillainMode.LeakInjected("preflop-too-tight", 0.15)`
-   - `gto-shallow` → `VillainMode.Archetype(PlayerArchetype.Tag)` with zero noise
+Each opponent is played in an independent heads-up session.
 
-3. **Extended `decideVillain`:** When mode is `LeakInjected`:
-   - Compute equity-vs-random for the villain's hand (MC estimate)
-   - Get GTO baseline action via `EquityBasedStrategy`
-   - Build `SpotContext` from current `GameState` + equity
-   - Pass through `LeakInjectedVillain.decide()` for potential deviation
-   - Requires tracking per-position `ActionLine` for `SpotContext` construction
+| Opponent | Role | Baseline Strategy | Leak | Severity |
+|----------|------|-------------------|------|----------|
+| `Villain01_overfold` | Leaker | `EquityBasedStrategy` | `OverfoldsToAggression` | 0.20 |
+| `Villain02_overcall` | Leaker | `EquityBasedStrategy` | `Overcalls` | 0.25 |
+| `Villain03_turnbluff` | Leaker | `EquityBasedStrategy` | `OverbluffsTurnBarrel` | 0.18 |
+| `Villain04_prefloploose` | Leaker | `EquityBasedStrategy` | `PreflopTooLoose` | 0.22 |
+| `Villain05_prefloptight` | Leaker | `EquityBasedStrategy` | `PreflopTooTight` | 0.15 |
+| `Villain06_gto` | Control | `CfrVillainStrategy(allowHeuristicFallback = false)` | `NoLeak` | 0.0 |
 
-4. **Extended `villainModeLabel` / `villainModeSlug`:** Add cases for new mode
+Dropped from v1:
+
+- `PassiveInBigPots`
+  Reason: the current profiling pipeline already treats it as a known limitation.
+  It is a bad fit for a proof harness whose artifacts are also meant for profiling
+  spot checks.
+- Shallow GTO via `ArchetypeVillainResponder`
+  Reason: it is intentionally stochastic and is not a clean false-positive canary.
+  The full CFR control is the better baseline.
+
+## V1 Session Design
+
+Default session size: `500` hands per opponent.
+
+To avoid a permanent button advantage, each opponent session is split into two legs:
+
+- Leg A: hero on the button for `250` hands
+- Leg B: hero in the big blind for `250` hands
+
+The same `RealTimeAdaptiveEngine` instance is reused across both legs of the same
+opponent session so that adaptation can accumulate within that session.
+
+Each opponent session is otherwise independent:
+
+- one fresh hero engine per opponent
+- one fixed leak definition per opponent
+- one output directory per opponent
+- one aggregate bb/100 result per opponent
+
+This keeps attribution exact and removes the identity problem that exists in the
+multiway hall path.
+
+## V1 Architecture
 
 ### AdaptiveProofHarness
 
 **New file:** `src/main/scala/sicfun/holdem/validation/AdaptiveProofHarness.scala`
 
-Orchestrator that configures, runs, and evaluates the proof.
+Responsibilities:
 
-**Responsibilities:**
+1. Build the fixed opponent roster.
+2. For each opponent, create one persistent `RealTimeAdaptiveEngine`.
+3. Run two simulator legs for that opponent with mirrored seat assignments.
+4. After each hand, feed villain responses to hero raises back into the reused
+   hero engine via `observeVillainResponseToRaise`.
+5. Export per-leg and combined PokerStars histories.
+6. Write a ground-truth manifest and a human-readable report.
 
-1. **Configure 9-player table:** Builds the `--villainPool` string and other PlayingHall args
-2. **Run in 500-hand blocks:** Invokes `TexasHoldemPlayingHall.run()` per block
-3. **Seat reshuffle between blocks:** Random hero position, stacks reset to 100bb
-4. **Ground truth sidecar:** `data/adaptive-proof/ground-truth.json` — villain identities,
-   per-block per-villain chip deltas
-5. **Checkpoint/resume:** `data/adaptive-proof/checkpoint.json` — next hand number, last seed,
-   cumulative stats. New runs derive a fresh seed (not deterministic replay)
-6. **Evaluation report:** Per-villain aggregate bb/100, second-half vs first-half learning signal,
-   GTO control bb/100
+### HeadsUpSimulator changes
 
-### Resume Logic
+`HeadsUpSimulator` is the right base for v1, but it needs explicit session-state
+support rather than just a cosmetic flag:
 
-On startup, if `checkpoint.json` exists:
-- Load accumulated state (hand count, per-villain chip deltas)
-- Derive a new RNG seed from the previous seed + current timestamp
-- Invoke PlayingHall continuing from the next hand number
-- Append to the existing PokerStars export file
+1. Explicit seat assignment for the hero:
+   - support `heroIsButton: Boolean` or equivalent config
+   - derive blind posting, acting order, `GameState.position`, and the `villainPos`
+     passed into `RealTimeAdaptiveEngine.decide(...)` from that config instead of
+     hard-coding hero on the button
 
-Each continuation explores new lines (non-deterministic), building a richer corpus.
+2. Surface raise-response observations cleanly:
+   - add an explicit representation of "villain responded to a hero raise"
+   - do not force the harness to infer this indirectly from generic action traces
+   - the simplest contract is a new per-hand collection such as
+     `heroRaiseResponses: Vector[PokerAction]` or a richer response event record
 
-## Output Directory
+3. Carry seat metadata into exported artifacts:
+   - `HandRecord` needs enough information for downstream export to know who had
+     the button in that leg
+   - that can be stored on `HandRecord` itself or returned alongside it in a
+     higher-level session result
+
+No multiway behavior is needed in v1.
+
+### PokerStarsExporter changes
+
+`PokerStarsExporter` currently hard-codes seat 1 as the button.
+For mirrored heads-up legs it needs a real API contract change, not just a text tweak:
+
+- either accept expanded `HandRecord` seat/button fields
+- or accept explicit seat assignment inputs in `exportHands(...)` / `exportChunked(...)`
+
+That keeps the artifact parseable while making the seat-balanced session honest.
+
+## V1 Adaptive Update Rule
+
+Within a single opponent session:
+
+1. Play a hand with the current hero engine state.
+2. Read the explicit hero-raise response events surfaced by the simulator.
+3. For each villain response to a hero raise (`Fold`, `Call`, or `Raise`),
+   call `heroEngine.observeVillainResponseToRaise(...)`.
+4. Reuse that updated engine for the next hand against the same opponent.
+
+This is the minimum wiring needed to make the harness actually exercise the
+adaptive response model across hands.
+
+V1 does not serialize and restore that adaptive state across process restarts.
+
+## V1 Outputs
+
+Each harness run writes a self-contained run directory.
 
 ```
 data/adaptive-proof/
-  checkpoint.json
-  ground-truth.json
-  report.txt
-  hall-out/
-    review-upload-pokerstars.txt    # appendable hand history
-    hands.tsv
-    learning.tsv
-    models/
+  run-<timestamp>-<seed>/
+    manifest.json
+    ground-truth.json
+    report.txt
+    combined-history.txt
+    Villain01_overfold/
+      leg-button.txt
+      leg-bigblind.txt
+      combined.txt
+    Villain02_overcall/
+      leg-button.txt
+      leg-bigblind.txt
+      combined.txt
+    ...
+    Villain06_gto/
+      leg-button.txt
+      leg-bigblind.txt
+      combined.txt
 ```
 
-## Test
+Why a self-contained run directory instead of checkpoint/append:
+
+- v1 does not have serialized adaptive engine state
+- block append would be misleading if a resumed run silently restarted learning
+- writing immutable per-run outputs is simpler and safer
+
+If we want resumable adaptive sessions later, that needs explicit state
+serialization and belongs in a follow-up spec.
+
+## Ground Truth Format
+
+`ground-truth.json` records the exact opponent matrix and the measured results:
+
+```json
+{
+  "handsPerOpponent": 500,
+  "legsPerOpponent": 2,
+  "opponents": [
+    {
+      "name": "Villain01_overfold",
+      "leakId": "overfold-river-aggression",
+      "severity": 0.20,
+      "strategy": "equity-based",
+      "heroNetBbPer100": 3.4,
+      "heroNetBbPer100ByLeg": {
+        "button": 5.1,
+        "bigBlind": 1.7
+      }
+    },
+    {
+      "name": "Villain06_gto",
+      "leakId": "gto-baseline",
+      "severity": 0.0,
+      "strategy": "cfr-no-fallback",
+      "heroNetBbPer100": -0.4,
+      "heroNetBbPer100ByLeg": {
+        "button": 0.6,
+        "bigBlind": -1.4
+      }
+    }
+  ]
+}
+```
+
+## Evaluation Report
+
+`report.txt` is a compact human-readable summary:
+
+```text
+=== Adaptive Proof Report ===
+Run seed: 12345
+Hands per opponent: 500
+
+Per-opponent results:
+  Villain01_overfold      bb/100: +3.4   button: +5.1   bigBlind: +1.7
+  Villain02_overcall      bb/100: +4.8   button: +6.0   bigBlind: +3.6
+  Villain03_turnbluff     bb/100: +2.6   button: +3.8   bigBlind: +1.4
+  Villain04_prefloploose  bb/100: +3.1   button: +4.0   bigBlind: +2.2
+  Villain05_prefloptight  bb/100: +1.5   button: +2.1   bigBlind: +0.9
+  Villain06_gto           bb/100: -0.4   button: +0.6   bigBlind: -1.4
+
+Leaker average bb/100: +3.1
+GTO control bb/100: -0.4
+```
+
+Primary success criteria:
+
+- average hero bb/100 across leakers is positive
+- hero bb/100 against the CFR control stays close to zero
+- all exported histories parse successfully
+
+Optional diagnostics:
+
+- per-leg bb/100
+- leak firing counts
+- hero raise-response observation counts
+
+V1 does not require a "second half > first half" learning assertion because the
+current simulator path does not yet provide restart-safe adaptive state and the
+sample sizes are still modest.
+
+## Test Plan
 
 **File:** `src/test/scala/sicfun/holdem/validation/AdaptiveProofHarnessTest.scala`
 
-Runs 1 block (500 hands). Tagged `munit.Slow`.
+Tagged `munit.Slow`.
 
-**Single-block assertions (loose, 500 hands is high variance):**
-1. Hall run completes without error
-2. Hand history file exists and is non-empty
-3. Ground truth sidecar written with correct villain count
-4. Hero aggregate bb/100 >= -15 (not catastrophically broken)
-5. Hero bb/100 vs GTO control < +30 (no bug-inflated edge)
-6. Checkpoint written with correct next hand number
-7. Hand history parseable by `HandHistoryImport.parseText()`
+The unit test should exercise a reduced but representative matrix:
 
-**Multi-block assertions (tighten with accumulation, checked by harness main):**
-- Hero bb/100 > 0 against each leaker (when total hands >= 1000)
-- Second-half bb/100 >= first-half bb/100 against leakers (when total hands >= 2000)
-- |bb/100| < 10 against GTO control (when total hands >= 2000)
+- one leaker
+- one CFR control
+- smaller hand count than the default main harness run
+
+Assertions:
+
+1. The harness run completes without error.
+2. Per-opponent output directories are created.
+3. `ground-truth.json` and `report.txt` are written.
+4. Each exported history file is non-empty.
+5. Each exported history file parses with `HandHistoryImport.parseText()`.
+6. The control opponent records zero leak firings.
+7. Reported opponent count matches the configured matrix.
+
+The full command-line harness run, not the unit test, is responsible for the full
+default matrix and higher-volume EV reporting.
 
 ## Files Changed
 
 | File | Change |
 |------|--------|
-| `TexasHoldemPlayingHall.scala` | `VillainMode.LeakInjected`, `decideVillain` leak path, `parseVillainModeToken` extended, per-position `ActionLine` tracking |
-| **New:** `AdaptiveProofHarness.scala` | Orchestrator, checkpoint/resume, ground truth, evaluation |
-| **New:** `AdaptiveProofHarnessTest.scala` | Single-block 500-hand test |
+| **New:** `AdaptiveProofHarness.scala` | Orchestrator for opponent matrix, mirrored legs, adaptive updates, export, ground truth, and reporting |
+| **New:** `AdaptiveProofHarnessTest.scala` | Reduced-matrix integration test for output and parseability |
+| `HeadsUpSimulator.scala` | Support explicit hero seat, correct blind/position wiring, explicit hero-raise response events, and seat metadata for export |
+| `PokerStarsExporter.scala` | Accept seat/button metadata and export correct button/blind lines for mirrored heads-up legs |
 
-| `TexasHoldemPlayingHall.scala` | Add `perVillainNetChips: Map[String, Double]` to `HallSummary`, accumulate per-villain hero net during `HallRunner.playHand` |
+Expected to remain unchanged:
 
-No changes to `InjectedLeak.scala`, `LeakInjectedVillain.scala`, `SpotContext.scala`, or `VillainStrategy.scala` — all reused as-is.
+- `InjectedLeak.scala`
+- `LeakInjectedVillain.scala`
+- `SpotContext.scala`
+- `VillainStrategy.scala`
+- `TexasHoldemPlayingHall.scala`
+
+## V2 Follow-up: Multiway PlayingHall Proof
+
+Multiway hall integration remains desirable, but it needs a separate spec once the
+following are designed explicitly:
+
+1. identity-keyed villain observations in the hall
+2. per-villain adaptive state in `RealTimeAdaptiveEngine`
+3. full-ring activation in `buildTableScenario`
+4. full-ring review export
+5. defensible multiway per-villain EV attribution
+6. serialized adaptive state if resumable sessions are required

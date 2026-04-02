@@ -5,6 +5,7 @@ import java.util.Locale
 import java.util.Properties
 import scala.collection.mutable
 
+/** Persistence facade for [[OpponentProfileStore]] across JSON and PostgreSQL targets. */
 object OpponentProfileStorePersistence:
   private[history] val PostgresProfilesTable = "opponent_profiles"
   private[history] val PostgresPlayersTable = "opponent_players"
@@ -73,6 +74,7 @@ object OpponentProfileStorePersistence:
       case OpponentMemoryTarget.Json(path) => OpponentProfileStore.save(path, store)
       case config: OpponentMemoryTarget.Postgres => PostgresOpponentProfileStore.save(config, store)
 
+/** PostgreSQL-backed store implementation used by [[OpponentProfileStorePersistence]]. */
 private object PostgresOpponentProfileStore:
   private val InsertBatchSize = 512
   private val ProfilesTable = OpponentProfileStorePersistence.PostgresProfilesTable

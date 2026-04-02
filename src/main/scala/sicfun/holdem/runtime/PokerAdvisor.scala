@@ -18,7 +18,7 @@ import scala.util.Random
   * game events and requests real-time recommendations.
   *
   * Usage:
-  *   sbt "runMain sicfun.holdem.PokerAdvisor [--key=value ...]"
+  *   sbt "runMain sicfun.holdem.runtime.PokerAdvisor [--key=value ...]"
   *
   * Options:
   *   --model=<dir>          Path to a saved model artifact directory (optional; bootstraps synthetic model if absent)
@@ -338,7 +338,7 @@ object PokerAdvisor:
 
   private val usage =
     """Usage:
-      |  runMain sicfun.holdem.PokerAdvisor [--key=value ...]
+      |  runMain sicfun.holdem.runtime.PokerAdvisor [--key=value ...]
       |
       |Options:
       |  --model=<dir>          Path to a saved model artifact directory

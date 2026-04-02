@@ -1,42 +1,39 @@
 # AI Code Navigation
 
-This repo has two repo-local code navigation tools:
+This repo prefers targeted navigation over broad raw file reads.
+
+Primary tools when they are available in the current client or toolchain:
 
 - `RepoMapper` for broad repository maps
 - `jCodeMunch` for symbol-level search and retrieval
+- `jDocMunch` for doc search and outlines
 
-Both are wired through local wrappers and vendored source trees.
+The repo no longer vendors RepoMapper or jCodeMunch source trees or tool-specific wrapper scripts. Use the interface your current client provides, such as MCP tools or external CLIs on `PATH`.
 
-RepoMapper cache data is written under `.tool-cache/repomapper`.
-The local jCodeMunch index is written under `.jcodemunch-index`.
+If `.tool-cache/repomapper` or `.jcodemunch-index/` exist, treat them as opportunistic local caches, not durable agent memory.
 
-## Local entry points
+## Local helper
 
-- `scripts/repomap.ps1`
-- `scripts/jcodemunch.ps1`
-- `scripts/import-ai-nav.ps1`
-
-## Vendored sources
-
-- `third_party/repomapper`
-- `third_party/jcodemunch_mcp`
+- `scripts/import-ai-nav.ps1` defines PowerShell aliases that forward to external `repomapper` and `jcodemunch` commands. Missing commands are reported when you invoke the alias.
+- There are no guaranteed repo-local wrappers such as `scripts/repomap.ps1` or `scripts/jcodemunch.ps1` in the current checkout.
 
 ## When to use which
 
 - Use `RepoMapper` when you do not yet know where to look.
 - Use `jCodeMunch` when you know a symbol name or want symbol-level retrieval.
+- Use `jDocMunch` for doc-section search and outlines when it is available.
 - Use `rg` first for the cheapest literal/text search when shell access is available.
 
 ## Recommended workflow
 
 1. Start with a broad map if the area is unfamiliar.
-2. Narrow with `file-tree` or `search-symbols`.
-3. Read only the specific implementation with `get-symbol`.
-4. Use `search-text` for strings, errors, comments, and other non-symbol text.
+2. Narrow with `file-tree`, `search-symbols`, or an equivalent targeted query.
+3. Read only the specific implementation or section you need.
+4. Use targeted text search for strings, errors, comments, and other non-symbol text.
 
 ## PowerShell helpers
 
-Import the repo-local helper functions into the current shell:
+If you have external `repomapper` and `jcodemunch` commands on `PATH`, import the repo-local helper functions into the current shell:
 
 ```powershell
 . .\scripts\import-ai-nav.ps1
@@ -44,8 +41,8 @@ Import the repo-local helper functions into the current shell:
 
 This adds:
 
-- `rmap` -> `RepoMapper` wrapper
-- `jcm` -> raw `jCodeMunch` wrapper
+- `rmap` -> `repomapper` CLI
+- `jcm` -> raw `jcodemunch` CLI
 - `jfindsym` -> symbol search
 - `jgetsym` -> symbol retrieval
 - `jfindtxt` -> text search
@@ -62,34 +59,18 @@ jtree
 joutline build.sbt
 ```
 
-## Useful commands
-
-```powershell
-.\scripts\repomap.ps1 --other-files src project scripts build.sbt README.md ROADMAP.md --chat-files build.sbt README.md --mentioned-files src/main/scala/sicfun/holdem/TexasHoldemPlayingHall.scala --mentioned-idents TexasHoldemPlayingHall --map-tokens 2048 --force-refresh
-
-.\scripts\jcodemunch.ps1 list-repos
-
-.\scripts\jcodemunch.ps1 file-tree --repo local/untitled --path-prefix src/main/scala/sicfun/holdem
-
-.\scripts\jcodemunch.ps1 search-symbols runConfig --repo local/untitled --language scala --max-results 10
-
-.\scripts\jcodemunch.ps1 search-text "playing hall failed" --repo local/untitled --file-pattern "*.scala" --max-results 5
-
-.\scripts\jcodemunch.ps1 get-symbol "src/main/scala/sicfun/holdem/TexasHoldemPlayingHall.scala::runConfig#function" --repo local/untitled --verify
-```
-
 ## Measured results in this repo
 
-Measured on March 7, 2026 after local Scala support, `.sbt` extraction, and Windows byte-offset fixes were applied to the vendored `jCodeMunch`.
+These are historical measurements from March 7, 2026, when this repo still carried the local navigation toolchain:
 
 - `RepoMapper` produced a useful repo map over 361 files in about 2022 tokens.
-- `jCodeMunch` now indexes 172 files with 2044 symbols.
+- `jCodeMunch` indexed 172 files with 2044 symbols.
 - Indexed language counts: 150 Scala, 10 Java, 9 C++, 3 Python.
 - `search-symbols runConfig --language scala` returned six candidates in about 820 tokens.
 - `get-symbol "src/main/scala/sicfun/holdem/TexasHoldemPlayingHall.scala::runConfig#function"` returned the full function in about 2589 tokens.
 - Reading the full `TexasHoldemPlayingHall.scala` file costs about 17379 tokens.
-- `build.sbt` now indexes as Scala and exposes task/settings symbols such as `headsUpTableMode`, `generateHeadsUpTable`, and `Compile / resourceGenerators`.
-- Simple key searches such as `headsUpTableMode` resolve to the key declaration instead of returning both the declaration and the plain `:=` assignment.
+- `build.sbt` indexed as Scala and exposed task/settings symbols such as `headsUpTableMode`, `generateHeadsUpTable`, and `Compile / resourceGenerators`.
+- Simple key searches such as `headsUpTableMode` resolved to the key declaration instead of returning both the declaration and the plain `:=` assignment.
 
 The practical takeaway is:
 
@@ -98,7 +79,6 @@ The practical takeaway is:
 
 ## Repo-specific notes
 
-- The vendored `jCodeMunch` includes local patches for Scala support.
-- The vendored `jCodeMunch` also preserves raw file newlines so symbol byte offsets verify correctly on Windows.
-- `jCodeMunch index-folder` now applies repo-local default ignores for `.venv-tools/`, `.github-tools/`, `.tool-cache/`, `data/`, `dist/`, `.idea/`, and `third_party/`.
-- `RepoMapper` is vendored with its `queries/` directory because the packaged install omitted those files.
+- Commit `8ced6f7` removed the vendored RepoMapper and jCodeMunch sources and their wrapper scripts.
+- `scripts/import-ai-nav.ps1` is a thin convenience layer over externally provided `repomapper` and `jcodemunch` CLIs.
+- Cache directories may exist from prior local runs, but treat them as stale until verified.

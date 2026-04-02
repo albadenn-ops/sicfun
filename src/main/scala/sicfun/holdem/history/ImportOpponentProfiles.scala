@@ -43,7 +43,9 @@ object ImportOpponentProfiles:
         }
         summary.feedPath.foreach(path => println(s"feedPath: ${path.toAbsolutePath.normalize()}"))
         summary.profiles.take(5).foreach { profile =>
-          val hints = profile.exploitHints.mkString(" | ")
+          val hints = profile.exploitHintDetails
+            .map(hint => s"${hint.text} ${formatMetrics(hint.metrics)}")
+            .mkString(" | ")
           println(s"${profile.playerName}: hands=${profile.handsObserved} archetype=${profile.archetypePosterior.mapEstimate} hints=$hints")
         }
 
@@ -158,3 +160,6 @@ object ImportOpponentProfiles:
       |  --storeSchema=<schema>     Optional PostgreSQL schema (default: public)
       |  --feedOut=<path>           Optional normalized PokerEvent TSV output
       |""".stripMargin
+
+  private def formatMetrics(metrics: Vector[Double]): String =
+    metrics.map(value => f"$value%.3f").mkString("[", ", ", "]")

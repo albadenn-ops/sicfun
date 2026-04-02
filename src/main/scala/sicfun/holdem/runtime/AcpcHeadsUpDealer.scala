@@ -11,6 +11,7 @@ import java.nio.file.{Files, Path, Paths}
 import java.util.Locale
 import scala.util.Random
 
+/** Minimal local ACPC-compatible heads-up dealer used for deterministic bot-vs-bot runs. */
 object AcpcHeadsUpDealer:
   private val ProtocolVersion = "VERSION:2.0.0"
   private val SmallBlindChips = 50

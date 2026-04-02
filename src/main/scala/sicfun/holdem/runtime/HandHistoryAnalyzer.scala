@@ -16,7 +16,7 @@ import scala.util.Random
   * recommended action and EV comparison.
   *
   * Usage:
-  *   runMain sicfun.holdem.HandHistoryAnalyzer <feedFile> [--key=value ...]
+  *   runMain sicfun.holdem.runtime.HandHistoryAnalyzer <feedFile> [--key=value ...]
   *
   * Options:
   *   --hero=<playerId>       Hero player ID (default "hero")
@@ -441,7 +441,7 @@ object HandHistoryAnalyzer:
 
   private val usage =
     """Usage:
-      |  runMain sicfun.holdem.HandHistoryAnalyzer <feedFile> [--key=value ...]
+      |  runMain sicfun.holdem.runtime.HandHistoryAnalyzer <feedFile> [--key=value ...]
       |
       |Options:
       |  --hero=<playerId>       Hero player ID (default "hero")

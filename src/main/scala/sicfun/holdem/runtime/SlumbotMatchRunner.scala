@@ -18,6 +18,7 @@ import scala.util.Random
 
 import ujson.{Num, Obj, Str, Value}
 
+/** Slumbot action-string parser/encoder mirroring heads-up betting-state semantics. */
 private[holdem] object SlumbotActionCodec:
   val SmallBlindChips = 50
   val BigBlindChips = 100
@@ -353,6 +354,7 @@ private[holdem] object SlumbotActionCodec:
   private def relativeActorId(actualActor: Int, heroActual: Int): Int =
     if actualActor == heroActual then 0 else 1
 
+/** Match runner that plays hands against Slumbot HTTP endpoints. */
 object SlumbotMatchRunner:
   private final case class Config(
       hands: Int,

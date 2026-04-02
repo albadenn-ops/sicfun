@@ -15,8 +15,12 @@ import java.util.Random
   */
 private[holdem] object HeroDecisionPipeline:
 
-  /** Protocol-neutral context for raise sizing. Both AcpcActionCodec.ParsedActionState and
-    * SlumbotActionCodec.ParsedActionState provide these fields.
+  /** Protocol-neutral context for raise sizing.
+    *
+    * Unit contract:
+    * - All `*Chips` fields are absolute chip counts from the protocol state.
+    * - The resulting [[PokerAction.Raise]] value is converted to big blinds (`amountBb`)
+    *   because runtime actions are represented in BB.
     */
   final case class RaiseSizingContext(
       stackRemainingChips: Int,
@@ -49,6 +53,7 @@ private[holdem] object HeroDecisionPipeline:
   def decideHero(mode: HeroMode, ctx: HeroDecisionContext): PokerAction =
     mode match
       case HeroMode.Adaptive =>
+        // Runtime mode: force a 1ms budget to prioritize throughput and bounded latency.
         ctx.engine
           .decide(
             hero = ctx.hero,
@@ -64,6 +69,8 @@ private[holdem] object HeroDecisionPipeline:
           .recommendation
           .bestAction
       case HeroMode.Gto =>
+        // Diagnostic/offline mode: infer posterior then run shallow CFR without a hard
+        // latency budget, favoring strategy quality over service-time guarantees.
         val gtoRng = new Random(ctx.rng.nextLong())
         val posterior = RangeInferenceEngine
           .inferPosterior(
@@ -111,6 +118,8 @@ private[holdem] object HeroDecisionPipeline:
           else ctx.bigBlindChips
         )
       val rawIncrements =
+        // Preflop opener/re-open heuristics are encoded in chips and later converted to BB.
+        // 150/200/300 are protocol-aligned defaults observed in the match runners.
         if ctx.currentStreet == Street.Preflop && ctx.toCallChips > 0 && ctx.streetLastBetToChips == ctx.bigBlindChips then
           Vector(150, 200)
         else if ctx.currentStreet == Street.Preflop && ctx.toCallChips == 0 && ctx.streetLastBetToChips == ctx.bigBlindChips then
@@ -141,6 +150,8 @@ private[holdem] object HeroDecisionPipeline:
       candidates: Vector[PokerAction],
       rng: Random
   ): PokerAction =
+    // Uses residual mass implicitly: if the cumulative probability never reaches the roll
+    // (for example because probabilities sum to < 1), fallback returns the max-probability action.
     val roll = rng.nextDouble()
     var cumulative = 0.0
     var idx = 0

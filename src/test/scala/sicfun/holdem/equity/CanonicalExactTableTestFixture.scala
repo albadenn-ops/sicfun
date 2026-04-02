@@ -11,7 +11,7 @@ import scala.util.control.NonFatal
   *
   * Resolution order:
   *   1) `-Dsicfun.test.canonicalExactTablePath` (must be valid/full)
-  *   2) tracked default artifact in `data/`
+  *   2) optional local artifact at the legacy `data/` path
   *   3) generated fallback in `target/test-generated/`
   */
 object CanonicalExactTableTestFixture:

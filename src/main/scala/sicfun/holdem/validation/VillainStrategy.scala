@@ -2,9 +2,11 @@ package sicfun.holdem.validation
 
 import sicfun.core.DiscreteDistribution
 import sicfun.holdem.cfr.{HoldemCfrConfig, HoldemCfrSolver}
+import sicfun.holdem.engine.GtoSolveEngine
 import sicfun.holdem.equity.{HoldemEquity, RangeParser}
 import sicfun.holdem.types.*
 
+import scala.collection.mutable
 import scala.util.Random
 
 /** Pluggable GTO baseline strategy for the simulated villain. */
@@ -81,10 +83,17 @@ final class CfrVillainStrategy(
       maxVillainHands = 64,
       includeVillainReraises = true
     ),
-    allowHeuristicFallback: Boolean = true
+    allowHeuristicFallback: Boolean = true,
+    collectSolveTiming: Boolean = false
 ) extends VillainStrategy:
 
-  private[validation] def allowsHeuristicFallback: Boolean = allowHeuristicFallback
+  private[holdem] def allowsHeuristicFallback: Boolean = allowHeuristicFallback
+  private val policyCache = mutable.HashMap.empty[CfrVillainStrategy.CacheKey, CfrVillainStrategy.CachedPolicy]
+  private val cacheStats = CfrVillainStrategy.CacheStats()
+  private val servedByProvider = mutable.HashMap.empty[String, Long].withDefaultValue(0L)
+  private val solvedByProvider = mutable.HashMap.empty[String, Long].withDefaultValue(0L)
+  private val solveWallByProviderNanos = mutable.HashMap.empty[String, Long].withDefaultValue(0L)
+  private val solveTimingStats = CfrVillainStrategy.SolveTimingStats()
 
   // HU Button opening range — the hands opponent would have opened preflop.
   // Parsed once and reused across all decisions.
@@ -92,6 +101,35 @@ final class CfrVillainStrategy(
     RangeParser.parseWithHands(CfrVillainStrategy.HuButtonOpenRange) match
       case Right(result) => result.hands
       case Left(_) => Set.empty // fallback: will use fullRange
+
+  private[holdem] def cacheStatsSnapshot: CfrVillainStrategy.CacheStatsSnapshot =
+    CfrVillainStrategy.CacheStatsSnapshot(
+      hits = cacheStats.hits,
+      misses = cacheStats.misses,
+      size = policyCache.size.toLong
+    )
+
+  private[holdem] def providerCountsSnapshot: Map[String, Long] =
+    servedByProvider.toMap
+
+  private[holdem] def solvedProviderCountsSnapshot: Map[String, Long] =
+    solvedByProvider.toMap
+
+  private[holdem] def solveTimingSnapshot: CfrVillainStrategy.SolveTimingSnapshot =
+    CfrVillainStrategy.SolveTimingSnapshot(
+      solveCount = solveTimingStats.solveCount,
+      solveWallNanos = solveTimingStats.solveWallNanos,
+      solveWallByProviderNanos = solveWallByProviderNanos.toMap,
+      nativeProfileCount = solveTimingStats.nativeProfileCount,
+      nativePrepareNanos = solveTimingStats.nativePrepareNanos,
+      nativePrepareSupportNanos = solveTimingStats.nativePrepareSupportNanos,
+      nativePrepareEquityNanos = solveTimingStats.nativePrepareEquityNanos,
+      nativePrepareResponseNanos = solveTimingStats.nativePrepareResponseNanos,
+      nativePrepareGameBuildNanos = solveTimingStats.nativePrepareGameBuildNanos,
+      nativeSpecBuildNanos = solveTimingStats.nativeSpecBuildNanos,
+      nativeSolveNanos = solveTimingStats.nativeSolveNanos,
+      nativeUnpackNanos = solveTimingStats.nativeUnpackNanos
+    )
 
   def decide(
       hand: HoleCards,
@@ -102,15 +140,69 @@ final class CfrVillainStrategy(
   ): PokerAction =
     if candidates.size <= 1 then return candidates.headOption.getOrElse(PokerAction.Check)
     try
-      val opponentRange = opponentRangeForStreet(hand, state)
-      val policy = HoldemCfrSolver.solveDecisionPolicy(
-        hero = hand,
-        state = state,
-        villainPosterior = opponentRange,
-        candidateActions = candidates,
-        config = config
+      val rangeProfile = opponentRangeProfile(hand, state)
+      val key = CfrVillainStrategy.CacheKey(
+        hand = hand,
+        board = state.board,
+        streetOrdinal = state.street.ordinal,
+        positionOrdinal = state.position.ordinal,
+        potBits = java.lang.Double.doubleToLongBits(state.pot),
+        toCallBits = java.lang.Double.doubleToLongBits(state.toCall),
+        stackBits = java.lang.Double.doubleToLongBits(state.stackSize),
+        candidateHash = GtoSolveEngine.hashActions(candidates),
+        rangeKindOrdinal = rangeProfile.kind.ordinal
       )
-      sampleAction(policy.actionProbabilities, candidates, rng)
+      policyCache.get(key) match
+        case Some(cached) =>
+          cacheStats.hits += 1L
+          recordProvider(cached.provider)
+          GtoSolveEngine.sampleActionByPolicy(cached.orderedActionProbabilities, cached.bestAction, rng)
+        case None =>
+          val opponentRange = opponentRangeForProfile(hand, state, rangeProfile)
+          val (policy, nativeProfileOpt, solveWallNanos) =
+            if collectSolveTiming then
+              val solveStarted = System.nanoTime()
+              val profiled = HoldemCfrSolver.solveShallowDecisionPolicyProfiled(
+                hero = hand,
+                state = state,
+                villainPosterior = opponentRange,
+                candidateActions = candidates,
+                config = config
+              )
+              (
+                profiled.policy,
+                profiled.nativeProfile,
+                math.max(1L, System.nanoTime() - solveStarted)
+              )
+            else
+              (
+                HoldemCfrSolver.solveShallowDecisionPolicy(
+                  hero = hand,
+                  state = state,
+                  villainPosterior = opponentRange,
+                  candidateActions = candidates,
+                  config = config
+                ),
+                None,
+                0L
+              )
+          val orderedActionProbabilities =
+            GtoSolveEngine.orderedPositiveProbabilities(candidates, policy.actionProbabilities)
+          cacheStats.misses += 1L
+          recordProvider(policy.provider)
+          recordSolvedProvider(policy.provider)
+          if collectSolveTiming then
+            recordSolveTiming(policy.provider, solveWallNanos, nativeProfileOpt)
+          if policyCache.size >= CfrVillainStrategy.MaxPolicyCacheEntries then policyCache.clear()
+          policyCache.update(
+            key,
+            CfrVillainStrategy.CachedPolicy(
+              orderedActionProbabilities = orderedActionProbabilities,
+              bestAction = policy.bestAction,
+              provider = policy.provider
+            )
+          )
+          GtoSolveEngine.sampleActionByPolicy(orderedActionProbabilities, policy.bestAction, rng)
     catch
       case err: Exception =>
         if allowHeuristicFallback then
@@ -122,29 +214,132 @@ final class CfrVillainStrategy(
     * preflop, excluding dead cards. Falls back to uniform if narrowed range is
     * too small (< 20 hands).
     */
-  private def opponentRangeForStreet(
+  private def opponentRangeProfile(
       hand: HoleCards,
       state: GameState
-  ): DiscreteDistribution[HoleCards] =
+  ): CfrVillainStrategy.OpponentRangeProfile =
     if state.street == Street.Preflop || buttonOpenHands.isEmpty then
-      HoldemEquity.fullRange(hand, state.board)
+      CfrVillainStrategy.OpponentRangeProfile(CfrVillainStrategy.OpponentRangeKind.FullRange, Vector.empty)
     else
       val dead = hand.asSet ++ state.board.asSet
-      val viable = buttonOpenHands.filter(h => !h.toVector.exists(dead.contains)).toSeq
-      if viable.size >= 20 then DiscreteDistribution.uniform(viable)
-      else HoldemEquity.fullRange(hand, state.board)
+      val viable = buttonOpenHands.iterator.filter(h => !h.toVector.exists(dead.contains)).toVector
+      if viable.size >= 20 then
+        CfrVillainStrategy.OpponentRangeProfile(
+          CfrVillainStrategy.OpponentRangeKind.NarrowedButtonOpenRange,
+          viable
+        )
+      else
+        CfrVillainStrategy.OpponentRangeProfile(CfrVillainStrategy.OpponentRangeKind.FullRange, Vector.empty)
 
-  private def sampleAction(
-      probs: Map[PokerAction, Double],
-      candidates: Vector[PokerAction],
-      rng: Random
-  ): PokerAction =
-    val roll = rng.nextDouble()
-    val cumulativeProbs = candidates.scanLeft(0.0)((acc, a) => acc + probs.getOrElse(a, 0.0)).tail
-    val idx = cumulativeProbs.indexWhere(_ > roll)
-    if idx >= 0 then candidates(idx) else probs.maxBy(_._2)._1
+  private def opponentRangeForProfile(
+      hand: HoleCards,
+      state: GameState,
+      profile: CfrVillainStrategy.OpponentRangeProfile
+  ): DiscreteDistribution[HoleCards] =
+    profile.kind match
+      case CfrVillainStrategy.OpponentRangeKind.FullRange =>
+        HoldemEquity.fullRange(hand, state.board)
+      case CfrVillainStrategy.OpponentRangeKind.NarrowedButtonOpenRange =>
+        DiscreteDistribution.uniform(profile.viableHands)
+
+  private def recordProvider(provider: String): Unit =
+    servedByProvider.update(provider, servedByProvider(provider) + 1L)
+
+  private def recordSolvedProvider(provider: String): Unit =
+    solvedByProvider.update(provider, solvedByProvider(provider) + 1L)
+
+  private def recordSolveTiming(
+      provider: String,
+      solveWallNanos: Long,
+      nativeProfileOpt: Option[sicfun.holdem.cfr.HoldemCfrNativeDecisionProfile]
+  ): Unit =
+    solveTimingStats.solveCount += 1L
+    solveTimingStats.solveWallNanos += solveWallNanos
+    solveWallByProviderNanos.update(provider, solveWallByProviderNanos(provider) + solveWallNanos)
+    nativeProfileOpt.foreach { nativeProfile =>
+      solveTimingStats.nativeProfileCount += 1L
+      solveTimingStats.nativePrepareNanos += nativeProfile.prepareNanos
+      solveTimingStats.nativePrepareSupportNanos += nativeProfile.prepareSupportNanos
+      solveTimingStats.nativePrepareEquityNanos += nativeProfile.prepareEquityNanos
+      solveTimingStats.nativePrepareResponseNanos += nativeProfile.prepareResponseNanos
+      solveTimingStats.nativePrepareGameBuildNanos += nativeProfile.prepareGameBuildNanos
+      solveTimingStats.nativeSpecBuildNanos += nativeProfile.specBuildNanos
+      solveTimingStats.nativeSolveNanos += nativeProfile.nativeSolveNanos
+      solveTimingStats.nativeUnpackNanos += nativeProfile.unpackNanos
+    }
 
 object CfrVillainStrategy:
+  private final case class CacheKey(
+      hand: HoleCards,
+      board: Board,
+      streetOrdinal: Int,
+      positionOrdinal: Int,
+      potBits: Long,
+      toCallBits: Long,
+      stackBits: Long,
+      candidateHash: Int,
+      rangeKindOrdinal: Int
+  )
+
+  private final case class CachedPolicy(
+      orderedActionProbabilities: Vector[(PokerAction, Double)],
+      bestAction: PokerAction,
+      provider: String
+  )
+
+  private final case class CacheStats(
+      var hits: Long = 0L,
+      var misses: Long = 0L
+  )
+
+  private final case class SolveTimingStats(
+      var solveCount: Long = 0L,
+      var solveWallNanos: Long = 0L,
+      var nativeProfileCount: Long = 0L,
+      var nativePrepareNanos: Long = 0L,
+      var nativePrepareSupportNanos: Long = 0L,
+      var nativePrepareEquityNanos: Long = 0L,
+      var nativePrepareResponseNanos: Long = 0L,
+      var nativePrepareGameBuildNanos: Long = 0L,
+      var nativeSpecBuildNanos: Long = 0L,
+      var nativeSolveNanos: Long = 0L,
+      var nativeUnpackNanos: Long = 0L
+  )
+
+  private[holdem] final case class CacheStatsSnapshot(
+      hits: Long,
+      misses: Long,
+      size: Long
+  )
+
+  private[holdem] final case class SolveTimingSnapshot(
+      solveCount: Long,
+      solveWallNanos: Long,
+      solveWallByProviderNanos: Map[String, Long],
+      nativeProfileCount: Long,
+      nativePrepareNanos: Long,
+      nativePrepareSupportNanos: Long,
+      nativePrepareEquityNanos: Long,
+      nativePrepareResponseNanos: Long,
+      nativePrepareGameBuildNanos: Long,
+      nativeSpecBuildNanos: Long,
+      nativeSolveNanos: Long,
+      nativeUnpackNanos: Long
+  ):
+    def profiledNativeTotalNanos: Long =
+      nativePrepareNanos + nativeSpecBuildNanos + nativeSolveNanos + nativeUnpackNanos
+
+  private enum OpponentRangeKind:
+    case FullRange
+    case NarrowedButtonOpenRange
+
+  private final case class OpponentRangeProfile(
+      kind: OpponentRangeKind,
+      viableHands: Vector[HoleCards]
+  )
+
+  private val MaxPolicyCacheEntries = 100000
+
   // Standard HU Button opening range (~85% of hands).
   // Source: TableFormat.defaultRangeStringsHeadsUp(Position.Button)
   val HuButtonOpenRange: String =

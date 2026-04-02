@@ -21,7 +21,7 @@ import scala.util.Random
   *  - Signal generation from snapshot + model artifact
   *
   * Usage:
-  *   runMain sicfun.holdem.LiveHandSimulator [--key=value ...]
+  *   runMain sicfun.holdem.runtime.LiveHandSimulator [--key=value ...]
   */
 object LiveHandSimulator:
   private val HeroPlayerId = "hero-btn"
@@ -353,7 +353,7 @@ object LiveHandSimulator:
 
   private val usage =
     """Usage:
-      |  runMain sicfun.holdem.LiveHandSimulator [--key=value ...]
+      |  runMain sicfun.holdem.runtime.LiveHandSimulator [--key=value ...]
       |
       |Options:
       |  --hero=AcKh                       Hero hole cards (4-char canonical token)

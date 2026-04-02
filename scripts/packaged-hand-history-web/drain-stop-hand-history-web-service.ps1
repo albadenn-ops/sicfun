@@ -42,6 +42,7 @@ try {
 
   $readyFlipped = $false
   $drained = $false
+  $lastObservedDrainState = $null
   $deadline = [DateTime]::UtcNow.AddSeconds($DrainTimeoutSeconds)
   while ([DateTime]::UtcNow -lt $deadline) {
     $service = Get-ServiceOrNull -ServiceName $ServiceName
@@ -63,7 +64,17 @@ try {
     try {
       $healthResponse = Invoke-WebRequest -Uri $healthUri -UseBasicParsing -TimeoutSec 5
       $health = $healthResponse.Content | ConvertFrom-Json
-      if ([int]$health.queuedJobs -eq 0 -and [int]$health.runningJobs -eq 0 -and [int]$health.timedOutWorkersInFlight -eq 0) {
+      $lastObservedDrainState = [pscustomobject]@{
+        ActiveHttpRequests = [int]$health.activeHttpRequests
+        QueuedJobs = [int]$health.queuedJobs
+        RunningJobs = [int]$health.runningJobs
+        TimedOutWorkersInFlight = [int]$health.timedOutWorkersInFlight
+      }
+      # Do not stop the service while UI, health, or job-status traffic is still in flight.
+      if ($lastObservedDrainState.ActiveHttpRequests -eq 0 -and
+          $lastObservedDrainState.QueuedJobs -eq 0 -and
+          $lastObservedDrainState.RunningJobs -eq 0 -and
+          $lastObservedDrainState.TimedOutWorkersInFlight -eq 0) {
         $drained = $true
         break
       }
@@ -78,7 +89,17 @@ try {
     Write-Warning "Readiness did not flip to 503 before stop."
   }
   if (-not $drained) {
-    Write-Warning "Queue did not fully drain within $DrainTimeoutSeconds seconds. Stopping service anyway."
+    if ($null -ne $lastObservedDrainState) {
+      Write-Warning ("Service did not fully drain within {0} seconds. activeHttpRequests={1} queuedJobs={2} runningJobs={3} timedOutWorkersInFlight={4}. Stopping service anyway." -f `
+        $DrainTimeoutSeconds,
+        $lastObservedDrainState.ActiveHttpRequests,
+        $lastObservedDrainState.QueuedJobs,
+        $lastObservedDrainState.RunningJobs,
+        $lastObservedDrainState.TimedOutWorkersInFlight)
+    }
+    else {
+      Write-Warning "Service did not fully drain within $DrainTimeoutSeconds seconds. Stopping service anyway."
+    }
   }
 
   Stop-Service -Name $ServiceName -ErrorAction Stop

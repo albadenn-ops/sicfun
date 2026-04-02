@@ -50,7 +50,9 @@ $fullSuites = @(
   "sicfun.holdem.runtime.TexasHoldemPlayingHallTest",
   "sicfun.holdem.model.TrainPokerActionModelCliTest",
   "sicfun.holdem.analysis.GenerateSignalsCliTest",
-  "sicfun.holdem.bench.OperationalRegressionSuiteTest"
+  "sicfun.holdem.bench.OperationalRegressionSuiteTest",
+  "sicfun.holdem.web.HandHistoryReviewSimulationProofTest",
+  "sicfun.holdem.web.HandHistoryReviewServerTest"
 )
 
 $quickSuites = @(
@@ -73,6 +75,13 @@ Push-Location $repoRoot
 try {
   $previousSbtOpts = $env:SBT_OPTS
   $env:SBT_OPTS = "-Dsbt.server.autostart=false"
+
+  if ($Quick) {
+    Write-Host "Quick proof covers core engine/runtime smoke. Run the full proof for hand-history review end-to-end coverage."
+  }
+  else {
+    Write-Host "Full proof includes hand-history review end-to-end coverage: hall export -> import -> analysis service -> async web job."
+  }
 
   Stop-StaleSbtJavaProcesses
   Invoke-SbtWithRetry -Commands $commands

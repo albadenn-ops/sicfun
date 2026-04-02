@@ -334,13 +334,16 @@ private[holdem] object HoldemPostflopNativeRuntime:
       if deviceCount <= 0 then ()
       else
         val boundedDeviceIndex = math.max(0, math.min(deviceIndex, deviceCount - 1))
+        val cacheFile = resolvedPostflopAutoTuneCacheFile
+        val cacheMtime = if cacheFile.isFile then cacheFile.lastModified() else 0L
         val fingerprint = safeCudaDeviceFingerprint(boundedDeviceIndex)
         if fingerprint.isEmpty then ()
         else
-          val appliedKey = s"$boundedDeviceIndex|$fingerprint"
+          val appliedKey =
+            s"$boundedDeviceIndex|$fingerprint|${cacheFile.getAbsolutePath}|$cacheMtime|$configuredGpuLibraryIdentity"
           if appliedPostflopTuneFingerprintRef.get() == appliedKey then ()
           else
-            loadPostflopAutoTuneDecision(resolvedPostflopAutoTuneCacheFile, boundedDeviceIndex, fingerprint) match
+            loadPostflopAutoTuneDecision(cacheFile, boundedDeviceIndex, fingerprint) match
               case Some(decision) =>
                 sys.props.update(PostflopCudaBlockSizeProperty, decision.blockSize.toString)
                 sys.props.update(PostflopCudaMaxChunkMatchupsProperty, decision.maxChunkMatchups.toString)
@@ -373,33 +376,36 @@ private[holdem] object HoldemPostflopNativeRuntime:
         val version = Option(props.getProperty("version")).map(_.trim).getOrElse("")
         if version != PostflopAutoTuneCacheVersion then None
         else
-          val count = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("device.count")).getOrElse(0)
-          if count <= 0 then None
+          val cachedGpuLibraryIdentity = Option(props.getProperty("gpuLibraryIdentity")).map(_.trim).getOrElse("")
+          if cachedGpuLibraryIdentity.isEmpty || cachedGpuLibraryIdentity != configuredGpuLibraryIdentity then None
           else
-            boundary:
-              var idx = 0
-              while idx < count do
-                val prefix = s"device.$idx."
-                val cachedIndex =
-                  GpuRuntimeSupport.parseNonNegativeIntOpt(props.getProperty(s"${prefix}index")).getOrElse(-1)
-                val cachedFingerprint = Option(props.getProperty(s"${prefix}fingerprint")).map(_.trim).getOrElse("")
-                if cachedIndex == deviceIndex && cachedFingerprint == fingerprint then
-                  val blockSizeOpt = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}blockSize"))
-                  val maxChunkOpt =
-                    GpuRuntimeSupport
-                      .parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunkMatchups"))
-                      .orElse(GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunk")))
-                  if blockSizeOpt.nonEmpty && maxChunkOpt.nonEmpty then
-                    break(
-                      Some(
-                        PostflopAutoTuneDecision(
-                          blockSize = blockSizeOpt.get,
-                          maxChunkMatchups = maxChunkOpt.get
+            val count = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("device.count")).getOrElse(0)
+            if count <= 0 then None
+            else
+              boundary:
+                var idx = 0
+                while idx < count do
+                  val prefix = s"device.$idx."
+                  val cachedIndex =
+                    GpuRuntimeSupport.parseNonNegativeIntOpt(props.getProperty(s"${prefix}index")).getOrElse(-1)
+                  val cachedFingerprint = Option(props.getProperty(s"${prefix}fingerprint")).map(_.trim).getOrElse("")
+                  if cachedIndex == deviceIndex && cachedFingerprint == fingerprint then
+                    val blockSizeOpt = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}blockSize"))
+                    val maxChunkOpt =
+                      GpuRuntimeSupport
+                        .parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunkMatchups"))
+                        .orElse(GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunk")))
+                    if blockSizeOpt.nonEmpty && maxChunkOpt.nonEmpty then
+                      break(
+                        Some(
+                          PostflopAutoTuneDecision(
+                            blockSize = blockSizeOpt.get,
+                            maxChunkMatchups = maxChunkOpt.get
+                          )
                         )
                       )
-                    )
-                idx += 1
-              None
+                  idx += 1
+                None
     catch
       case _: Throwable => None
 
@@ -455,6 +461,16 @@ private[holdem] object HoldemPostflopNativeRuntime:
     try Option(HoldemPostflopNativeGpuBindings.cudaDeviceInfo(deviceIndex)).map(_.trim).getOrElse("")
     catch
       case _: Throwable => ""
+
+  private def configuredGpuLibraryIdentity: String =
+    GpuRuntimeSupport.resolveNonEmpty(GpuPathProperty, GpuPathEnv) match
+      case Some(path) =>
+        val file = new File(path)
+        val mtime = if file.exists() then file.lastModified() else 0L
+        s"path=${file.getAbsolutePath}|mtime=$mtime"
+      case None =>
+        val lib = GpuRuntimeSupport.resolveNonEmpty(GpuLibProperty, GpuLibEnv).getOrElse(DefaultGpuLibrary)
+        s"lib=$lib"
 
   private def safeEngineLabel(backend: Backend): String =
     try

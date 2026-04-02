@@ -39,6 +39,7 @@ private[holdem] object HoldemCfrNativeRuntime:
     require(infosetKeys.length == infosetPlayers.length, "infosetKeys/infosetPlayers length mismatch")
     require(infosetKeys.length == infosetActions.length, "infosetKeys/infosetActions length mismatch")
     require(infosetKeys.length == infosetActionCounts.length, "infosetKeys/infosetActionCounts length mismatch")
+    require(rootInfoSetIndex < infosetActionCounts.length, "rootInfoSetIndex must reference an infoset")
 
   final case class NativeTreeSpecFixed(
       rootNodeId: Int,
@@ -65,10 +66,16 @@ private[holdem] object HoldemCfrNativeRuntime:
     require(infosetKeys.length == infosetPlayers.length, "infosetKeys/infosetPlayers length mismatch")
     require(infosetKeys.length == infosetActions.length, "infosetKeys/infosetActions length mismatch")
     require(infosetKeys.length == infosetActionCounts.length, "infosetKeys/infosetActionCounts length mismatch")
+    require(rootInfoSetIndex < infosetActionCounts.length, "rootInfoSetIndex must reference an infoset")
 
   final case class NativeSolveResult(
       averageStrategiesFlattened: Array[Double],
       expectedValuePlayer0: Double,
+      lastEngineCode: Int
+  )
+
+  final case class NativeRootSolveResult(
+      rootStrategy: Array[Double],
       lastEngineCode: Int
   )
 
@@ -219,6 +226,84 @@ private[holdem] object HoldemCfrNativeRuntime:
         catch
           case ex: UnsatisfiedLinkError =>
             Left(s"${backendLabel(backend)} native CFR symbols not found: ${ex.getMessage}")
+          case ex: Throwable =>
+            Left(
+              Option(ex.getMessage)
+                .map(_.trim)
+                .filter(_.nonEmpty)
+                .getOrElse(ex.getClass.getSimpleName)
+            )
+
+  def solveTreeRoot(
+      backend: Backend,
+      spec: NativeTreeSpec,
+      config: CfrSolver.Config
+  ): Either[String, NativeRootSolveResult] =
+    val loadResult =
+      backend match
+        case Backend.Cpu => cpuLoadResult()
+        case Backend.Gpu => gpuLoadResult()
+    loadResult match
+      case Left(reason) =>
+        Left(reason)
+      case Right(_) =>
+        try
+          val outRootStrategy = new Array[Double](spec.infosetActionCounts(spec.rootInfoSetIndex))
+          val status =
+            backend match
+              case Backend.Cpu =>
+                HoldemCfrNativeCpuBindings.solveTreeRoot(
+                  config.iterations,
+                  config.averagingDelay,
+                  config.cfrPlus,
+                  config.linearAveraging,
+                  spec.rootNodeId,
+                  spec.rootInfoSetIndex,
+                  spec.nodeTypes,
+                  spec.nodeStarts,
+                  spec.nodeCounts,
+                  spec.nodeInfosets,
+                  spec.edgeChildIds,
+                  spec.edgeProbabilities,
+                  spec.terminalUtilities,
+                  spec.infosetPlayers,
+                  spec.infosetActionCounts,
+                  outRootStrategy
+                )
+              case Backend.Gpu =>
+                HoldemCfrNativeGpuBindings.solveTreeRoot(
+                  config.iterations,
+                  config.averagingDelay,
+                  config.cfrPlus,
+                  config.linearAveraging,
+                  spec.rootNodeId,
+                  spec.rootInfoSetIndex,
+                  spec.nodeTypes,
+                  spec.nodeStarts,
+                  spec.nodeCounts,
+                  spec.nodeInfosets,
+                  spec.edgeChildIds,
+                  spec.edgeProbabilities,
+                  spec.terminalUtilities,
+                  spec.infosetPlayers,
+                  spec.infosetActionCounts,
+                  outRootStrategy
+                )
+          if status != 0 then Left(describeStatus(status))
+          else
+            val engineCode =
+              backend match
+                case Backend.Cpu => safeLastEngineCodeCpu()
+                case Backend.Gpu => safeLastEngineCodeGpu()
+            Right(
+              NativeRootSolveResult(
+                rootStrategy = outRootStrategy,
+                lastEngineCode = engineCode
+              )
+            )
+        catch
+          case ex: UnsatisfiedLinkError =>
+            Left(s"${backendLabel(backend)} native CFR root-only symbols not found: ${ex.getMessage}")
           case ex: Throwable =>
             Left(
               Option(ex.getMessage)

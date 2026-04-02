@@ -10,7 +10,9 @@ import ujson.{Arr, Num, Obj, Str, Value}
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
+import scala.util.control.NonFatal
 
+/** Aggregated per-action counters used to derive compact behavioral signatures. */
 final case class OpponentActionSummary(
     folds: Int = 0,
     raises: Int = 0,
@@ -126,6 +128,7 @@ object ExploitHint:
   private def roundMetric(value: Double): Double =
     math.round(value * 1000.0) / 1000.0
 
+/** Persisted long-term profile for a remembered opponent. */
 final case class OpponentProfile(
     site: String,
     playerName: String,
@@ -176,6 +179,7 @@ final case class OpponentProfile(
   def identified: OpponentProfile =
     OpponentIdentity.ensureProfileIdentity(this)
 
+/** In-memory store of remembered opponent profiles, aliases, and collapse assertions. */
 object OpponentProfile:
   val MaxRecentEvents = 1024
   val MaxSeenHandIds = 2048
@@ -227,8 +231,33 @@ object OpponentProfile:
   def merge(existing: OpponentProfile, incoming: OpponentProfile): OpponentProfile =
     val existingSeen = existing.seenHandIds.toSet
     val uniqueIncomingHandIds = incoming.seenHandIds.filterNot(existingSeen.contains)
-    if uniqueIncomingHandIds.isEmpty then existing
+    val mergedShowdownHands = (existing.showdownHands ++ incoming.showdownHands).distinctBy(_.handId)
+    val mergedPlayerUid =
+      if existing.playerUid == incoming.playerUid then existing.playerUid
+      else existing.playerUid.orElse(incoming.playerUid)
+    val mergedProfileUid =
+      if existing.profileUid == incoming.profileUid then existing.profileUid
+      else existing.profileUid.orElse(incoming.profileUid)
+    val mergedBehaviorUid =
+      if existing.behaviorUid == incoming.behaviorUid then existing.behaviorUid
+      else existing.behaviorUid.orElse(incoming.behaviorUid)
+    val mergedModelUid =
+      if existing.modelUid == incoming.modelUid then existing.modelUid
+      else existing.modelUid.orElse(incoming.modelUid)
+    if uniqueIncomingHandIds.isEmpty then
+      existing.copy(
+        firstSeenEpochMillis = math.min(existing.firstSeenEpochMillis, incoming.firstSeenEpochMillis),
+        lastSeenEpochMillis = math.max(existing.lastSeenEpochMillis, incoming.lastSeenEpochMillis),
+        showdownHands = mergedShowdownHands,
+        playerUid = mergedPlayerUid,
+        profileUid = mergedProfileUid,
+        behaviorUid = mergedBehaviorUid,
+        modelUid = mergedModelUid
+      )
     else
+      val incomingScale = uniqueIncomingHandIds.length.toDouble / math.max(1, incoming.seenHandIds.length).toDouble
+      val scaledIncomingActionSummary = scaleActionSummary(incoming.actionSummary, incomingScale)
+      val scaledIncomingRaiseResponses = scaleRaiseResponses(incoming.raiseResponses, incomingScale)
       val uniqueIncomingSet = uniqueIncomingHandIds.toSet
       val mergedEvents = (existing.recentEvents ++ incoming.recentEvents.filter(event => uniqueIncomingSet.contains(event.handId)))
         .sortBy(event => (event.occurredAtEpochMillis, event.handId, event.sequenceInHand))
@@ -240,28 +269,39 @@ object OpponentProfile:
         handsObserved = existing.handsObserved + uniqueIncomingHandIds.length,
         firstSeenEpochMillis = math.min(existing.firstSeenEpochMillis, incoming.firstSeenEpochMillis),
         lastSeenEpochMillis = math.max(existing.lastSeenEpochMillis, incoming.lastSeenEpochMillis),
-        actionSummary = existing.actionSummary.merge(incoming.actionSummary),
+        actionSummary = existing.actionSummary.merge(scaledIncomingActionSummary),
         raiseResponses = RaiseResponseCounts(
-          folds = existing.raiseResponses.folds + incoming.raiseResponses.folds,
-          calls = existing.raiseResponses.calls + incoming.raiseResponses.calls,
-          raises = existing.raiseResponses.raises + incoming.raiseResponses.raises
+          folds = existing.raiseResponses.folds + scaledIncomingRaiseResponses.folds,
+          calls = existing.raiseResponses.calls + scaledIncomingRaiseResponses.calls,
+          raises = existing.raiseResponses.raises + scaledIncomingRaiseResponses.raises
         ),
         recentEvents = mergedEvents,
         seenHandIds = mergedSeen,
-        showdownHands = (existing.showdownHands ++ incoming.showdownHands).distinctBy(_.handId),
-        playerUid =
-          if existing.playerUid == incoming.playerUid then existing.playerUid
-          else existing.playerUid.orElse(incoming.playerUid),
-        profileUid =
-          if existing.profileUid == incoming.profileUid then existing.profileUid
-          else existing.profileUid.orElse(incoming.profileUid),
-        behaviorUid =
-          if existing.behaviorUid == incoming.behaviorUid then existing.behaviorUid
-          else existing.behaviorUid.orElse(incoming.behaviorUid),
-        modelUid =
-          if existing.modelUid == incoming.modelUid then existing.modelUid
-          else existing.modelUid.orElse(incoming.modelUid)
+        showdownHands = mergedShowdownHands,
+        playerUid = mergedPlayerUid,
+        profileUid = mergedProfileUid,
+        behaviorUid = mergedBehaviorUid,
+        modelUid = mergedModelUid
       )
+
+  private def scaleActionSummary(summary: OpponentActionSummary, scale: Double): OpponentActionSummary =
+    OpponentActionSummary(
+      folds = scaleCount(summary.folds, scale),
+      raises = scaleCount(summary.raises, scale),
+      calls = scaleCount(summary.calls, scale),
+      checks = scaleCount(summary.checks, scale),
+      callPotOddsTotal = summary.callPotOddsTotal * scale
+    )
+
+  private def scaleRaiseResponses(counts: RaiseResponseCounts, scale: Double): RaiseResponseCounts =
+    RaiseResponseCounts(
+      folds = scaleCount(counts.folds, scale),
+      calls = scaleCount(counts.calls, scale),
+      raises = scaleCount(counts.raises, scale)
+    )
+
+  private def scaleCount(count: Int, scale: Double): Int =
+    math.round(count.toDouble * scale).toInt
 
   def observeEvent(
       profile: OpponentProfile,
@@ -521,7 +561,7 @@ object OpponentProfile:
       hints += exploitHint(
         ruleId = "calling-station-profile",
         text = "Treat them like a calling station until shown otherwise.",
-        deviationRatioFromGto = compoundDeviationRatio(
+        deviationRatioFromGto = minDeviationRatio(
           upwardDeviationRatio(callRate, gtoBaseline = 0.32),
           downwardDeviationRatio(raiseRate, gtoBaseline = 0.18)
         ),
@@ -542,7 +582,7 @@ object OpponentProfile:
       hints += exploitHint(
         ruleId = "passive-lines",
         text = "Respect sudden aggression from their passive lines.",
-        deviationRatioFromGto = compoundDeviationRatio(
+        deviationRatioFromGto = minDeviationRatio(
           upwardDeviationRatio(checkRate, gtoBaseline = 0.20),
           downwardDeviationRatio(raiseRate, gtoBaseline = 0.16)
         ),
@@ -614,11 +654,11 @@ object OpponentProfile:
         hints += exploitHint(
           ruleId = "showdown-weak-heavy",
           text = "Has shown down weak hands; likely stations or bluffs reaching showdown - value bet thinner.",
-          deviationRatioFromGto = compoundDeviationRatio(
+          deviationRatioFromGto = minDeviationRatio(
             upwardDeviationRatio(weakRatio, gtoBaseline = 0.25),
             math.max(
               upwardDeviationRatio(callVsRaise, gtoBaseline = 0.30),
-              compoundDeviationRatio(
+              minDeviationRatio(
                 upwardDeviationRatio(callRate, gtoBaseline = 0.12),
                 downwardDeviationRatio(raiseRate, gtoBaseline = 0.22)
               )
@@ -629,7 +669,7 @@ object OpponentProfile:
           evScaleBb = 0.8
         )
 
-      if showdowns.size >= 5 && pairRatio >= 1.0 then
+      if showdowns.size >= 5 && pairRatio >= 0.50 then
         hints += exploitHint(
           ruleId = "showdown-pair-heavy",
           text = "Showdown history is pair-heavy; range may be set-mining oriented.",
@@ -668,7 +708,7 @@ object OpponentProfile:
   private def downwardDeviationRatio(observed: Double, gtoBaseline: Double): Double =
     clamp01((gtoBaseline - observed) / math.max(1e-9, gtoBaseline))
 
-  private def compoundDeviationRatio(parts: Double*): Double =
+  private def minDeviationRatio(parts: Double*): Double =
     if parts.isEmpty then 0.0
     else clamp01(parts.min)
 
@@ -694,6 +734,8 @@ final case class OpponentProfileStore(
     playerCollapses: Vector[PlayerCollapse] = Vector.empty,
     profileCollapses: Vector[ProfileCollapse] = Vector.empty
 ):
+  private[history] var isNormalized: Boolean = false
+
   def population: Vector[RememberedPlayer] =
     OpponentProfileStore.normalize(this).players
 
@@ -777,13 +819,18 @@ object OpponentProfileStore:
   private val FormatVersion = "opponent-profile-store-v2"
   private val LegacyFormatVersion = "opponent-profile-store-v1"
 
-  val empty: OpponentProfileStore = OpponentProfileStore(Vector.empty)
+  val empty: OpponentProfileStore = markNormalized(OpponentProfileStore(Vector.empty))
 
   def load(path: Path): OpponentProfileStore =
     if !Files.exists(path) then empty
     else
-      val json = ujson.read(Files.readString(path, StandardCharsets.UTF_8))
-      readStore(json)
+      try
+        val json = ujson.read(Files.readString(path, StandardCharsets.UTF_8))
+        readStore(json)
+      catch
+        case NonFatal(error) =>
+          System.err.println(s"warning: failed to load opponent profile store from $path: ${readErrorMessage(error)}")
+          empty
 
   def save(path: Path, store: OpponentProfileStore): Unit =
     Option(path.getParent).foreach(parent => Files.createDirectories(parent))
@@ -793,73 +840,81 @@ object OpponentProfileStore:
     OpponentIdentity.aliasKey(site, playerName)
 
   private[history] def normalize(store: OpponentProfileStore): OpponentProfileStore =
-    val identifiedProfiles = store.profiles.map(OpponentIdentity.ensureProfileIdentity)
-    val mergedProfiles = mutable.LinkedHashMap.empty[String, OpponentProfile]
-    identifiedProfiles.foreach { profile =>
-      val profileUid = profile.profileUid.getOrElse(
-        throw new IllegalArgumentException("identified profile must define profileUid")
-      )
-      val merged =
-        mergedProfiles.get(profileUid) match
-          case Some(existing) =>
-            OpponentIdentity.ensureProfileIdentity(
-              OpponentProfile.merge(existing, profile).copy(
-                site = existing.site,
-                playerName = existing.playerName,
-                playerUid = existing.playerUid.orElse(profile.playerUid),
-                profileUid = Some(profileUid),
-                behaviorUid = existing.behaviorUid.orElse(profile.behaviorUid),
-                modelUid =
-                  (existing.modelUid, profile.modelUid) match
-                    case (Some(left), Some(right)) if left != right => None
-                    case (Some(left), _) => Some(left)
-                    case (_, Some(right)) => Some(right)
-                    case _ => None
+    if store.isNormalized then store
+    else
+      val identifiedProfiles = store.profiles.map(OpponentIdentity.ensureProfileIdentity)
+      val mergedProfiles = mutable.LinkedHashMap.empty[String, OpponentProfile]
+      identifiedProfiles.foreach { profile =>
+        val profileUid = profile.profileUid.getOrElse(
+          throw new IllegalArgumentException("identified profile must define profileUid")
+        )
+        val merged =
+          mergedProfiles.get(profileUid) match
+            case Some(existing) =>
+              OpponentIdentity.ensureProfileIdentity(
+                OpponentProfile.merge(existing, profile).copy(
+                  site = existing.site,
+                  playerName = existing.playerName,
+                  playerUid = existing.playerUid.orElse(profile.playerUid),
+                  profileUid = Some(profileUid),
+                  behaviorUid = existing.behaviorUid.orElse(profile.behaviorUid),
+                  modelUid =
+                    (existing.modelUid, profile.modelUid) match
+                      case (Some(left), Some(right)) if left != right => None
+                      case (Some(left), _) => Some(left)
+                      case (_, Some(right)) => Some(right)
+                      case _ => None
+                )
               )
-            )
-          case None => profile
-      mergedProfiles.update(profileUid, merged)
-    }
+            case None => profile
+        mergedProfiles.update(profileUid, merged)
+      }
 
-    val playerByUid = mutable.LinkedHashMap.empty[String, RememberedPlayer]
-    identifiedProfiles.foreach { profile =>
-      val defaultPlayer = OpponentIdentity.defaultPlayer(profile)
-      playerByUid.update(defaultPlayer.playerUid, mergePlayers(playerByUid.get(defaultPlayer.playerUid), defaultPlayer))
-    }
-    store.players.map(OpponentIdentity.normalizePlayer).foreach { player =>
-      playerByUid.update(player.playerUid, mergePlayers(playerByUid.get(player.playerUid), player))
-    }
+      val playerByUid = mutable.LinkedHashMap.empty[String, RememberedPlayer]
+      identifiedProfiles.foreach { profile =>
+        val defaultPlayer = OpponentIdentity.defaultPlayer(profile)
+        playerByUid.update(defaultPlayer.playerUid, mergePlayers(playerByUid.get(defaultPlayer.playerUid), defaultPlayer))
+      }
+      store.players.map(OpponentIdentity.normalizePlayer).foreach { player =>
+        playerByUid.update(player.playerUid, mergePlayers(playerByUid.get(player.playerUid), player))
+      }
 
-    val aliasByKey = mutable.LinkedHashMap.empty[String, PlayerAlias]
-    identifiedProfiles.foreach { profile =>
-      val defaultAlias = PlayerAlias(
-        site = profile.site,
-        playerName = profile.playerName,
-        playerUid = profile.playerUid.getOrElse(
-          throw new IllegalArgumentException("identified profile must define playerUid")
+      val aliasByKey = mutable.LinkedHashMap.empty[String, PlayerAlias]
+      identifiedProfiles.foreach { profile =>
+        val defaultAlias = PlayerAlias(
+          site = profile.site,
+          playerName = profile.playerName,
+          playerUid = profile.playerUid.getOrElse(
+            throw new IllegalArgumentException("identified profile must define playerUid")
+          )
+        )
+        aliasByKey.update(key(defaultAlias.site, defaultAlias.playerName), OpponentIdentity.normalizeAlias(defaultAlias))
+      }
+      playerByUid.values.foreach { player =>
+        val canonicalAlias = PlayerAlias(
+          site = player.canonicalSite,
+          playerName = player.canonicalName,
+          playerUid = player.playerUid
+        )
+        aliasByKey.update(key(canonicalAlias.site, canonicalAlias.playerName), OpponentIdentity.normalizeAlias(canonicalAlias))
+      }
+      store.aliases.map(OpponentIdentity.normalizeAlias).foreach { alias =>
+        aliasByKey.update(key(alias.site, alias.playerName), alias)
+      }
+
+      markNormalized(
+        OpponentProfileStore(
+          profiles = mergedProfiles.values.toVector.sortBy(profile => (profile.site, profile.playerName, profile.profileUid.getOrElse(""))),
+          players = playerByUid.values.toVector.sortBy(player => (player.canonicalSite, player.canonicalName, player.playerUid)),
+          aliases = aliasByKey.values.toVector.sortBy(alias => (alias.site, alias.playerName, alias.playerUid)),
+          playerCollapses = dedupePlayerCollapses(store.playerCollapses),
+          profileCollapses = dedupeProfileCollapses(store.profileCollapses)
         )
       )
-      aliasByKey.update(key(defaultAlias.site, defaultAlias.playerName), OpponentIdentity.normalizeAlias(defaultAlias))
-    }
-    playerByUid.values.foreach { player =>
-      val canonicalAlias = PlayerAlias(
-        site = player.canonicalSite,
-        playerName = player.canonicalName,
-        playerUid = player.playerUid
-      )
-      aliasByKey.update(key(canonicalAlias.site, canonicalAlias.playerName), OpponentIdentity.normalizeAlias(canonicalAlias))
-    }
-    store.aliases.map(OpponentIdentity.normalizeAlias).foreach { alias =>
-      aliasByKey.update(key(alias.site, alias.playerName), alias)
-    }
 
-    OpponentProfileStore(
-      profiles = mergedProfiles.values.toVector.sortBy(profile => (profile.site, profile.playerName, profile.profileUid.getOrElse(""))),
-      players = playerByUid.values.toVector.sortBy(player => (player.canonicalSite, player.canonicalName, player.playerUid)),
-      aliases = aliasByKey.values.toVector.sortBy(alias => (alias.site, alias.playerName, alias.playerUid)),
-      playerCollapses = dedupePlayerCollapses(store.playerCollapses),
-      profileCollapses = dedupeProfileCollapses(store.profileCollapses)
-    )
+  private def markNormalized(store: OpponentProfileStore): OpponentProfileStore =
+    store.isNormalized = true
+    store
 
   private def findProfile(store: OpponentProfileStore, site: String, playerName: String): Option[OpponentProfile] =
     rawPlayerUid(store, site, playerName)
@@ -1164,27 +1219,83 @@ object OpponentProfileStore:
     )
 
   private[history] def readStore(json: Value): OpponentProfileStore =
-    val obj = json.obj
-    val version = obj.get("formatVersion").map(_.str).getOrElse(LegacyFormatVersion)
-    version match
-      case FormatVersion =>
-        normalize(
-          OpponentProfileStore(
-            profiles = obj.get("profiles").map(_.arr.toVector.map(readProfile)).getOrElse(Vector.empty),
-            players = obj.get("players").map(_.arr.toVector.map(readPlayer)).getOrElse(Vector.empty),
-            aliases = obj.get("aliases").map(_.arr.toVector.map(readAlias)).getOrElse(Vector.empty),
-            playerCollapses = obj.get("playerCollapses").map(_.arr.toVector.map(readPlayerCollapse)).getOrElse(Vector.empty),
-            profileCollapses = obj.get("profileCollapses").map(_.arr.toVector.map(readProfileCollapse)).getOrElse(Vector.empty)
+    try
+      val obj = json.obj
+      readStoreVersion(obj) match
+        case Some(FormatVersion) =>
+          normalize(
+            OpponentProfileStore(
+              profiles = readProfiles(obj),
+              players = readPlayers(obj),
+              aliases = readAliases(obj),
+              playerCollapses = readPlayerCollapses(obj),
+              profileCollapses = readProfileCollapses(obj)
+            )
           )
-        )
-      case LegacyFormatVersion =>
-        normalize(
-          OpponentProfileStore(
-            profiles = obj.get("profiles").map(_.arr.toVector.map(readProfile)).getOrElse(Vector.empty)
+        case Some(LegacyFormatVersion) =>
+          normalize(
+            OpponentProfileStore(
+              profiles = readProfiles(obj)
+            )
           )
-        )
-      case other =>
-        throw new IllegalArgumentException(s"unsupported opponent profile store version: $other")
+        case Some(other) =>
+          System.err.println(s"warning: unsupported opponent profile store version '$other'; loading empty store")
+          empty
+        case None =>
+          empty
+    catch
+      case NonFatal(error) =>
+        System.err.println(s"warning: invalid opponent profile store payload: ${readErrorMessage(error)}")
+        empty
+
+  private def readStoreVersion(obj: collection.Map[String, Value]): Option[String] =
+    obj.get("formatVersion") match
+      case None => Some(LegacyFormatVersion)
+      case Some(value) =>
+        try Some(value.str)
+        catch
+          case NonFatal(error) =>
+            System.err.println(s"warning: invalid opponent profile store formatVersion: ${readErrorMessage(error)}")
+            None
+
+  private def readProfiles(obj: collection.Map[String, Value]): Vector[OpponentProfile] =
+    readEntries(obj, fieldName = "profiles", entryLabel = "opponent profile")(readProfile)
+
+  private def readPlayers(obj: collection.Map[String, Value]): Vector[RememberedPlayer] =
+    readEntries(obj, fieldName = "players", entryLabel = "remembered player")(readPlayer)
+
+  private def readAliases(obj: collection.Map[String, Value]): Vector[PlayerAlias] =
+    readEntries(obj, fieldName = "aliases", entryLabel = "player alias")(readAlias)
+
+  private def readPlayerCollapses(obj: collection.Map[String, Value]): Vector[PlayerCollapse] =
+    readEntries(obj, fieldName = "playerCollapses", entryLabel = "player collapse")(readPlayerCollapse)
+
+  private def readProfileCollapses(obj: collection.Map[String, Value]): Vector[ProfileCollapse] =
+    readEntries(obj, fieldName = "profileCollapses", entryLabel = "profile collapse")(readProfileCollapse)
+
+  private def readEntries[T](
+      obj: collection.Map[String, Value],
+      fieldName: String,
+      entryLabel: String
+  )(reader: Value => T): Vector[T] =
+    obj.get(fieldName) match
+      case None => Vector.empty
+      case Some(value) =>
+        val entries =
+          try value.arr.toVector
+          catch
+            case NonFatal(error) =>
+              System.err.println(
+                s"warning: skipping corrupt opponent profile store field '$fieldName': ${readErrorMessage(error)}"
+              )
+              return Vector.empty
+        entries.zipWithIndex.flatMap { case (entryJson, index) =>
+          try Some(reader(entryJson))
+          catch
+            case NonFatal(error) =>
+              System.err.println(s"warning: skipping corrupt $entryLabel at index $index: ${readErrorMessage(error)}")
+              None
+        }
 
   private[history] def writeProfile(profile: OpponentProfile): Value =
     Obj(
@@ -1218,9 +1329,11 @@ object OpponentProfileStore:
 
   private[history] def readProfile(json: Value): OpponentProfile =
     val obj = json.obj
+    val site = obj("site").str
+    val playerName = obj("playerName").str
     OpponentProfile(
-      site = obj("site").str,
-      playerName = obj("playerName").str,
+      site = site,
+      playerName = playerName,
       handsObserved = obj("handsObserved").num.toInt,
       firstSeenEpochMillis = obj("firstSeenEpochMillis").str.toLong,
       lastSeenEpochMillis = obj("lastSeenEpochMillis").str.toLong,
@@ -1242,7 +1355,7 @@ object OpponentProfileStore:
           raises = responses("raises").num.toInt
         )
       },
-      recentEvents = obj.get("recentEvents").map(_.arr.toVector.map(readEvent)).getOrElse(Vector.empty),
+      recentEvents = obj.get("recentEvents").map(value => readRecentEvents(value.arr, site, playerName)).getOrElse(Vector.empty),
       seenHandIds = obj.get("seenHandIds").map(_.arr.toVector.map(_.str)).getOrElse(Vector.empty),
       showdownHands = obj.get("showdownHands").map(_.arr.toVector.map { recordJson =>
         val recordObj = recordJson.obj
@@ -1258,6 +1371,20 @@ object OpponentProfileStore:
       behaviorUid = obj.get("behaviorUid").filterNot(_ == ujson.Null).map(_.str),
       modelUid = obj.get("modelUid").filterNot(_ == ujson.Null).map(_.str)
     )
+
+  private def readRecentEvents(json: collection.IndexedSeq[Value], site: String, playerName: String): Vector[PokerEvent] =
+    json.toVector.zipWithIndex.flatMap { case (eventJson, index) =>
+      try Some(readEvent(eventJson))
+      catch
+        case NonFatal(error) =>
+          System.err.println(
+            s"warning: skipping corrupt opponent event for $site/$playerName at index $index: ${readErrorMessage(error)}"
+          )
+          None
+    }
+
+  private def readErrorMessage(error: Throwable): String =
+    Option(error.getMessage).map(_.trim).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)
 
   private[history] def writePlayer(player: RememberedPlayer): Value =
     Obj(

@@ -180,6 +180,65 @@ Java_sicfun_holdem_HoldemCfrNativeCpuBindings_solveTree(
 }
 
 extern "C" JNIEXPORT jint JNICALL
+Java_sicfun_holdem_HoldemCfrNativeCpuBindings_solveTreeRoot(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jint iterations,
+    jint averagingDelay,
+    jboolean cfrPlus,
+    jboolean linearAveraging,
+    jint rootNodeId,
+    jint rootInfoSetIndex,
+    jintArray nodeTypesArray,
+    jintArray nodeStartsArray,
+    jintArray nodeCountsArray,
+    jintArray nodeInfosetsArray,
+    jintArray edgeChildIdsArray,
+    jdoubleArray edgeProbabilitiesArray,
+    jdoubleArray terminalUtilitiesArray,
+    jintArray infosetPlayersArray,
+    jintArray infosetActionCountsArray,
+    jdoubleArray outRootStrategyArray) {
+  cfrnative::TreeSpec spec;
+  spec.iterations = static_cast<int>(iterations);
+  spec.averaging_delay = static_cast<int>(averagingDelay);
+  spec.cfr_plus = (cfrPlus == JNI_TRUE);
+  spec.linear_averaging = (linearAveraging == JNI_TRUE);
+  spec.root_node_id = static_cast<int>(rootNodeId);
+
+  int status = read_int_array(env, nodeTypesArray, spec.node_types);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeStartsArray, spec.node_starts);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeCountsArray, spec.node_counts);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeInfosetsArray, spec.node_infosets);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, edgeChildIdsArray, spec.edge_child_ids);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_double_array(env, edgeProbabilitiesArray, spec.edge_probabilities);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_double_array(env, terminalUtilitiesArray, spec.terminal_utilities);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, infosetPlayersArray, spec.infoset_players);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, infosetActionCountsArray, spec.infoset_action_counts);
+  if (status != cfrnative::kStatusOk) return status;
+
+  cfrnative::RootSolveOutput output;
+  status = cfrnative::solve_root(spec, static_cast<int>(rootInfoSetIndex), output);
+  if (status != cfrnative::kStatusOk) {
+    return status;
+  }
+
+  status = write_double_array(env, outRootStrategyArray, output.root_strategy);
+  if (status != cfrnative::kStatusOk) return status;
+
+  g_last_engine_code.store(kEngineCpu, std::memory_order_relaxed);
+  return cfrnative::kStatusOk;
+}
+
+extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemCfrNativeCpuBindings_solveTreeFixed(
     JNIEnv* env,
     jclass /*clazz*/,

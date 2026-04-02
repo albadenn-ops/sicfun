@@ -4,8 +4,22 @@
 
 For any non-trivial task in this repository, use one delegated sidecar before finalizing your answer or patch.
 
+## Code Navigation
+
+Prefer repo-local navigation tools before broad raw file reads, especially to avoid RAM-heavy exploration:
+
+- If your current client or toolchain exposes `repomapper`, use it for cheap broad orientation when you do not yet know where to look.
+- If your current client or toolchain exposes `jcodemunch`, use it for file trees, symbol lookup, targeted text search, and focused retrieval.
+- If your current client or toolchain exposes `jdocmunch`, use it for docs; otherwise use focused doc reads/searches instead of loading large documents wholesale.
+- Use `rg` first for cheap literal search when shell access is available.
+- Prefer targeted retrieval over reading entire large files or large directory sweeps when the narrower tool can answer the question.
+- Do not assume tool-specific repo-local wrapper scripts exist in the current checkout. `scripts/import-ai-nav.ps1` is only a PowerShell convenience layer for CLI-based sessions when `repomapper` and `jcodemunch` are installed on `PATH`.
+- If `.jcodemunch-index/` or `.tool-cache/repomapper/` exist, treat them as local caches only; do not assume they are present, fresh, or shared across chats.
+
+See [`docs/ai-code-navigation.md`](docs/ai-code-navigation.md) for workflow guidance and repo-specific notes.
+
 Default rule:
-- Use [`scripts/ai-minion.ps1`](scripts/ai-minion.ps1) for repo exploration, second-pass review, benchmark/result summarization, and patch planning.
+- Use [`scripts/ai-minion.ps1`](scripts/ai-minion.ps1) for second-pass review, benchmark/result summarization, and patch planning after local navigation has narrowed the scope.
 - Available linked workers are `gemini`, `claude`, and `gpt`.
 - Treat every provider as a read-only helper. Codex remains responsible for edits, verification, and final judgment.
 - Prefer `claude` for planning, scope control, contradiction hunting, and fact-checking when available.

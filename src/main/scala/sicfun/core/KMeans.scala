@@ -2,6 +2,7 @@ package sicfun.core
 
 import scala.util.Random
 
+/** Hyperparameters for k-means clustering. */
 final case class KMeansConfig(
     k: Int,
     maxIterations: Int = 100,
@@ -12,6 +13,7 @@ final case class KMeansConfig(
   require(maxIterations >= 1, "maxIterations must be >= 1")
   require(convergenceThreshold >= 0.0, "convergenceThreshold must be >= 0")
 
+/** Result of a k-means fit run. */
 final case class KMeansResult(
     centroids: Vector[Vector[Double]],
     assignments: Vector[Int],
@@ -20,6 +22,7 @@ final case class KMeansResult(
     converged: Boolean
 )
 
+/** Lightweight k-means implementation for dense Double vectors. */
 object KMeans:
   def fit(points: Vector[Vector[Double]], config: KMeansConfig): KMeansResult =
     require(points.nonEmpty, "points must be non-empty")

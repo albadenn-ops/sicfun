@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [ValidateSet("menu", "quick-proof", "full-proof", "hall-max-autotune", "hall-max-gpu", "hall-single")]
+  [ValidateSet("menu", "quick-proof", "full-proof", "gpu-prereqs-check", "gpu-prereqs-install", "gpu-global-tune", "gpu-global-tune-proof", "hall-max-autotune", "hall-max-gpu", "hall-single")]
   [string]$Action = "menu",
   [switch]$WhatIf
 )
@@ -29,15 +29,42 @@ function New-RunbookAction {
 $actions = [ordered]@{}
 $actions["quick-proof"] = New-RunbookAction `
   -Key "quick-proof" `
-  -Label "Quick proof pipeline" `
+  -Label "Quick proof pipeline (core smoke)" `
   -CommandText "powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1 -Quick" `
   -Command { & powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1 -Quick }
 
 $actions["full-proof"] = New-RunbookAction `
   -Key "full-proof" `
-  -Label "Full proof pipeline" `
+  -Label "Full proof pipeline with hand-history review E2E" `
   -CommandText "powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1" `
   -Command { & powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1 }
+
+$actions["gpu-global-tune"] = New-RunbookAction `
+  -Key "gpu-global-tune" `
+  -Label "Global GPU/native tuning pass" `
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/run-global-tuning.ps1 --targets=runtime" `
+  -Command { & powershell -ExecutionPolicy Bypass -File scripts/run-global-tuning.ps1 --targets=runtime } `
+  -Heavy $true
+
+$actions["gpu-prereqs-check"] = New-RunbookAction `
+  -Key "gpu-prereqs-check" `
+  -Label "Check GPU build prerequisites" `
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1" `
+  -Command { & powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1 }
+
+$actions["gpu-prereqs-install"] = New-RunbookAction `
+  -Key "gpu-prereqs-install" `
+  -Label "Install missing GPU build prerequisites" `
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1 -InstallMissing" `
+  -Command { & powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1 -InstallMissing } `
+  -Heavy $true
+
+$actions["gpu-global-tune-proof"] = New-RunbookAction `
+  -Key "gpu-global-tune-proof" `
+  -Label "Global GPU tuning portability proof" `
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/prove-global-gpu-tuning-portability.ps1" `
+  -Command { & powershell -ExecutionPolicy Bypass -File scripts/prove-global-gpu-tuning-portability.ps1 } `
+  -Heavy $true
 
 $actions["hall-max-autotune"] = New-RunbookAction `
   -Key "hall-max-autotune" `
@@ -130,6 +157,10 @@ function Invoke-RunbookAction {
 $menuOrder = @(
   "quick-proof",
   "full-proof",
+  "gpu-prereqs-check",
+  "gpu-prereqs-install",
+  "gpu-global-tune",
+  "gpu-global-tune-proof",
   "hall-max-autotune",
   "hall-max-gpu",
   "hall-single"

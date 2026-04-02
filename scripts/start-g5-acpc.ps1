@@ -14,10 +14,10 @@ $dotnet = Join-Path $dotnetDirAbs "dotnet.exe"
 $g5Dll = Join-Path $runtimeDirAbs "G5.Acpc.dll"
 
 if (-not (Test-Path $dotnet)) {
-  throw "dotnet not found at $dotnet. Run scripts/build-g5-acpc.ps1 first."
+  throw "dotnet not found at $dotnet. Run scripts/build-g5-acpc.ps1 first. data/tmp/toolchains is local setup and is not source-controlled."
 }
 if (-not (Test-Path $g5Dll)) {
-  throw "G5.Acpc.dll not found at $g5Dll. Run scripts/build-g5-acpc.ps1 first."
+  throw "G5.Acpc.dll not found at $g5Dll. Run scripts/build-g5-acpc.ps1 first. The runtime under data/tmp/ is generated locally and is not source-controlled."
 }
 
 $env:DOTNET_ROOT = $dotnetDirAbs

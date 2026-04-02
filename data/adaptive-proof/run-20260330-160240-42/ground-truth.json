@@ -1,0 +1,96 @@
+{
+  "handsPerOpponent": 10000,
+  "legsPerOpponent": 2,
+  "opponents": [
+    {
+      "name": "Villain01_overfold",
+      "role": "Leaker",
+      "leakId": "overfold-river-aggression",
+      "severity": 0.2,
+      "strategy": "equity-based",
+      "heroNetBbPer100": -88.94836736000045,
+      "heroNetBbPer100ByLeg": {
+        "button": -224.96251264000085,
+        "bigBlind": 47.06577791999994
+      },
+      "leakFiredCount": 26,
+      "leakApplicableSpots": 206,
+      "heroRaiseResponseCount": 19179
+    },
+    {
+      "name": "Villain02_overcall",
+      "role": "Leaker",
+      "leakId": "overcall-big-bets",
+      "severity": 0.25,
+      "strategy": "equity-based",
+      "heroNetBbPer100": 110.66491870720014,
+      "heroNetBbPer100ByLeg": {
+        "button": 80.56412861440003,
+        "bigBlind": 140.76570880000037
+      },
+      "leakFiredCount": 902,
+      "leakApplicableSpots": 6875,
+      "heroRaiseResponseCount": 18405
+    },
+    {
+      "name": "Villain03_turnbluff",
+      "role": "Leaker",
+      "leakId": "overbluff-turn-barrel",
+      "severity": 0.18,
+      "strategy": "equity-based",
+      "heroNetBbPer100": 16.893641919999997,
+      "heroNetBbPer100ByLeg": {
+        "button": -45.32222336000004,
+        "bigBlind": 79.10950719999988
+      },
+      "leakFiredCount": 220,
+      "leakApplicableSpots": 1141,
+      "heroRaiseResponseCount": 18451
+    },
+    {
+      "name": "Villain04_prefloploose",
+      "role": "Leaker",
+      "leakId": "preflop-too-loose",
+      "severity": 0.22,
+      "strategy": "equity-based",
+      "heroNetBbPer100": -123.07600832000003,
+      "heroNetBbPer100ByLeg": {
+        "button": -183.98955392000002,
+        "bigBlind": -62.162462719999965
+      },
+      "leakFiredCount": 1109,
+      "leakApplicableSpots": 7294,
+      "heroRaiseResponseCount": 18869
+    },
+    {
+      "name": "Villain05_prefloptight",
+      "role": "Leaker",
+      "leakId": "preflop-too-tight",
+      "severity": 0.15,
+      "strategy": "equity-based",
+      "heroNetBbPer100": 54.944955839999956,
+      "heroNetBbPer100ByLeg": {
+        "button": -144.33056896000005,
+        "bigBlind": 254.22048063999995
+      },
+      "leakFiredCount": 1377,
+      "leakApplicableSpots": 9225,
+      "heroRaiseResponseCount": 17669
+    },
+    {
+      "name": "Villain06_gto",
+      "role": "Control",
+      "leakId": "gto-baseline",
+      "severity": 0,
+      "strategy": "cfr-no-fallback",
+      "heroNetBbPer100": -54.524869657600505,
+      "heroNetBbPer100ByLeg": {
+        "button": -88.93275519999999,
+        "bigBlind": -20.116984115199866
+      },
+      "leakFiredCount": 0,
+      "leakApplicableSpots": 0,
+      "heroRaiseResponseCount": 18137
+    }
+  ]
+}

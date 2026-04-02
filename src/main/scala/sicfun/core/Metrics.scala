@@ -1,5 +1,6 @@
 package sicfun.core
 
+/** Statistical and information-theoretic utility functions used across inference modules. */
 object Metrics:
   private inline val Eps = Probability.Eps
 

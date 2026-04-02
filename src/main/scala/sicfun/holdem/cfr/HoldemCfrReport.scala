@@ -346,7 +346,7 @@ object HoldemCfrReport:
 
   private val usage =
     """Usage:
-      |  runMain sicfun.holdem.HoldemCfrReport [--key=value ...]
+      |  runMain sicfun.holdem.cfr.HoldemCfrReport [--key=value ...]
       |
       |Core:
       |  --hero=<AcKh>                     Default AcKh

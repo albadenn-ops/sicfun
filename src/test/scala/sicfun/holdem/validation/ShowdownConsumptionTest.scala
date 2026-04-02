@@ -13,6 +13,9 @@ import scala.util.Random
 class ShowdownConsumptionTest extends FunSuite:
   override val munitTimeout = scala.concurrent.duration.Duration(600, "s")
 
+  private def withScalaCfrProvider[A](thunk: => A): A =
+    TestSystemPropertyScope.withSystemProperties(Seq("sicfun.cfr.provider" -> Some("scala")))(thunk)
+
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
@@ -33,18 +36,20 @@ class ShowdownConsumptionTest extends FunSuite:
       baselineNoise = if leak.id == NoLeak.Id then 0.0 else 0.03,
       seed = seed
     )
-    val sim = new HeadsUpSimulator(
-      heroEngine = None,
-      villain = villain,
-      seed = seed,
-      villainStrategy = ValidationRunner.villainStrategyFor(leak)
-    )
-    val records = (1 to handsToPlay).map(sim.playHand).toVector
-    val text = PokerStarsExporter.exportHands(records, "Hero", villain.name)
-    val parsed = HandHistoryImport.parseText(text, Some(HandHistorySite.PokerStars), Some("Hero"))
-    assert(parsed.isRight, s"parse failed: ${parsed.left.getOrElse("")}")
-    val profiles = OpponentProfile.fromImportedHands("simulated", parsed.toOption.get, Set("Hero"))
-    profiles.headOption.getOrElse(fail(s"missing profile for ${leak.id}"))
+    withScalaCfrProvider {
+      val sim = new HeadsUpSimulator(
+        heroEngine = None,
+        villain = villain,
+        seed = seed,
+        villainStrategy = ValidationRunner.villainStrategyFor(leak)
+      )
+      val records = (1 to handsToPlay).map(sim.playHand).toVector
+      val text = PokerStarsExporter.exportHands(records, "Hero", villain.name)
+      val parsed = HandHistoryImport.parseText(text, Some(HandHistorySite.PokerStars), Some("Hero"))
+      assert(parsed.isRight, s"parse failed: ${parsed.left.getOrElse("")}")
+      val profiles = OpponentProfile.fromImportedHands("simulated", parsed.toOption.get, Set("Hero"))
+      profiles.headOption.getOrElse(fail(s"missing profile for ${leak.id}"))
+    }
 
   private def isShowdownHint(text: String): Boolean =
     text.contains("shown down") ||

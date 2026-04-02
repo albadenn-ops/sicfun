@@ -22,7 +22,9 @@ class HeadsUpSimulatorTest extends FunSuite:
 
   private def makeSimulator(
       leaks: Vector[InjectedLeak] = Vector.empty,
-      seed: Long = 42L
+      seed: Long = 42L,
+      heroEngine: Option[RealTimeAdaptiveEngine] = Some(makeEngine()),
+      heroIsButton: Boolean = true
   ): HeadsUpSimulator =
     val villain = LeakInjectedVillain(
       name = "TestVillain",
@@ -31,11 +33,12 @@ class HeadsUpSimulatorTest extends FunSuite:
       seed = seed
     )
     new HeadsUpSimulator(
-      heroEngine = Some(makeEngine()),
+      heroEngine = heroEngine,
       villain = villain,
       seed = seed,
       equityTrialsForCategory = 100,
-      budgetMs = 20L
+      budgetMs = 20L,
+      heroIsButton = heroIsButton
     )
 
   test("playHand returns a valid HandRecord"):
@@ -107,3 +110,31 @@ class HeadsUpSimulatorTest extends FunSuite:
     assertEquals(r1.villainCards, r2.villainCards)
     assertEquals(r1.actions.map(_.action), r2.actions.map(_.action))
     assertEqualsDouble(r1.heroNet, r2.heroNet, 0.001)
+
+  test("mirrored seat config changes seat metadata and first preflop actor"):
+    val buttonRecord = makeSimulator(seed = 123L, heroIsButton = true).playHand(1)
+    val bigBlindRecord = makeSimulator(seed = 123L, heroIsButton = false).playHand(1)
+
+    assertEquals(buttonRecord.heroSeat, 1)
+    assertEquals(buttonRecord.villainSeat, 2)
+    assert(buttonRecord.heroIsButton)
+    assertEquals(buttonRecord.buttonSeat, 1)
+    assertEquals(buttonRecord.actions.head.player, "Hero")
+
+    assertEquals(bigBlindRecord.heroSeat, 2)
+    assertEquals(bigBlindRecord.villainSeat, 1)
+    assert(!bigBlindRecord.heroIsButton)
+    assertEquals(bigBlindRecord.buttonSeat, 1)
+    assertEquals(bigBlindRecord.actions.head.player, "TestVillain")
+
+  test("simulator surfaces explicit villain responses to hero raises"):
+    val sim = makeSimulator(seed = 41L, heroEngine = None)
+    val records = (1 to 40).map(i => sim.playHand(i)).toVector
+    val responses = records.flatMap(_.heroRaiseResponses)
+
+    assert(responses.nonEmpty, "expected at least one villain response to a hero raise")
+    assert(responses.forall { event =>
+      event.response match
+        case PokerAction.Fold | PokerAction.Call | PokerAction.Raise(_) => true
+        case _ => false
+    })

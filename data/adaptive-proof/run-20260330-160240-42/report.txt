@@ -1,0 +1,14 @@
+=== Adaptive Proof Report ===
+Run seed: 42
+Hands per opponent: 10000
+
+Per-opponent results:
+  Villain01_overfold     bb/100: -88,9   button: -225,0   bigBlind: +47,1
+  Villain02_overcall     bb/100: +110,7   button: +80,6   bigBlind: +140,8
+  Villain03_turnbluff    bb/100: +16,9   button: -45,3   bigBlind: +79,1
+  Villain04_prefloploose bb/100: -123,1   button: -184,0   bigBlind: -62,2
+  Villain05_prefloptight bb/100: +54,9   button: -144,3   bigBlind: +254,2
+  Villain06_gto          bb/100: -54,5   button: -88,9   bigBlind: -20,1
+
+Leaker average bb/100: -5,9
+GTO control bb/100: -54,5

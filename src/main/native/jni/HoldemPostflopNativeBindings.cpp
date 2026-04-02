@@ -411,6 +411,15 @@ jint compute_postflop_mc_equity_cpu(
     const int trials,
     const uint64_t seed,
     EquityResultNative* __restrict__ out) {
+  if (!is_valid_card_id(hero_first) || !is_valid_card_id(hero_second) ||
+      !is_valid_card_id(villain_first) || !is_valid_card_id(villain_second)) {
+    return 125;
+  }
+  for (int b = 0; b < board_size; ++b) {
+    if (!is_valid_card_id(board_cards[b])) {
+      return 125;
+    }
+  }
   const int cards_needed = kBoardCardCount - board_size;
   if (cards_needed < 0 || cards_needed > kBoardCardCount) {
     return kStatusInvalidBoardSize;

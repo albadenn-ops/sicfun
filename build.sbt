@@ -25,8 +25,7 @@ lazy val root = (project in file("."))
       "-new-syntax",
       "-indent"
     ),
-    Test / scalacOptions -= "-Xfatal-warnings",
-    Test / parallelExecution := false
+    Test / scalacOptions -= "-Xfatal-warnings"
   )
 
 lazy val headsUpTableMode = settingKey[String]("Heads-up equity table mode: exact or mc")

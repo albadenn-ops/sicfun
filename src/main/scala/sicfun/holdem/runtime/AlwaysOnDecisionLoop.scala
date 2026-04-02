@@ -147,6 +147,14 @@ object AlwaysOnDecisionLoop:
   private def runConfig(config: CliConfig): Either[String, RunSummary] =
     new LoopRunner(config).run()
 
+  /** Runtime coordinator for one always-on loop instance.
+    *
+    * Lifecycle:
+    * 1. Read incremental feed entries from the last persisted byte offset.
+    * 2. Update per-hand state and opportunistically emit hero decisions.
+    * 3. Observe villain responses to hero raises and update adaptive priors.
+    * 4. Persist snapshots/logs/opponent memory and optionally retrain on schedule.
+    */
   private final class LoopRunner(config: CliConfig):
     private val snapshotsRoot = config.outputDir.resolve("snapshots")
     private val modelsRoot = config.outputDir.resolve("models")
@@ -234,6 +242,7 @@ object AlwaysOnDecisionLoop:
       processedEvents += 1
       updated
 
+    /** Tracks only villain reactions that directly follow a pending hero raise. */
     private def maybeObserveVillainResponse(event: PokerEvent): Unit =
       if event.playerId == config.villainPlayerId then
         val responseToHeroRaise = pendingRaiseTracker.onVillainAction(event.handId, event.action)
@@ -262,6 +271,7 @@ object AlwaysOnDecisionLoop:
           case _ =>
             opponentProfileStoreDirty = false
 
+    /** Emits hero recommendations only for hero-originated feed events. */
     private def maybeEmitHeroDecision(event: PokerEvent, updated: HandState): Unit =
       if event.playerId == config.heroPlayerId then
         pendingRaiseTracker.onHeroAction(event.handId, event.action)
@@ -318,6 +328,7 @@ object AlwaysOnDecisionLoop:
       if config.retrainEnabled && decisionsEmitted % config.retrainEveryDecisions == 0 then
         config.trainingDataPath.foreach(runRetrain)
 
+    /** Triggers retraining, records both success and failure, and keeps serving live traffic. */
     private def runRetrain(trainingPath: Path): Unit =
       val retrainTarget = modelsRoot.resolve(s"model-retrain-$decisionsEmitted")
       val retrainResult = TrainPokerActionModel.run(Array(
@@ -381,6 +392,11 @@ object AlwaysOnDecisionLoop:
     private def currentRememberedVillainEvents(): Vector[PokerEvent] =
       loadRememberedOpponent(opponentProfileStore, config).map(_.recentEvents).getOrElse(Vector.empty)
 
+  /** Builds a fresh adaptive engine instance from current CLI/runtime settings.
+    *
+    * Negative CFR threshold flags (`-1`) are interpreted as disabled and mapped to
+    * positive infinity so guardrail comparisons stay monotonic.
+    */
   private def newAdaptiveEngine(config: CliConfig, model: PokerActionModel): RealTimeAdaptiveEngine =
     val equilibriumBaselineConfig =
       if config.cfrIterations <= 0 then None
@@ -678,7 +694,7 @@ object AlwaysOnDecisionLoop:
 
   private val usage =
     """Usage:
-      |  runMain sicfun.holdem.AlwaysOnDecisionLoop --feedPath=<events.tsv> --modelArtifactDir=<dir> [--key=value ...]
+      |  runMain sicfun.holdem.runtime.AlwaysOnDecisionLoop --feedPath=<events.tsv> --modelArtifactDir=<dir> [--key=value ...]
       |
       |Required:
       |  --feedPath=<path>                 Append-only TSV feed (DecisionLoopEventFeedIO header)

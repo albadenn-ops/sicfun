@@ -20,6 +20,11 @@ final case class RecordedAction(
 )
 
 /** Complete record of one simulated hand. */
+final case class HeroRaiseResponseEvent(
+    street: Street,
+    response: PokerAction
+)
+
 final case class HandRecord(
     handId: String,
     handNumber: Int,
@@ -29,8 +34,14 @@ final case class HandRecord(
     actions: Vector[RecordedAction],
     heroNet: Double,
     streetsPlayed: Int,
+    heroSeat: Int = 1,
+    villainSeat: Int = 2,
+    heroIsButton: Boolean = true,
+    heroRaiseResponses: Vector[HeroRaiseResponseEvent] = Vector.empty,
+    villainName: String = "Villain",
     leakApplicableSpots: Int = 0
-)
+):
+  def buttonSeat: Int = if heroIsButton then heroSeat else villainSeat
 
 /** Focused heads-up hand simulator for validation.
   *
@@ -50,11 +61,16 @@ final class HeadsUpSimulator(
     smallBlind: Double = 0.5,
     bigBlind: Double = 1.0,
     budgetMs: Long = 50L,
-    villainStrategy: VillainStrategy = EquityBasedStrategy()
+    villainStrategy: VillainStrategy = EquityBasedStrategy(),
+    heroIsButton: Boolean = true
 ):
   private val rng = new Random(seed)
   private val heroName = "Hero"
   private val streets = Vector(Street.Preflop, Street.Flop, Street.Turn, Street.River)
+  private val heroSeat = if heroIsButton then 1 else 2
+  private val villainSeat = if heroIsButton then 2 else 1
+  private val heroPosition = if heroIsButton then Position.Button else Position.BigBlind
+  private val villainPosition = if heroIsButton then Position.BigBlind else Position.Button
 
   def playHand(handNumber: Int): HandRecord =
     // Shuffle deck
@@ -66,6 +82,7 @@ final class HeadsUpSimulator(
     val actions = mutable.ArrayBuffer.empty[RecordedAction]
     val villainObs = mutable.ArrayBuffer.empty[VillainObservation]
     val villainLine = mutable.ArrayBuffer.empty[PokerAction]
+    val heroRaiseResponses = mutable.ArrayBuffer.empty[HeroRaiseResponseEvent]
     var applicableSpots = 0
     var heroStack = startingStack
     var villainStack = startingStack
@@ -73,10 +90,14 @@ final class HeadsUpSimulator(
     var handOver = false
     var streetsPlayed = 0
     var lastFolderIsHero = false
+    var pendingHeroRaiseStreet: Option[Street] = None
 
-    // Post blinds: hero = SB/Button, villain = BB
-    heroStack -= smallBlind
-    villainStack -= bigBlind
+    if heroIsButton then
+      heroStack -= smallBlind
+      villainStack -= bigBlind
+    else
+      villainStack -= smallBlind
+      heroStack -= bigBlind
     pot = smallBlind + bigBlind
 
     def boardForStreet(street: Street): Board = street match
@@ -89,17 +110,25 @@ final class HeadsUpSimulator(
       streetsPlayed += 1
       val board = boardForStreet(street)
       // Track per-street commitments to compute correct toCall after raises
-      var heroCommitted = if street == Street.Preflop then smallBlind else 0.0
-      var villainCommitted = if street == Street.Preflop then bigBlind else 0.0
+      var heroCommitted =
+        if street == Street.Preflop then
+          if heroIsButton then smallBlind else bigBlind
+        else 0.0
+      var villainCommitted =
+        if street == Street.Preflop then
+          if heroIsButton then bigBlind else smallBlind
+        else 0.0
       var toCall = if street == Street.Preflop then bigBlind - smallBlind else 0.0
       var streetDone = false
       var actionsThisStreet = 0
-      // Preflop: SB(hero/Button) acts first. Postflop: villain(BB/OOP) acts first.
-      var heroTurn = street == Street.Preflop
+      // Preflop: SB/Button acts first. Postflop: BB/OOP acts first.
+      var heroTurn =
+        if street == Street.Preflop then heroIsButton
+        else !heroIsButton
 
       while !streetDone && !handOver && actionsThisStreet < 8 do
         if heroTurn then
-          val gs = GameState(street, board, pot, math.max(0.0, toCall), Position.Button, heroStack, Vector.empty)
+          val gs = GameState(street, board, pot, math.max(0.0, toCall), heroPosition, heroStack, Vector.empty)
           val heroAction = validateAction(decideHero(heroCards, gs, board, street, villainObs.toVector), toCall)
           actions += RecordedAction(street, heroName, heroAction, pot, toCall, heroStack,
             leakFired = false, leakId = None)
@@ -125,9 +154,10 @@ final class HeadsUpSimulator(
               pot += netCost
               heroCommitted += netCost
               toCall = math.max(0.0, heroCommitted - villainCommitted)
+              pendingHeroRaiseStreet = Some(street)
               actionsThisStreet += 1
         else
-          val gs = GameState(street, board, pot, math.max(0.0, toCall), Position.BigBlind, villainStack, Vector.empty)
+          val gs = GameState(street, board, pot, math.max(0.0, toCall), villainPosition, villainStack, Vector.empty)
 
           // Compute equity once — used for both GTO decision and SpotContext
           val equityVsRandom = estimateEquityVsRandom(villainCards, board)
@@ -152,6 +182,13 @@ final class HeadsUpSimulator(
           // Track observation for hero's adaptive inference
           villainObs += VillainObservation(validatedAction, gs)
           villainLine += validatedAction
+          pendingHeroRaiseStreet.foreach { responseStreet =>
+            validatedAction match
+              case PokerAction.Fold | PokerAction.Call | PokerAction.Raise(_) =>
+                heroRaiseResponses += HeroRaiseResponseEvent(responseStreet, validatedAction)
+              case _ => ()
+          }
+          pendingHeroRaiseStreet = None
 
           validatedAction match
             case PokerAction.Fold =>
@@ -177,6 +214,9 @@ final class HeadsUpSimulator(
               actionsThisStreet += 1
 
         heroTurn = !heroTurn
+
+      if pendingHeroRaiseStreet.contains(street) then
+        pendingHeroRaiseStreet = None
 
     // Determine outcome
     val finalBoard = boardForStreet(streets(math.min(streetsPlayed - 1, streets.length - 1)))
@@ -210,6 +250,11 @@ final class HeadsUpSimulator(
       actions = actions.toVector,
       heroNet = heroNet,
       streetsPlayed = streetsPlayed,
+      heroSeat = heroSeat,
+      villainSeat = villainSeat,
+      heroIsButton = heroIsButton,
+      heroRaiseResponses = heroRaiseResponses.toVector,
+      villainName = villain.name,
       leakApplicableSpots = applicableSpots
     )
 
@@ -229,7 +274,7 @@ final class HeadsUpSimulator(
             hero = hero,
             state = gs,
             folds = Vector.empty, // heads-up, no preflop folds
-            villainPos = Position.BigBlind,
+            villainPos = villainPosition,
             observations = villainObservations,
             candidateActions = candidates,
             decisionBudgetMillis = Some(budgetMs),

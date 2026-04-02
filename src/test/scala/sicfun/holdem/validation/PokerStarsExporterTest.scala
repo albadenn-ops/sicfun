@@ -17,7 +17,9 @@ class PokerStarsExporterTest extends FunSuite:
         Card(Rank.Eight, Suit.Clubs)
       )),
       actions: Vector[RecordedAction] = Vector.empty,
-      heroNet: Double = 5.0
+      heroNet: Double = 5.0,
+      heroIsButton: Boolean = true,
+      villainName: String = "Villain"
   ): HandRecord =
     HandRecord(
       handId = f"SIM-${handNumber}%08d",
@@ -25,18 +27,35 @@ class PokerStarsExporterTest extends FunSuite:
       heroCards = heroCards,
       villainCards = villainCards,
       board = board,
-      actions = if actions.nonEmpty then actions else defaultActions,
+      actions = if actions.nonEmpty then actions else if heroIsButton then defaultActionsHeroButton else defaultActionsHeroBigBlind,
       heroNet = heroNet,
-      streetsPlayed = 4
+      streetsPlayed = 4,
+      heroSeat = if heroIsButton then 1 else 2,
+      villainSeat = if heroIsButton then 2 else 1,
+      heroIsButton = heroIsButton,
+      villainName = villainName
     )
 
-  private val defaultActions: Vector[RecordedAction] = Vector(
+  private val defaultActionsHeroButton: Vector[RecordedAction] = Vector(
     RecordedAction(Street.Preflop, "Hero", PokerAction.Call, 1.5, 0.5, 99.5, leakFired = false, leakId = None),
     RecordedAction(Street.Preflop, "Villain", PokerAction.Check, 2.0, 0.0, 99.0, leakFired = false, leakId = None),
     RecordedAction(Street.Flop, "Villain", PokerAction.Raise(4.0), 2.0, 0.0, 99.0, leakFired = false, leakId = None),
     RecordedAction(Street.Flop, "Hero", PokerAction.Call, 6.0, 4.0, 99.0, leakFired = false, leakId = None),
     RecordedAction(Street.Turn, "Villain", PokerAction.Check, 10.0, 0.0, 95.0, leakFired = false, leakId = None),
     RecordedAction(Street.Turn, "Hero", PokerAction.Check, 10.0, 0.0, 95.0, leakFired = false, leakId = None),
+    RecordedAction(Street.River, "Villain", PokerAction.Raise(8.0), 10.0, 0.0, 95.0, leakFired = false, leakId = None),
+    RecordedAction(Street.River, "Hero", PokerAction.Fold, 18.0, 8.0, 95.0, leakFired = false, leakId = None)
+  )
+
+  private val defaultActionsHeroBigBlind: Vector[RecordedAction] = Vector(
+    RecordedAction(Street.Preflop, "Villain", PokerAction.Call, 1.5, 0.5, 99.5, leakFired = false, leakId = None),
+    RecordedAction(Street.Preflop, "Hero", PokerAction.Check, 2.0, 0.0, 99.0, leakFired = false, leakId = None),
+    RecordedAction(Street.Flop, "Hero", PokerAction.Check, 2.0, 0.0, 99.0, leakFired = false, leakId = None),
+    RecordedAction(Street.Flop, "Villain", PokerAction.Raise(4.0), 2.0, 0.0, 99.0, leakFired = false, leakId = None),
+    RecordedAction(Street.Flop, "Hero", PokerAction.Call, 6.0, 4.0, 99.0, leakFired = false, leakId = None),
+    RecordedAction(Street.Turn, "Hero", PokerAction.Check, 10.0, 0.0, 95.0, leakFired = false, leakId = None),
+    RecordedAction(Street.Turn, "Villain", PokerAction.Check, 10.0, 0.0, 95.0, leakFired = false, leakId = None),
+    RecordedAction(Street.River, "Hero", PokerAction.Check, 10.0, 0.0, 95.0, leakFired = false, leakId = None),
     RecordedAction(Street.River, "Villain", PokerAction.Raise(8.0), 10.0, 0.0, 95.0, leakFired = false, leakId = None),
     RecordedAction(Street.River, "Hero", PokerAction.Fold, 18.0, 8.0, 95.0, leakFired = false, leakId = None)
   )
@@ -94,3 +113,44 @@ class PokerStarsExporterTest extends FunSuite:
         assertEquals(hands.size, 3, "all 3 hands should parse")
       case Left(err) =>
         fail(s"parseText failed on multi-hand export: $err")
+
+  test("exportHands honors mirrored heads-up seat metadata"):
+    val record = makeRecord(heroIsButton = false)
+    val text = PokerStarsExporter.exportHands(Vector(record), "Hero", "Villain")
+
+    assert(text.contains("Seat #1 is the button"), "villain should hold the button when hero is big blind")
+    assert(text.contains("Seat 1: Villain"), "villain should move to seat 1 in mirrored leg")
+    assert(text.contains("Seat 2: Hero"), "hero should move to seat 2 in mirrored leg")
+    assert(text.contains("Villain: posts small blind $0.50"), "villain should post the small blind")
+    assert(text.contains("Hero: posts big blind $1.00"), "hero should post the big blind")
+
+  test("multi-opponent export uses the per-record villain identity"):
+    val first = makeRecord(handNumber = 1, villainName = "VillainA")
+    val second = makeRecord(handNumber = 2, heroIsButton = false, villainName = "VillainB")
+    val text = PokerStarsExporter.exportHands(Vector(first, second), "Hero", "IgnoredVillain")
+
+    assert(text.contains("Seat 2: VillainA"), "first hand should keep its own villain identity")
+    assert(text.contains("Seat 1: VillainB"), "second hand should use its own mirrored villain identity")
+    assert(text.contains("VillainB: posts small blind $0.50"), "second hand should use the per-record villain name")
+
+  test("exportHands converts simulator raise amounts into correct total-to text"):
+    val raiseActions = Vector(
+      RecordedAction(Street.Preflop, "Hero", PokerAction.Raise(2.5), 1.5, 0.5, 99.5, leakFired = false, leakId = None),
+      RecordedAction(Street.Preflop, "Villain", PokerAction.Fold, 4.0, 2.0, 99.0, leakFired = false, leakId = None)
+    )
+    val record = makeRecord(actions = raiseActions)
+    val text = PokerStarsExporter.exportHands(Vector(record), "Hero", "Villain")
+
+    assert(text.contains("Hero: raises $2.00 to $3.00"), "raise text should reflect the total contribution after calling")
+
+  test("mirrored-seat export roundtrips through HandHistoryImport.parseText"):
+    val record = makeRecord(heroIsButton = false)
+    val text = PokerStarsExporter.exportHands(Vector(record), "Hero", "Villain")
+    val parsed = HandHistoryImport.parseText(text, Some(HandHistorySite.PokerStars), Some("Hero"))
+
+    parsed match
+      case Right(hands) =>
+        assertEquals(hands.size, 1)
+        assertEquals(hands.head.buttonSeatNumber, 1)
+      case Left(err) =>
+        fail(s"parseText failed on mirrored-seat export: $err")

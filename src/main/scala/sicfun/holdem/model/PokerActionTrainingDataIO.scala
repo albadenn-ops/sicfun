@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import scala.jdk.CollectionConverters.*
 
+/** TSV reader for supervised poker action training rows. */
 object PokerActionTrainingDataIO:
   private val RequiredColumns: Set[String] = Set(
     "street",

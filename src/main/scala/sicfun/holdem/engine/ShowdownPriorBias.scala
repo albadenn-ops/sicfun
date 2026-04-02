@@ -4,6 +4,7 @@ import sicfun.core.{Card, DiscreteDistribution, Rank}
 import sicfun.holdem.history.ShowdownRecord
 import sicfun.holdem.types.*
 
+/** Coarse hand classes used to map showdown observations into prior-bias buckets. */
 enum ShowdownHandClass:
   case PremiumPair
   case Broadway
@@ -46,6 +47,11 @@ object ShowdownHandClass:
   private def highestRankValue(hand: HoleCards): Int =
     math.max(hand.first.rank.value, hand.second.rank.value)
 
+/** Applies a conservative showdown-informed bias on top of a context prior range.
+  *
+  * The bias is bounded and blended with the original prior to avoid overfitting to small
+  * showdown samples.
+  */
 object ShowdownPriorBias:
   val MinShowdowns = 3
   val MaxBiasMultiplier = 1.5

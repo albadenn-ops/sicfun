@@ -3,8 +3,10 @@ package sicfun.holdem.history
 import java.nio.file.{Path, Paths}
 import java.util.Locale
 
+/** Persistence target for opponent-memory storage. */
 sealed trait OpponentMemoryTarget
 
+/** Parses and validates opponent-memory target definitions. */
 object OpponentMemoryTarget:
   final case class Json(path: Path) extends OpponentMemoryTarget
   final case class Postgres(

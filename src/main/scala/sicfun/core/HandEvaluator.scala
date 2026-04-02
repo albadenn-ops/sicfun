@@ -1,5 +1,7 @@
 package sicfun.core
 
+import sicfun.holdem.types.ScopedRuntimeProperties
+
 import java.util.concurrent.ConcurrentHashMap
 
 /** Poker hand categories ordered by strength from weakest to strongest.
@@ -516,8 +518,10 @@ object HandEvaluator:
     key
 
   private def configuredCacheLimit(property: String, env: String, default: Int): Int =
-    sys.props
+    ScopedRuntimeProperties
       .get(property)
+      .flatten
+      .orElse(sys.props.get(property))
       .orElse(sys.env.get(env))
       .flatMap(_.trim.toIntOption)
       .filter(_ >= 0)

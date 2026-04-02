@@ -214,7 +214,7 @@ object ValidationRunner:
           println(f"  [DBG] $villainName: evts=${evts.size} turn(n=${turnEvts.size} r=$turnRaises) rvr(facing=${riverFacing.size} folds=$riverFolds) hints=$hints")
       }
 
-    // TODO: cluster analysis (secondary) — use PlayerSignature.compute for cluster assignment
+    // Deferred enhancement: add cluster analysis using PlayerSignature.compute for assignment.
     PlayerValidationResult(
       villainName = villainName,
       leakId = leak.id,

@@ -84,6 +84,42 @@ final case class HoldemCfrDecisionPolicy(
   require(villainSupport > 0, "villainSupport must be positive")
   require(provider.trim.nonEmpty, "provider must be non-empty")
 
+private[holdem] final case class HoldemCfrNativeDecisionProfile(
+    provider: String,
+    iterations: Int,
+    infoSetKey: String,
+    villainSupport: Int,
+    nodeCount: Int,
+    infoSetCount: Int,
+    prepareNanos: Long,
+    prepareSupportNanos: Long = 0L,
+    prepareEquityNanos: Long = 0L,
+    prepareResponseNanos: Long = 0L,
+    prepareGameBuildNanos: Long = 0L,
+    specBuildNanos: Long,
+    nativeSolveNanos: Long,
+    unpackNanos: Long,
+    actionProbabilities: Map[PokerAction, Double],
+    bestAction: PokerAction
+):
+  require(provider.trim.nonEmpty, "provider must be non-empty")
+  require(iterations > 0, "iterations must be positive")
+  require(villainSupport > 0, "villainSupport must be positive")
+  require(nodeCount > 0, "nodeCount must be positive")
+  require(infoSetCount > 0, "infoSetCount must be positive")
+  require(actionProbabilities.nonEmpty, "actionProbabilities must be non-empty")
+
+  def measuredTotalNanos: Long =
+    prepareNanos + specBuildNanos + nativeSolveNanos + unpackNanos
+
+  def jvmMeasuredNanos: Long =
+    prepareNanos + specBuildNanos + unpackNanos
+
+private[holdem] final case class HoldemCfrProfiledDecisionPolicy(
+    policy: HoldemCfrDecisionPolicy,
+    nativeProfile: Option[HoldemCfrNativeDecisionProfile]
+)
+
 /** CFR baseline solver for a heads-up decision abstraction.
   *
   * This module integrates with existing project equity engines:
@@ -138,10 +174,29 @@ object HoldemCfrSolver:
       actionProbabilities: Map[PokerAction, Double]
   )
 
+  private final case class RootPolicyProfiledSolveResult(
+      rootPolicy: RootPolicySolveResult,
+      nativeProfile: Option[HoldemCfrNativeDecisionProfile]
+  )
+
   private final case class PreparedGame(
       heroActions: Vector[PokerAction],
       villainSupport: Vector[(HoleCards, Double)],
       game: HoldemDecisionGame
+  )
+
+  private final case class PrepareGameTiming(
+      supportNanos: Long,
+      equityLookupNanos: Long,
+      responseBuildNanos: Long,
+      gameBuildNanos: Long
+  ):
+    def totalNanos: Long =
+      supportNanos + equityLookupNanos + responseBuildNanos + gameBuildNanos
+
+  private final case class PreparedGameProfiled(
+      prepared: PreparedGame,
+      timing: PrepareGameTiming
   )
 
   private final case class ContinuationChanceCacheKey(
@@ -289,6 +344,84 @@ object HoldemCfrSolver:
       villainSupport = prepared.villainSupport.length,
       provider = providerLabel(rootPolicy.provider)
     )
+
+  private[holdem] def profileNativeDecisionPolicy(
+      hero: HoleCards,
+      state: GameState,
+      villainPosterior: DiscreteDistribution[HoleCards],
+      candidateActions: Vector[PokerAction],
+      config: HoldemCfrConfig,
+      backend: HoldemCfrNativeRuntime.Backend
+  ): Either[String, HoldemCfrNativeDecisionProfile] =
+    val sanitizedHeroActions = sanitizeHeroActions(state, candidateActions)
+    maybeSolveTerminalRootPolicy(
+      hero = hero,
+      state = state,
+      villainPosterior = villainPosterior,
+      heroActions = sanitizedHeroActions,
+      config = config
+    ) match
+      case Some(policy) =>
+        return Left(s"decision solve shortcut bypassed CFR provider (${policy.provider})")
+      case None => ()
+
+    val preparedProfile = prepareGameProfiled(
+      hero = hero,
+      state = state,
+      villainPosterior = villainPosterior,
+      candidateActions = sanitizedHeroActions,
+      config = config
+    )
+    val prepared = preparedProfile.prepared
+    val prepareTiming = preparedProfile.timing
+    val prepareNanos = prepareTiming.totalNanos
+
+    if prepared.game.requiresScalaOnly then
+      Left("prepared game requires scala-only solve path")
+    else
+      val cfrConfig = CfrSolver.Config(
+        iterations = config.iterations,
+        cfrPlus = config.cfrPlus,
+        averagingDelay = config.averagingDelay,
+        linearAveraging = config.linearAveraging
+      )
+      val specStarted = System.nanoTime()
+      val spec = prepared.game.toNativeTreeSpec
+      val specBuildNanos = elapsedNanosSince(specStarted)
+      val solveStarted = System.nanoTime()
+      HoldemCfrNativeRuntime.solveTreeRoot(backend = backend, spec = spec, config = cfrConfig) match
+        case Left(reason) =>
+          Left(reason)
+        case Right(nativeResult) =>
+          val nativeSolveNanos = elapsedNanosSince(solveStarted)
+          val unpackStarted = System.nanoTime()
+          val actionProbabilities =
+            rootPolicyFromNativeStrategy(prepared.heroActions, nativeResult.rootStrategy)
+          val unpackNanos = elapsedNanosSince(unpackStarted)
+          val bestAction = selectBestActionByProbability(prepared.heroActions, actionProbabilities)
+          Right(
+            HoldemCfrNativeDecisionProfile(
+              provider =
+                backend match
+                  case HoldemCfrNativeRuntime.Backend.Cpu => "native-cpu"
+                  case HoldemCfrNativeRuntime.Backend.Gpu => "native-gpu",
+              iterations = config.iterations,
+              infoSetKey = prepared.game.heroRootInfoSetKey,
+              villainSupport = prepared.villainSupport.length,
+              nodeCount = spec.nodeTypes.length,
+              infoSetCount = spec.infosetKeys.length,
+              prepareNanos = prepareNanos,
+              prepareSupportNanos = prepareTiming.supportNanos,
+              prepareEquityNanos = prepareTiming.equityLookupNanos,
+              prepareResponseNanos = prepareTiming.responseBuildNanos,
+              prepareGameBuildNanos = prepareTiming.gameBuildNanos,
+              specBuildNanos = specBuildNanos,
+              nativeSolveNanos = nativeSolveNanos,
+              unpackNanos = unpackNanos,
+              actionProbabilities = actionProbabilities,
+              bestAction = bestAction
+            )
+          )
 
   def solveBatchDecisionPolicies(
       heroHands: IndexedSeq[HoleCards],
@@ -521,6 +654,72 @@ object HoldemCfrSolver:
             candidateActions = sanitizedHeroActions,
             config = config
           )
+
+  private[holdem] def solveShallowDecisionPolicyProfiled(
+      hero: HoleCards,
+      state: GameState,
+      villainPosterior: DiscreteDistribution[HoleCards],
+      candidateActions: Vector[PokerAction],
+      config: HoldemCfrConfig = HoldemCfrConfig()
+  ): HoldemCfrProfiledDecisionPolicy =
+    val sanitizedHeroActions = sanitizeHeroActions(state, candidateActions)
+    maybeSolveTerminalRootPolicy(
+      hero = hero,
+      state = state,
+      villainPosterior = villainPosterior,
+      heroActions = sanitizedHeroActions,
+      config = config
+    ) match
+      case Some(policy) =>
+        return HoldemCfrProfiledDecisionPolicy(policy = policy, nativeProfile = None)
+      case None => ()
+
+    if configuredDirectShallowApproximationEnabled then
+      maybeSolveDirectShallowPolicyFast(
+        hero = hero,
+        state = state,
+        villainPosterior = villainPosterior,
+        heroActions = sanitizedHeroActions,
+        config = config
+      ) match
+        case Some(policy) =>
+          return HoldemCfrProfiledDecisionPolicy(policy = policy, nativeProfile = None)
+        case None => ()
+
+    val preparedProfile = prepareGameProfiled(
+      hero = hero,
+      state = state,
+      villainPosterior = villainPosterior,
+      candidateActions = sanitizedHeroActions,
+      config = config
+    )
+    val prepared = preparedProfile.prepared
+    val prepareTiming = preparedProfile.timing
+    val cfrConfig = CfrSolver.Config(
+      iterations = config.iterations,
+      cfrPlus = config.cfrPlus,
+      averagingDelay = config.averagingDelay,
+      linearAveraging = config.linearAveraging
+    )
+    val profiledRootPolicy = solveRootPolicyProfiled(
+      game = prepared.game,
+      config = cfrConfig,
+      rootActions = prepared.heroActions,
+      villainSupport = prepared.villainSupport.length,
+      prepareTiming = prepareTiming
+    )
+    val bestAction = selectBestActionByProbability(prepared.heroActions, profiledRootPolicy.rootPolicy.actionProbabilities)
+    HoldemCfrProfiledDecisionPolicy(
+      policy = HoldemCfrDecisionPolicy(
+        actionProbabilities = profiledRootPolicy.rootPolicy.actionProbabilities,
+        bestAction = bestAction,
+        iterations = profiledRootPolicy.rootPolicy.iterations,
+        infoSetKey = prepared.game.heroRootInfoSetKey,
+        villainSupport = prepared.villainSupport.length,
+        provider = providerLabel(profiledRootPolicy.rootPolicy.provider)
+      ),
+      nativeProfile = profiledRootPolicy.nativeProfile
+    )
 
   private def maybeSolveDirectShallowPolicyFast(
       hero: HoleCards,
@@ -1044,6 +1243,70 @@ object HoldemCfrSolver:
       game = game
     )
 
+  private def prepareGameProfiled(
+      hero: HoleCards,
+      state: GameState,
+      villainPosterior: DiscreteDistribution[HoleCards],
+      candidateActions: Vector[PokerAction],
+      config: HoldemCfrConfig
+  ): PreparedGameProfiled =
+    require(candidateActions.nonEmpty, "candidateActions must be non-empty")
+
+    val supportStarted = System.nanoTime()
+    val heroActions = sanitizeHeroActions(state, candidateActions)
+    require(heroActions.nonEmpty, "no legal hero actions after sanitization")
+    val deadMask = deadCardMask(hero, state.board)
+    val villainSupport = trimVillainSupport(villainPosterior, deadMask, config.maxVillainHands)
+    val supportNanos = elapsedNanosSince(supportStarted)
+
+    val equityStarted = System.nanoTime()
+    val equityByVillain = buildEquityLookup(
+      hero = hero,
+      board = state.board,
+      villains = villainSupport.map(_._1),
+      trials = config.equityTrials,
+      preferNativeBatch = config.preferNativeBatch,
+      rngSeed = config.rngSeed
+    )
+    val equityLookupNanos = elapsedNanosSince(equityStarted)
+
+    val responseStarted = System.nanoTime()
+    val villainResponseByRaise = buildVillainResponses(state, heroActions, config)
+    val heroResponsesByReraise = buildHeroReraiseResponses(state, villainResponseByRaise)
+    val responseBuildNanos = elapsedNanosSince(responseStarted)
+
+    val gameBuildStarted = System.nanoTime()
+    val game = HoldemDecisionGame(
+      hero = hero,
+      publicState = state,
+      villainDistribution = villainSupport,
+      heroActions = heroActions,
+      villainResponseByRaise = villainResponseByRaise,
+      heroResponseByReraise = heroResponsesByReraise,
+      equityByVillain = equityByVillain,
+      equityTrials = config.equityTrials,
+      preferNativeBatch = config.preferNativeBatch,
+      rngSeed = config.rngSeed,
+      postflopLookahead = postflopLookaheadEnabled(state, config),
+      postflopBetFractions = sanitizePostflopBetFractions(config.postflopBetFractions)
+    )
+    val prepared = PreparedGame(
+      heroActions = heroActions,
+      villainSupport = villainSupport,
+      game = game
+    )
+    val gameBuildNanos = elapsedNanosSince(gameBuildStarted)
+
+    PreparedGameProfiled(
+      prepared = prepared,
+      timing = PrepareGameTiming(
+        supportNanos = supportNanos,
+        equityLookupNanos = equityLookupNanos,
+        responseBuildNanos = responseBuildNanos,
+        gameBuildNanos = gameBuildNanos
+      )
+    )
+
   private def toActionMap(
       snapshot: CfrSolver.InfoSetSnapshot[PokerAction]
   ): Map[PokerAction, Double] =
@@ -1154,6 +1417,78 @@ object HoldemCfrSolver:
         solveRootWithNative(game, config, HoldemCfrNativeRuntime.Backend.Gpu)
           .orElse(solveRootWithNative(game, config, HoldemCfrNativeRuntime.Backend.Cpu))
           .getOrElse(solveRootWithScala(game, config))
+
+  private def solveRootPolicyProfiled(
+      game: HoldemDecisionGame,
+      config: CfrSolver.Config,
+      rootActions: Vector[PokerAction],
+      villainSupport: Int,
+      prepareTiming: PrepareGameTiming
+  ): RootPolicyProfiledSolveResult =
+    val configured = resolveConfiguredProvider()
+    if game.requiresScalaOnly then
+      configured match
+        case Provider.ScalaFixed | Provider.NativeCpuFixed | Provider.NativeGpuFixed =>
+          return RootPolicyProfiledSolveResult(
+            rootPolicy = solveRootWithScalaFixed(game, config),
+            nativeProfile = None
+          )
+        case _ =>
+          return RootPolicyProfiledSolveResult(
+            rootPolicy = solveRootWithScala(game, config),
+            nativeProfile = None
+          )
+    configured match
+      case Provider.Scala =>
+        RootPolicyProfiledSolveResult(solveRootWithScala(game, config), None)
+      case Provider.ScalaFixed =>
+        RootPolicyProfiledSolveResult(solveRootWithScalaFixed(game, config), None)
+      case Provider.NativeCpuFixed =>
+        RootPolicyProfiledSolveResult(
+          solveRootWithNativeFixedCpu(game, config)
+            .orElse(solveRootWithNative(game, config, HoldemCfrNativeRuntime.Backend.Cpu))
+            .getOrElse(solveRootWithScala(game, config)),
+          None
+        )
+      case Provider.NativeGpuFixed =>
+        RootPolicyProfiledSolveResult(
+          solveRootWithNativeFixedGpu(game, config)
+            .orElse(solveRootWithNative(game, config, HoldemCfrNativeRuntime.Backend.Gpu))
+            .orElse(solveRootWithNative(game, config, HoldemCfrNativeRuntime.Backend.Cpu))
+            .getOrElse(solveRootWithScala(game, config)),
+          None
+        )
+      case Provider.NativeCpu =>
+        solveRootWithNativeProfiled(
+          game = game,
+          config = config,
+          backend = HoldemCfrNativeRuntime.Backend.Cpu,
+          rootActions = rootActions,
+          villainSupport = villainSupport,
+          prepareTiming = prepareTiming
+        ).getOrElse(
+          RootPolicyProfiledSolveResult(solveRootWithScala(game, config), None)
+        )
+      case Provider.NativeGpu =>
+        solveRootWithNativeProfiled(
+          game = game,
+          config = config,
+          backend = HoldemCfrNativeRuntime.Backend.Gpu,
+          rootActions = rootActions,
+          villainSupport = villainSupport,
+          prepareTiming = prepareTiming
+        ).orElse(
+          solveRootWithNativeProfiled(
+            game = game,
+            config = config,
+            backend = HoldemCfrNativeRuntime.Backend.Cpu,
+            rootActions = rootActions,
+            villainSupport = villainSupport,
+            prepareTiming = prepareTiming
+          )
+        ).getOrElse(
+          RootPolicyProfiledSolveResult(solveRootWithScala(game, config), None)
+        )
 
   private def solveWithScala(
       game: HoldemDecisionGame,
@@ -1292,7 +1627,7 @@ object HoldemCfrSolver:
       backend: HoldemCfrNativeRuntime.Backend
   ): Option[RootPolicySolveResult] =
     val spec = game.toNativeTreeSpec
-    HoldemCfrNativeRuntime.solveTree(
+    HoldemCfrNativeRuntime.solveTreeRoot(
       backend = backend,
       spec = spec,
       config = config
@@ -1308,10 +1643,68 @@ object HoldemCfrSolver:
                 case HoldemCfrNativeRuntime.Backend.Cpu => Provider.NativeCpu
                 case HoldemCfrNativeRuntime.Backend.Gpu => Provider.NativeGpu,
             iterations = config.iterations,
-            actionProbabilities = rootPolicyFromNativeFlattened(
-              spec = spec,
-              flattened = nativeResult.averageStrategiesFlattened,
-              rootActions = game.heroActions
+            actionProbabilities =
+              rootPolicyFromNativeStrategy(game.heroActions, nativeResult.rootStrategy)
+          )
+        )
+
+  private def solveRootWithNativeProfiled(
+      game: HoldemDecisionGame,
+      config: CfrSolver.Config,
+      backend: HoldemCfrNativeRuntime.Backend,
+      rootActions: Vector[PokerAction],
+      villainSupport: Int,
+      prepareTiming: PrepareGameTiming
+  ): Option[RootPolicyProfiledSolveResult] =
+    val specStarted = System.nanoTime()
+    val spec = game.toNativeTreeSpec
+    val specBuildNanos = elapsedNanosSince(specStarted)
+    val solveStarted = System.nanoTime()
+    HoldemCfrNativeRuntime.solveTreeRoot(
+      backend = backend,
+      spec = spec,
+      config = config
+    ) match
+      case Left(reason) =>
+        GpuRuntimeSupport.log(s"native CFR ${backend.toString.toLowerCase} root solve unavailable: $reason")
+        None
+      case Right(nativeResult) =>
+        val nativeSolveNanos = elapsedNanosSince(solveStarted)
+        val unpackStarted = System.nanoTime()
+        val actionProbabilities =
+          rootPolicyFromNativeStrategy(rootActions, nativeResult.rootStrategy)
+        val unpackNanos = elapsedNanosSince(unpackStarted)
+        val provider =
+          backend match
+            case HoldemCfrNativeRuntime.Backend.Cpu => Provider.NativeCpu
+            case HoldemCfrNativeRuntime.Backend.Gpu => Provider.NativeGpu
+        val bestAction = selectBestActionByProbability(rootActions, actionProbabilities)
+        Some(
+          RootPolicyProfiledSolveResult(
+            rootPolicy = RootPolicySolveResult(
+              provider = provider,
+              iterations = config.iterations,
+              actionProbabilities = actionProbabilities
+            ),
+            nativeProfile = Some(
+              HoldemCfrNativeDecisionProfile(
+                provider = providerLabel(provider),
+                iterations = config.iterations,
+                infoSetKey = game.heroRootInfoSetKey,
+                villainSupport = villainSupport,
+                nodeCount = spec.nodeTypes.length,
+                infoSetCount = spec.infosetKeys.length,
+                prepareNanos = prepareTiming.totalNanos,
+                prepareSupportNanos = prepareTiming.supportNanos,
+                prepareEquityNanos = prepareTiming.equityLookupNanos,
+                prepareResponseNanos = prepareTiming.responseBuildNanos,
+                prepareGameBuildNanos = prepareTiming.gameBuildNanos,
+                specBuildNanos = specBuildNanos,
+                nativeSolveNanos = nativeSolveNanos,
+                unpackNanos = unpackNanos,
+                actionProbabilities = actionProbabilities,
+                bestAction = bestAction
+              )
             )
           )
         )
@@ -1426,23 +1819,18 @@ object HoldemCfrSolver:
       infosetIdx += 1
     builder.result()
 
-  private def rootPolicyFromNativeFlattened(
-      spec: HoldemCfrNativeRuntime.NativeTreeSpec,
-      flattened: Array[Double],
-      rootActions: Vector[PokerAction]
+  private def rootPolicyFromNativeStrategy(
+      rootActions: Vector[PokerAction],
+      rootStrategy: Array[Double]
   ): Map[PokerAction, Double] =
-    val expectedLength = spec.infosetActionCounts.sum
-    require(flattened.length == expectedLength, s"native flattened strategy length mismatch: ${flattened.length} != $expectedLength")
-    var cursor = 0
-    var infosetIdx = 0
-    while infosetIdx < spec.rootInfoSetIndex do
-      cursor += spec.infosetActionCounts(infosetIdx)
-      infosetIdx += 1
-    val count = spec.infosetActionCounts(spec.rootInfoSetIndex)
+    require(
+      rootStrategy.length == rootActions.length,
+      s"native root action-count mismatch: ${rootStrategy.length} != ${rootActions.length}"
+    )
     val raw = Map.newBuilder[PokerAction, Double]
     var idx = 0
-    while idx < count do
-      raw += spec.infosetActions(spec.rootInfoSetIndex)(idx) -> math.max(0.0, flattened(cursor + idx))
+    while idx < rootStrategy.length do
+      raw += rootActions(idx) -> math.max(0.0, rootStrategy(idx))
       idx += 1
     normalizedPolicyForActions(rootActions, raw.result())
 
@@ -1631,6 +2019,9 @@ object HoldemCfrSolver:
   private def benchmarkNanos(thunk: => Any): Long =
     val started = System.nanoTime()
     thunk
+    elapsedNanosSince(started)
+
+  private def elapsedNanosSince(started: Long): Long =
     math.max(1L, System.nanoTime() - started)
 
   private def benchmarkNativeProvider(

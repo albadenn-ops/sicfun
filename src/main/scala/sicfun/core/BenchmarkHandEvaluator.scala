@@ -2,6 +2,11 @@ package sicfun.core
 
 import scala.util.Random
 
+/** Micro-benchmark for comparing category-only hand evaluation against full 5-card ranking.
+  *
+  * It generates deterministic random 5-card samples, validates categorical parity, and
+  * reports throughput/checksums to detect accidental optimizer dead-code elimination.
+  */
 object BenchmarkHandEvaluator:
   private final case class Config(
       samples: Int,

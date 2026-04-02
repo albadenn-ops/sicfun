@@ -73,10 +73,26 @@ data/*-probe*/
 data/*-readable*.tsv
 data/check*.tsv
 data/runtime-classpath.txt
+data/heads-up-equity-canonical-exact-cuda-full.bin
+data/heads-up-equity-canonical-*.csv
+data/heads-up-equity-canonical-*.tsv
+data/heads-up-equity-canonical-gpu-*.bin
+data/headsup-canonical-mc*.tbl
+data/*autotune*.properties
+data/tmp-canonical-*.tbl
 
 ### Build artifacts ###
 HeadsUpOpenCLBindings.obj
 src/main/native/build/
+src/main/native/build-ddre-verify/
+src/main/native/build-ddre-verify-cuda/
+src/main/native/bench/*.exe
+src/main/native/bench/*.obj
+native_baseline_bench.obj
+src/main/native.rar
+
+### Validation output ###
+validation-output/
 
 ### Generated test/benchmark data ###
 data/playing-hall-*/
@@ -111,3 +127,4 @@ hs_err_pid*.log
 test-output*.txt
 test-run*.txt
 code-review-*.md
+replay_pid*.log

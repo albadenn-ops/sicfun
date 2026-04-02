@@ -36,13 +36,18 @@ object PokerStarsExporter:
 
   private def appendHand(sb: StringBuilder, record: HandRecord, heroName: String, villainName: String): Unit =
     val ts = BaseTimestamp.plusSeconds(record.handNumber.toLong)
+    val recordVillainName = if record.villainName.trim.nonEmpty then record.villainName else villainName
+    val seatAssignments = Vector(record.heroSeat -> heroName, record.villainSeat -> recordVillainName).sortBy(_._1)
+    val bigBlindName = if record.heroIsButton then recordVillainName else heroName
+    val smallBlindResolvedName = if record.heroIsButton then heroName else recordVillainName
     // Header
     sb.append(s"PokerStars Hand #${record.handId}: Hold'em No Limit (${money(0.50)}/${money(1.00)}) - ${TimeFmt.format(ts)}\n")
-    sb.append(s"Table 'Validation' 2-max Seat #1 is the button\n")
-    sb.append(s"Seat 1: $heroName (${money(StartingStack)} in chips)\n")
-    sb.append(s"Seat 2: $villainName (${money(StartingStack)} in chips)\n")
-    sb.append(s"$heroName: posts small blind ${money(0.50)}\n")
-    sb.append(s"$villainName: posts big blind ${money(1.00)}\n")
+    sb.append(s"Table 'Validation' 2-max Seat #${record.buttonSeat} is the button\n")
+    seatAssignments.foreach { case (seatNumber, name) =>
+      sb.append(s"Seat $seatNumber: $name (${money(StartingStack)} in chips)\n")
+    }
+    sb.append(s"$smallBlindResolvedName: posts small blind ${money(0.50)}\n")
+    sb.append(s"$bigBlindName: posts big blind ${money(1.00)}\n")
 
     // Hole cards
     sb.append("*** HOLE CARDS ***\n")
@@ -50,17 +55,21 @@ object PokerStarsExporter:
 
     // Actions grouped by street
     var currentStreet = Street.Preflop
+    var committed = initialCommitted(record, heroName, recordVillainName)
     for action <- record.actions do
       if action.street != currentStreet then
         currentStreet = action.street
         appendStreetHeader(sb, currentStreet, record.board)
-      appendAction(sb, action)
+        committed = Map(heroName -> 0.0, recordVillainName -> 0.0)
+      val actorCommitted = committed.getOrElse(action.player, 0.0)
+      appendAction(sb, action, actorCommitted)
+      committed = updateCommitted(committed, action)
 
     // Showdown or summary
     if !record.actions.lastOption.exists(_.action == PokerAction.Fold) then
       sb.append("*** SHOW DOWN ***\n")
       sb.append(s"$heroName: shows [${record.heroCards.first.toToken} ${record.heroCards.second.toToken}]\n")
-      sb.append(s"$villainName: shows [${record.villainCards.first.toToken} ${record.villainCards.second.toToken}]\n")
+      sb.append(s"$recordVillainName: shows [${record.villainCards.first.toToken} ${record.villainCards.second.toToken}]\n")
 
     sb.append("*** SUMMARY ***\n")
     sb.append("\n\n")
@@ -80,7 +89,7 @@ object PokerStarsExporter:
         sb.append(s"*** RIVER *** [$flopTurn] [$river]\n")
       case _ => ()
 
-  private def appendAction(sb: StringBuilder, action: RecordedAction): Unit =
+  private def appendAction(sb: StringBuilder, action: RecordedAction, actorCommitted: Double): Unit =
     val name = action.player
     action.action match
       case PokerAction.Fold =>
@@ -91,11 +100,26 @@ object PokerStarsExporter:
         sb.append(s"$name: calls ${money(action.toCall)}\n")
       case PokerAction.Raise(amount) =>
         if action.toCall > 0 then
-          // Raising over existing bet
-          sb.append(s"$name: raises ${money(amount - action.toCall)} to ${money(amount)}\n")
+          val totalTo = actorCommitted + amount
+          sb.append(s"$name: raises ${money(amount - action.toCall)} to ${money(totalTo)}\n")
         else
-          // Betting into unchecked pot
           sb.append(s"$name: bets ${money(amount)}\n")
+
+  private def initialCommitted(record: HandRecord, heroName: String, villainName: String): Map[String, Double] =
+    if record.heroIsButton then Map(heroName -> 0.5, villainName -> 1.0)
+    else Map(heroName -> 1.0, villainName -> 0.5)
+
+  private def updateCommitted(
+      committed: Map[String, Double],
+      action: RecordedAction
+  ): Map[String, Double] =
+    val current = committed.getOrElse(action.player, 0.0)
+    val updated =
+      action.action match
+        case PokerAction.Call => current + action.toCall
+        case PokerAction.Raise(amount) => current + amount
+        case _ => current
+    committed.updated(action.player, updated)
 
   private def money(amount: Double): String =
     String.format(Locale.ROOT, "$%.2f", java.lang.Double.valueOf(amount))

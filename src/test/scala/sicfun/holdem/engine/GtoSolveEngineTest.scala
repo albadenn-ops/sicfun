@@ -1,7 +1,7 @@
 package sicfun.holdem.engine
 
 import munit.FunSuite
-import sicfun.core.{Card, DiscreteDistribution}
+import sicfun.core.Card
 import sicfun.holdem.types.*
 
 class GtoSolveEngineTest extends FunSuite:
@@ -103,81 +103,6 @@ class GtoSolveEngineTest extends FunSuite:
     val h1 = GtoSolveEngine.hashActions(Vector(PokerAction.Fold, PokerAction.Call))
     val h2 = GtoSolveEngine.hashActions(Vector(PokerAction.Check, PokerAction.Call))
     assertNotEquals(h1, h2)
-
-  test("hashPosterior: deterministic across hand ordering"):
-    val left = DiscreteDistribution(
-      Map(
-        hole("As", "Kd") -> 0.4,
-        hole("Qh", "Qs") -> 0.6
-      )
-    )
-    val right = DiscreteDistribution(
-      Map(
-        hole("Qh", "Qs") -> 0.6,
-        hole("As", "Kd") -> 0.4
-      )
-    )
-    assertEquals(GtoSolveEngine.hashPosterior(left), GtoSolveEngine.hashPosterior(right))
-
-  test("hashPosterior: changes when opponent weights change"):
-    val base = DiscreteDistribution(
-      Map(
-        hole("As", "Kd") -> 0.4,
-        hole("Qh", "Qs") -> 0.6
-      )
-    )
-    val shifted = DiscreteDistribution(
-      Map(
-        hole("As", "Kd") -> 0.7,
-        hole("Qh", "Qs") -> 0.3
-      )
-    )
-    assertNotEquals(GtoSolveEngine.hashPosterior(base), GtoSolveEngine.hashPosterior(shifted))
-
-  test("buildGtoSolveCacheKey: includes opponent posterior hash"):
-    val state = GameState(
-      street = Street.Turn, pot = 18.0, toCall = 4.0, stackSize = 82.0,
-      board = board("2c", "7d", "Jh", "Qc"), position = Position.Button,
-      betHistory = Vector.empty
-    )
-    val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(12.0))
-    val hero = hole("Ac", "Kd")
-    val left = DiscreteDistribution(
-      Map(
-        hole("As", "Qd") -> 0.35,
-        hole("Ts", "9s") -> 0.30,
-        hole("Qh", "Js") -> 0.20,
-        hole("7c", "7s") -> 0.15
-      )
-    )
-    val right = DiscreteDistribution(
-      Map(
-        hole("As", "Qd") -> 0.15,
-        hole("Ts", "9s") -> 0.20,
-        hole("Qh", "Js") -> 0.30,
-        hole("7c", "7s") -> 0.35
-      )
-    )
-    val signature = GtoSolveEngine.canonicalHeroBoardSignature(hero, state.board)
-    val leftKey = GtoSolveEngine.buildGtoSolveCacheKey(
-      perspective = 0,
-      hand = hero,
-      state = state,
-      candidates = candidates,
-      opponentPosterior = left,
-      baseEquityTrials = 800,
-      canonicalSignature = signature
-    )
-    val rightKey = GtoSolveEngine.buildGtoSolveCacheKey(
-      perspective = 0,
-      hand = hero,
-      state = state,
-      candidates = candidates,
-      opponentPosterior = right,
-      baseEquityTrials = 800,
-      canonicalSignature = signature
-    )
-    assertNotEquals(leftKey, rightKey)
 
   // --- gtoResponds Fast mode tests ---
 

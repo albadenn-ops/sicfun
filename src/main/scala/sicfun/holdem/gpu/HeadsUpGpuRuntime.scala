@@ -84,6 +84,10 @@ object HeadsUpGpuRuntime:
 
   private val telemetryRef = new AtomicReference[BatchTelemetry](null)
 
+  private[holdem] def resetLoadCacheForTests(): Unit =
+    telemetryRef.set(null)
+    NativeJniProvider.resetLoadCacheForTests()
+
   /** Internal SPI for GPU computation backends. */
   private trait Provider:
     def id: String
@@ -165,21 +169,33 @@ object HeadsUpGpuRuntime:
     */
   private object NativeJniProvider extends Provider:
     override val id: String = "native"
+    private val nativeLoadResultRef = new AtomicReference[Either[String, String]](null)
     private val packedApiSupportRef = new AtomicReference[java.lang.Boolean](null)
     private val warmupDoneRef = new AtomicReference[java.lang.Boolean](java.lang.Boolean.FALSE)
 
-    private lazy val nativeLoadResult: Either[String, String] =
-      GpuRuntimeSupport.loadNativeLibrary(
-        pathProperty = NativePathProperty,
-        pathEnv = NativePathEnv,
-        libProperty = NativeLibProperty,
-        libEnv = NativeLibEnv,
-        defaultLib = DefaultNativeLibrary,
-        label = "native GPU library"
-      )
+    private def nativeLoadResult(): Either[String, String] =
+      val cached = nativeLoadResultRef.get()
+      if cached != null then cached
+      else
+        val loaded =
+          GpuRuntimeSupport.loadNativeLibrary(
+            pathProperty = NativePathProperty,
+            pathEnv = NativePathEnv,
+            libProperty = NativeLibProperty,
+            libEnv = NativeLibEnv,
+            defaultLib = DefaultNativeLibrary,
+            label = "native GPU library"
+          )
+        nativeLoadResultRef.compareAndSet(null, loaded)
+        nativeLoadResultRef.get()
+
+    def resetLoadCacheForTests(): Unit =
+      nativeLoadResultRef.set(null)
+      packedApiSupportRef.set(null)
+      warmupDoneRef.set(java.lang.Boolean.FALSE)
 
     override def availability: Availability =
-      nativeLoadResult match
+      nativeLoadResult() match
         case Right(source) =>
           maybeWarmUpOnAvailability()
           Availability(
@@ -200,7 +216,7 @@ object HeadsUpGpuRuntime:
         mode: HeadsUpEquityTable.Mode,
         monteCarloSeedBase: Long
     ): Either[String, BatchSuccess] =
-      nativeLoadResult match
+      nativeLoadResult() match
         case Left(reason) => Left(reason)
         case Right(_) =>
           try

@@ -59,8 +59,29 @@ inline int infer_posterior_raw(
   }
 
   constexpr double kMinLikelihood = 1e-6;
-  const int effective_observation_count = std::max(observation_count, 1);
-  const double inverse_observation_count = 1.0 / static_cast<double>(effective_observation_count);
+
+  // Zero observations: posterior equals the (normalized) prior — no evidence, no update.
+  if (observation_count == 0) {
+    double total = 0.0;
+    for (int hypothesis = 0; hypothesis < hypothesis_count; ++hypothesis) {
+      const double prior_value = prior[hypothesis];
+      if (!std::isfinite(prior_value) || prior_value < 0.0) {
+        return kStatusInvalidPrior;
+      }
+      posterior[hypothesis] = std::max(prior_value, kMinLikelihood);
+      total += posterior[hypothesis];
+    }
+    if (!std::isfinite(total) || !(total > 0.0)) {
+      return kStatusZeroMass;
+    }
+    const double inv_total = 1.0 / total;
+    for (int hypothesis = 0; hypothesis < hypothesis_count; ++hypothesis) {
+      posterior[hypothesis] *= inv_total;
+    }
+    return kStatusOk;
+  }
+
+  const double inverse_observation_count = 1.0 / static_cast<double>(observation_count);
 
   double total = 0.0;
   for (int hypothesis = 0; hypothesis < hypothesis_count; ++hypothesis) {
@@ -69,16 +90,19 @@ inline int infer_posterior_raw(
       return kStatusInvalidPrior;
     }
 
-    double score = std::sqrt(std::max(prior_value, kMinLikelihood));
+    // Log-space accumulation: replace sqrt() + N × pow() with (N+1) × log() + 1 × exp().
+    // std::log is ~3-5× cheaper than std::pow per call.
+    double log_score = 0.5 * std::log(std::max(prior_value, kMinLikelihood));
     for (int observation = 0; observation < observation_count; ++observation) {
       const int offset = observation * hypothesis_count + hypothesis;
       const double likelihood = likelihoods[offset];
       if (!std::isfinite(likelihood) || likelihood < 0.0) {
         return kStatusInvalidLikelihood;
       }
-      score *= std::pow(std::max(likelihood, kMinLikelihood), inverse_observation_count);
+      log_score += inverse_observation_count * std::log(std::max(likelihood, kMinLikelihood));
     }
 
+    const double score = std::exp(log_score);
     if (!std::isfinite(score) || score < 0.0) {
       return kStatusInvalidLikelihood;
     }

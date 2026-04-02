@@ -405,6 +405,9 @@ object HoldemEquity:
               k += 1
             arr
           else null
+        val sampledDeckIndexes =
+          if boardMissing > 0 then new Array[Int](boardMissing)
+          else null
 
         while i < trials do
           val villain = sampler.sample(rng)
@@ -420,15 +423,16 @@ object HoldemEquity:
               villain.first, villain.second, boardCards(0), boardCards(1), boardCards(2), boardCards(3), boardCards(4)
             )
           else
-            val remaining = deckMinusDead.filterNot(card => card == villain.first || card == villain.second)
-            val extra = sampleWithoutReplacement(remaining, boardMissing, rng)
-            // Fill sampled cards into reusable board array.
-            var k = boardCards.length
-            var extraIdx = 0
-            while k < 5 do
-              boardArr(k) = extra(extraIdx)
-              extraIdx += 1
-              k += 1
+            fillBoardWithRandomCards(
+              boardArr = boardArr,
+              knownBoardSize = boardCards.length,
+              deckMinusDead = deckMinusDead,
+              blockedFirst = villain.first,
+              blockedSecond = villain.second,
+              missing = boardMissing,
+              sampledDeckIndexes = sampledDeckIndexes,
+              rng = rng
+            )
             heroRank = HandEvaluator.evaluate7PackedDirect(
               hero.first, hero.second, boardArr(0), boardArr(1), boardArr(2), boardArr(3), boardArr(4)
             )
@@ -1185,6 +1189,38 @@ object HoldemEquity:
       result += buffer(i)
       i += 1
     result.result()
+
+  /** Fills the missing board cards by uniformly sampling without replacement from
+    * deckMinusDead while excluding the current villain hole cards.
+    * Uses a small fixed-size index scratch buffer to avoid per-trial allocations.
+    */
+  private def fillBoardWithRandomCards(
+      boardArr: Array[Card],
+      knownBoardSize: Int,
+      deckMinusDead: IndexedSeq[Card],
+      blockedFirst: Card,
+      blockedSecond: Card,
+      missing: Int,
+      sampledDeckIndexes: Array[Int],
+      rng: Random
+  ): Unit =
+    var draw = 0
+    while draw < missing do
+      var accepted = false
+      while !accepted do
+        val idx = rng.nextInt(deckMinusDead.length)
+        val card = deckMinusDead(idx)
+        if card != blockedFirst && card != blockedSecond then
+          var duplicate = false
+          var j = 0
+          while j < draw && !duplicate do
+            if sampledDeckIndexes(j) == idx then duplicate = true
+            j += 1
+          if !duplicate then
+            sampledDeckIndexes(draw) = idx
+            boardArr(knownBoardSize + draw) = card
+            accepted = true
+      draw += 1
 
   private object WeightedSampler:
     def fromArrays[A](items: Array[A], weights: Array[Double]): WeightedSampler[A] =

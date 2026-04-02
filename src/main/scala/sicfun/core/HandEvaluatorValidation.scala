@@ -1,5 +1,6 @@
 package sicfun.core
 
+/** Exhaustive combinatorial validation helpers for [[HandEvaluator]] category frequencies. */
 object HandEvaluatorValidation:
   val TotalFiveCardHands: Long = 2_598_960L
 

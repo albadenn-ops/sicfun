@@ -24,6 +24,26 @@ public final class HoldemCfrNativeGpuBindings {
       double[] outExpectedValue
   );
 
+  /** Same ABI contract as {@link HoldemCfrNativeCpuBindings#solveTreeRoot}. */
+  public static native int solveTreeRoot(
+      int iterations,
+      int averagingDelay,
+      boolean cfrPlus,
+      boolean linearAveraging,
+      int rootNodeId,
+      int rootInfoSetIndex,
+      int[] nodeTypes,
+      int[] nodeStarts,
+      int[] nodeCounts,
+      int[] nodeInfosets,
+      int[] edgeChildIds,
+      double[] edgeProbabilities,
+      double[] terminalUtilities,
+      int[] infosetPlayers,
+      int[] infosetActionCounts,
+      double[] outRootStrategy
+  );
+
   /**
    * Fixed-point ABI variant.
    *

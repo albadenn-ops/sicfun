@@ -1,0 +1,45 @@
+{
+  "totalHands": 500,
+  "blocks": [
+    {
+      "blockIndex": 0,
+      "seed": 6674089274190705664,
+      "heroPosition": "Button",
+      "heroBbPer100": 131.68
+    }
+  ],
+  "perVillainBbPer100": [
+    {
+      "name": "Villain01_overfoldrive",
+      "heroNetBbPer100": -12.1
+    },
+    {
+      "name": "Villain02_overcallbigb",
+      "heroNetBbPer100": 22.3
+    },
+    {
+      "name": "Villain03_overblufftur",
+      "heroNetBbPer100": 6.4
+    },
+    {
+      "name": "Villain04_passivebigpo",
+      "heroNetBbPer100": -19.4
+    },
+    {
+      "name": "Villain05_prefloptoolo",
+      "heroNetBbPer100": 74.48
+    },
+    {
+      "name": "Villain06_prefloptooti",
+      "heroNetBbPer100": 17.9
+    },
+    {
+      "name": "Villain07_tag",
+      "heroNetBbPer100": 34.7
+    },
+    {
+      "name": "Villain08_gto",
+      "heroNetBbPer100": 7.4
+    }
+  ]
+}

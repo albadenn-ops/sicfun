@@ -293,6 +293,13 @@ object RangeInferenceEngine:
       observationsForBayes.nonEmpty &&
         actionModel.isEffectivelyUniform
 
+    /** Applies DDRE policy for decision-time posterior selection.
+      *
+      * Modes:
+      * - Off: pure Bayesian posterior.
+      * - Shadow: compute DDRE for telemetry, still return Bayesian posterior.
+      * - Blend*: validate and fuse Bayes/DDRE according to configured alpha.
+      */
     def resolveDecisionPosteriorFor(
         bayesPosterior: DiscreteDistribution[HoleCards]
     ): DiscreteDistribution[HoleCards] =
@@ -397,6 +404,11 @@ object RangeInferenceEngine:
     require(filtered.nonEmpty, "villain range is empty after hero/board filtering")
     DiscreteDistribution(filtered).normalized
 
+  /** Validates Bayes/DDRE candidates against legal support, then chooses/fuses based on mode.
+    *
+    * This method is fail-closed only when both sources are invalid in blend modes.
+    * In all degradable paths it logs a `ddre_degraded` event and returns a safe fallback.
+    */
   private def resolveDecisionPosterior(
       hero: HoleCards,
       board: Board,
@@ -759,7 +771,13 @@ object RangeInferenceEngine:
     }
     ActionRecommendation(heroEquity, evaluations, best.action)
 
-  /** Truncates a CompactPosterior to top-k hands by weight. */
+  /** Truncates a CompactPosterior to top-k hands by weight.
+    *
+    * Retention guarantees:
+    * - keep at most `maxHands`
+    * - keep at least `minHands`
+    * - continue keeping hands until cumulative mass reaches `minMass`
+    */
   private def truncateCompact(
       cp: HoldemEquity.CompactPosterior,
       maxHands: Int,
@@ -905,6 +923,12 @@ object RangeInferenceEngine:
             continuationEquityMean = continuationEquityMean
           )
 
+  /** Approximate EV for raise lines with response-aware continuation probabilities.
+    *
+    * Behavior model:
+    * - folds win current pot immediately
+    * - continuing lines assume a one-street realized-equity approximation
+    */
   private def raiseEvFromContinuation(
       state: GameState,
       raiseAmount: Double,

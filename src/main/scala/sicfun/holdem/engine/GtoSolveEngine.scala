@@ -26,12 +26,17 @@ private[holdem] object GtoSolveEngine:
       canonicalHeroPacked: Long,
       streetOrdinal: Int,
       canonicalBoardPacked: Long,
-      potBits: Long,
-      toCallBits: Long,
-      stackBits: Long,
+      potBucket: Int,
+      toCallBucket: Int,
+      stackBucket: Int,
       candidateHash: Int,
-      opponentPosteriorHash: Long,
       baseEquityTrials: Int
+  )
+
+  private[holdem] final case class CanonicalSuitContext(
+      canonicalHeroPacked: Long,
+      canonicalBoardPacked: Long,
+      suitMap: Array[Int]
   )
 
   private[holdem] final case class GtoCachedPolicy(
@@ -121,7 +126,6 @@ private[holdem] object GtoSolveEngine:
       hand = hand,
       state = state,
       candidates = candidates,
-      opponentPosterior = villainPosterior,
       baseEquityTrials = baseEquityTrials,
       canonicalSignature = canonicalSignature
     )
@@ -138,7 +142,7 @@ private[holdem] object GtoSolveEngine:
           iterations = gtoIterations(state.street, baseEquityTrials, candidates.length),
           maxVillainHands = gtoMaxVillainHands(state.street, candidates.length),
           equityTrials = gtoEquityTrials(state.street, baseEquityTrials, candidates.length),
-          postflopLookahead = state.street != Street.Preflop && state.street != Street.River,
+          postflopLookahead = false,
           rngSeed = exactEquitySeed(
             perspective = perspective,
             baseEquityTrials = baseEquityTrials,
@@ -303,7 +307,6 @@ private[holdem] object GtoSolveEngine:
       hand: HoleCards,
       state: GameState,
       candidates: Vector[PokerAction],
-      opponentPosterior: DiscreteDistribution[HoleCards],
       baseEquityTrials: Int,
       canonicalSignature: (Long, Long)
   ): GtoSolveCacheKey =
@@ -313,28 +316,25 @@ private[holdem] object GtoSolveEngine:
       canonicalHeroPacked = canonicalHeroPacked,
       streetOrdinal = state.street.ordinal,
       canonicalBoardPacked = canonicalBoardPacked,
-      potBits = java.lang.Double.doubleToLongBits(state.pot),
-      toCallBits = java.lang.Double.doubleToLongBits(state.toCall),
-      stackBits = java.lang.Double.doubleToLongBits(state.stackSize),
+      potBucket = quantizePot(state.pot),
+      toCallBucket = quantizeToCall(state.toCall),
+      stackBucket = quantizeStack(state.stackSize),
       candidateHash = hashActions(candidates),
-      opponentPosteriorHash = hashPosterior(opponentPosterior),
       baseEquityTrials = baseEquityTrials
     )
 
-  private[holdem] def hashPosterior(
-      posterior: DiscreteDistribution[HoleCards]
-  ): Long =
-    posterior.weights.iterator
-      .collect { case (hand, probability) if probability > 0.0 =>
-        (hand, probability)
-      }
-      .toVector
-      .sortBy { case (hand, _) => (hand.first.id, hand.second.id) }
-      .foldLeft(0xCBF29CE484222325L) { case (acc, (hand, probability)) =>
-        val withFirst = mix64(acc ^ hand.first.id.toLong)
-        val withSecond = mix64(withFirst ^ hand.second.id.toLong)
-        mix64(withSecond ^ java.lang.Double.doubleToLongBits(probability))
-      }
+  /** Quantize pot into ~1bb buckets up to 20bb, then ~5bb buckets beyond. */
+  private def quantizePot(pot: Double): Int =
+    if pot <= 20.0 then math.round(pot).toInt
+    else 20 + math.round((pot - 20.0) / 5.0).toInt
+
+  /** Quantize toCall into half-bb buckets. */
+  private def quantizeToCall(toCall: Double): Int =
+    math.round(toCall * 2.0).toInt
+
+  /** Quantize stack into ~5bb buckets. */
+  private def quantizeStack(stack: Double): Int =
+    math.round(stack / 5.0).toInt
 
   private def exactEquitySeed(
       perspective: Int,
@@ -363,11 +363,12 @@ private[holdem] object GtoSolveEngine:
       Array(3, 1, 0, 2), Array(3, 1, 2, 0), Array(3, 2, 0, 1), Array(3, 2, 1, 0)
     )
 
-  private[holdem] def canonicalHeroBoardSignature(hand: HoleCards, board: Board): (Long, Long) =
+  private[holdem] def canonicalHeroBoardContext(hand: HoleCards, board: Board): CanonicalSuitContext =
     val boardSize = board.cards.length
     val remappedBoardIds = new Array[Int](boardSize)
     var bestHeroPacked = Long.MaxValue
     var bestBoardPacked = Long.MaxValue
+    var bestSuitMap = SuitPermutations(0)
     var permIdx = 0
     while permIdx < SuitPermutations.length do
       val suitMap = SuitPermutations(permIdx)
@@ -375,7 +376,7 @@ private[holdem] object GtoSolveEngine:
       val heroSecondId = remapCardId(hand.second, suitMap)
       val lowHero = math.min(heroFirstId, heroSecondId)
       val highHero = math.max(heroFirstId, heroSecondId)
-      val heroPacked = ((lowHero.toLong << 6) | highHero.toLong) & 0xFFFL
+      val heroPacked = packRemappedHoleCards(lowHero, highHero)
 
       var idx = 0
       while idx < boardSize do
@@ -391,12 +392,35 @@ private[holdem] object GtoSolveEngine:
       if heroPacked < bestHeroPacked || (heroPacked == bestHeroPacked && boardPacked < bestBoardPacked) then
         bestHeroPacked = heroPacked
         bestBoardPacked = boardPacked
+        bestSuitMap = suitMap
       permIdx += 1
-    (bestHeroPacked, bestBoardPacked)
+    CanonicalSuitContext(
+      canonicalHeroPacked = bestHeroPacked,
+      canonicalBoardPacked = bestBoardPacked,
+      suitMap = bestSuitMap
+    )
+
+  private[holdem] def canonicalHeroBoardSignature(hand: HoleCards, board: Board): (Long, Long) =
+    val context = canonicalHeroBoardContext(hand, board)
+    (context.canonicalHeroPacked, context.canonicalBoardPacked)
+
+  private[holdem] def canonicalizeHoleCards(hand: HoleCards, suitMap: Array[Int]): Int =
+    val firstId = remapCardId(hand.first, suitMap)
+    val secondId = remapCardId(hand.second, suitMap)
+    packHoleCardsId(firstId, secondId)
 
   private def remapCardId(card: Card, suitMap: Array[Int]): Int =
     val mappedSuit = suitMap(card.suit.ordinal)
     (mappedSuit * 13) + card.rank.ordinal
+
+  private def packRemappedHoleCards(lowId: Int, highId: Int): Long =
+    ((lowId.toLong << 6) | highId.toLong) & 0xFFFL
+
+  private def packHoleCardsId(firstId: Int, secondId: Int): Int =
+    if firstId < secondId then
+      (firstId * (103 - firstId)) / 2 + (secondId - firstId - 1)
+    else
+      (secondId * (103 - secondId)) / 2 + (firstId - secondId - 1)
 
   // --- Action hashing ---
 

@@ -14,6 +14,7 @@ import java.nio.file.{Files, Path, Paths}
 import java.util.Locale
 import scala.util.Random
 
+/** ACPC action-string parser/encoder with heads-up reverse-blinds state reconstruction. */
 private[holdem] object AcpcActionCodec:
   val SmallBlindChips = 50
   val BigBlindChips = 100
@@ -545,6 +546,7 @@ private[holdem] object AcpcActionCodec:
 
     value
 
+/** Match runner that connects SICFUN hero to an ACPC dealer socket. */
 object AcpcMatchRunner:
   private val ProtocolVersion = "VERSION:2.0.0"
 

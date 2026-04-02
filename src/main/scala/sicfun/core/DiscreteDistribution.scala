@@ -1,5 +1,10 @@
 package sicfun.core
 
+/** Immutable finite discrete distribution with non-negative finite weights.
+  *
+  * The structure does not force normalization on construction; callers can keep unnormalized
+  * weights and call [[normalized]] when a proper probability mass function is needed.
+  */
 final case class DiscreteDistribution[A](weights: Map[A, Double]):
   import Probability.{Eps, isFiniteNonNegative}
 
@@ -49,6 +54,7 @@ final case class DiscreteDistribution[A](weights: Map[A, Double]):
     (DiscreteDistribution(posterior.result()), evidence)
 
 object DiscreteDistribution:
+  /** Uniform distribution over distinct support values. */
   def uniform[A](values: Seq[A]): DiscreteDistribution[A] =
     val distinct = values.distinct
     require(distinct.nonEmpty, "uniform distribution requires non-empty support")

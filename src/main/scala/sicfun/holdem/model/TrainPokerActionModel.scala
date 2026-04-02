@@ -3,6 +3,7 @@ import sicfun.holdem.cli.*
 
 import java.nio.file.{Path, Paths}
 
+/** CLI entrypoint for training and exporting versioned poker action models. */
 object TrainPokerActionModel:
   private final case class CliConfig(
       trainingPath: String,

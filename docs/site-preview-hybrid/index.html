@@ -22,6 +22,7 @@
         <p class="pronunciation">Texas Hold'em hand-history review</p>
       </div>
       <nav class="site-nav" aria-label="Primary">
+        <a href="#account">Account</a>
         <a href="#upload">Upload</a>
         <a href="#proof">Results</a>
         <a href="#range">Simulator</a>
@@ -71,6 +72,93 @@
           </ul>
         </article>
       </aside>
+    </section>
+
+    <section class="section" id="account">
+      <div class="section-head">
+        <p class="eyebrow">Account</p>
+        <h2>Platform users, profile defaults, and Google-ready sign-in.</h2>
+        <p class="section-note">
+          Production-facing deployments can now keep real users instead of only HTTP Basic auth. Use local
+          email/password registration, wire Google OIDC when configured, and keep profile defaults such as
+          hero screen name and preferred site with the account.
+        </p>
+      </div>
+
+      <div class="account-grid">
+        <article class="surface account-card">
+          <div class="auth-state" id="auth-state">
+            <p class="card-kicker">Checking auth</p>
+            <h3>Loading account controls...</h3>
+            <p class="section-note">
+              SICFUN is checking whether this deployment requires sign-in and whether a session is already
+              active.
+            </p>
+          </div>
+
+          <form class="auth-form" id="auth-form">
+            <label class="field">
+              <span>Email</span>
+              <input id="auth-email" type="email" autocomplete="username email" placeholder="player@example.com">
+            </label>
+
+            <label class="field">
+              <span>Password</span>
+              <input id="auth-password" type="password" autocomplete="current-password" placeholder="At least 10 characters">
+            </label>
+
+            <label class="field">
+              <span>Display name</span>
+              <input id="auth-display-name" type="text" autocomplete="nickname" placeholder="Optional for local registration">
+            </label>
+
+            <div class="auth-actions">
+              <button class="button" id="auth-login" type="button">Sign In</button>
+              <button class="button button-secondary" id="auth-register" type="button">Register</button>
+              <a class="button button-google hidden" id="google-login-link" href="/api/auth/oidc/google/start">Continue with Google</a>
+            </div>
+          </form>
+        </article>
+
+        <article class="frame account-card hidden" id="profile-card">
+          <div class="profile-summary" id="profile-summary">
+            <p class="card-kicker">Profile</p>
+            <h3>Sign in to manage profile defaults.</h3>
+          </div>
+
+          <form class="auth-form" id="profile-form">
+            <label class="field">
+              <span>Display name</span>
+              <input id="profile-display-name" type="text" autocomplete="nickname" placeholder="Display name">
+            </label>
+
+            <label class="field">
+              <span>Default hero screen name</span>
+              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form">
+            </label>
+
+            <label class="field">
+              <span>Preferred site</span>
+              <select id="profile-preferred-site">
+                <option value="">Auto-detect</option>
+                <option value="pokerstars">PokerStars</option>
+                <option value="winamax">Winamax</option>
+                <option value="ggpoker">GGPoker</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Time zone</span>
+              <input id="profile-time-zone" type="text" placeholder="e.g. Europe/Madrid">
+            </label>
+
+            <div class="auth-actions">
+              <button class="button" id="profile-save" type="submit">Save Profile</button>
+              <button class="button button-secondary" id="auth-logout" type="button">Sign Out</button>
+            </div>
+          </form>
+        </article>
+      </div>
     </section>
 
     <section class="section" id="upload">

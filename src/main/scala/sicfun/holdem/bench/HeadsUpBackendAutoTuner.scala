@@ -66,7 +66,7 @@ object HeadsUpBackendAutoTuner:
       engine: String,
       blockSize: Option[Int],
       maxChunkMatchups: Option[Int],
-      source: String,
+      source: "tuned" | "cache",
       detail: String
   )
 
@@ -87,7 +87,8 @@ object HeadsUpBackendAutoTuner:
   private val NativeLibProperty = "sicfun.gpu.native.lib"
   private val NativeLibEnv = "sicfun_GPU_NATIVE_LIB"
   private val DefaultNativeLibrary = "sicfun_gpu_kernel"
-  private val CacheVersion = "5"
+  private val CacheVersion = "6"
+  private val LegacyCacheVersion = "5"
   private val DefaultCachePath = "data/headsup-backend-autotune.properties"
   private val TuneMaxEntries = 12000
   private val TuneMinEntries = 2000
@@ -124,7 +125,8 @@ object HeadsUpBackendAutoTuner:
       tableKind: String,
       mode: HeadsUpEquityTable.Mode,
       maxMatchups: Long,
-      backend: HeadsUpEquityTable.ComputeBackend
+      backend: HeadsUpEquityTable.ComputeBackend,
+      forceRetune: Boolean = false
   ): Unit =
     if backend != HeadsUpEquityTable.ComputeBackend.Gpu then
       ()
@@ -134,14 +136,16 @@ object HeadsUpBackendAutoTuner:
           configureForHybrid(
             tableKind = tableKind.trim.toLowerCase,
             mode = mode,
-            maxMatchups = maxMatchups
+            maxMatchups = maxMatchups,
+            forceRetune = forceRetune
           )
         case _ =>
           mode match
             case HeadsUpEquityTable.Mode.Exact =>
               runAutoTuneExact(
                 tableKind = tableKind.trim.toLowerCase,
-                maxMatchups = maxMatchups
+                maxMatchups = maxMatchups,
+                forceRetune = forceRetune
               )
             case mc: HeadsUpEquityTable.Mode.MonteCarlo =>
               runAutoTune(
@@ -149,20 +153,23 @@ object HeadsUpBackendAutoTuner:
                 mode = mc,
                 maxMatchups = maxMatchups,
                 includeCpuCandidate = true,
-                tuneScope = "any"
+                tuneScope = "any",
+                forceRetune = forceRetune
               )
 
   /** Runs auto-tuning for the backend comparison harness (CUDA candidates only, no CPU fallback). */
   def configureForComparison(
       tableKind: String,
       mode: HeadsUpEquityTable.Mode,
-      maxMatchups: Long
+      maxMatchups: Long,
+      forceRetune: Boolean = false
   ): Unit =
     mode match
       case HeadsUpEquityTable.Mode.Exact =>
         runAutoTuneExact(
           tableKind = tableKind.trim.toLowerCase,
-          maxMatchups = maxMatchups
+          maxMatchups = maxMatchups,
+          forceRetune = forceRetune
         )
       case mc: HeadsUpEquityTable.Mode.MonteCarlo =>
         runAutoTune(
@@ -170,7 +177,8 @@ object HeadsUpBackendAutoTuner:
           mode = mc,
           maxMatchups = maxMatchups,
           includeCpuCandidate = false,
-          tuneScope = "cuda"
+          tuneScope = "cuda",
+          forceRetune = forceRetune
         )
 
   private def runAutoTune(
@@ -178,7 +186,8 @@ object HeadsUpBackendAutoTuner:
       mode: HeadsUpEquityTable.Mode.MonteCarlo,
       maxMatchups: Long,
       includeCpuCandidate: Boolean,
-      tuneScope: String
+      tuneScope: String,
+      forceRetune: Boolean
   ): Unit =
     if !autoTuneEnabled then
       GpuRuntimeSupport.log("gpu-autotune: disabled via sicfun.gpu.autotune/sicfun_GPU_AUTOTUNE")
@@ -206,7 +215,7 @@ object HeadsUpBackendAutoTuner:
             candidates = monteCarloCandidates(includeCpuCandidate, batch.size)
           )
 
-          runDecisionSession(batch, workload) match
+          runDecisionSession(batch, workload, forceRetune) match
             case Some((decision, fromCache)) =>
               printDecision(decision, fromCache = fromCache, tuneTrials = tuneTrials, tuneEntries = batch.size)
             case None =>
@@ -214,7 +223,8 @@ object HeadsUpBackendAutoTuner:
 
   private def runAutoTuneExact(
       tableKind: String,
-      maxMatchups: Long
+      maxMatchups: Long,
+      forceRetune: Boolean
   ): Unit =
     if !autoTuneEnabled then
       GpuRuntimeSupport.log("gpu-autotune: disabled via sicfun.gpu.autotune/sicfun_GPU_AUTOTUNE")
@@ -241,7 +251,7 @@ object HeadsUpBackendAutoTuner:
             candidates = exactCandidates(batch.size)
           )
 
-          runDecisionSession(batch, workload) match
+          runDecisionSession(batch, workload, forceRetune) match
             case Some((decision, true)) =>
               GpuRuntimeSupport.log(
                 s"gpu-autotune: exact cached engine=${decision.engine}, block=${showOpt(decision.blockSize)}, " +
@@ -287,20 +297,29 @@ object HeadsUpBackendAutoTuner:
 
   private def runDecisionSession(
       batch: BatchData,
-      workload: TuneWorkload
+      workload: TuneWorkload,
+      forceRetune: Boolean
   ): Option[(Decision, Boolean)] =
     val cacheFile = resolvedCacheFile
-    loadDecisionFromCache(cacheFile, workload.signature) match
-      case Some(cached) =>
-        applyDecision(cached)
-        Some((cached, true))
-      case None =>
-        benchmarkCandidates(batch, workload).minByOption(_.seconds).map { winner =>
-          val decision = decisionForResult(winner)
-          applyDecision(decision)
-          saveDecisionToCache(cacheFile, workload.signature, decision)
-          (decision, false)
-        }
+    if forceRetune then
+      benchmarkCandidates(batch, workload).minByOption(_.seconds).map { winner =>
+        val decision = decisionForResult(winner)
+        applyDecision(decision)
+        saveDecisionToCache(cacheFile, workload.signature, decision)
+        (decision, false)
+      }
+    else
+      loadDecisionFromCache(cacheFile, workload.signature) match
+        case Some(cached) =>
+          applyDecision(cached)
+          Some((cached, true))
+        case None =>
+          benchmarkCandidates(batch, workload).minByOption(_.seconds).map { winner =>
+            val decision = decisionForResult(winner)
+            applyDecision(decision)
+            saveDecisionToCache(cacheFile, workload.signature, decision)
+            (decision, false)
+          }
 
   private def benchmarkCandidates(
       batch: BatchData,
@@ -414,36 +433,73 @@ object HeadsUpBackendAutoTuner:
       try props.load(in)
       finally in.close()
 
-      val version = Option(props.getProperty("version")).getOrElse("")
-      val cachedSignature = Option(props.getProperty("signature")).getOrElse("")
-      if version != CacheVersion || cachedSignature != signature then
-        None
-      else
-        val engine = Option(props.getProperty("engine")).map(_.trim.toLowerCase).filter(_.nonEmpty)
-        engine.map { e =>
-          Decision(
-            engine = e,
-            blockSize = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("blockSize")),
-            maxChunkMatchups = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("maxChunkMatchups")),
-            source = "cache",
-            detail = Option(props.getProperty("detail")).getOrElse("cached")
-          )
-        }
+      loadDecisionEntries(props).collectFirst {
+        case (`signature`, decision) =>
+          decision.copy(source = "cache")
+      }
 
   private def saveDecisionToCache(file: File, signature: String, decision: Decision): Unit =
     val parent = file.getParentFile
     if parent != null then parent.mkdirs()
     val props = new Properties()
+    if file.isFile then
+      val in = new FileInputStream(file)
+      try props.load(in)
+      finally in.close()
+    val mergedEntries =
+      (loadDecisionEntries(props).filterNot(_._1 == signature) :+ (signature -> decision.copy(source = "tuned"))).zipWithIndex
+    props.clear()
     props.setProperty("version", CacheVersion)
-    props.setProperty("signature", signature)
-    props.setProperty("engine", decision.engine)
-    decision.blockSize.foreach(v => props.setProperty("blockSize", v.toString))
-    decision.maxChunkMatchups.foreach(v => props.setProperty("maxChunkMatchups", v.toString))
-    props.setProperty("detail", decision.detail)
+    props.setProperty("entry.count", mergedEntries.size.toString)
+    mergedEntries.foreach { case ((entrySignature, entryDecision), idx) =>
+      val prefix = s"entry.$idx."
+      props.setProperty(s"${prefix}signature", entrySignature)
+      props.setProperty(s"${prefix}engine", entryDecision.engine)
+      entryDecision.blockSize.foreach(v => props.setProperty(s"${prefix}blockSize", v.toString))
+      entryDecision.maxChunkMatchups.foreach(v => props.setProperty(s"${prefix}maxChunkMatchups", v.toString))
+      props.setProperty(s"${prefix}detail", entryDecision.detail)
+    }
     props.setProperty("updatedAtMillis", System.currentTimeMillis().toString)
     val out = new FileOutputStream(file)
     try props.store(out, "heads-up backend autotune cache")
     finally out.close()
+
+  private def loadDecisionEntries(props: Properties): Vector[(String, Decision)] =
+    Option(props.getProperty("version")).map(_.trim).getOrElse("") match
+      case CacheVersion =>
+        val count = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("entry.count")).getOrElse(0)
+        (0 until count).flatMap { idx =>
+          val prefix = s"entry.$idx."
+          val signature = Option(props.getProperty(s"${prefix}signature")).map(_.trim).filter(_.nonEmpty)
+          val engine = Option(props.getProperty(s"${prefix}engine")).map(_.trim.toLowerCase).filter(_.nonEmpty)
+          for
+            entrySignature <- signature
+            entryEngine <- engine
+          yield entrySignature ->
+            Decision(
+              engine = entryEngine,
+              blockSize = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}blockSize")),
+              maxChunkMatchups = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunkMatchups")),
+              source = "cache",
+              detail = Option(props.getProperty(s"${prefix}detail")).getOrElse("cached")
+            )
+        }.toVector
+      case LegacyCacheVersion =>
+        val signature = Option(props.getProperty("signature")).map(_.trim).filter(_.nonEmpty)
+        val engine = Option(props.getProperty("engine")).map(_.trim.toLowerCase).filter(_.nonEmpty)
+        (for
+          entrySignature <- signature
+          entryEngine <- engine
+        yield entrySignature ->
+          Decision(
+            engine = entryEngine,
+            blockSize = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("blockSize")),
+            maxChunkMatchups = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("maxChunkMatchups")),
+            source = "cache",
+            detail = Option(props.getProperty("detail")).getOrElse("cached")
+          )).toVector
+      case _ =>
+        Vector.empty
 
   private def workloadSignature(tableKind: String, trials: Int, tuneEntries: Int, tuneScope: String): String =
     val os = System.getProperty("os.name", "unknown").trim.toLowerCase
@@ -495,7 +551,8 @@ object HeadsUpBackendAutoTuner:
 
   // ── Hybrid multi-device calibration ─────────────────────────────
 
-  private val HybridCacheVersion = "3"
+  private val HybridCacheVersion = "4"
+  private val LegacyHybridCacheVersion = "3"
   private val DefaultHybridCachePath = "data/headsup-hybrid-autotune.properties"
   private val HybridCachePathProperty = "sicfun.gpu.autotune.hybridCachePath"
   private val HybridCachePathEnv = "sicfun_GPU_AUTOTUNE_HYBRID_CACHE_PATH"
@@ -522,18 +579,20 @@ object HeadsUpBackendAutoTuner:
   def configureForHybrid(
       tableKind: String,
       mode: HeadsUpEquityTable.Mode,
-      maxMatchups: Long
+      maxMatchups: Long,
+      forceRetune: Boolean = false
   ): Unit =
     mode match
       case HeadsUpEquityTable.Mode.Exact =>
         GpuRuntimeSupport.log("hybrid-autotune: skipped (exact mode)")
       case mc: HeadsUpEquityTable.Mode.MonteCarlo =>
-        runHybridAutoTune(tableKind.trim.toLowerCase, mc, maxMatchups)
+        runHybridAutoTune(tableKind.trim.toLowerCase, mc, maxMatchups, forceRetune)
 
   private def runHybridAutoTune(
       tableKind: String,
       mode: HeadsUpEquityTable.Mode.MonteCarlo,
-      maxMatchups: Long
+      maxMatchups: Long,
+      forceRetune: Boolean
   ): Unit =
     if !autoTuneEnabled then
       GpuRuntimeSupport.log("hybrid-autotune: disabled via sicfun.gpu.autotune/sicfun_GPU_AUTOTUNE")
@@ -556,29 +615,15 @@ object HeadsUpBackendAutoTuner:
           val topology = deviceTopologyFingerprint(devices)
           val signature = hybridWorkloadSignature(tableKind, tuneTrials, batch.size, topology)
 
-          loadHybridDecisionFromCache(cacheFile, signature) match
-            case Some(cached) =>
-              applyHybridDecision(cached)
-              printHybridDecision(cached, fromCache = true, tuneTrials, batch.size)
-            case None =>
-              val tuneMode: HeadsUpEquityTable.Mode.MonteCarlo =
-                HeadsUpEquityTable.Mode.MonteCarlo(tuneTrials)
-              val results = devices.flatMap { device =>
-                benchmarkDevice(device, batch, tuneMode)
-              }
-              if results.isEmpty then
-                GpuRuntimeSupport.log("hybrid-autotune: all device benchmarks failed, leaving defaults")
-              else
-                val totalThroughput = results.map(_._2).sum
-                val configs = results.map { case (device, throughput) =>
-                  val weight = if totalThroughput > 0 then throughput / totalThroughput else 1.0 / results.size
-                  HybridDeviceConfig(device.id, throughput, weight)
-                }
-                val detail = configs.map(c => f"${c.deviceId}:${c.throughput}%.1f/s(${c.weight * 100}%.1f%%)").mkString(", ")
-                val decision = HybridDecision(configs, source = "tuned", detail = detail)
-                applyHybridDecision(decision)
-                saveHybridDecisionToCache(cacheFile, signature, decision)
-                printHybridDecision(decision, fromCache = false, tuneTrials, batch.size)
+          if !forceRetune then
+            loadHybridDecisionFromCache(cacheFile, signature) match
+              case Some(cached) =>
+                applyHybridDecision(cached)
+                printHybridDecision(cached, fromCache = true, tuneTrials, batch.size)
+              case None =>
+                benchmarkAndPersistHybrid(cacheFile, signature, devices, batch, tuneTrials)
+          else
+            benchmarkAndPersistHybrid(cacheFile, signature, devices, batch, tuneTrials)
 
   private def benchmarkDevice(
       device: HeadsUpHybridDispatcher.ComputeDevice,
@@ -659,16 +704,103 @@ object HeadsUpBackendAutoTuner:
       try props.load(in)
       finally in.close()
 
-      val version = Option(props.getProperty("version")).getOrElse("")
-      val cachedSignature = Option(props.getProperty("signature")).getOrElse("")
-      if version != HybridCacheVersion || cachedSignature != signature then
-        None
-      else
+      loadHybridDecisionEntries(props).collectFirst {
+        case (`signature`, decision) =>
+          decision.copy(source = "cache")
+      }
+
+  private def saveHybridDecisionToCache(file: File, signature: String, decision: HybridDecision): Unit =
+    val parent = file.getParentFile
+    if parent != null then parent.mkdirs()
+    val props = new Properties()
+    if file.isFile then
+      val in = new FileInputStream(file)
+      try props.load(in)
+      finally in.close()
+    val mergedEntries =
+      (loadHybridDecisionEntries(props).filterNot(_._1 == signature) :+ (signature -> decision.copy(source = "tuned"))).zipWithIndex
+    props.clear()
+    props.setProperty("version", HybridCacheVersion)
+    props.setProperty("entry.count", mergedEntries.size.toString)
+    mergedEntries.foreach { case ((entrySignature, entryDecision), entryIdx) =>
+      val prefix = s"entry.$entryIdx."
+      props.setProperty(s"${prefix}signature", entrySignature)
+      props.setProperty(s"${prefix}device.count", entryDecision.devices.size.toString)
+      entryDecision.devices.zipWithIndex.foreach { case (config, deviceIdx) =>
+        val devicePrefix = s"${prefix}device.$deviceIdx."
+        props.setProperty(s"${devicePrefix}id", config.deviceId)
+        props.setProperty(s"${devicePrefix}throughput", config.throughput.toString)
+        props.setProperty(s"${devicePrefix}weight", config.weight.toString)
+      }
+      props.setProperty(s"${prefix}detail", entryDecision.detail)
+    }
+    props.setProperty("updatedAtMillis", System.currentTimeMillis().toString)
+    val out = new FileOutputStream(file)
+    try props.store(out, "heads-up hybrid autotune cache")
+    finally out.close()
+
+  private def benchmarkAndPersistHybrid(
+      cacheFile: File,
+      signature: String,
+      devices: Vector[HeadsUpHybridDispatcher.ComputeDevice],
+      batch: BatchData,
+      tuneTrials: Int
+  ): Unit =
+    val tuneMode: HeadsUpEquityTable.Mode.MonteCarlo =
+      HeadsUpEquityTable.Mode.MonteCarlo(tuneTrials)
+    val results = devices.flatMap { device =>
+      benchmarkDevice(device, batch, tuneMode)
+    }
+    if results.isEmpty then
+      GpuRuntimeSupport.log("hybrid-autotune: all device benchmarks failed, leaving defaults")
+    else
+      val totalThroughput = results.map(_._2).sum
+      val configs = results.map { case (device, throughput) =>
+        val weight = if totalThroughput > 0 then throughput / totalThroughput else 1.0 / results.size
+        HybridDeviceConfig(device.id, throughput, weight)
+      }
+      val detail = configs.map(c => f"${c.deviceId}:${c.throughput}%.1f/s(${c.weight * 100}%.1f%%)").mkString(", ")
+      val decision = HybridDecision(configs, source = "tuned", detail = detail)
+      applyHybridDecision(decision)
+      saveHybridDecisionToCache(cacheFile, signature, decision)
+      printHybridDecision(decision, fromCache = false, tuneTrials, batch.size)
+
+  private def loadHybridDecisionEntries(props: Properties): Vector[(String, HybridDecision)] =
+    Option(props.getProperty("version")).map(_.trim).getOrElse("") match
+      case HybridCacheVersion =>
+        val count = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("entry.count")).getOrElse(0)
+        (0 until count).flatMap { entryIdx =>
+          val prefix = s"entry.$entryIdx."
+          val signature = Option(props.getProperty(s"${prefix}signature")).map(_.trim).filter(_.nonEmpty)
+          val deviceCount = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}device.count")).getOrElse(0)
+          if signature.isEmpty || deviceCount <= 0 then None
+          else
+            val configs = (0 until deviceCount).flatMap { deviceIdx =>
+              val devicePrefix = s"${prefix}device.$deviceIdx."
+              val deviceId = Option(props.getProperty(s"${devicePrefix}id")).map(_.trim).filter(_.nonEmpty)
+              val throughput = Option(props.getProperty(s"${devicePrefix}throughput")).flatMap(s =>
+                scala.util.Try(s.trim.toDouble).toOption
+              )
+              val weight = Option(props.getProperty(s"${devicePrefix}weight")).flatMap(s =>
+                scala.util.Try(s.trim.toDouble).toOption
+              )
+              for
+                id <- deviceId
+                t <- throughput
+                w <- weight
+              yield HybridDeviceConfig(id, t, w)
+            }.toVector
+            if configs.size == deviceCount then
+              Some(signature.get -> HybridDecision(configs, source = "cache", detail = Option(props.getProperty(s"${prefix}detail")).getOrElse("cached")))
+            else None
+        }.toVector
+      case LegacyHybridCacheVersion =>
+        val signature = Option(props.getProperty("signature")).map(_.trim).filter(_.nonEmpty)
         val count = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("device.count")).getOrElse(0)
-        if count <= 0 then None
+        if signature.isEmpty || count <= 0 then Vector.empty
         else
-          val configs = (0 until count).flatMap { i =>
-            val prefix = s"device.$i."
+          val configs = (0 until count).flatMap { idx =>
+            val prefix = s"device.$idx."
             val deviceId = Option(props.getProperty(s"${prefix}id")).map(_.trim).filter(_.nonEmpty)
             val throughput = Option(props.getProperty(s"${prefix}throughput")).flatMap(s =>
               scala.util.Try(s.trim.toDouble).toOption
@@ -682,27 +814,8 @@ object HeadsUpBackendAutoTuner:
               w <- weight
             yield HybridDeviceConfig(id, t, w)
           }.toVector
-
           if configs.size == count then
-            val detail = Option(props.getProperty("detail")).getOrElse("cached")
-            Some(HybridDecision(configs, source = "cache", detail = detail))
-          else None
-
-  private def saveHybridDecisionToCache(file: File, signature: String, decision: HybridDecision): Unit =
-    val parent = file.getParentFile
-    if parent != null then parent.mkdirs()
-    val props = new Properties()
-    props.setProperty("version", HybridCacheVersion)
-    props.setProperty("signature", signature)
-    props.setProperty("device.count", decision.devices.size.toString)
-    decision.devices.zipWithIndex.foreach { case (config, i) =>
-      val prefix = s"device.$i."
-      props.setProperty(s"${prefix}id", config.deviceId)
-      props.setProperty(s"${prefix}throughput", config.throughput.toString)
-      props.setProperty(s"${prefix}weight", config.weight.toString)
-    }
-    props.setProperty("detail", decision.detail)
-    props.setProperty("updatedAtMillis", System.currentTimeMillis().toString)
-    val out = new FileOutputStream(file)
-    try props.store(out, "heads-up hybrid autotune cache")
-    finally out.close()
+            Vector(signature.get -> HybridDecision(configs, source = "cache", detail = Option(props.getProperty("detail")).getOrElse("cached")))
+          else Vector.empty
+      case _ =>
+        Vector.empty
