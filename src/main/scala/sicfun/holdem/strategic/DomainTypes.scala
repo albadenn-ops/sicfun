@@ -51,3 +51,4 @@ object Ev:
     inline def >=(other: Ev): Boolean = e >= other
     inline def <=(other: Ev): Boolean = e <= other
     inline def abs: Ev = math.abs(e)
+
