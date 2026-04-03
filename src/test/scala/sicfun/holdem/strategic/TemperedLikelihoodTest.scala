@@ -269,3 +269,206 @@ class TemperedLikelihoodTest extends munit.FunSuite:
     // Ratio should be very close to 1
     val ratio = result(0) / result(1)
     assert(ratio < 2.0, s"extreme tempering should flatten ratio to near 1, got $ratio")
+
+  // ==================== Native parity tests (conditional on DLL availability) ====================
+
+  private def nativeTemperedCpuAvailable: Boolean =
+    // Probe whether the tempered JNI symbol exists in the loaded DLL.
+    // availability() only checks the base library load; the tempered symbol
+    // may not be present in older compiled DLLs, so we do a minimal probe call.
+    val probe = sicfun.holdem.gpu.HoldemBayesNativeRuntime.updatePosteriorTemperedInPlace(
+      backend = sicfun.holdem.gpu.HoldemBayesNativeRuntime.Backend.Cpu,
+      observationCount = 1,
+      hypothesisCount = 1,
+      prior = Array(1.0),
+      likelihoods = Array(1.0),
+      kappaTemp = 1.0,
+      deltaFloor = 0.0,
+      eta = null,
+      useLegacyForm = false,
+      outPosterior = new Array[Double](1),
+      outLogEvidence = Array(0.0)
+    )
+    probe match
+      case Left(msg) if msg.contains("symbols not found") => false
+      case Left(msg) if msg.contains("not available")     => false
+      case _                                               => true
+
+  test("Native parity: tempered C++ matches Scala reference (two-layer, kappa=0.9, delta=1e-8)"):
+    assume(nativeTemperedCpuAvailable, "native CPU tempered symbol not available")
+    val hypothesisCount = 8
+    val observationCount = 2
+    val prior = Array(0.2, 0.15, 0.15, 0.1, 0.1, 0.1, 0.1, 0.1)
+    val likelihoods = Array(
+      0.4, 0.3, 0.2, 0.05, 0.02, 0.01, 0.01, 0.01, // observation 0
+      0.1, 0.1, 0.3, 0.2,  0.1,  0.1,  0.05, 0.05   // observation 1
+    )
+    val kappaTemp = 0.9
+    val deltaFloor = 1e-8
+    val eta = TemperedLikelihood.defaultEta(hypothesisCount)
+    val cfg = TemperedConfig.twoLayer(kappaTemp = kappaTemp, deltaFloor = deltaFloor)
+
+    // Scala reference: apply tempered update observation by observation
+    var scalaPosterior = prior.map(_ / prior.sum)
+    var obs = 0
+    while obs < observationCount do
+      val row = likelihoods.slice(obs * hypothesisCount, (obs + 1) * hypothesisCount)
+      scalaPosterior = TemperedLikelihood.updatePosterior(scalaPosterior, row, eta, cfg)
+      obs += 1
+
+    // Native
+    val outPosterior = new Array[Double](hypothesisCount)
+    val outLogEvidence = Array(0.0)
+    val result = sicfun.holdem.gpu.HoldemBayesNativeRuntime.updatePosteriorTemperedInPlace(
+      backend = sicfun.holdem.gpu.HoldemBayesNativeRuntime.Backend.Cpu,
+      observationCount = observationCount,
+      hypothesisCount = hypothesisCount,
+      prior = prior,
+      likelihoods = likelihoods,
+      kappaTemp = kappaTemp,
+      deltaFloor = deltaFloor,
+      eta = eta,
+      useLegacyForm = false,
+      outPosterior = outPosterior,
+      outLogEvidence = outLogEvidence
+    )
+    assert(result.isRight, s"native call failed: $result")
+
+    // Compare
+    var i = 0
+    while i < hypothesisCount do
+      assertEqualsDouble(outPosterior(i), scalaPosterior(i), 1e-10)
+      i += 1
+
+  test("Native parity: legacy mode matches Scala reference"):
+    assume(nativeTemperedCpuAvailable, "native CPU tempered symbol not available")
+    val hypothesisCount = 4
+    val observationCount = 1
+    val prior = Array(0.4, 0.3, 0.2, 0.1)
+    val likelihoods = Array(0.6, 0.2, 0.15, 0.05)
+    val eps = 1e-6
+    val eta = TemperedLikelihood.defaultEta(hypothesisCount)
+    val cfg = TemperedConfig.legacy(epsilon = eps)
+
+    // Scala reference
+    val scalaPosterior = TemperedLikelihood.updatePosterior(prior, likelihoods, eta, cfg)
+
+    // Native
+    val outPosterior = new Array[Double](hypothesisCount)
+    val outLogEvidence = Array(0.0)
+    val result = sicfun.holdem.gpu.HoldemBayesNativeRuntime.updatePosteriorTemperedInPlace(
+      backend = sicfun.holdem.gpu.HoldemBayesNativeRuntime.Backend.Cpu,
+      observationCount = observationCount,
+      hypothesisCount = hypothesisCount,
+      prior = prior,
+      likelihoods = likelihoods,
+      kappaTemp = 1.0,
+      deltaFloor = eps,
+      eta = eta,
+      useLegacyForm = true,
+      outPosterior = outPosterior,
+      outLogEvidence = outLogEvidence
+    )
+    assert(result.isRight, s"native call failed: $result")
+
+    var i = 0
+    while i < hypothesisCount do
+      assertEqualsDouble(outPosterior(i), scalaPosterior(i), 1e-12)
+      i += 1
+
+  test("Native parity: untampered fast-path matches original updatePosterior"):
+    assume(nativeTemperedCpuAvailable, "native CPU tempered symbol not available")
+    val hypothesisCount = 4
+    val observationCount = 1
+    val prior = Array(0.4, 0.3, 0.2, 0.1)
+    val likelihoods = Array(0.6, 0.2, 0.15, 0.05)
+
+    // Original path
+    val origPosterior = new Array[Double](hypothesisCount)
+    val origLogEvidence = Array(0.0)
+    val origResult = sicfun.holdem.gpu.HoldemBayesNativeRuntime.updatePosteriorInPlace(
+      backend = sicfun.holdem.gpu.HoldemBayesNativeRuntime.Backend.Cpu,
+      observationCount = observationCount,
+      hypothesisCount = hypothesisCount,
+      prior = prior,
+      likelihoods = likelihoods,
+      outPosterior = origPosterior,
+      outLogEvidence = origLogEvidence
+    )
+    assert(origResult.isRight, s"original native call failed: $origResult")
+
+    // Tempered with kappa=1, delta=0 (should delegate to original)
+    val temperedPosterior = new Array[Double](hypothesisCount)
+    val temperedLogEvidence = Array(0.0)
+    val temperedResult = sicfun.holdem.gpu.HoldemBayesNativeRuntime.updatePosteriorTemperedInPlace(
+      backend = sicfun.holdem.gpu.HoldemBayesNativeRuntime.Backend.Cpu,
+      observationCount = observationCount,
+      hypothesisCount = hypothesisCount,
+      prior = prior,
+      likelihoods = likelihoods,
+      kappaTemp = 1.0,
+      deltaFloor = 0.0,
+      eta = null,
+      useLegacyForm = false,
+      outPosterior = temperedPosterior,
+      outLogEvidence = temperedLogEvidence
+    )
+    assert(temperedResult.isRight, s"tempered native call failed: $temperedResult")
+
+    // Must be bit-identical (fast path delegates to original function)
+    var i = 0
+    while i < hypothesisCount do
+      assertEqualsDouble(temperedPosterior(i), origPosterior(i), 0.0)
+      i += 1
+    assertEqualsDouble(temperedLogEvidence(0), origLogEvidence(0), 0.0)
+
+  // ==================== Integration backward-compatibility ====================
+
+  test("Integration backward compat: kappa=1 delta=0 through tempered path matches original"):
+    assume(nativeTemperedCpuAvailable, "native CPU tempered symbol not available")
+    val hypothesisCount = 6
+    val observationCount = 2
+    val prior = Array(0.2, 0.2, 0.15, 0.15, 0.15, 0.15)
+
+    val likelihoods = Array(
+      0.4, 0.25, 0.15, 0.1, 0.05, 0.05,
+      0.1, 0.2,  0.3,  0.2, 0.1,  0.1
+    )
+
+    // Run original (untampered) native path
+    val origPosterior = new Array[Double](hypothesisCount)
+    val origLogEvidence = Array(0.0)
+    val origResult = sicfun.holdem.gpu.HoldemBayesNativeRuntime.updatePosteriorInPlace(
+      backend = sicfun.holdem.gpu.HoldemBayesNativeRuntime.Backend.Cpu,
+      observationCount = observationCount,
+      hypothesisCount = hypothesisCount,
+      prior = prior,
+      likelihoods = likelihoods,
+      outPosterior = origPosterior,
+      outLogEvidence = origLogEvidence
+    )
+    assert(origResult.isRight, s"original native call failed: $origResult")
+
+    // Run tempered with kappa=1, delta=0, NOT legacy
+    val temperedPosterior = new Array[Double](hypothesisCount)
+    val temperedLogEvidence = Array(0.0)
+    val temperedResult = sicfun.holdem.gpu.HoldemBayesNativeRuntime.updatePosteriorTemperedInPlace(
+      backend = sicfun.holdem.gpu.HoldemBayesNativeRuntime.Backend.Cpu,
+      observationCount = observationCount,
+      hypothesisCount = hypothesisCount,
+      prior = prior,
+      likelihoods = likelihoods,
+      kappaTemp = 1.0,
+      deltaFloor = 0.0,
+      eta = null,
+      useLegacyForm = false,
+      outPosterior = temperedPosterior,
+      outLogEvidence = temperedLogEvidence
+    )
+    assert(temperedResult.isRight, s"tempered native call failed: $temperedResult")
+
+    var i = 0
+    while i < hypothesisCount do
+      assertEqualsDouble(temperedPosterior(i), origPosterior(i), 0.0)
+      i += 1
+    assertEqualsDouble(temperedLogEvidence(0), origLogEvidence(0), 0.0)
