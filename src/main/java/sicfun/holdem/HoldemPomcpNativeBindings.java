@@ -80,7 +80,64 @@ public final class HoldemPomcpNativeBindings {
 
   /**
    * Returns the engine code from the last successful {@link #solvePftDpw} call.
-   * 0 = no computation yet, 3 = PFT-DPW CPU.
+   * 0 = no computation yet, 3 = PFT-DPW CPU, 4 = W-POMCP CPU.
    */
   public static native int lastEngineCode();
+
+  /**
+   * Run W-POMCP multi-agent factored particle filter search (Definition 56).
+   *
+   * <p>All particle arrays are flat [rival][particle] row-major layout.
+   * The rival action probs are flat [rival][action] row-major.
+   *
+   * @param rivalCount          number of rivals (1..8)
+   * @param particlesPerRival   particle count per rival, length = rivalCount
+   * @param particleTypes       rival type index per particle, flat
+   * @param particlePrivStates  private state index per particle, flat
+   * @param particleWeights     importance weights per particle, flat
+   * @param pubStreet           public state street (0=preflop..3=river)
+   * @param pubPot              current pot size
+   * @param numHeroActions      number of hero actions at this decision point
+   * @param rivalActionProbs    per-rival action probs, flat [rival][action]
+   * @param rewards             reward per hero action, length = numHeroActions
+   * @param numSimulations      number of MCTS simulations
+   * @param discount            gamma: discount factor in (0, 1)
+   * @param exploration         UCB1 exploration constant
+   * @param rMax                maximum absolute reward bound
+   * @param maxDepth            tree depth limit
+   * @param essThreshold        ESS ratio for resampling trigger
+   * @param seed                RNG seed for reproducibility
+   * @param outActionValues     [numHeroActions] output: Q(root, a) per action
+   * @param outBestAction       [1] output: best action index
+   * @param outRootValue        [1] output: root value estimate
+   * @return 0 on success, non-zero error code on failure
+   */
+  public static native int solveWPomcp(
+      int rivalCount,
+      int[] particlesPerRival,
+      int[] particleTypes,
+      int[] particlePrivStates,
+      double[] particleWeights,
+      int pubStreet,
+      double pubPot,
+      int numHeroActions,
+      double[] rivalActionProbs,
+      double[] rewards,
+      int numSimulations,
+      double discount,
+      double exploration,
+      double rMax,
+      int maxDepth,
+      double essThreshold,
+      long seed,
+      double[] outActionValues,
+      int[] outBestAction,
+      double[] outRootValue
+  );
+
+  /**
+   * Run C++ self-test for W-POMCP. Returns 0 on success.
+   * Only meaningful when the DLL is compiled with WPOMCP_SELF_TEST.
+   */
+  public static native int selfTestWPomcp();
 }

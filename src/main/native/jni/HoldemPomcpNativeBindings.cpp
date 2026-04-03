@@ -30,11 +30,13 @@
 #include <vector>
 
 #include "PftDpwSolver.hpp"
+#include "WPomcpSolver.hpp"
 
 namespace {
 
 constexpr jint kEngineUnknown = 0;
 constexpr jint kEnginePftDpw = 3;  /* Engine code 3: PFT-DPW CPU. */
+constexpr jint kEngineCpu = 4;     /* Engine code 4: W-POMCP CPU. */
 
 /* Tracks which engine last completed successfully. Read by lastEngineCode(). */
 std::atomic<jint> g_last_engine_code(kEngineUnknown);
@@ -285,6 +287,146 @@ JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemPomcpNativeBindings_lastEngineCode(
     JNIEnv* /*env*/, jclass /*cls*/) {
   return g_last_engine_code.load(std::memory_order_relaxed);
+}
+
+/*
+ * JNI method: sicfun.holdem.HoldemPomcpNativeBindings.solveWPomcp
+ *
+ * Bridges JVM arrays to wpomcp::solve_raw(). Uses critical array access
+ * for zero-copy. Releases arrays in reverse acquisition order.
+ *
+ * Java signature:
+ *   static native int solveWPomcp(
+ *       int rivalCount,
+ *       int[] particlesPerRival,
+ *       int[] particleTypes,
+ *       int[] particlePrivStates,
+ *       double[] particleWeights,
+ *       int pubStreet,
+ *       double pubPot,
+ *       int numHeroActions,
+ *       double[] rivalActionProbs,
+ *       double[] rewards,
+ *       int numSimulations,
+ *       double discount,
+ *       double exploration,
+ *       double rMax,
+ *       int maxDepth,
+ *       double essThreshold,
+ *       long seed,
+ *       double[] outActionValues,
+ *       int[] outBestAction,
+ *       double[] outRootValue
+ *   );
+ */
+JNIEXPORT jint JNICALL
+Java_sicfun_holdem_HoldemPomcpNativeBindings_solveWPomcp(
+    JNIEnv* env,
+    jclass /* cls */,
+    jint rival_count,
+    jintArray j_particles_per_rival,
+    jintArray j_particle_types,
+    jintArray j_particle_priv_states,
+    jdoubleArray j_particle_weights,
+    jint pub_street,
+    jdouble pub_pot,
+    jint num_hero_actions,
+    jdoubleArray j_rival_action_probs,
+    jdoubleArray j_rewards,
+    jint num_simulations,
+    jdouble discount,
+    jdouble exploration,
+    jdouble r_max,
+    jint max_depth,
+    jdouble ess_threshold,
+    jlong seed,
+    jdoubleArray j_out_action_values,
+    jintArray j_out_best_action,
+    jdoubleArray j_out_root_value) {
+
+  /* Null checks on all array arguments. */
+  if (j_particles_per_rival == nullptr || j_particle_types == nullptr ||
+      j_particle_priv_states == nullptr || j_particle_weights == nullptr ||
+      j_rival_action_probs == nullptr || j_rewards == nullptr ||
+      j_out_action_values == nullptr || j_out_best_action == nullptr ||
+      j_out_root_value == nullptr) {
+    return wpomcp::kStatusNullArray;
+  }
+
+  /* Acquire critical arrays (zero-copy access to JVM heap). */
+  jint* ppr = static_cast<jint*>(
+      env->GetPrimitiveArrayCritical(j_particles_per_rival, nullptr));
+  jint* ptypes = static_cast<jint*>(
+      env->GetPrimitiveArrayCritical(j_particle_types, nullptr));
+  jint* pprivs = static_cast<jint*>(
+      env->GetPrimitiveArrayCritical(j_particle_priv_states, nullptr));
+  jdouble* pweights = static_cast<jdouble*>(
+      env->GetPrimitiveArrayCritical(j_particle_weights, nullptr));
+  jdouble* rap = static_cast<jdouble*>(
+      env->GetPrimitiveArrayCritical(j_rival_action_probs, nullptr));
+  jdouble* rew = static_cast<jdouble*>(
+      env->GetPrimitiveArrayCritical(j_rewards, nullptr));
+  jdouble* out_vals = static_cast<jdouble*>(
+      env->GetPrimitiveArrayCritical(j_out_action_values, nullptr));
+  jint* out_best = static_cast<jint*>(
+      env->GetPrimitiveArrayCritical(j_out_best_action, nullptr));
+  jdouble* out_root = static_cast<jdouble*>(
+      env->GetPrimitiveArrayCritical(j_out_root_value, nullptr));
+
+  if (ppr == nullptr || ptypes == nullptr || pprivs == nullptr ||
+      pweights == nullptr || rap == nullptr || rew == nullptr ||
+      out_vals == nullptr || out_best == nullptr || out_root == nullptr) {
+    /* Release any successfully acquired arrays before returning. */
+    if (out_root) env->ReleasePrimitiveArrayCritical(j_out_root_value, out_root, JNI_ABORT);
+    if (out_best) env->ReleasePrimitiveArrayCritical(j_out_best_action, out_best, JNI_ABORT);
+    if (out_vals) env->ReleasePrimitiveArrayCritical(j_out_action_values, out_vals, JNI_ABORT);
+    if (rew) env->ReleasePrimitiveArrayCritical(j_rewards, rew, JNI_ABORT);
+    if (rap) env->ReleasePrimitiveArrayCritical(j_rival_action_probs, rap, JNI_ABORT);
+    if (pweights) env->ReleasePrimitiveArrayCritical(j_particle_weights, pweights, JNI_ABORT);
+    if (pprivs) env->ReleasePrimitiveArrayCritical(j_particle_priv_states, pprivs, JNI_ABORT);
+    if (ptypes) env->ReleasePrimitiveArrayCritical(j_particle_types, ptypes, JNI_ABORT);
+    if (ppr) env->ReleasePrimitiveArrayCritical(j_particles_per_rival, ppr, JNI_ABORT);
+    return wpomcp::kStatusReadFailure;
+  }
+
+  /* Call the solver. */
+  int status = wpomcp::solve_raw(
+      rival_count, ppr, ptypes, pprivs, pweights,
+      pub_street, pub_pot,
+      num_hero_actions, rap, rew,
+      num_simulations, discount, exploration, r_max,
+      max_depth, ess_threshold, seed,
+      out_vals, out_best, out_root);
+
+  /* Release critical arrays in reverse order. Commit output arrays only on success. */
+  int release_mode = (status == wpomcp::kStatusOk) ? 0 : JNI_ABORT;
+  env->ReleasePrimitiveArrayCritical(j_out_root_value, out_root, release_mode);
+  env->ReleasePrimitiveArrayCritical(j_out_best_action, out_best, release_mode);
+  env->ReleasePrimitiveArrayCritical(j_out_action_values, out_vals, release_mode);
+  env->ReleasePrimitiveArrayCritical(j_rewards, rew, JNI_ABORT);
+  env->ReleasePrimitiveArrayCritical(j_rival_action_probs, rap, JNI_ABORT);
+  env->ReleasePrimitiveArrayCritical(j_particle_weights, pweights, JNI_ABORT);
+  env->ReleasePrimitiveArrayCritical(j_particle_priv_states, pprivs, JNI_ABORT);
+  env->ReleasePrimitiveArrayCritical(j_particle_types, ptypes, JNI_ABORT);
+  env->ReleasePrimitiveArrayCritical(j_particles_per_rival, ppr, JNI_ABORT);
+
+  if (status == wpomcp::kStatusOk) {
+    g_last_engine_code.store(kEngineCpu);
+  }
+
+  return status;
+}
+
+/* Self-test entry point for JNI. */
+JNIEXPORT jint JNICALL
+Java_sicfun_holdem_HoldemPomcpNativeBindings_selfTestWPomcp(
+    JNIEnv* /* env */,
+    jclass /* cls */) {
+#ifdef WPOMCP_SELF_TEST
+  return wpomcp::self_test();
+#else
+  return wpomcp::kStatusOk;  /* self-test not compiled in */
+#endif
 }
 
 }  // extern "C"
