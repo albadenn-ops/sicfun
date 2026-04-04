@@ -97,12 +97,21 @@ struct PublicState {
 struct RivalBeliefSet {
   std::vector<RivalParticle> particles;
   double ess_threshold = kDefaultEssThreshold;
+  bool is_normalized_ = false;
 
-  /** Effective sample size: 1 / sum(w_j^2) after normalization.
+  /** Effective sample size: (sum w)^2 / sum(w^2).
     * Returns C_i when all weights are equal (best case).
-    * Returns 1.0 when one particle dominates (worst case). */
+    * Returns 1.0 when one particle dominates (worst case).
+    * Fast path: after normalize(), sum_w == 1.0 so ESS = 1/sum(w_j^2). */
   double ess() const {
     if (particles.empty()) return 0.0;
+    if (is_normalized_) {
+      // After normalize(), sum_w == 1.0, so ESS = 1/sum(w_j^2)
+      double sum_w2 = 0.0;
+      for (const auto& p : particles) sum_w2 += p.weight * p.weight;
+      return (sum_w2 > 0.0) ? 1.0 / sum_w2 : 0.0;
+    }
+    // Full computation when not known to be normalized
     double sum_w = 0.0;
     double sum_w2 = 0.0;
     for (const auto& p : particles) {
@@ -120,6 +129,7 @@ struct RivalBeliefSet {
     if (sum <= 0.0) return false;
     const double inv_sum = 1.0 / sum;
     for (auto& p : particles) p.weight *= inv_sum;
+    is_normalized_ = true;
     return true;
   }
 
@@ -375,6 +385,8 @@ inline bool update_rival_weights(
   if (n != obs_liks.particle_count || obs_liks.likelihoods == nullptr) {
     return false;
   }
+
+  belief.is_normalized_ = false;  // weights are about to change
 
   for (int j = 0; j < n; ++j) {
     const double lik = obs_liks.likelihoods[j];
@@ -634,8 +646,10 @@ private:
     if (node.should_widen(config_.pw_c, config_.pw_alpha)) {
       /* Progressive widening: try a new action. */
       hero_action = pick_unexpanded_action(node, num_actions);
-      node.action_expanded_[hero_action] = true;
-      node.expanded_count_++;
+      if (!node.action_expanded_[hero_action]) {
+        node.action_expanded_[hero_action] = true;
+        node.expanded_count_++;
+      }
     } else {
       /* Exploit/explore among expanded actions. */
       hero_action = node.select_action_ucb1(
@@ -708,6 +722,7 @@ private:
       dst.particles.resize(src.particles.size());
       std::copy(src.particles.begin(), src.particles.end(), dst.particles.begin());
       dst.ess_threshold = src.ess_threshold;
+      dst.is_normalized_ = src.is_normalized_;
     }
     update_factored_belief(scratch, next_pub,
                            rival_obs.data(), rc, rng_);
