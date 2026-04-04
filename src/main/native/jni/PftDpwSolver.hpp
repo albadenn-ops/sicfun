@@ -73,6 +73,8 @@ struct Particle {
 /* Particle belief: a set of weighted particles representing P(x | history). */
 struct ParticleBelief {
   std::vector<Particle> particles;
+  mutable std::vector<double> cdf_;
+  mutable bool cdf_valid_ = false;
 
   /* Normalize weights so they sum to 1.0.
    * No-op if the particle set is empty or already normalized. */
@@ -87,6 +89,32 @@ struct ParticleBelief {
         p.weight *= inv;
       }
     }
+    cdf_valid_ = false;  // invalidate CDF on normalize
+  }
+
+  /* Build (or reuse) cached CDF for O(log n) weighted sampling. */
+  void ensure_cdf() const {
+    if (cdf_valid_) return;
+    const int n = size();
+    cdf_.resize(n);
+    if (n == 0) return;
+    cdf_[0] = particles[0].weight;
+    for (int i = 1; i < n; ++i) cdf_[i] = cdf_[i-1] + particles[i].weight;
+    if (cdf_[n-1] > 0.0) {
+      const double inv = 1.0 / cdf_[n-1];
+      for (int i = 0; i < n; ++i) cdf_[i] *= inv;
+    }
+    cdf_[n-1] = 1.0;  // clamp last entry to avoid floating-point gaps
+    cdf_valid_ = true;
+  }
+
+  /* Sample a particle index weighted by belief, using cached CDF + binary search. */
+  int sample(double u) const {
+    ensure_cdf();
+    auto it = std::lower_bound(cdf_.begin(), cdf_.end(), u);
+    return static_cast<int>(std::min(
+        static_cast<size_t>(it - cdf_.begin()),
+        cdf_.empty() ? 0u : cdf_.size() - 1));
   }
 
   int size() const { return static_cast<int>(particles.size()); }
@@ -320,18 +348,9 @@ inline double random_rollout(const ParticleBelief& belief,
                               const PftDpwConfig& cfg,
                               int current_depth,
                               std::mt19937_64& rng) {
-  /* Sample one particle as the rollout starting state. */
+  /* Sample one particle as the rollout starting state (cached CDF). */
   std::uniform_real_distribution<double> uniform(0.0, 1.0);
-  double u = uniform(rng);
-  double cumw = 0.0;
-  int state = belief.particles[0].state_idx;
-  for (const auto& p : belief.particles) {
-    cumw += p.weight;
-    if (u <= cumw) {
-      state = p.state_idx;
-      break;
-    }
-  }
+  int state = belief.particles[belief.sample(uniform(rng))].state_idx;
 
   std::uniform_int_distribution<int> action_dist(0, model.num_actions - 1);
   double total_reward = 0.0;
@@ -417,17 +436,8 @@ inline double simulate(PftTree& tree, int node_id,
      * transitioning it, and sampling obs from O(o | x', a). */
     std::uniform_real_distribution<double> uniform(0.0, 1.0);
 
-    /* Sample particle weighted by belief. */
-    double u = uniform(rng);
-    double cumw = 0.0;
-    int sampled_state = node.belief.particles[0].state_idx;
-    for (const auto& p : node.belief.particles) {
-      cumw += p.weight;
-      if (u <= cumw) {
-        sampled_state = p.state_idx;
-        break;
-      }
-    }
+    /* Sample particle weighted by belief (cached CDF). */
+    int sampled_state = node.belief.particles[node.belief.sample(uniform(rng))].state_idx;
     const int next_state = model.transition(sampled_state, action_id);
 
     /* Sample observation from O(o | x', a). */
