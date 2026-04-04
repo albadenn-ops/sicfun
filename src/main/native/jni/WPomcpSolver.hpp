@@ -557,6 +557,27 @@ private:
   std::mt19937 rng_;
   WPomcpNode root_;
 
+  /** Per-depth scratch storage to avoid deep-copying FactoredBelief on every
+    * recursive simulate() call. Indexed by recursion depth so that each level
+    * reuses a pre-allocated belief buffer instead of allocating a new one.
+    */
+  struct SimulationContext {
+    std::vector<FactoredBelief> belief_stack;  // indexed by depth
+    void ensure_depth(int depth, const FactoredBelief& tmpl) {
+      if (static_cast<int>(belief_stack.size()) <= depth) {
+        belief_stack.resize(depth + 1);
+      }
+      auto& b = belief_stack[depth];
+      if (b.rival_beliefs.size() != tmpl.rival_beliefs.size()) {
+        b.rival_beliefs.resize(tmpl.rival_beliefs.size());
+        for (size_t i = 0; i < tmpl.rival_beliefs.size(); ++i) {
+          b.rival_beliefs[i].particles.resize(tmpl.rival_beliefs[i].particles.size());
+        }
+      }
+    }
+  };
+  SimulationContext sim_ctx_;
+
   /** Pick an action not yet in expanded_actions. */
   int pick_unexpanded_action(const WPomcpNode& node, int num_actions) {
     for (int a = 0; a < num_actions; ++a) {
@@ -593,7 +614,7 @@ private:
     */
   double simulate(
       WPomcpNode& node,
-      FactoredBelief belief,  /* by value: each simulation works on a copy */
+      const FactoredBelief& belief,  /* by const-ref: scratch buffer used for mutations */
       const TransitionModel& model,
       int depth) {
 
@@ -675,15 +696,27 @@ private:
       rival_obs[i].likelihoods = lik_storage[i].data();
       rival_obs[i].particle_count = np;
     }
-    update_factored_belief(belief, next_pub,
+    /* Copy belief into per-depth scratch buffer and mutate the copy,
+     * avoiding a deep copy of all rival particle vectors on each recursion. */
+    sim_ctx_.ensure_depth(depth, belief);
+    auto& scratch = sim_ctx_.belief_stack[depth];
+    scratch.public_state = belief.public_state;
+    for (int i = 0; i < rc; ++i) {
+      auto& src = belief.rival_beliefs[i];
+      auto& dst = scratch.rival_beliefs[i];
+      dst.particles.resize(src.particles.size());
+      std::copy(src.particles.begin(), src.particles.end(), dst.particles.begin());
+      dst.ess_threshold = src.ess_threshold;
+    }
+    update_factored_belief(scratch, next_pub,
                            rival_obs.data(), rc, rng_);
 
     /* EXPAND / RECURSE: find or create child node. */
     obs_hash = next_pub.street * 1000 + hero_action;
     WPomcpNode* child = find_or_create_child(node, hero_action, obs_hash);
 
-    /* Recursive simulation from child. */
-    double future = simulate(*child, std::move(belief), model, depth + 1);
+    /* Recursive simulation from child using scratch belief. */
+    double future = simulate(*child, scratch, model, depth + 1);
     double total = reward + config_.discount * future;
 
     /* BACKPROPAGATE. */
@@ -727,6 +760,11 @@ public:
 
     /* Clear tree for fresh search. */
     root_ = WPomcpNode{};
+
+    /* Reset scratch belief stack; reserve up to max_depth to avoid
+     * reallocation during the simulation loop. */
+    sim_ctx_.belief_stack.clear();
+    sim_ctx_.belief_stack.reserve(config_.max_depth);
 
     /* Run simulations. */
     int completed = 0;
