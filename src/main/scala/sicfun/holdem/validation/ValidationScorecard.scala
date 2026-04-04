@@ -2,7 +2,36 @@ package sicfun.holdem.validation
 
 import java.util.Locale
 
-/** Per-player validation result. */
+/** Summary of strategic layer metrics for a single validation player.
+  *
+  * This is a flattened, serialization-friendly view of the strategic snapshot.
+  * Produced by StrategicSnapshot.build, consumed by the scorecard formatter.
+  */
+final case class StrategicSummary(
+    dominantClass: String,
+    fidelityCoverage: String,
+    fourWorldV11: Double,
+    fourWorldV00: Double
+)
+
+/** Per-player validation result capturing all metrics needed for the scorecard.
+  *
+  * Combines simulation statistics (leak firings, applicable spots, hero EV),
+  * convergence analysis (how many hands to detect the leak), and classification
+  * results (archetype assignment, cluster ID).
+  *
+  * @param villainName               human-readable villain identifier (e.g. "overcall-big-bets_severe")
+  * @param leakId                    identifier of the injected leak
+  * @param severity                  leak severity in [0, 1]
+  * @param totalHands                total hands simulated for this player
+  * @param leakApplicableSpots       spots where the leak predicate was applicable
+  * @param leakFiredCount            spots where the leak actually deviated from GTO
+  * @param heroNetBbPer100           hero's win-rate against this villain in bb/100
+  * @param convergence               convergence summary from the ConvergenceTracker
+  * @param assignedArchetype         final archetype classification from the posterior
+  * @param archetypeConvergenceChunk chunk index where archetype classification stabilized
+  * @param clusterId                 optional cluster assignment from PlayerSignature analysis
+  */
 final case class PlayerValidationResult(
     villainName: String,
     leakId: String,
@@ -14,11 +43,30 @@ final case class PlayerValidationResult(
     convergence: ConvergenceSummary,
     assignedArchetype: String,
     archetypeConvergenceChunk: Option[Int],
-    clusterId: Option[Int]
+    clusterId: Option[Int],
+    strategicSummary: Option[StrategicSummary] = None
 )
 
-/** Formats the final validation report — per-player and aggregate. */
+/** Formats the final validation report — per-player and aggregate.
+  *
+  * The scorecard has two sections:
+  *
+  * '''Per-player section:''' For each villain, shows hands played, leak fire rate,
+  * hero EV, detection status (DETECTED/NOT DETECTED for leaky players, PASS/FAIL
+  * for GTO canaries), hands-to-detect, confidence, false positive count, archetype
+  * classification, and optional cluster assignment.
+  *
+  * '''Aggregate section:''' Shows total players, detection rate across leak players,
+  * median hands-to-detect, GTO canary pass rate, average false positives, and
+  * hero's average win-rate against exploitable opponents (with a CONFIRMED/INVESTIGATE
+  * verdict based on whether adaptive play beats exploitable opponents).
+  */
 object ValidationScorecard:
+  /** Format all player results into a human-readable scorecard string.
+    *
+    * @param results vector of per-player validation results
+    * @return formatted multi-line report
+    */
   def format(results: Vector[PlayerValidationResult]): String =
     val sb = new StringBuilder
     sb.append("=== PROFILING VALIDATION SCORECARD ===\n\n")
@@ -57,6 +105,13 @@ object ValidationScorecard:
       sb.append("\n")
 
       r.clusterId.foreach(c => sb.append(s"  SECONDARY: Cluster ID $c\n\n"))
+      r.strategicSummary.foreach { ss =>
+        sb.append("  STRATEGIC: Formal Layer Metrics\n")
+        sb.append(s"    Dominant class: ${ss.dominantClass}\n")
+        sb.append(s"    V^{1,1}: ${fmtD(ss.fourWorldV11, "%.3f")}  V^{0,0}: ${fmtD(ss.fourWorldV00, "%.3f")}\n")
+        sb.append(s"    Fidelity:       ${ss.fidelityCoverage}\n")
+        sb.append("\n")
+      }
       sb.append("---\n\n")
     }
 
