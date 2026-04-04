@@ -72,6 +72,57 @@ struct UpdateOutput {
                                      Useful for model comparison / marginal likelihood. */
 };
 
+/*
+ * Validates, copies, and normalizes a prior distribution into the posterior buffer.
+ * Returns kStatusOk on success, or kStatusInvalidPrior if the prior contains
+ * NaN/Inf/negative values or sums to zero.
+ */
+inline int copy_and_normalize_prior(
+    const int hypothesis_count,
+    const double* BAYESNATIVE_RESTRICT prior,
+    double* BAYESNATIVE_RESTRICT posterior) {
+  double prior_sum = 0.0;
+  int hypothesis = 0;
+  for (; hypothesis + 3 < hypothesis_count; hypothesis += 4) {
+    const double value0 = prior[hypothesis];
+    const double value1 = prior[hypothesis + 1];
+    const double value2 = prior[hypothesis + 2];
+    const double value3 = prior[hypothesis + 3];
+    if (!std::isfinite(value0) || value0 < 0.0 || !std::isfinite(value1) || value1 < 0.0 ||
+        !std::isfinite(value2) || value2 < 0.0 || !std::isfinite(value3) || value3 < 0.0) {
+      return kStatusInvalidPrior;
+    }
+    posterior[hypothesis] = value0;
+    posterior[hypothesis + 1] = value1;
+    posterior[hypothesis + 2] = value2;
+    posterior[hypothesis + 3] = value3;
+    prior_sum += (value0 + value1) + (value2 + value3);
+  }
+  for (; hypothesis < hypothesis_count; ++hypothesis) {
+    const double value = prior[hypothesis];
+    if (!std::isfinite(value) || value < 0.0) {
+      return kStatusInvalidPrior;
+    }
+    posterior[hypothesis] = value;
+    prior_sum += value;
+  }
+  if (!(prior_sum > 0.0)) {
+    return kStatusInvalidPrior;
+  }
+  const double inv_prior_sum = 1.0 / prior_sum;
+  hypothesis = 0;
+  for (; hypothesis + 3 < hypothesis_count; hypothesis += 4) {
+    posterior[hypothesis] *= inv_prior_sum;
+    posterior[hypothesis + 1] *= inv_prior_sum;
+    posterior[hypothesis + 2] *= inv_prior_sum;
+    posterior[hypothesis + 3] *= inv_prior_sum;
+  }
+  for (; hypothesis < hypothesis_count; ++hypothesis) {
+    posterior[hypothesis] *= inv_prior_sum;
+  }
+  return kStatusOk;
+}
+
 /* Validates that observation_count * hypothesis_count does not overflow int.
  * Returns false if either dimension is non-positive or the product exceeds INT_MAX. */
 inline bool valid_length_product(const int observation_count, const int hypothesis_count) {
@@ -128,49 +179,10 @@ inline int update_posterior_raw(
 
   const double eps = 1e-12;  /* Minimum evidence threshold to avoid division by zero. */
 
-  /* Step 1: Validate prior values and copy into posterior buffer.
-   * Uses 4-wide unrolling to reduce loop overhead and improve ILP. */
-  double prior_sum = 0.0;
-  int hypothesis = 0;
-  for (; hypothesis + 3 < hypothesis_count; hypothesis += 4) {
-    const double value0 = prior[hypothesis];
-    const double value1 = prior[hypothesis + 1];
-    const double value2 = prior[hypothesis + 2];
-    const double value3 = prior[hypothesis + 3];
-    if (!std::isfinite(value0) || value0 < 0.0 || !std::isfinite(value1) || value1 < 0.0 ||
-        !std::isfinite(value2) || value2 < 0.0 || !std::isfinite(value3) || value3 < 0.0) {
-      return kStatusInvalidPrior;
-    }
-    posterior[hypothesis] = value0;
-    posterior[hypothesis + 1] = value1;
-    posterior[hypothesis + 2] = value2;
-    posterior[hypothesis + 3] = value3;
-    prior_sum += (value0 + value1) + (value2 + value3);
-  }
-  for (; hypothesis < hypothesis_count; ++hypothesis) {
-    const double value = prior[hypothesis];
-    if (!std::isfinite(value) || value < 0.0) {
-      return kStatusInvalidPrior;
-    }
-    posterior[hypothesis] = value;
-    prior_sum += value;
-  }
-
-  if (!(prior_sum > 0.0)) {
-    return kStatusInvalidPrior;
-  }
-
-  /* Step 2: Normalize prior into a proper probability distribution. */
-  const double inv_prior_sum = 1.0 / prior_sum;
-  hypothesis = 0;
-  for (; hypothesis + 3 < hypothesis_count; hypothesis += 4) {
-    posterior[hypothesis] *= inv_prior_sum;
-    posterior[hypothesis + 1] *= inv_prior_sum;
-    posterior[hypothesis + 2] *= inv_prior_sum;
-    posterior[hypothesis + 3] *= inv_prior_sum;
-  }
-  for (; hypothesis < hypothesis_count; ++hypothesis) {
-    posterior[hypothesis] *= inv_prior_sum;
+  /* Step 1+2: Validate, copy, and normalize prior into posterior buffer. */
+  const int prior_status = copy_and_normalize_prior(hypothesis_count, prior, posterior);
+  if (prior_status != kStatusOk) {
+    return prior_status;
   }
 
   /* Step 3: Sequential Bayesian update — for each observation, multiply posterior
@@ -182,7 +194,7 @@ inline int update_posterior_raw(
     const double* row =
         likelihoods + static_cast<long long>(obs) * static_cast<long long>(hypothesis_count);
     double evidence = 0.0;
-    hypothesis = 0;
+    int hypothesis = 0;
     for (; hypothesis + 3 < hypothesis_count; hypothesis += 4) {
       const double updated0 = posterior[hypothesis] * row[hypothesis];
       const double updated1 = posterior[hypothesis + 1] * row[hypothesis + 1];
@@ -293,49 +305,29 @@ inline int update_posterior_tempered_raw(
         observation_count, hypothesis_count, prior, likelihoods, posterior, out_log_evidence);
   }
 
-  /* Step 1: Validate prior values and copy into posterior buffer. */
-  double prior_sum = 0.0;
-  int hypothesis = 0;
-  for (; hypothesis + 3 < hypothesis_count; hypothesis += 4) {
-    const double value0 = prior[hypothesis];
-    const double value1 = prior[hypothesis + 1];
-    const double value2 = prior[hypothesis + 2];
-    const double value3 = prior[hypothesis + 3];
-    if (!std::isfinite(value0) || value0 < 0.0 || !std::isfinite(value1) || value1 < 0.0 ||
-        !std::isfinite(value2) || value2 < 0.0 || !std::isfinite(value3) || value3 < 0.0) {
-      return kStatusInvalidPrior;
-    }
-    posterior[hypothesis] = value0;
-    posterior[hypothesis + 1] = value1;
-    posterior[hypothesis + 2] = value2;
-    posterior[hypothesis + 3] = value3;
-    prior_sum += (value0 + value1) + (value2 + value3);
-  }
-  for (; hypothesis < hypothesis_count; ++hypothesis) {
-    const double value = prior[hypothesis];
-    if (!std::isfinite(value) || value < 0.0) {
-      return kStatusInvalidPrior;
-    }
-    posterior[hypothesis] = value;
-    prior_sum += value;
+  /* Step 1+2: Validate, copy, and normalize prior into posterior buffer. */
+  const int prior_status = copy_and_normalize_prior(hypothesis_count, prior, posterior);
+  if (prior_status != kStatusOk) {
+    return prior_status;
   }
 
-  if (!(prior_sum > 0.0)) {
-    return kStatusInvalidPrior;
+  /* Step 2b: Resolve effective eta pointer — materialize uniform default if null.
+   * Hoisted outside the observation loop to eliminate per-element null checks. */
+  std::vector<double> default_eta_buf;
+  const double* eta_eff = eta;
+  if (eta == nullptr) {
+    default_eta_buf.assign(static_cast<size_t>(hypothesis_count), default_eta_val);
+    eta_eff = default_eta_buf.data();
   }
 
-  /* Step 2: Normalize prior. */
-  const double inv_prior_sum = 1.0 / prior_sum;
-  hypothesis = 0;
-  for (; hypothesis + 3 < hypothesis_count; hypothesis += 4) {
-    posterior[hypothesis] *= inv_prior_sum;
-    posterior[hypothesis + 1] *= inv_prior_sum;
-    posterior[hypothesis + 2] *= inv_prior_sum;
-    posterior[hypothesis + 3] *= inv_prior_sum;
-  }
-  for (; hypothesis < hypothesis_count; ++hypothesis) {
-    posterior[hypothesis] *= inv_prior_sum;
-  }
+  /* Hoist mode selection outside all loops. Each mode has its own branch-free
+   * unrolled loop body, eliminating per-element if/else in the hot path. */
+  enum class TempMode { kLegacy, kKappaOne, kFull };
+  const TempMode mode = use_legacy_form ? TempMode::kLegacy
+      : (kappa_temp == 1.0) ? TempMode::kKappaOne : TempMode::kFull;
+
+  /* Precompute loop-invariant constants for each mode. */
+  const double omd = 1.0 - delta_floor;  /* Used by kLegacy: (1-delta)*raw + delta*eta */
 
   /* Step 3: Sequential Bayesian update with tempered likelihoods. */
   double log_evidence = 0.0;
@@ -344,64 +336,84 @@ inline int update_posterior_tempered_raw(
         likelihoods + static_cast<long long>(obs) * static_cast<long long>(hypothesis_count);
     double evidence = 0.0;
 
-    hypothesis = 0;
-    for (; hypothesis + 3 < hypothesis_count; hypothesis += 4) {
-      /* Apply tempering to each of 4 likelihoods. */
-      double tempered0, tempered1, tempered2, tempered3;
-      const double raw0 = row[hypothesis];
-      const double raw1 = row[hypothesis + 1];
-      const double raw2 = row[hypothesis + 2];
-      const double raw3 = row[hypothesis + 3];
-      const double eta0 = (eta != nullptr) ? eta[hypothesis]     : default_eta_val;
-      const double eta1 = (eta != nullptr) ? eta[hypothesis + 1] : default_eta_val;
-      const double eta2 = (eta != nullptr) ? eta[hypothesis + 2] : default_eta_val;
-      const double eta3 = (eta != nullptr) ? eta[hypothesis + 3] : default_eta_val;
-
-      if (use_legacy_form) {
+    int hypothesis = 0;
+    switch (mode) {
+      case TempMode::kLegacy: {
         /* Legacy: (1 - delta_floor) * raw + delta_floor * eta */
-        const double one_minus_delta = 1.0 - delta_floor;
-        tempered0 = one_minus_delta * raw0 + delta_floor * eta0;
-        tempered1 = one_minus_delta * raw1 + delta_floor * eta1;
-        tempered2 = one_minus_delta * raw2 + delta_floor * eta2;
-        tempered3 = one_minus_delta * raw3 + delta_floor * eta3;
-      } else if (kappa_temp == 1.0) {
+        for (; hypothesis + 3 < hypothesis_count; hypothesis += 4) {
+          const double tempered0 = omd * row[hypothesis]     + delta_floor * eta_eff[hypothesis];
+          const double tempered1 = omd * row[hypothesis + 1] + delta_floor * eta_eff[hypothesis + 1];
+          const double tempered2 = omd * row[hypothesis + 2] + delta_floor * eta_eff[hypothesis + 2];
+          const double tempered3 = omd * row[hypothesis + 3] + delta_floor * eta_eff[hypothesis + 3];
+          const double updated0 = posterior[hypothesis]     * tempered0;
+          const double updated1 = posterior[hypothesis + 1] * tempered1;
+          const double updated2 = posterior[hypothesis + 2] * tempered2;
+          const double updated3 = posterior[hypothesis + 3] * tempered3;
+          posterior[hypothesis]     = updated0;
+          posterior[hypothesis + 1] = updated1;
+          posterior[hypothesis + 2] = updated2;
+          posterior[hypothesis + 3] = updated3;
+          evidence += (updated0 + updated1) + (updated2 + updated3);
+        }
+        for (; hypothesis < hypothesis_count; ++hypothesis) {
+          const double tempered = omd * row[hypothesis] + delta_floor * eta_eff[hypothesis];
+          const double updated = posterior[hypothesis] * tempered;
+          posterior[hypothesis] = updated;
+          evidence += updated;
+        }
+        break;
+      }
+      case TempMode::kKappaOne: {
         /* Two-layer with kappa=1: raw + delta * eta (no pow). */
-        tempered0 = raw0 + delta_floor * eta0;
-        tempered1 = raw1 + delta_floor * eta1;
-        tempered2 = raw2 + delta_floor * eta2;
-        tempered3 = raw3 + delta_floor * eta3;
-      } else {
-        /* Full two-layer: pow(raw, kappa) + delta * eta. */
-        tempered0 = std::pow(std::max(0.0, raw0), kappa_temp) + delta_floor * eta0;
-        tempered1 = std::pow(std::max(0.0, raw1), kappa_temp) + delta_floor * eta1;
-        tempered2 = std::pow(std::max(0.0, raw2), kappa_temp) + delta_floor * eta2;
-        tempered3 = std::pow(std::max(0.0, raw3), kappa_temp) + delta_floor * eta3;
+        for (; hypothesis + 3 < hypothesis_count; hypothesis += 4) {
+          const double tempered0 = row[hypothesis]     + delta_floor * eta_eff[hypothesis];
+          const double tempered1 = row[hypothesis + 1] + delta_floor * eta_eff[hypothesis + 1];
+          const double tempered2 = row[hypothesis + 2] + delta_floor * eta_eff[hypothesis + 2];
+          const double tempered3 = row[hypothesis + 3] + delta_floor * eta_eff[hypothesis + 3];
+          const double updated0 = posterior[hypothesis]     * tempered0;
+          const double updated1 = posterior[hypothesis + 1] * tempered1;
+          const double updated2 = posterior[hypothesis + 2] * tempered2;
+          const double updated3 = posterior[hypothesis + 3] * tempered3;
+          posterior[hypothesis]     = updated0;
+          posterior[hypothesis + 1] = updated1;
+          posterior[hypothesis + 2] = updated2;
+          posterior[hypothesis + 3] = updated3;
+          evidence += (updated0 + updated1) + (updated2 + updated3);
+        }
+        for (; hypothesis < hypothesis_count; ++hypothesis) {
+          const double tempered = row[hypothesis] + delta_floor * eta_eff[hypothesis];
+          const double updated = posterior[hypothesis] * tempered;
+          posterior[hypothesis] = updated;
+          evidence += updated;
+        }
+        break;
       }
-
-      const double updated0 = posterior[hypothesis]     * tempered0;
-      const double updated1 = posterior[hypothesis + 1] * tempered1;
-      const double updated2 = posterior[hypothesis + 2] * tempered2;
-      const double updated3 = posterior[hypothesis + 3] * tempered3;
-      posterior[hypothesis]     = updated0;
-      posterior[hypothesis + 1] = updated1;
-      posterior[hypothesis + 2] = updated2;
-      posterior[hypothesis + 3] = updated3;
-      evidence += (updated0 + updated1) + (updated2 + updated3);
-    }
-    for (; hypothesis < hypothesis_count; ++hypothesis) {
-      const double raw = row[hypothesis];
-      const double eta_val = (eta != nullptr) ? eta[hypothesis] : default_eta_val;
-      double tempered;
-      if (use_legacy_form) {
-        tempered = (1.0 - delta_floor) * raw + delta_floor * eta_val;
-      } else if (kappa_temp == 1.0) {
-        tempered = raw + delta_floor * eta_val;
-      } else {
-        tempered = std::pow(std::max(0.0, raw), kappa_temp) + delta_floor * eta_val;
+      case TempMode::kFull: {
+        /* Full two-layer: exp(kappa * log(max(1e-300, raw))) + delta * eta.
+         * Uses exp+log (~5-10ns) instead of pow (~50-100ns), vectorizable by clang -O3. */
+        for (; hypothesis + 3 < hypothesis_count; hypothesis += 4) {
+          const double tempered0 = std::exp(kappa_temp * std::log(std::max(1e-300, row[hypothesis])))     + delta_floor * eta_eff[hypothesis];
+          const double tempered1 = std::exp(kappa_temp * std::log(std::max(1e-300, row[hypothesis + 1]))) + delta_floor * eta_eff[hypothesis + 1];
+          const double tempered2 = std::exp(kappa_temp * std::log(std::max(1e-300, row[hypothesis + 2]))) + delta_floor * eta_eff[hypothesis + 2];
+          const double tempered3 = std::exp(kappa_temp * std::log(std::max(1e-300, row[hypothesis + 3]))) + delta_floor * eta_eff[hypothesis + 3];
+          const double updated0 = posterior[hypothesis]     * tempered0;
+          const double updated1 = posterior[hypothesis + 1] * tempered1;
+          const double updated2 = posterior[hypothesis + 2] * tempered2;
+          const double updated3 = posterior[hypothesis + 3] * tempered3;
+          posterior[hypothesis]     = updated0;
+          posterior[hypothesis + 1] = updated1;
+          posterior[hypothesis + 2] = updated2;
+          posterior[hypothesis + 3] = updated3;
+          evidence += (updated0 + updated1) + (updated2 + updated3);
+        }
+        for (; hypothesis < hypothesis_count; ++hypothesis) {
+          const double tempered = std::exp(kappa_temp * std::log(std::max(1e-300, row[hypothesis]))) + delta_floor * eta_eff[hypothesis];
+          const double updated = posterior[hypothesis] * tempered;
+          posterior[hypothesis] = updated;
+          evidence += updated;
+        }
+        break;
       }
-      const double updated = posterior[hypothesis] * tempered;
-      posterior[hypothesis] = updated;
-      evidence += updated;
     }
 
     if (!std::isfinite(evidence)) {
