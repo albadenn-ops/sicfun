@@ -26,6 +26,7 @@
 #include <limits>
 #include <numeric>
 #include <random>
+#include <memory>
 #include <vector>
 
 #include "PftDpwSolver.hpp"
@@ -458,7 +459,7 @@ struct WPomcpNode {
     int obs_hash = 0;  /* hash of the observation received after action */
   };
   std::vector<ChildKey> child_keys;
-  std::vector<WPomcpNode> children;
+  std::vector<std::unique_ptr<WPomcpNode>> children;
 
   /** UCB1 action score for hero action a at this node.
     * score = Q(s,a) + c * sqrt(ln(N(s)) / N(s,a))
@@ -578,6 +579,13 @@ private:
   };
   SimulationContext sim_ctx_;
 
+  /* Pre-allocated per-simulation scratch buffers for simulate().
+   * These replace per-call local allocations since simulate() overwrites
+   * them before use at each depth (not recursive w.r.t. these). */
+  std::vector<RivalActionDist> scratch_rival_dists_;
+  std::vector<ObservationLikelihoods> scratch_rival_obs_;
+  std::vector<std::vector<double>> scratch_lik_storage_;
+
   /** Pick an action not yet in expanded_actions. */
   int pick_unexpanded_action(const WPomcpNode& node, int num_actions) {
     for (int a = 0; a < num_actions; ++a) {
@@ -598,13 +606,14 @@ private:
     for (size_t i = 0; i < parent.child_keys.size(); ++i) {
       if (parent.child_keys[i].hero_action == hero_action &&
           parent.child_keys[i].obs_hash == obs_hash) {
-        return &parent.children[i];
+        return parent.children[i].get();
       }
     }
-    /* Create new child. */
+    /* Create new child. Pointer stability: unique_ptr indirection means
+     * vector reallocation does not move the WPomcpNode itself. */
     parent.child_keys.push_back({hero_action, obs_hash});
-    parent.children.emplace_back();
-    return &parent.children.back();
+    parent.children.push_back(std::make_unique<WPomcpNode>());
+    return parent.children.back().get();
   }
 
   /** Run a single simulation from the given node at the given depth.
@@ -645,7 +654,7 @@ private:
     JointRivalAction joint_action;
     {
       const int rc = config_.rival_count();
-      std::vector<RivalActionDist> rival_dists(rc);
+      auto& rival_dists = scratch_rival_dists_;
       for (int i = 0; i < rc; ++i) {
         /* Rival i's action distribution conditioned on their
          * particle-averaged state and the public state. */
@@ -688,8 +697,8 @@ private:
 
     /* Build per-rival observation likelihoods from model. */
     const int rc = config_.rival_count();
-    std::vector<ObservationLikelihoods> rival_obs(rc);
-    std::vector<std::vector<double>> lik_storage(rc);
+    auto& rival_obs = scratch_rival_obs_;
+    auto& lik_storage = scratch_lik_storage_;
     for (int i = 0; i < rc; ++i) {
       const int np = belief.rival_beliefs[i].particle_count();
       lik_storage[i].assign(np, 1.0);  /* uniform likelihood as default */
@@ -766,6 +775,12 @@ public:
     sim_ctx_.belief_stack.clear();
     sim_ctx_.belief_stack.reserve(config_.max_depth);
 
+    /* Pre-allocate per-simulation scratch buffers sized to rival count. */
+    const int rc = config_.rival_count();
+    scratch_rival_dists_.resize(rc);
+    scratch_rival_obs_.resize(rc);
+    scratch_lik_storage_.resize(rc);
+
     /* Run simulations. */
     int completed = 0;
     for (int sim = 0; sim < config_.num_simulations; ++sim) {
@@ -804,7 +819,7 @@ public:
   static int count_nodes(const WPomcpNode& node) {
     int count = 1;
     for (const auto& child : node.children) {
-      count += count_nodes(child);
+      count += count_nodes(*child);
     }
     return count;
   }
