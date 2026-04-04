@@ -62,6 +62,23 @@ class TheoremValidationTest extends munit.FunSuite:
     // All posteriors positive (smoothing)
     posterior.foreach(p => assert(p > 0.0))
 
+  test("Theorem 2b: delta=0 kappa<1 converges to pure power posterior"):
+    val kappa = 0.5
+    val priors = Vector(0.4, 0.35, 0.25)
+    val rawLikelihoods = Vector(0.8, 0.2, 0.05)
+    // delta=0: L = Pr(y|c)^kappa + 0 = Pr(y|c)^kappa (pure power posterior)
+    val powerLikelihoods = rawLikelihoods.map(pr => math.pow(pr, kappa))
+    val denom = powerLikelihoods.zip(priors).map(_ * _).sum
+    val posterior = powerLikelihoods.zip(priors).map((l, mu) => l * mu / denom)
+    assertEqualsDouble(posterior.sum, 1.0, Tol)
+    // Power posterior flattens relative to standard Bayes (kappa < 1 shrinks differences)
+    val standardDenom = rawLikelihoods.zip(priors).map(_ * _).sum
+    val standardPosterior = rawLikelihoods.zip(priors).map((l, mu) => l * mu / standardDenom)
+    // The power posterior should be more uniform than standard Bayes
+    val powerRange = posterior.max - posterior.min
+    val standardRange = standardPosterior.max - standardPosterior.min
+    assert(powerRange < standardRange, "Power posterior should be flatter than standard Bayes")
+
   test("Theorem 2c: kappa=1 delta=0 recovers standard Bayes on-path"):
     val priors = Vector(0.6, 0.4)
     val rawLikelihoods = Vector(0.9, 0.3)
@@ -289,3 +306,29 @@ class TheoremValidationTest extends munit.FunSuite:
     // Use relative tolerance for large numbers (floating-point order of operations)
     val expectedRobust = 4.0 * rMax / math.pow(1.0 - gamma, 2) * (1.0 - gamma + gamma * rho)
     assertEqualsDouble(robustBound, expectedRobust, 1e-6)
+
+  // ========================================================================
+  // RevealSchedule (Def 51): classify action relative to threshold
+  // ========================================================================
+
+  test("RevealSchedule: classify returns Conceal below threshold"):
+    val rival = PlayerId("v1")
+    val stage = sicfun.holdem.types.Street.Flop
+    val sched = RevealSchedule(Map((rival, stage) -> RevealThreshold(Ev(0.5), isExact = true)))
+    assertEquals(sched.classify(rival, stage, Ev(0.3)), RevealDecision.Conceal)
+
+  test("RevealSchedule: classify returns Reveal above threshold"):
+    val rival = PlayerId("v1")
+    val stage = sicfun.holdem.types.Street.Flop
+    val sched = RevealSchedule(Map((rival, stage) -> RevealThreshold(Ev(0.5), isExact = true)))
+    assertEquals(sched.classify(rival, stage, Ev(0.7)), RevealDecision.Reveal)
+
+  test("RevealSchedule: classify returns Randomize at exact threshold"):
+    val rival = PlayerId("v1")
+    val stage = sicfun.holdem.types.Street.Flop
+    val sched = RevealSchedule(Map((rival, stage) -> RevealThreshold(Ev(0.5), isExact = true)))
+    assertEquals(sched.classify(rival, stage, Ev(0.5)), RevealDecision.Randomize)
+
+  test("RevealSchedule: classify returns Unknown for missing rival/stage"):
+    val sched = RevealSchedule(Map.empty)
+    assertEquals(sched.classify(PlayerId("v1"), sicfun.holdem.types.Street.Turn, Ev(0.5)), RevealDecision.Unknown)
