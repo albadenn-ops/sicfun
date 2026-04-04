@@ -27,6 +27,7 @@
 #include <numeric>
 #include <random>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "PftDpwSolver.hpp"
@@ -450,16 +451,16 @@ struct WPomcpNode {
 
   int visit_count = 0;
   std::vector<ActionStats> action_stats;  /* indexed by hero action */
-  std::vector<int> expanded_actions;      /* hero actions expanded so far */
+  std::array<bool, kMaxActions> action_expanded_{};  /* replaces vector<int> expanded_actions */
+  int expanded_count_ = 0;
 
-  /* Children are stored as a flat vector keyed by an expanded-action index.
-   * Each expanded action can have multiple observation-children (stochastic). */
-  struct ChildKey {
-    int hero_action = 0;
-    int obs_hash = 0;  /* hash of the observation received after action */
-  };
-  std::vector<ChildKey> child_keys;
+  /* Children indexed by packed (hero_action, obs_hash) key for O(1) lookup. */
+  std::unordered_map<int64_t, size_t> child_index_;
   std::vector<std::unique_ptr<WPomcpNode>> children;
+
+  static int64_t pack_key(int hero_action, int obs_hash) {
+    return (static_cast<int64_t>(hero_action) << 32) | static_cast<uint32_t>(obs_hash);
+  }
 
   /** UCB1 action score for hero action a at this node.
     * score = Q(s,a) + c * sqrt(ln(N(s)) / N(s,a))
@@ -491,11 +492,10 @@ struct WPomcpNode {
   }
 
   /** Check if progressive widening allows expanding a new action.
-    * Condition: |expanded_actions| < c * N(s)^alpha */
+    * Condition: expanded_count_ < c * N(s)^alpha */
   bool should_widen(double pw_c, double pw_alpha) const {
-    const double limit = pw_c * std::pow(
-        static_cast<double>(visit_count), pw_alpha);
-    return static_cast<double>(expanded_actions.size()) < limit;
+    const double limit = pw_c * std::pow(static_cast<double>(visit_count), pw_alpha);
+    return static_cast<double>(expanded_count_) < limit;
   }
 };
 
@@ -586,33 +586,24 @@ private:
   std::vector<ObservationLikelihoods> scratch_rival_obs_;
   std::vector<std::vector<double>> scratch_lik_storage_;
 
-  /** Pick an action not yet in expanded_actions. */
+  /** Pick an action not yet expanded (O(kMaxActions) bitset scan). */
   int pick_unexpanded_action(const WPomcpNode& node, int num_actions) {
     for (int a = 0; a < num_actions; ++a) {
-      bool found = false;
-      for (int ea : node.expanded_actions) {
-        if (ea == a) { found = true; break; }
-      }
-      if (!found) return a;
+      if (!node.action_expanded_[a]) return a;
     }
-    /* All expanded: pick by UCB1. */
     return node.select_action_ucb1(config_.exploration_constant, num_actions);
   }
 
-  /** Find an existing child node or create a new one. */
-  WPomcpNode* find_or_create_child(
-      WPomcpNode& parent, int hero_action, int obs_hash) {
-
-    for (size_t i = 0; i < parent.child_keys.size(); ++i) {
-      if (parent.child_keys[i].hero_action == hero_action &&
-          parent.child_keys[i].obs_hash == obs_hash) {
-        return parent.children[i].get();
-      }
+  /** Find an existing child node or create a new one (O(1) hash lookup). */
+  WPomcpNode* find_or_create_child(WPomcpNode& parent, int hero_action, int obs_hash) {
+    const int64_t key = WPomcpNode::pack_key(hero_action, obs_hash);
+    auto it = parent.child_index_.find(key);
+    if (it != parent.child_index_.end()) {
+      return parent.children[it->second].get();
     }
-    /* Create new child. Pointer stability: unique_ptr indirection means
-     * vector reallocation does not move the WPomcpNode itself. */
-    parent.child_keys.push_back({hero_action, obs_hash});
+    const size_t idx = parent.children.size();
     parent.children.push_back(std::make_unique<WPomcpNode>());
+    parent.child_index_[key] = idx;
     return parent.children.back().get();
   }
 
@@ -643,7 +634,8 @@ private:
     if (node.should_widen(config_.pw_c, config_.pw_alpha)) {
       /* Progressive widening: try a new action. */
       hero_action = pick_unexpanded_action(node, num_actions);
-      node.expanded_actions.push_back(hero_action);
+      node.action_expanded_[hero_action] = true;
+      node.expanded_count_++;
     } else {
       /* Exploit/explore among expanded actions. */
       hero_action = node.select_action_ucb1(
