@@ -79,19 +79,14 @@ class AdaptationSafetyTest extends munit.FunSuite:
 
   // -- SafetyConfig --
 
-  test("SafetyConfig clamps beta to betaBar"):
-    val _ = SafetyConfig(
-      epsilonNE = 0.03,
-      deltaAdapt = 0.05,
-      betaDet = 0.1
-    )
+  test("clampBeta reduces proposed beta to betaBar"):
     val clamped = AdaptationSafety.clampBeta(
       proposedBeta = 0.8,
       betaBar = 0.6
     )
     assertEqualsDouble(clamped, 0.6, Tol)
 
-  test("SafetyConfig passes beta through when below betaBar"):
+  test("clampBeta passes beta through when below betaBar"):
     val clamped = AdaptationSafety.clampBeta(
       proposedBeta = 0.3,
       betaBar = 0.6

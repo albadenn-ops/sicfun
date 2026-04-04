@@ -23,6 +23,8 @@ object OpponentModelBridge:
       pfr: Double,
       af: Double
   ): BridgeResult[DiscreteDistribution[StrategicClass]] =
+    if vpip < 0.0 || pfr < 0.0 || af < 0.0 then
+      return BridgeResult.Absent(s"invalid stats: vpip=$vpip, pfr=$pfr, af=$af (all must be >= 0)")
     // Heuristic: high AF => more bluffs, high VPIP+low PFR => marginal
     val bluffWeight = math.min(af * 0.1, 0.4)
     val valueWeight = math.min(pfr * 0.02, 0.4)

@@ -28,6 +28,7 @@ object ValueBridge:
       staticEquity: Double,
       controlFrac: Double = 0.5
   ): BridgeResult[FourWorld] =
+    require(controlFrac >= 0.0 && controlFrac <= 1.0, s"controlFrac must be in [0,1], got $controlFrac")
     val v11 = Ev(engineEv)
     val v00 = Ev(staticEquity)
     val gap = engineEv - staticEquity

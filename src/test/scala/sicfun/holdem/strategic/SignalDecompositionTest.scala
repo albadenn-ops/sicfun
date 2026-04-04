@@ -79,11 +79,13 @@ class SignalDecompositionTest extends munit.FunSuite:
   // -- Non-additivity warning (Def 43) --
 
   test("deltaSigAggregate != sum of per-rival deltaSig in general"):
-    // Construct a case where aggregate != sum-of-individuals
+    // Per-rival: deltaSig_1 = 10-6=4, deltaSig_2 = 12-7=5, sum = 9
     val perRival1 = SignalDecomposition.computePerRivalDelta(Ev(10.0), Ev(8.0), Ev(6.0))
     val perRival2 = SignalDecomposition.computePerRivalDelta(Ev(12.0), Ev(9.0), Ev(7.0))
     val sumIndividual = perRival1.deltaSig + perRival2.deltaSig
-    // Aggregate uses joint Q-functions, which can differ from sum
+    // Aggregate uses joint Q-functions which differ from per-rival sum
     val agg = SignalDecomposition.deltaSigAggregate(Ev(22.0), Ev(13.5))
-    // Just verify the API works -- non-additivity is a property, not a bug
-    assert(agg.value != sumIndividual.value || agg.value == sumIndividual.value)
+    // agg = 22 - 13.5 = 8.5, but sumIndividual = 4 + 5 = 9 => non-additive
+    assertEqualsDouble(agg.value, 8.5, Tol)
+    assertEqualsDouble(sumIndividual.value, 9.0, Tol)
+    assert(agg.value != sumIndividual.value, "aggregate should differ from sum of per-rival deltas")

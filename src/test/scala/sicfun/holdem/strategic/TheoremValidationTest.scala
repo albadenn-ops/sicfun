@@ -157,15 +157,18 @@ class TheoremValidationTest extends munit.FunSuite:
   // ========================================================================
 
   test("Theorem 6: V^{0,0} uses Pi^ol (open-loop), same observation dynamics"):
-    // Structural test: FourWorld.v00 is labeled as open-loop + blind.
-    // The four-world construction does NOT modify observation generation.
-    // We verify that changing only the policy class (not the kernel) yields v00.
+    // Theorem 6 is a structural property: the no-learning counterfactual restricts
+    // Pi^S to Pi^ol WITHOUT altering observation generation. We verify the construction:
+    // v00 and v01 share the same blind kernel (same observations) but differ in policy.
+    // deltaControl = v01 - v00 isolates the policy effect under identical kernels.
     val fw = FourWorldDecomposition.compute(Ev(10.0), Ev(7.0), Ev(6.0), Ev(4.0))
-    // v00 (blind+open-loop) and v01 (blind+closed-loop) share the same blind kernel
-    // The difference is purely in the policy class, not observation generation.
-    val controlValue = fw.v01 - fw.v00
-    // This is well-defined (both use blind kernels, differ only in policy)
-    assert(controlValue.value >= 0.0 || controlValue.value < 0.0) // always well-defined
+    // deltaControl is well-defined and captures the pure policy effect
+    assertEqualsDouble(fw.deltaControl.value, 2.0, Tol)
+    // deltaSigStar is well-defined and captures the pure signal effect
+    assertEqualsDouble(fw.deltaSigStar.value, 3.0, Tol)
+    // Both are computed under the same v00 baseline (shared observation dynamics)
+    assertEqualsDouble((fw.v00 + fw.deltaControl).value, fw.v01.value, Tol)
+    assertEqualsDouble((fw.v00 + fw.deltaSigStar).value, fw.v10.value, Tol)
 
   // ========================================================================
   // Theorem 7: Convexity of robust value function under Wasserstein ambiguity
