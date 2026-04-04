@@ -292,8 +292,8 @@ Java_sicfun_holdem_HoldemPomcpNativeBindings_lastEngineCode(
 /*
  * JNI method: sicfun.holdem.HoldemPomcpNativeBindings.solveWPomcp
  *
- * Bridges JVM arrays to wpomcp::solve_raw(). Uses critical array access
- * for zero-copy. Releases arrays in reverse acquisition order.
+ * Bridges JVM arrays to wpomcp::solve_raw(). Uses copy-based JNI access
+ * (GetXxxArrayRegion / SetXxxArrayRegion) to avoid GC-pinning violations.
  *
  * Java signature:
  *   static native int solveWPomcp(
@@ -353,67 +353,46 @@ Java_sicfun_holdem_HoldemPomcpNativeBindings_solveWPomcp(
     return wpomcp::kStatusNullArray;
   }
 
-  /* Acquire critical arrays (zero-copy access to JVM heap). */
-  jint* ppr = static_cast<jint*>(
-      env->GetPrimitiveArrayCritical(j_particles_per_rival, nullptr));
-  jint* ptypes = static_cast<jint*>(
-      env->GetPrimitiveArrayCritical(j_particle_types, nullptr));
-  jint* pprivs = static_cast<jint*>(
-      env->GetPrimitiveArrayCritical(j_particle_priv_states, nullptr));
-  jdouble* pweights = static_cast<jdouble*>(
-      env->GetPrimitiveArrayCritical(j_particle_weights, nullptr));
-  jdouble* rap = static_cast<jdouble*>(
-      env->GetPrimitiveArrayCritical(j_rival_action_probs, nullptr));
-  jdouble* rew = static_cast<jdouble*>(
-      env->GetPrimitiveArrayCritical(j_rewards, nullptr));
-  jdouble* out_vals = static_cast<jdouble*>(
-      env->GetPrimitiveArrayCritical(j_out_action_values, nullptr));
-  jint* out_best = static_cast<jint*>(
-      env->GetPrimitiveArrayCritical(j_out_best_action, nullptr));
-  jdouble* out_root = static_cast<jdouble*>(
-      env->GetPrimitiveArrayCritical(j_out_root_value, nullptr));
+  std::vector<int> ppr_vec, ptypes_vec, pprivs_vec;
+  std::vector<double> pweights_vec, rap_vec, rew_vec;
+  int s;
+  s = read_int_array(env, j_particles_per_rival, ppr_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_int_array(env, j_particle_types, ptypes_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_int_array(env, j_particle_priv_states, pprivs_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_double_array(env, j_particle_weights, pweights_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_double_array(env, j_rival_action_probs, rap_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_double_array(env, j_rewards, rew_vec);
+  if (s != pftdpw::kStatusOk) return s;
 
-  if (ppr == nullptr || ptypes == nullptr || pprivs == nullptr ||
-      pweights == nullptr || rap == nullptr || rew == nullptr ||
-      out_vals == nullptr || out_best == nullptr || out_root == nullptr) {
-    /* Release any successfully acquired arrays before returning. */
-    if (out_root) env->ReleasePrimitiveArrayCritical(j_out_root_value, out_root, JNI_ABORT);
-    if (out_best) env->ReleasePrimitiveArrayCritical(j_out_best_action, out_best, JNI_ABORT);
-    if (out_vals) env->ReleasePrimitiveArrayCritical(j_out_action_values, out_vals, JNI_ABORT);
-    if (rew) env->ReleasePrimitiveArrayCritical(j_rewards, rew, JNI_ABORT);
-    if (rap) env->ReleasePrimitiveArrayCritical(j_rival_action_probs, rap, JNI_ABORT);
-    if (pweights) env->ReleasePrimitiveArrayCritical(j_particle_weights, pweights, JNI_ABORT);
-    if (pprivs) env->ReleasePrimitiveArrayCritical(j_particle_priv_states, pprivs, JNI_ABORT);
-    if (ptypes) env->ReleasePrimitiveArrayCritical(j_particle_types, ptypes, JNI_ABORT);
-    if (ppr) env->ReleasePrimitiveArrayCritical(j_particles_per_rival, ppr, JNI_ABORT);
-    return wpomcp::kStatusReadFailure;
-  }
+  // Output buffers
+  std::vector<double> out_vals_vec(num_hero_actions, 0.0);
+  int out_best_val = 0;
+  double out_root_val = 0.0;
 
-  /* Call the solver. */
   int status = wpomcp::solve_raw(
-      rival_count, ppr, ptypes, pprivs, pweights,
-      pub_street, pub_pot,
-      num_hero_actions, rap, rew,
-      num_simulations, discount, exploration, r_max,
-      max_depth, ess_threshold, seed,
-      out_vals, out_best, out_root);
-
-  /* Release critical arrays in reverse order. Commit output arrays only on success. */
-  int release_mode = (status == wpomcp::kStatusOk) ? 0 : JNI_ABORT;
-  env->ReleasePrimitiveArrayCritical(j_out_root_value, out_root, release_mode);
-  env->ReleasePrimitiveArrayCritical(j_out_best_action, out_best, release_mode);
-  env->ReleasePrimitiveArrayCritical(j_out_action_values, out_vals, release_mode);
-  env->ReleasePrimitiveArrayCritical(j_rewards, rew, JNI_ABORT);
-  env->ReleasePrimitiveArrayCritical(j_rival_action_probs, rap, JNI_ABORT);
-  env->ReleasePrimitiveArrayCritical(j_particle_weights, pweights, JNI_ABORT);
-  env->ReleasePrimitiveArrayCritical(j_particle_priv_states, pprivs, JNI_ABORT);
-  env->ReleasePrimitiveArrayCritical(j_particle_types, ptypes, JNI_ABORT);
-  env->ReleasePrimitiveArrayCritical(j_particles_per_rival, ppr, JNI_ABORT);
+      rival_count, ppr_vec.data(), ptypes_vec.data(), pprivs_vec.data(),
+      pweights_vec.data(), pub_street, pub_pot, num_hero_actions,
+      rap_vec.data(), rew_vec.data(), num_simulations, discount,
+      exploration, r_max, max_depth, ess_threshold, seed,
+      out_vals_vec.data(), &out_best_val, &out_root_val);
 
   if (status == wpomcp::kStatusOk) {
+    s = write_double_array(env, j_out_action_values, out_vals_vec);
+    if (s != pftdpw::kStatusOk) return s;
+    // Write best_action and root_value as single-element arrays
+    std::vector<int> best_vec = {out_best_val};
+    s = write_int_array(env, j_out_best_action, best_vec);
+    if (s != pftdpw::kStatusOk) return s;
+    std::vector<double> root_vec = {out_root_val};
+    s = write_double_array(env, j_out_root_value, root_vec);
+    if (s != pftdpw::kStatusOk) return s;
     g_last_engine_code.store(kEngineCpu);
   }
-
   return status;
 }
 
