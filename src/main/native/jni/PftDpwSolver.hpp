@@ -357,23 +357,17 @@ struct PftTree {
   int max_nodes;
 
   explicit PftTree(int max_n) : max_nodes(max_n) {
-    nodes.resize(static_cast<size_t>(max_n));
+    nodes.reserve(static_cast<size_t>(max_n));
   }
 
   /* Add a new node with the given belief and depth.
    * Returns the node ID, or -1 if the tree is full (capacity exceeded). */
   int add_node(const ParticleBelief& belief, int depth) {
-    if (node_count >= max_nodes) {
-      return -1;
-    }
+    if (node_count >= max_nodes) return -1;
+    nodes.emplace_back();
     const int id = node_count++;
     nodes[id].belief = belief;
-    nodes[id].visit_count = 0;
     nodes[id].depth = depth;
-    nodes[id].action_ids.clear();
-    nodes[id].q_values.clear();
-    nodes[id].action_visits.clear();
-    nodes[id].obs_children.clear();
     return id;
   }
 };
