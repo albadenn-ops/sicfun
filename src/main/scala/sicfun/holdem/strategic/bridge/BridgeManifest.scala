@@ -55,7 +55,7 @@ object BridgeManifest:
     BridgeEntry("PerRivalDelta",            "Defs 40-42", Fidelity.Exact,   Severity.Cosmetic,   "pure computation over Q-function values"),
     BridgeEntry("PerRivalSignalSubDecomp",  "Defs 48-49", Fidelity.Exact,   Severity.Cosmetic,   "pure computation over Q-function values"),
     BridgeEntry("BluffFramework",           "Defs 35-39", Fidelity.Exact,   Severity.Cosmetic,   "pure predicates over formal types"),
-    BridgeEntry("AdaptationSafety",         "Defs 52-53", Fidelity.Exact,   Severity.Cosmetic,   "pure computation"),
+    BridgeEntry("AdaptationSafety",         "Defs 52-53 (v0.30.2); upgrade to Defs 57/57A-C pending Wave 4", Fidelity.Exact,   Severity.Cosmetic,   "pure computation; def numbering will change in Wave 4"),
     BridgeEntry("RevealSchedule",           "Def 51",     Fidelity.Exact,   Severity.Cosmetic,   "pure computation")
   )
 

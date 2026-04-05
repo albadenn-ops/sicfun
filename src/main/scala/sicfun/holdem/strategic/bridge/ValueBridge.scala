@@ -2,6 +2,22 @@ package sicfun.holdem.strategic.bridge
 
 import sicfun.holdem.strategic.*
 
+// MIGRATION CHECKLIST (Wave 0 — spec hygiene fence)
+// --------------------------------------------------
+// Symbol aliases introduced in v0.31.1; old names remain canonical during Waves 1-6:
+//   delta_adapt    -> epsilon_adapt  (§9A')
+//   delta_retreat  -> delta_cp_retreat  (§9B)
+//   omega must always be qualified as chain-omega or grid-omega.
+//
+// Compatibility policy:
+//   - Keep toFourWorld / toDeltaVocabulary signatures unchanged through Wave 6.
+//   - Mark old bridge methods @deprecated once Wave 6 bridge migration lands.
+//   - Remove old bridge paths in Wave 7 only.
+//
+// Pending work tracked here:
+//   V^{1,0}, V^{0,1}  — interpolated today; proper POMDP values due Phase 3 / Wave 3
+//   controlFrac param  — heuristic split; to be replaced by formal decomposition in Wave 4
+
 /** Bridge: engine EV calculations -> FourWorld, DeltaVocabulary.
   *
   * The four-world decomposition requires evaluating the same decision under

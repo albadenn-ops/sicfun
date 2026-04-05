@@ -56,13 +56,18 @@ object UniformPolarization extends SpotPolarization:
       rivalState: RivalBeliefState
   ): Double = 0.5
 
-/** Posterior-divergence polarization: measures polarization as the
-  * KL divergence between the posterior-on-class after observing the
-  * sizing vs. the prior, normalized to [0, 1].
+/** Posterior-divergence polarization: an approximation of Def 25 polarization.
   *
-  * Pol(lambda) = 1 - exp(-D_KL(posterior_lambda || prior))
+  * IMPORTANT — this is NOT a real KL divergence computation.
+  * The class name and the formula in the spec (Def 25) describe the ideal:
+  *   Pol(lambda) = 1 - exp(-D_KL(posterior_lambda || prior))
+  * but the current implementation does NOT compute that KL divergence.
+  * It uses sizing fraction as a proxy instead (see method body).  The prior
+  * parameter is accepted for API compatibility but is currently unused.
   *
-  * This is the canonical implementation for Def 25.
+  * The "canonical KL" framing in earlier doc versions was an overclaim.
+  * This is a sizing-extremity proxy, not a true posterior-divergence measure.
+  * A genuine KL-based implementation is deferred to Wave 2 (kernel closure).
   */
 final class PosteriorDivergencePolarization(
     prior: DiscreteDistribution[StrategicClass]
@@ -72,9 +77,11 @@ final class PosteriorDivergencePolarization(
       publicState: PublicState,
       rivalState: RivalBeliefState
   ): Double =
-    // KL divergence is computed by the likelihood update in the kernel.
-    // Here we use the sizing fraction as a proxy: extreme sizings
-    // (very small or very large relative to pot) are more polarizing.
+    // PROXY IMPLEMENTATION — does not compute actual KL divergence.
+    // Uses sizing fraction as a stand-in: extreme sizings (very small or
+    // very large relative to pot) are treated as more polarizing.
+    // The `prior` field is unused until Wave 2 replaces this with real
+    // posterior-divergence computation.
     val f = sizing.fractionOfPot.value
     val extremity = math.abs(2.0 * f - 1.0) // 0 at half-pot, 1 at 0 or full-pot
     // Sigmoid-like transform to [0, 1]

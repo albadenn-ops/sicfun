@@ -2,6 +2,23 @@ package sicfun.holdem.strategic
 
 import sicfun.core.DiscreteDistribution
 
+// MIGRATION CHECKLIST (Wave 0 — spec hygiene fence)
+// --------------------------------------------------
+// Symbol aliases introduced in v0.31.1; old names remain canonical during Waves 1-6:
+//   delta_adapt    -> epsilon_adapt  (§9A')
+//   delta_retreat  -> delta_cp_retreat  (§9B)
+//   omega must always be qualified as chain-omega or grid-omega.
+//
+// Compatibility policy:
+//   - Keep all current kernel trait signatures and KernelVariant members unchanged
+//     through Wave 6.
+//   - Mark old names @deprecated once Wave 2 (kernel closure) replacements exist.
+//   - Remove old names in Wave 7 only.
+//
+// Pending work tracked here:
+//   PosteriorDivergencePolarization — proxy implementation; real KL due Wave 2
+//   KernelVariant.Design            — placeholder; concrete design kernel due Wave 2
+
 /** Type alias for a function that updates a model state M given a posterior
   * distribution over strategic classes. Used to embed classification posteriors
   * back into belief states after a Bayesian update step (Def 16).

@@ -1,16 +1,26 @@
 package sicfun.holdem.strategic
 
-/** Adaptation safety framework (Defs 52-53).
+/** Adaptation safety framework (Defs 52-53, v0.30.2); to be upgraded to
+  * Defs 57/57A-C in Wave 4 of the v0.31.1 formal closure plan.
   *
-  * Def 52: SICFUN's exploitation satisfies adaptation safety iff for every
-  * opponent strategy sigma:
+  * SYMBOL-MAPPING NOTE (Wave 0 — spec hygiene):
+  *   delta_adapt    -> epsilon_adapt  (v0.31.1 §9A' alias; same quantity)
+  *   delta_retreat  -> delta_cp_retreat  (v0.31.1 §9B alias; same quantity)
+  *   omega must always be qualified as chain-omega or grid-omega.
+  *
+  * Def 52 (v0.30.2): SICFUN's exploitation satisfies adaptation safety iff
+  * for every opponent strategy sigma:
   *   Exploit(pi^S_{beta}) <= epsilon_NE + delta_adapt.
   *
-  * Def 53: Affine equilibrium deterrence -- any opponent attempting to exploit
-  * SICFUN must themselves become exploitable:
+  * Def 53 (v0.30.2): Affine equilibrium deterrence -- any opponent attempting
+  * to exploit SICFUN must themselves become exploitable:
   *   Exploit_opp(sigma^exploit) >= beta_det * Gain_opp(sigma^exploit).
   *
   * Theorem 8: clamping beta <= betaBar(delta_adapt) enforces A10.
+  *
+  * COMPATIBILITY POLICY (Waves 1-6): legacy constructors and accessors are
+  * preserved under their current names. Old names will be marked @deprecated
+  * once Wave 4 replacements (Defs 57/57A-C) exist. Removal is Wave 7.
   */
 object AdaptationSafety:
 
