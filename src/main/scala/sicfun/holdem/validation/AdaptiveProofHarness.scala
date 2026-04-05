@@ -1,6 +1,7 @@
 package sicfun.holdem.validation
 
 import sicfun.holdem.runtime.TexasHoldemPlayingHall
+import sicfun.holdem.strategic.bridge.BridgeManifest
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
@@ -10,12 +11,43 @@ import scala.util.Random
 
 /** 9-max adaptive proof harness orchestrator.
   *
-  * Runs the adaptive hero against 6 leak-injected villains + 1 shallow-GTO (TAG) +
-  * 1 validatable GTO control in 500-hand blocks via `TexasHoldemPlayingHall.run()`,
-  * with seat reshuffling between blocks.
+  * Validates the adaptive hero engine in a full-ring (9-max) setting by running
+  * it against a realistic villain pool: 6 leak-injected opponents (one per major
+  * leak type), 1 shallow-GTO TAG, and 1 full-GTO control. Each "block" is a
+  * 500-hand session played via `TexasHoldemPlayingHall.run()`, with the hero's
+  * seat position randomized between blocks to ensure position-independence.
+  *
+  * The harness produces:
+  *   - A `ground-truth.json` with per-villain bb/100 for downstream regression testing
+  *   - A human-readable `report.txt` summarizing hero's overall and per-villain performance
+  *   - Per-block outputs from the playing hall (hand histories, model artifacts, etc.)
+  *
+  * Design rationale:
+  *   - Block-based execution allows incremental validation without committing to
+  *     a single massive run; each block gets a fresh RNG seed derived from the
+  *     master seed, so results are reproducible.
+  *   - The villain pool string (`defaultVillainPool`) encodes leak types and severities
+  *     that TexasHoldemPlayingHall's villain factory understands.
+  *   - Hero position cycles through all 9 seats randomly to avoid positional bias.
+  *
+  * Entry point: `main(args)` or programmatic `run(Config())`.
+  *
+  * @see [[ValidationRunner]] for the heads-up profiling validation pipeline
+  * @see [[TexasHoldemPlayingHall]] for the underlying simulation engine
   */
 object AdaptiveProofHarness:
 
+  /** Configuration for a proof harness run.
+    *
+    * @param handsPerBlock  number of hands per block (each block = one TexasHoldemPlayingHall session)
+    * @param blocks         number of blocks to run (hero seat is randomized per block)
+    * @param seed           master RNG seed — each block derives its own seed from this
+    * @param budgetMs       per-decision time budget in milliseconds for the adaptive engine
+    * @param bunchingTrials Monte Carlo trials for bunching-effect estimation
+    * @param equityTrials   Monte Carlo trials for equity estimation
+    * @param outputDir      root directory for all outputs
+    * @param modelDir       optional pre-trained PokerActionModel artifact directory
+    */
   final case class Config(
       handsPerBlock: Int = 500,
       blocks: Int = 1,
@@ -28,7 +60,12 @@ object AdaptiveProofHarness:
   ):
     def totalHands: Int = handsPerBlock * blocks
 
-  /** The 8-villain pool string for --villainPool. */
+  /** The 8-villain pool encoded as a comma-separated string for --villainPool.
+    *
+    * Format: "leak:<type>:<severity>" for leak-injected villains, "tag" for shallow-GTO,
+    * "gto" for full-GTO control. The playing hall's villain factory parses this to
+    * construct the appropriate opponent instances.
+    */
   val defaultVillainPool: String =
     "leak:overfold:0.20,leak:overcall:0.25,leak:turnbluff:0.18,leak:passive:0.30,leak:prefloploose:0.22,leak:prefloptight:0.15,tag,gto"
 
@@ -43,6 +80,9 @@ object AdaptiveProofHarness:
     "Villain08_gto"
   )
 
+  /** Result of a single block run: captures the block index, RNG seed used,
+    * hero's table position, and the full HallSummary from the playing hall.
+    */
   final case class BlockResult(
       blockIndex: Int,
       seed: Long,
@@ -50,14 +90,21 @@ object AdaptiveProofHarness:
       hallSummary: TexasHoldemPlayingHall.HallSummary
   )
 
+  /** Aggregate result across all blocks, providing summary statistics.
+    *
+    * `aggregateHeroBbPer100` and `perVillainAggregateBbPer100` merge chip totals
+    * across blocks to compute overall win-rates, normalized to bb/100 hands.
+    */
   final case class RunResult(
       config: Config,
       blocks: Vector[BlockResult]
   ):
     def totalHands: Int = blocks.map(_.hallSummary.handsPlayed).sum
+    /** Hero's aggregate win-rate in big blinds per 100 hands across all blocks. */
     def aggregateHeroBbPer100: Double =
       val totalNet = blocks.map(_.hallSummary.heroNetChips).sum
       if totalHands > 0 then (totalNet / totalHands) * 100.0 else 0.0
+    /** Per-villain aggregate bb/100, merging chip deltas across all blocks. */
     def perVillainAggregateBbPer100: Map[String, Double] =
       val merged = scala.collection.mutable.HashMap.empty[String, Double].withDefaultValue(0.0)
       blocks.foreach { block =>
@@ -73,6 +120,15 @@ object AdaptiveProofHarness:
     "UTG", "UTG1", "UTG2", "Middle", "Hijack", "Cutoff", "Button", "SmallBlind", "BigBlind"
   )
 
+  /** Execute the proof harness: run `config.blocks` blocks of `config.handsPerBlock` hands each.
+    *
+    * For each block, a fresh RNG seed is derived from the master seed, hero position is
+    * randomized, and `TexasHoldemPlayingHall.run()` is invoked with the full 9-max
+    * villain pool. If any block fails, a RuntimeException is thrown immediately.
+    *
+    * @param config harness configuration (defaults to 1 block of 500 hands)
+    * @return aggregated RunResult across all blocks
+    */
   def run(config: Config = Config()): RunResult =
     val rng = new Random(config.seed)
     println("=== Adaptive Proof Harness (9-Max) ===")
@@ -120,6 +176,14 @@ object AdaptiveProofHarness:
 
     RunResult(config, results)
 
+  /** Write ground-truth JSON and human-readable report to a timestamped run directory.
+    *
+    * Creates `<outputDir>/run-<epochSeconds>-<seed>/` containing:
+    *   - `ground-truth.json` — machine-readable per-villain bb/100 for regression testing
+    *   - `report.txt` — formatted summary printed to stdout and saved to disk
+    *
+    * @return the Path to the created run directory
+    */
   def writeOutputs(result: RunResult, outputDir: Path): Path =
     val runDir = outputDir.resolve(s"run-${Instant.now().getEpochSecond}-${result.config.seed}")
     Files.createDirectories(runDir)
@@ -134,6 +198,11 @@ object AdaptiveProofHarness:
 
     runDir
 
+  /** Serialize the run result to a JSON string suitable for regression testing.
+    *
+    * Contains totalHands, per-block details (seed, hero position, bb/100), and
+    * per-villain aggregate bb/100 sorted alphabetically by villain name.
+    */
   private def writeGroundTruthJson(result: RunResult): String =
     val perVillain = result.perVillainAggregateBbPer100
     val opponents = perVillain.toVector.sortBy(_._1).map { case (name, bbPer100) =>
@@ -153,11 +222,13 @@ object AdaptiveProofHarness:
     val json = ujson.Obj(
       "totalHands" -> ujson.Num(result.totalHands),
       "blocks" -> ujson.Arr(blocks*),
-      "perVillainBbPer100" -> ujson.Arr(opponents*)
+      "perVillainBbPer100" -> ujson.Arr(opponents*),
+      "bridgeFidelity" -> ujson.Str(BridgeManifest.summary)
     )
     ujson.write(json, indent = 2)
 
-  private def formatReport(result: RunResult): String =
+  /** Format a human-readable report with overall and per-villain bb/100 numbers. */
+  private[validation] def formatReport(result: RunResult): String =
     val sb = new StringBuilder
     sb.append("=== Adaptive Proof Report (9-Max) ===\n")
     sb.append(s"Seed: ${result.config.seed}\n")
@@ -168,6 +239,10 @@ object AdaptiveProofHarness:
     result.perVillainAggregateBbPer100.toVector.sortBy(_._1).foreach { case (name, bb) =>
       sb.append(String.format(Locale.ROOT, "  %-28s %+.1f\n", name, bb))
     }
+    sb.append(s"\n${BridgeManifest.summary}\n")
+    sb.append("Bridge Fidelity: structural gaps = ")
+    sb.append(BridgeManifest.structuralGaps.map(_.formalObject).mkString(", "))
+    sb.append("\n")
     sb.toString()
 
   private def roundTo2(value: Double): Double =
@@ -179,6 +254,9 @@ object AdaptiveProofHarness:
     val runDir = writeOutputs(result, config.outputDir)
     println(s"\nOutputs written to: ${runDir.toAbsolutePath.normalize()}")
 
+  /** Parse CLI arguments into Config. Supports --hands, --blocks, --seed, --budget,
+    * --output, and --model flags with simple prefix matching.
+    */
   private def parseArgs(args: Array[String]): Config =
     var config = Config()
     args.foreach { arg =>

@@ -9,6 +9,18 @@ import java.nio.file.{Files, Path}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
+/** Tests for the 9-max adaptive proof harness orchestrator.
+  *
+  * Validates that [[AdaptiveProofHarness]] can run a complete proof cycle
+  * (simulating a multi-player playing hall, exporting review hand histories,
+  * writing ground-truth JSON and a human-readable report) and that the
+  * exported PokerStars-format text roundtrips through [[HandHistoryImport]].
+  *
+  * The test uses a minimal configuration (1 block of 12 hands) to keep
+  * runtime reasonable while still exercising the full orchestration path:
+  * hall simulation, review upload generation, ground-truth serialization,
+  * and report formatting.
+  */
 class AdaptiveProofHarnessTest extends FunSuite:
   override val munitTimeout: Duration = 300.seconds
 
@@ -61,6 +73,13 @@ class AdaptiveProofHarnessTest extends FunSuite:
     finally
       deleteRecursively(root)
   }
+
+  test("formatReport includes bridge fidelity summary"):
+    val config = AdaptiveProofHarness.Config(handsPerBlock = 10, blocks = 0, seed = 1L)
+    val result = AdaptiveProofHarness.RunResult(config, Vector.empty)
+    val report = AdaptiveProofHarness.formatReport(result)
+    assert(report.contains("Bridge Fidelity"), s"expected Bridge Fidelity in:\n$report")
+    assert(report.contains("exact"), s"expected 'exact' in:\n$report")
 
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
