@@ -1,6 +1,7 @@
 package sicfun.holdem.strategic.solver
 
 import sicfun.holdem.HoldemPomcpNativeBindings
+import sicfun.holdem.gpu.GpuRuntimeSupport
 
 /** Configuration for PFT-DPW POMDP solver (mirrors C++ PftDpwConfig).
   *
@@ -125,22 +126,28 @@ object PftDpwRuntime:
 
   @volatile private var loadState: Either[Throwable, Unit] = null
 
-  /** Load the native library (idempotent: loads at most once). */
+  /** Load the native library (idempotent: loads at most once).
+    *
+    * Uses GpuRuntimeSupport.loadNativeLibrary which probes:
+    *   1. Explicit path via system property / environment variable
+    *   2. System.loadLibrary (java.library.path)
+    *   3. Local build fallback: src/main/native/build/sicfun_pomcp_native.dll
+    */
   private def ensureLoaded(): Unit =
     if loadState == null then
       synchronized {
         if loadState == null then
           loadState =
-            try
-              val absPath = Option(System.getProperty(PathProperty))
-                .orElse(Option(System.getenv(PathEnv)))
-                .filter(_.nonEmpty)
-              absPath match
-                case Some(path) => System.load(path)
-                case None       => System.loadLibrary(DefaultLib)
-              Right(())
-            catch
-              case t: Throwable => Left(t)
+            GpuRuntimeSupport.loadNativeLibrary(
+              pathProperty = PathProperty,
+              pathEnv = PathEnv,
+              libProperty = PathProperty, // no separate lib property for PftDpw
+              libEnv = PathEnv,
+              defaultLib = DefaultLib,
+              label = "PFT-DPW POMCP"
+            ) match
+              case Right(_)      => Right(())
+              case Left(reason)  => Left(new UnsatisfiedLinkError(reason))
       }
     loadState match
       case Right(_)  => ()

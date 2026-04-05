@@ -1,6 +1,7 @@
 package sicfun.holdem.strategic.solver
 
 import sicfun.holdem.HoldemPomcpNativeBindings
+import sicfun.holdem.gpu.GpuRuntimeSupport
 import java.util.concurrent.atomic.AtomicReference
 
 /** Runtime wrapper for W-POMCP native solver via JNI.
@@ -110,24 +111,25 @@ private[strategic] object WPomcpRuntime:
   /** Check if the native library is available. */
   def isAvailable: Boolean = ensureLoaded().isRight
 
-  /** Load the native library if not already loaded. */
+  /** Load the native library if not already loaded.
+    *
+    * Uses GpuRuntimeSupport.loadNativeLibrary which probes:
+    *   1. Explicit path via system property / environment variable
+    *   2. System.loadLibrary (java.library.path)
+    *   3. Local build fallback: src/main/native/build/sicfun_pomcp_native.dll
+    */
   def ensureLoaded(): Either[String, Unit] =
     loadState.get() match
       case Some(result) => result
       case None =>
-        val result =
-          try
-            val libName = sys.props.getOrElse(LibProperty,
-              sys.env.getOrElse(LibEnv, DefaultLib))
-            val libPath = sys.props.get(PathProperty)
-              .orElse(sys.env.get(PathEnv))
-            libPath match
-              case Some(path) => System.load(s"$path/$libName.dll")
-              case None       => System.loadLibrary(libName)
-            Right(())
-          catch
-            case e: UnsatisfiedLinkError =>
-              Left(s"W-POMCP native library not available: ${e.getMessage}")
+        val result = GpuRuntimeSupport.loadNativeLibrary(
+          pathProperty = PathProperty,
+          pathEnv = PathEnv,
+          libProperty = LibProperty,
+          libEnv = LibEnv,
+          defaultLib = DefaultLib,
+          label = "W-POMCP"
+        ).map(_ => ())
         loadState.compareAndSet(None, Some(result))
         loadState.get().get
 

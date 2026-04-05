@@ -40,6 +40,7 @@ lazy val headsUpCanonicalTableAutoGenerate = settingKey[Boolean]("Auto-generate 
 lazy val generateHeadsUpCanonicalTable = taskKey[File]("Generate canonical heads-up equity table resource")
 lazy val gpuSmokeGate = taskKey[Unit]("Run the GPU smoke gate (requires provider availability + CUDA engine execution)")
 lazy val gpuExactParityGate = taskKey[Unit]("Run exact native CPU vs CUDA parity gate on a small canonical slice")
+lazy val nativeBuild = taskKey[Unit]("Rebuild native CPU DLLs via clang++ when sources are newer than outputs")
 
 headsUpTableMode := "mc"
 headsUpTableTrials := 200
@@ -137,6 +138,43 @@ generateHeadsUpCanonicalTable := {
     out
   }
 }
+
+nativeBuild := {
+  val log = streams.value.log
+  val nativeDir = baseDirectory.value / "src" / "main" / "native"
+  val jniDir = nativeDir / "jni"
+  val buildDir = nativeDir / "build"
+  val buildScript = nativeDir / "build-windows-llvm.ps1"
+
+  if (!buildScript.exists()) {
+    log.warn(s"Native build script not found: $buildScript — skipping native build")
+  } else {
+    // Check if any .cpp/.hpp source is newer than the CPU DLLs built by build-windows-llvm.ps1
+    val sources = (jniDir ** ("*.cpp" | "*.hpp")).get
+    val cpuDllNames = Set(
+      "sicfun_native_cpu.dll", "sicfun_cfr_native.dll", "sicfun_bayes_native.dll",
+      "sicfun_ddre_native.dll", "sicfun_postflop_native.dll", "sicfun_pomcp_native.dll"
+    )
+    val cpuDlls = (buildDir * "*.dll").get.filter(f => cpuDllNames.contains(f.getName))
+    val needsRebuild = cpuDlls.size < cpuDllNames.size || {
+      val oldestDll = cpuDlls.map(_.lastModified()).min
+      sources.exists(_.lastModified() > oldestDll)
+    }
+    if (needsRebuild) {
+      log.info("Native sources changed — rebuilding DLLs via build-windows-llvm.ps1")
+      val exitCode = scala.sys.process.Process(
+        Seq("powershell", "-ExecutionPolicy", "Bypass", "-File", buildScript.getAbsolutePath),
+        nativeDir
+      ).!
+      if (exitCode != 0) sys.error(s"Native build failed with exit code $exitCode")
+      log.info("Native DLLs rebuilt successfully")
+    } else {
+      log.info("Native DLLs up to date — skipping rebuild")
+    }
+  }
+}
+
+Test / test := (Test / test).dependsOn(nativeBuild).value
 
 gpuSmokeGate := {
   val log = streams.value.log

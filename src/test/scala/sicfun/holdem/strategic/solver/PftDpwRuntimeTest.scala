@@ -22,10 +22,15 @@ class PftDpwRuntimeTest extends FunSuite:
   /* Tag for tests that require the native POMCP library. */
   val NativeTag = new munit.Tag("native")
 
-  /* Check whether the native library is available (non-throwing probe). */
+  /* Check whether the native library is available (non-throwing probe).
+   * Triggers PftDpwRuntime's loader which probes src/main/native/build/ as fallback. */
   private def nativeAvailable: Boolean =
     try
-      HoldemPomcpNativeBindings.lastEngineCode()
+      PftDpwRuntime.solve(
+        TabularGenerativeModel(Array(0), Array(1.0), Array(1.0), 1, 1, 1),
+        ParticleBelief(Array(0), Array(1.0)),
+        PftDpwConfig(numSimulations = 1, maxDepth = 1)
+      )
       true
     catch case _: UnsatisfiedLinkError => false
 
