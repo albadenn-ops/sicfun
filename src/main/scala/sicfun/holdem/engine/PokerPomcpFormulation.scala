@@ -152,9 +152,13 @@ object PokerPomcpFormulation:
 
     val rivalParticles = rivalBeliefs.values.toIndexedSeq.map { belief =>
       val (types, weights) = belief.toParticles(particlesPerRival, heroBucket)
+      /* Distribute rival private states (hand buckets) uniformly across [0, NumHandBuckets).
+       * Each particle gets a bucket proportional to its index so that the showdown equity
+       * table is exercised across the full rival bucket range, not collapsed to a single value. */
+      val privStates = Array.tabulate(particlesPerRival)(i => i % NumHandBuckets)
       WPomcpRuntime.RivalParticles(
         rivalTypes = types,
-        privStates = Array.fill(particlesPerRival)(heroBucket),
+        privStates = privStates,
         weights = weights
       )
     }
