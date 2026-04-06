@@ -3,6 +3,7 @@ package sicfun.holdem.engine
 import munit.FunSuite
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.*
+import sicfun.holdem.strategic.solver.WPomcpRuntime
 
 class StrategicEngineTest extends FunSuite:
 
@@ -104,3 +105,48 @@ class StrategicEngineTest extends FunSuite:
     assert(engine.currentHandActive)
     // Beliefs still present
     assertEquals(engine.sessionState.rivalBeliefs.size, 1)
+
+  private def nativeAvailable: Boolean = WPomcpRuntime.isAvailable
+
+  test("integration: play a complete hand with Strategic mode"):
+    assume(nativeAvailable, "Native library not available")
+    val engine = new StrategicEngine(StrategicEngine.Config(numSimulations = 100))
+    engine.initSession(rivalIds = Vector(PlayerId("villain")))
+
+    // Hand 1: start hand
+    engine.startHand()
+
+    val preflopState = minimalState
+    val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(3.0))
+
+    // Villain raises
+    engine.observeAction(PlayerId("villain"), PokerAction.Raise(3.0), preflopState)
+
+    // Hero decides
+    val action = engine.decide(preflopState, candidates)
+    assert(candidates.contains(action), s"Action $action not in candidates")
+
+    // End hand
+    engine.endHand()
+
+    // Hand 2: beliefs should persist
+    engine.startHand()
+    val action2 = engine.decide(preflopState, candidates)
+    assert(candidates.contains(action2), s"Action $action2 not in candidates (hand 2)")
+    engine.endHand()
+
+  test("integration: decideHeroStrategic routes correctly"):
+    assume(nativeAvailable, "Native library not available")
+    val engine = new StrategicEngine(StrategicEngine.Config(numSimulations = 50))
+    engine.initSession(rivalIds = Vector(PlayerId("villain")))
+    engine.startHand()
+
+    val gs = minimalState
+    val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(3.0))
+    val ctx = HeroDecisionPipeline.StrategicDecisionContext(
+      state = gs,
+      candidates = candidates,
+      engine = engine
+    )
+    val action = HeroDecisionPipeline.decideHeroStrategic(ctx)
+    assert(candidates.contains(action), s"Action $action not in candidates")
