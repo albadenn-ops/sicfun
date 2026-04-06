@@ -47,6 +47,13 @@ private[holdem] object HeroDecisionPipeline:
       bigBlindChips: Int
   )
 
+  /** Context for Strategic mode decisions. */
+  final case class StrategicDecisionContext(
+      state: GameState,
+      candidates: Vector[PokerAction],
+      engine: StrategicEngine
+  )
+
   /** Context for a hero decision. Bundles all parameters needed by both Adaptive and GTO modes. */
   final case class HeroDecisionContext(
       hero: HoleCards,
@@ -74,8 +81,10 @@ private[holdem] object HeroDecisionPipeline:
     * - '''GTO''': Runs full Bayesian posterior inference (bunching + action model) followed
     *   by a shallow CFR solve. No latency budget is applied, favoring strategy quality
     *   over response time. Suitable for offline analysis and diagnostics.
+    * - '''Strategic''': Not supported via this entry point. Callers must use
+    *   [[decideHeroStrategic]] with a [[StrategicDecisionContext]] instead.
     *
-    * @param mode either HeroMode.Adaptive or HeroMode.Gto
+    * @param mode HeroMode.Adaptive or HeroMode.Gto (Strategic throws UnsupportedOperationException)
     * @param ctx the bundled decision context containing all required parameters
     * @return the chosen PokerAction
     */
@@ -133,21 +142,12 @@ private[holdem] object HeroDecisionPipeline:
           rng = gtoRng
         )
       case HeroMode.Strategic =>
-        // TODO(Task 8): wire StrategicEngine here; delegate to Adaptive in the interim.
-        ctx.engine
-          .decide(
-            hero = ctx.hero,
-            state = ctx.state,
-            folds = ctx.folds,
-            villainPos = ctx.villainPos,
-            observations = ctx.observations,
-            candidateActions = ctx.candidates,
-            decisionBudgetMillis = ctx.decisionBudgetMillis,
-            rng = new Random(ctx.rng.nextLong())
-          )
-          .decision
-          .recommendation
-          .bestAction
+        throw new UnsupportedOperationException(
+          "Strategic mode requires StrategicDecisionContext — use decideHeroStrategic()")
+
+  /** Strategic mode decision dispatch. */
+  def decideHeroStrategic(ctx: StrategicDecisionContext): PokerAction =
+    ctx.engine.decide(ctx.state, ctx.candidates)
 
   /** Computes legal raise sizes based on the protocol game state.
     *
