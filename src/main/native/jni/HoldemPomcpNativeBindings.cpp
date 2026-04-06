@@ -396,6 +396,116 @@ Java_sicfun_holdem_HoldemPomcpNativeBindings_solveWPomcp(
   return status;
 }
 
+/*
+ * JNI method: sicfun.holdem.HoldemPomcpNativeBindings.solveWPomcpV2
+ *
+ * Bridges JVM arrays to wpomcp::solve_raw_v2(). Uses copy-based JNI access
+ * (GetXxxArrayRegion / SetXxxArrayRegion) to avoid GC-pinning violations.
+ *
+ * Uses the factored tabular model: type-conditioned rival policies, tabular
+ * terminal flags, showdown equity table, and action effects.
+ *
+ * Engine code 5 = W-POMCP V2 CPU.
+ */
+JNIEXPORT jint JNICALL
+Java_sicfun_holdem_HoldemPomcpNativeBindings_solveWPomcpV2(
+    JNIEnv* env,
+    jclass /* cls */,
+    jint rival_count,
+    jintArray j_particles_per_rival,
+    jintArray j_particle_types,
+    jintArray j_particle_priv_states,
+    jdoubleArray j_particle_weights,
+    jint pub_street,
+    jdouble pub_pot,
+    jint num_hero_actions,
+    jint num_rival_types,
+    jint num_pub_states,
+    jdoubleArray j_rival_policy,
+    jdoubleArray j_action_effects,
+    jdoubleArray j_showdown_equity,
+    jint num_hero_buckets,
+    jint num_rival_buckets,
+    jintArray j_terminal_flags,
+    jint hero_bucket,
+    jdouble pot_bucket_size,
+    jint num_simulations,
+    jdouble discount,
+    jdouble exploration,
+    jdouble r_max,
+    jint max_depth,
+    jdouble ess_threshold,
+    jlong seed,
+    jdoubleArray j_out_action_values,
+    jintArray j_out_best_action,
+    jdoubleArray j_out_root_value) {
+
+  /* Null checks on all array arguments. */
+  if (j_particles_per_rival == nullptr || j_particle_types == nullptr ||
+      j_particle_priv_states == nullptr || j_particle_weights == nullptr ||
+      j_rival_policy == nullptr || j_action_effects == nullptr ||
+      j_showdown_equity == nullptr || j_terminal_flags == nullptr ||
+      j_out_action_values == nullptr || j_out_best_action == nullptr ||
+      j_out_root_value == nullptr) {
+    return wpomcp::kStatusNullArray;
+  }
+
+  std::vector<int> ppr_vec, ptypes_vec, pprivs_vec, tf_vec;
+  std::vector<double> pweights_vec, rp_vec, ae_vec, se_vec;
+  int s;
+  s = read_int_array(env, j_particles_per_rival, ppr_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_int_array(env, j_particle_types, ptypes_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_int_array(env, j_particle_priv_states, pprivs_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_double_array(env, j_particle_weights, pweights_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_double_array(env, j_rival_policy, rp_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_double_array(env, j_action_effects, ae_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_double_array(env, j_showdown_equity, se_vec);
+  if (s != pftdpw::kStatusOk) return s;
+  s = read_int_array(env, j_terminal_flags, tf_vec);
+  if (s != pftdpw::kStatusOk) return s;
+
+  if (ppr_vec.empty() || ptypes_vec.empty() || pprivs_vec.empty() ||
+      pweights_vec.empty() || rp_vec.empty() || ae_vec.empty() ||
+      se_vec.empty() || tf_vec.empty()) {
+    return wpomcp::kStatusReadFailure;
+  }
+
+  /* Output buffers. */
+  std::vector<double> out_vals_vec(num_hero_actions, 0.0);
+  int out_best_val = 0;
+  double out_root_val = 0.0;
+
+  int status = wpomcp::solve_raw_v2(
+      rival_count, ppr_vec.data(), ptypes_vec.data(), pprivs_vec.data(),
+      pweights_vec.data(), pub_street, pub_pot, num_hero_actions,
+      num_rival_types, num_pub_states,
+      rp_vec.data(), ae_vec.data(), se_vec.data(),
+      num_hero_buckets, num_rival_buckets, tf_vec.data(),
+      hero_bucket, pot_bucket_size,
+      num_simulations, discount, exploration, r_max, max_depth, ess_threshold,
+      static_cast<long long>(seed),
+      out_vals_vec.data(), &out_best_val, &out_root_val);
+
+  if (status == wpomcp::kStatusOk) {
+    s = write_double_array(env, j_out_action_values, out_vals_vec);
+    if (s != pftdpw::kStatusOk) return s;
+    std::vector<int> best_vec = {out_best_val};
+    s = write_int_array(env, j_out_best_action, best_vec);
+    if (s != pftdpw::kStatusOk) return s;
+    std::vector<double> root_vec = {out_root_val};
+    s = write_double_array(env, j_out_root_value, root_vec);
+    if (s != pftdpw::kStatusOk) return s;
+    g_last_engine_code.store(5, std::memory_order_relaxed);  /* 5 = W-POMCP V2 CPU */
+  }
+  return status;
+}
+
 /* Self-test entry point for JNI. */
 JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemPomcpNativeBindings_selfTestWPomcp(

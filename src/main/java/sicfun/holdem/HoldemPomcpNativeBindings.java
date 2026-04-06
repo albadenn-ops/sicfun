@@ -136,6 +136,71 @@ public final class HoldemPomcpNativeBindings {
   );
 
   /**
+   * V2 W-POMCP with factored tabular model (type-conditioned policies,
+   * real observation particle reweighting, tabular rewards).
+   *
+   * @param rivalCount          number of rivals (1..8)
+   * @param particlesPerRival   particle count per rival, length = rivalCount
+   * @param particleTypes       rival type index per particle, flat
+   * @param particlePrivStates  private state index per particle, flat
+   * @param particleWeights     importance weights per particle, flat
+   * @param pubStreet           public state street (0=preflop..3=river)
+   * @param pubPot              current pot size
+   * @param numHeroActions      number of hero actions at this decision point
+   * @param numRivalTypes       number of discrete rival behavioral types
+   * @param numPubStates        number of public states in the tabular model
+   * @param rivalPolicy         type-conditioned rival policy, flat [numRivalTypes * numPubStates * numHeroActions]
+   * @param actionEffects       action effect triples, flat [numHeroActions * 3] (potDeltaFrac, isFold, isAllin)
+   * @param showdownEquity      hero vs rival showdown equity, flat [numHeroBuckets * numRivalBuckets]
+   * @param numHeroBuckets      hero bucket count for equity indexing
+   * @param numRivalBuckets     rival bucket count for equity indexing
+   * @param terminalFlags       terminal state flags, flat [numPubStates * numHeroActions]
+   * @param heroBucket          hero's current private state bucket index
+   * @param potBucketSize       pot discretization granularity for public state encoding
+   * @param numSimulations      number of MCTS simulations
+   * @param discount            gamma: discount factor in (0, 1)
+   * @param exploration         UCB1 exploration constant
+   * @param rMax                maximum absolute reward bound
+   * @param maxDepth            tree depth limit
+   * @param essThreshold        ESS ratio for resampling trigger
+   * @param seed                RNG seed for reproducibility
+   * @param outActionValues     [numHeroActions] output: Q(root, a) per action
+   * @param outBestAction       [1] output: best action index
+   * @param outRootValue        [1] output: root value estimate
+   * @return 0 on success, non-zero error code on failure
+   */
+  public static native int solveWPomcpV2(
+      int rivalCount,
+      int[] particlesPerRival,
+      int[] particleTypes,
+      int[] particlePrivStates,
+      double[] particleWeights,
+      int pubStreet,
+      double pubPot,
+      int numHeroActions,
+      int numRivalTypes,
+      int numPubStates,
+      double[] rivalPolicy,
+      double[] actionEffects,
+      double[] showdownEquity,
+      int numHeroBuckets,
+      int numRivalBuckets,
+      int[] terminalFlags,
+      int heroBucket,
+      double potBucketSize,
+      int numSimulations,
+      double discount,
+      double exploration,
+      double rMax,
+      int maxDepth,
+      double essThreshold,
+      long seed,
+      double[] outActionValues,
+      int[] outBestAction,
+      double[] outRootValue
+  );
+
+  /**
    * Run C++ self-test for W-POMCP. Returns 0 on success.
    * Only meaningful when the DLL is compiled with WPOMCP_SELF_TEST.
    */
