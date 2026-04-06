@@ -2,6 +2,7 @@ package sicfun.holdem.engine
 
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.*
+import sicfun.holdem.strategic.solver.WPomcpRuntime
 
 /** Builds flat array inputs for the WPomcp V2 factored tabular model.
   *
@@ -138,3 +139,41 @@ object PokerPomcpFormulation:
         else
           flags(idx) = 0  // Continue — non-terminal mid-hand action
     flags
+
+  /** Build complete SearchInputV2 from poker game state and strategic beliefs. */
+  def buildSearchInputV2(
+      gameState: GameState,
+      rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
+      heroActions: Vector[PokerAction],
+      heroBucket: Int,
+      particlesPerRival: Int = 100
+  ): WPomcpRuntime.SearchInputV2 =
+    val numActions = heroActions.size
+
+    val rivalParticles = rivalBeliefs.values.toIndexedSeq.map { belief =>
+      val (types, weights) = belief.toParticles(particlesPerRival, heroBucket)
+      WPomcpRuntime.RivalParticles(
+        rivalTypes = types,
+        privStates = Array.fill(particlesPerRival)(heroBucket),
+        weights = weights
+      )
+    }
+
+    val model = WPomcpRuntime.FactoredModel(
+      rivalPolicy = buildRivalPolicy(NumRivalTypes, NumPubStates, numActions),
+      numRivalTypes = NumRivalTypes,
+      numPubStates = NumPubStates,
+      actionEffects = buildActionEffects(heroActions, gameState.pot, gameState.stackSize),
+      showdownEquity = buildShowdownEquity(NumHandBuckets, NumHandBuckets),
+      numHeroBuckets = NumHandBuckets,
+      numRivalBuckets = NumHandBuckets,
+      terminalFlags = buildTerminalFlags(NumPubStates, numActions),
+      potBucketSize = DefaultPotBucketSize
+    )
+
+    WPomcpRuntime.SearchInputV2(
+      publicState = WPomcpRuntime.PublicState(gameState.street.ordinal, gameState.pot.toDouble),
+      rivalParticles = rivalParticles,
+      model = model,
+      heroBucket = heroBucket
+    )

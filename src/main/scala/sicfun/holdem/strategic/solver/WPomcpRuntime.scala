@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicReference
   * itself is stateless (creates a fresh solver per call), so concurrent
   * calls from different threads are safe.
   */
-private[strategic] object WPomcpRuntime:
+private[holdem] object WPomcpRuntime:
 
   /** Configuration for a W-POMCP search.
     *
