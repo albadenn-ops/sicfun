@@ -98,6 +98,41 @@ private[strategic] object WPomcpRuntime:
       rootValue: Double
   )
 
+  /** Factored tabular model for V2 solver (type-conditioned policies + tabular rewards). */
+  final case class FactoredModel(
+      rivalPolicy: Array[Double],
+      numRivalTypes: Int,
+      numPubStates: Int,
+      actionEffects: Array[Double],
+      showdownEquity: Array[Double],
+      numHeroBuckets: Int,
+      numRivalBuckets: Int,
+      terminalFlags: Array[Int],
+      potBucketSize: Double
+  ):
+    def numActions: Int = actionEffects.length / 3
+    require(rivalPolicy.length == numRivalTypes * numPubStates * numActions,
+      s"rivalPolicy size ${rivalPolicy.length} != $numRivalTypes * $numPubStates * $numActions")
+    require(actionEffects.length % 3 == 0,
+      s"actionEffects length ${actionEffects.length} must be divisible by 3")
+    require(showdownEquity.length == numHeroBuckets * numRivalBuckets,
+      s"showdownEquity size ${showdownEquity.length} != $numHeroBuckets * $numRivalBuckets")
+    require(terminalFlags.length == numPubStates * numActions,
+      s"terminalFlags size ${terminalFlags.length} != $numPubStates * $numActions")
+
+  /** V2 search input with factored tabular model. */
+  final case class SearchInputV2(
+      publicState: PublicState,
+      rivalParticles: IndexedSeq[RivalParticles],
+      model: FactoredModel,
+      heroBucket: Int
+  ):
+    require(rivalParticles.nonEmpty, "Must have at least one rival")
+    require(rivalParticles.size <= 8, s"Max 8 rivals, got ${rivalParticles.size}")
+    require(heroBucket >= 0 && heroBucket < model.numHeroBuckets,
+      s"heroBucket $heroBucket out of range [0, ${model.numHeroBuckets})")
+    def rivalCount: Int = rivalParticles.size
+
   /* Library loading state. */
   private val PathProperty = "sicfun.pomcp.native.path"
   private val PathEnv = "sicfun_POMCP_NATIVE_PATH"
@@ -170,6 +205,64 @@ private[strategic] object WPomcpRuntime:
           input.heroActionCount,
           input.rivalActionProbs,
           input.rewards,
+          config.numSimulations,
+          config.discount,
+          config.exploration,
+          config.rMax,
+          config.maxDepth,
+          config.essThreshold,
+          config.seed,
+          outActionValues,
+          outBestAction,
+          outRootValue
+        )
+
+        if status == 0 then
+          Right(SearchResult(outActionValues, outBestAction(0), outRootValue(0)))
+        else
+          Left(describeStatus(status))
+
+  /** Run V2 W-POMCP search with factored tabular model. */
+  def solveV2(input: SearchInputV2, config: Config): Either[String, SearchResult] =
+    ensureLoaded() match
+      case Left(err) => Left(err)
+      case Right(()) =>
+        val totalParticles = input.rivalParticles.map(_.particleCount).sum
+        val particlesPerRival = input.rivalParticles.map(_.particleCount).toArray
+        val allTypes = new Array[Int](totalParticles)
+        val allPrivs = new Array[Int](totalParticles)
+        val allWeights = new Array[Double](totalParticles)
+        var offset = 0
+        for rp <- input.rivalParticles do
+          System.arraycopy(rp.rivalTypes, 0, allTypes, offset, rp.particleCount)
+          System.arraycopy(rp.privStates, 0, allPrivs, offset, rp.particleCount)
+          System.arraycopy(rp.weights, 0, allWeights, offset, rp.particleCount)
+          offset += rp.particleCount
+
+        val numActions = input.model.numActions
+        val outActionValues = new Array[Double](numActions)
+        val outBestAction = new Array[Int](1)
+        val outRootValue = new Array[Double](1)
+
+        val status = HoldemPomcpNativeBindings.solveWPomcpV2(
+          input.rivalCount,
+          particlesPerRival,
+          allTypes,
+          allPrivs,
+          allWeights,
+          input.publicState.street,
+          input.publicState.pot,
+          numActions,
+          input.model.numRivalTypes,
+          input.model.numPubStates,
+          input.model.rivalPolicy,
+          input.model.actionEffects,
+          input.model.showdownEquity,
+          input.model.numHeroBuckets,
+          input.model.numRivalBuckets,
+          input.model.terminalFlags,
+          input.heroBucket,
+          input.model.potBucketSize,
           config.numSimulations,
           config.discount,
           config.exploration,

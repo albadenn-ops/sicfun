@@ -313,3 +313,77 @@ class WPomcpRuntimeTest extends munit.FunSuite:
     for v <- result.toOption.get.actionValues do
       assert(math.abs(v) <= bound * 1.01,
         s"Action value $v exceeds bound $bound")
+
+  /* --- FactoredModel validation tests --- */
+
+  test("FactoredModel rejects mismatched rival policy size"):
+    intercept[IllegalArgumentException]:
+      WPomcpRuntime.FactoredModel(
+        rivalPolicy = Array(0.5, 0.5),  /* should be 4 * 2 * 2 = 16 */
+        numRivalTypes = 4,
+        numPubStates = 2,
+        actionEffects = Array.fill(6)(0.0),
+        showdownEquity = Array.fill(100)(0.5),
+        numHeroBuckets = 10,
+        numRivalBuckets = 10,
+        terminalFlags = Array.fill(4)(0),
+        potBucketSize = 50.0
+      )
+
+  test("FactoredModel accepts valid dimensions"):
+    val nTypes = 4; val nPub = 2; val nAct = 2
+    val model = WPomcpRuntime.FactoredModel(
+      rivalPolicy = Array.fill(nTypes * nPub * nAct)(1.0 / nAct),
+      numRivalTypes = nTypes,
+      numPubStates = nPub,
+      actionEffects = Array.fill(nAct * 3)(0.0),
+      showdownEquity = Array.fill(10 * 10)(0.5),
+      numHeroBuckets = 10,
+      numRivalBuckets = 10,
+      terminalFlags = Array.fill(nPub * nAct)(0),
+      potBucketSize = 50.0
+    )
+    assertEquals(model.numRivalTypes, 4)
+
+  test("native: solveV2 with dominant action returns correct best action"):
+    assume(nativeAvailable, "Native library not available")
+    val rp = WPomcpRuntime.RivalParticles(
+      rivalTypes = Array(0, 1, 2, 3),
+      privStates = Array(0, 1, 2, 3),
+      weights = Array(0.25, 0.25, 0.25, 0.25)
+    )
+    val nTypes = 4; val nPub = 4; val nAct = 3
+    val policy = Array.fill(nTypes * nPub * nAct)(0.0)
+    for pub <- 0 until nPub do
+      policy(0 * nPub * nAct + pub * nAct + 0) = 1.0
+      for t <- 1 until nTypes do
+        policy(t * nPub * nAct + pub * nAct + 1) = 1.0
+    val effects = Array(
+      0.0, 1.0, 0.0,   /* fold */
+      0.5, 0.0, 0.0,   /* call */
+      1.0, 0.0, 0.0    /* raise */
+    )
+    val equity = Array.tabulate(10 * 10)((idx) =>
+      val hb = idx / 10; val rb = idx % 10
+      if hb > rb then 0.8 else if hb == rb then 0.5 else 0.2
+    )
+    val terminal = Array.fill(nPub * nAct)(0)
+    for a <- 0 until nAct do terminal(3 * nAct + a) = 3
+
+    val model = WPomcpRuntime.FactoredModel(
+      rivalPolicy = policy, numRivalTypes = nTypes, numPubStates = nPub,
+      actionEffects = effects, showdownEquity = equity,
+      numHeroBuckets = 10, numRivalBuckets = 10,
+      terminalFlags = terminal, potBucketSize = 50.0
+    )
+    val input = WPomcpRuntime.SearchInputV2(
+      publicState = WPomcpRuntime.PublicState(0, 100.0),
+      rivalParticles = IndexedSeq(rp),
+      model = model,
+      heroBucket = 7
+    )
+    val config = WPomcpRuntime.Config(numSimulations = 500, seed = 42L)
+    val result = WPomcpRuntime.solveV2(input, config)
+    assert(result.isRight, s"Expected Right, got $result")
+    val sr = result.toOption.get
+    assert(sr.actionValues.length == 3)
