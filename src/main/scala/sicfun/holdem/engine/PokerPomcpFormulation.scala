@@ -2,6 +2,7 @@ package sicfun.holdem.engine
 
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.*
+import sicfun.holdem.strategic.StrategicClass
 import sicfun.holdem.strategic.solver.WPomcpRuntime
 
 /** Builds flat array inputs for the WPomcp V2 factored tabular model.
@@ -24,7 +25,8 @@ object PokerPomcpFormulation:
   /** Build rival policy table: P(action | rivalType, pubState).
     *
     * Indexed as: rivalPolicy(rivalType * numPubStates * numActions + pubState * numActions + action)
-    * Initial value: uniform distribution over actions for all (type, pubState) pairs.
+    * Uses type-conditioned action priors derived from StrategicClass behavioral profiles.
+    * Action 0 = fold, action 1 = check/call, actions 2+ = raises (distributed uniformly).
     *
     * @param numRivalTypes number of discrete rival type categories
     * @param numPubStates  number of discrete public states
@@ -37,8 +39,33 @@ object PokerPomcpFormulation:
       numActions: Int
   ): Array[Double] =
     val size = numRivalTypes * numPubStates * numActions
-    val uniformProb = 1.0 / numActions.toDouble
-    Array.fill(size)(uniformProb)
+    val result = new Array[Double](size)
+    for typeIdx <- 0 until numRivalTypes do
+      val priors = classPriors(StrategicClass.fromOrdinal(typeIdx), numActions)
+      for pub <- 0 until numPubStates do
+        val base = typeIdx * numPubStates * numActions + pub * numActions
+        System.arraycopy(priors, 0, result, base, numActions)
+    result
+
+  /** Per-class action distribution for numActions actions.
+    * Returns normalized array of length numActions.
+    * Action 0 = fold, action 1 = check/call, actions 2+ = raises.
+    */
+  private def classPriors(cls: StrategicClass, numActions: Int): Array[Double] =
+    val raw = new Array[Double](numActions)
+    val (foldP, passiveP, raiseP) = cls match
+      case StrategicClass.Value     => (0.05, 0.75, 0.20)
+      case StrategicClass.Bluff     => (0.10, 0.25, 0.65)
+      case StrategicClass.SemiBluff => (0.05, 0.45, 0.50)
+      case StrategicClass.Marginal  => (0.15, 0.75, 0.10)
+    raw(0) = foldP
+    if numActions > 1 then raw(1) = passiveP
+    val raiseSlots = math.max(1, numActions - 2)
+    for i <- 2 until numActions do raw(i) = raiseP / raiseSlots
+    // Normalize
+    val sum = raw.sum
+    if sum > 0 then for i <- raw.indices do raw(i) /= sum
+    raw
 
   /** Build action effects: [numActions * 3] fields per action.
     *

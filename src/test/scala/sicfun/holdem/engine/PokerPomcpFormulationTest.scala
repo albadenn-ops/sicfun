@@ -2,7 +2,6 @@ package sicfun.holdem.engine
 
 import munit.FunSuite
 import sicfun.holdem.types.*
-
 class PokerPomcpFormulationTest extends FunSuite:
 
   test("buildRivalPolicy produces correct dimensions"):
@@ -15,6 +14,26 @@ class PokerPomcpFormulationTest extends FunSuite:
     // Check it's a valid probability distribution per (type, pubState)
     val probPerSlice = policy.grouped(3).map(_.sum).toList
     assert(probPerSlice.forall(s => math.abs(s - 1.0) < 1e-10))
+
+  test("buildRivalPolicy has type-conditioned priors"):
+    val nTypes = 4; val nPub = 192; val nAct = 3
+    val policy = PokerPomcpFormulation.buildRivalPolicy(nTypes, nPub, nAct)
+    // Value type (ordinal 0): fold should be low, call should be higher
+    val valueFold = policy(0 * nPub * nAct + 0 * nAct + 0)  // type=0, pub=0, action=0 (fold)
+    val valueCall = policy(0 * nPub * nAct + 0 * nAct + 1)  // type=0, pub=0, action=1 (check/call)
+    assert(valueCall > valueFold, s"Value type: call ($valueCall) should exceed fold ($valueFold)")
+    // Bluff type (ordinal 1): raise should dominate
+    val bluffRaise = policy(1 * nPub * nAct + 0 * nAct + 2) // type=1, pub=0, action=2 (raise)
+    val bluffCall  = policy(1 * nPub * nAct + 0 * nAct + 1) // type=1, pub=0, action=1 (call)
+    assert(bluffRaise > bluffCall, s"Bluff type: raise ($bluffRaise) should exceed call ($bluffCall)")
+
+  test("buildRivalPolicy is not uniform"):
+    val policy = PokerPomcpFormulation.buildRivalPolicy(4, 192, 3)
+    // Different types should have different distributions
+    val nPub = 192; val nAct = 3
+    val valueFold = policy(0 * nPub * nAct + 0)
+    val bluffFold = policy(1 * nPub * nAct + 0)
+    assert(valueFold != bluffFold, "Value and Bluff types should have different fold probabilities")
 
   test("buildActionEffects encodes fold correctly"):
     val actions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(3.0))

@@ -15,6 +15,14 @@ import sicfun.core.DiscreteDistribution
   * kernel variants.
   */
 trait SpotPolarization:
+  /** The fidelity level of this polarization implementation.
+    *
+    * Implementations self-report whether they compute exact posterior
+    * divergence (Fidelity.Exact), use an approximation (Fidelity.Approximate),
+    * or are absent/stubbed (Fidelity.Absent).
+    */
+  def fidelity: Fidelity
+
   /** Compute the polarization value for a given sizing in a spot.
     *
     * Higher polarization means the sizing reveals more about the
@@ -50,39 +58,86 @@ trait SpotPolarization:
   * polarization analysis is disabled.
   */
 object UniformPolarization extends SpotPolarization:
+  def fidelity: Fidelity = Fidelity.Approximate
+
   def polarization(
       sizing: Sizing,
       publicState: PublicState,
       rivalState: RivalBeliefState
   ): Double = 0.5
 
-/** Posterior-divergence polarization: an approximation of Def 25 polarization.
+/** Posterior-divergence polarization (Def 25).
   *
-  * IMPORTANT — this is NOT a real KL divergence computation.
-  * The class name and the formula in the spec (Def 25) describe the ideal:
-  *   Pol(lambda) = 1 - exp(-D_KL(posterior_lambda || prior))
-  * but the current implementation does NOT compute that KL divergence.
-  * It uses sizing fraction as a proxy instead (see method body).  The prior
-  * parameter is accepted for API compatibility but is currently unused.
+  * Pol(lambda) = 1 - exp(-D_KL(posterior_lambda || prior))
   *
-  * The "canonical KL" framing in earlier doc versions was an overclaim.
-  * This is a sizing-extremity proxy, not a true posterior-divergence measure.
-  * A genuine KL-based implementation is deferred to Wave 2 (kernel closure).
+  * Computes how much information a specific sizing reveals about the
+  * rival's type by measuring the KL divergence between the posterior
+  * (after observing the sizing) and the prior.
+  *
+  * Requires a `TemperedLikelihoodFn` to compute the posterior distribution
+  * for a given sizing. When no likelihood is available, falls back to
+  * a sizing-extremity proxy (Fidelity.Approximate).
   */
 final class PosteriorDivergencePolarization(
-    prior: DiscreteDistribution[StrategicClass]
+    prior: DiscreteDistribution[StrategicClass],
+    likelihood: Option[TemperedLikelihoodFn] = None
 ) extends SpotPolarization:
+  def fidelity: Fidelity =
+    if likelihood.isDefined then Fidelity.Exact else Fidelity.Approximate
+
   def polarization(
       sizing: Sizing,
       publicState: PublicState,
       rivalState: RivalBeliefState
+  ): Double = likelihood match
+    case Some(lf) => klPolarization(sizing, publicState, rivalState, lf)
+    case None     => proxyPolarization(sizing)
+
+  /** Real KL-divergence polarization (Def 25 exact). */
+  private def klPolarization(
+      sizing: Sizing,
+      publicState: PublicState,
+      rivalState: RivalBeliefState,
+      lf: TemperedLikelihoodFn
   ): Double =
-    // PROXY IMPLEMENTATION — does not compute actual KL divergence.
-    // Uses sizing fraction as a stand-in: extreme sizings (very small or
-    // very large relative to pot) are treated as more polarizing.
-    // The `prior` field is unused until Wave 2 replaces this with real
-    // posterior-divergence computation.
+    // Build a signal representing this sizing as a raise action
+    val signal = ActionSignal(
+      action = sicfun.holdem.types.PokerAction.Category.Raise,
+      sizing = Some(sizing),
+      timing = None,
+      stage = publicState.street
+    )
+    val posterior = lf(signal, publicState, rivalState)
+    val kl = PosteriorDivergencePolarization.klDivergence(posterior, prior)
+    math.max(0.0, math.min(1.0, 1.0 - math.exp(-kl)))
+
+  /** Sizing-extremity proxy (fallback when no likelihood is available). */
+  private def proxyPolarization(sizing: Sizing): Double =
     val f = sizing.fractionOfPot.value
-    val extremity = math.abs(2.0 * f - 1.0) // 0 at half-pot, 1 at 0 or full-pot
-    // Sigmoid-like transform to [0, 1]
+    val extremity = math.abs(2.0 * f - 1.0)
     1.0 - math.exp(-2.0 * extremity)
+
+object PosteriorDivergencePolarization:
+  /** KL divergence D_KL(p || q) for discrete distributions over StrategicClass.
+    *
+    * D_KL(p || q) = sum_c p(c) * ln(p(c) / q(c))
+    *
+    * Follows the convention:
+    *   - 0 * ln(0/q) = 0
+    *   - p * ln(p/0) = +inf (in practice, tempered priors have full support)
+    */
+  def klDivergence(
+      p: DiscreteDistribution[StrategicClass],
+      q: DiscreteDistribution[StrategicClass]
+  ): Double =
+    import scala.util.boundary, boundary.break
+    val allClasses = (p.support ++ q.support).toSet
+    var kl = 0.0
+    boundary:
+      for cls <- allClasses do
+        val pVal = p.probabilityOf(cls)
+        val qVal = q.probabilityOf(cls)
+        if pVal > 1e-15 then
+          if qVal > 1e-15 then kl += pVal * math.log(pVal / qVal)
+          else break(Double.PositiveInfinity)
+      kl
