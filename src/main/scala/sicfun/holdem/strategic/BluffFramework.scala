@@ -23,6 +23,23 @@ object BluffFramework:
   def feasibleActions(legalActions: Vector[PokerAction]): Vector[PokerAction] =
     legalActions
 
+  /** Def 36: Belief-conditioned feasible action correspondence.
+    * Filters actions whose Q-value under the current belief is below a dominance threshold.
+    * Actions without Q-value data are always considered feasible.
+    * Never returns an empty set — falls back to all legal actions if all are dominated.
+    */
+  def feasibleActions(
+      legalActions: Vector[PokerAction],
+      belief: StrategicRivalBelief,
+      qRefLookup: PokerAction => Option[Ev],
+      dominanceThreshold: Ev = Ev(-0.5)
+  ): Vector[PokerAction] =
+    val candidates = legalActions.filter { action =>
+      qRefLookup(action).forall(_ >= dominanceThreshold)
+    }
+    if candidates.isEmpty then legalActions
+    else candidates
+
   /** Def 37: Feasible non-bluff actions for the same hand.
     * U_nf(b~) = {u in A(b~) | StructuralBluff(c, u) = 0}.
     */

@@ -25,6 +25,35 @@ class BluffFrameworkTest extends munit.FunSuite:
     assert(feasible.nonEmpty)
     assertEquals(feasible, actions)
 
+  // -- Def 36: Belief-conditioned feasible action correspondence --
+
+  test("feasibleActions with belief filters dominated actions"):
+    val belief = StrategicRivalBelief.uniform
+    val qLookup: PokerAction => Option[Ev] = {
+      case PokerAction.Fold => Some(Ev(-1.0))  // dominated
+      case PokerAction.Call => Some(Ev(0.2))
+      case _ => None
+    }
+    val actions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(50.0))
+    val feasible = BluffFramework.feasibleActions(actions, belief, qLookup, dominanceThreshold = Ev(-0.5))
+    assert(!feasible.contains(PokerAction.Fold), "Dominated fold should be filtered")
+    assert(feasible.contains(PokerAction.Call))
+    assert(feasible.contains(PokerAction.Raise(50.0)))
+
+  test("feasibleActions with belief never filters to empty"):
+    val belief = StrategicRivalBelief.uniform
+    val qLookup: PokerAction => Option[Ev] = _ => Some(Ev(-2.0))
+    val actions = Vector(PokerAction.Fold, PokerAction.Call)
+    val feasible = BluffFramework.feasibleActions(actions, belief, qLookup)
+    assert(feasible.nonEmpty, "Should never filter to empty set")
+
+  test("feasibleActions with belief keeps actions with no Q-value"):
+    val belief = StrategicRivalBelief.uniform
+    val qLookup: PokerAction => Option[Ev] = _ => None
+    val actions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(50.0))
+    val feasible = BluffFramework.feasibleActions(actions, belief, qLookup, dominanceThreshold = Ev(0.0))
+    assertEquals(feasible, actions, "Actions without Q-value data should always be feasible")
+
   // -- Def 37: Feasible non-bluff actions --
 
   test("feasibleNonBluffActions excludes structural bluffs"):

@@ -113,7 +113,7 @@ class ReductionismManifestTest extends FunSuite:
       Severity.Proxy, "Wave 2", resolved = true),
     Reductionism("BF-001", "strategic/BluffFramework.scala:21",
       "Feasibility check is identity pass-through — all actions always feasible",
-      Severity.Proxy, "Wave 3"),
+      Severity.Proxy, "Wave 3", resolved = true),
 
     // ── Tier 5: Bridge fidelity gaps (from BridgeManifest) ──
     Reductionism("BM-001", "strategic/bridge/BridgeManifest.scala",
