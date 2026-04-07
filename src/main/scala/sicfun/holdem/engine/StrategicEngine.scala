@@ -265,7 +265,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
 
       val prior = rivalState match
         case srb: StrategicRivalBelief => classes.map(c => srb.typePosterior.probabilityOf(c))
-        case _ => Array.fill(classes.length)(0.25)
+        case _ => classes.map(c => StrategicRivalBelief.uniform.typePosterior.probabilityOf(c))
 
       val posterior = TemperedLikelihood.updatePosterior(prior, basePr, eta, config.temperedConfig)
       DiscreteDistribution(classes.zip(posterior).toMap)

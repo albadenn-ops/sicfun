@@ -12,6 +12,7 @@ final case class StrategicRivalBelief(
 
   /** Identity update — real Bayesian update happens via kernel pipeline in Dynamics.fullStep(). */
   // REDUCTIONISM: identity pass-through — real update happens in kernel pipeline StateEmbeddingUpdater
+  @deprecated("Use kernel pipeline StateEmbeddingUpdater instead — update happens via Dynamics.fullStep", "v0.32")
   def update(signal: ActionSignal, publicState: PublicState): StrategicRivalBelief =
     this
 
