@@ -124,10 +124,10 @@ class ReductionismManifestTest extends FunSuite:
       Severity.Silent, "Wave 3", resolved = true),
     Reductionism("BM-003", "strategic/bridge/BridgeManifest.scala",
       "ClassPosterior = heuristic from VPIP/PFR/AF, not Bayesian",
-      Severity.Proxy, "Wave 4"),
+      Severity.Proxy, "Wave 4", resolved = true),
     Reductionism("BM-004", "strategic/bridge/BridgeManifest.scala",
       "FourWorld.V10, V01 = interpolated estimates, not POMDP-derived",
-      Severity.Proxy, "Wave 4"),
+      Severity.Proxy, "Wave 4", resolved = true),
 
     // ── Tier 6: Orphaned formal objects ──
     Reductionism("OR-001", "strategic/SafetyBellman.scala",

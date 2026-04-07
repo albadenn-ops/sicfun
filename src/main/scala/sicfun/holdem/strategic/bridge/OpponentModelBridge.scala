@@ -46,3 +46,14 @@ object OpponentModelBridge:
       DiscreteDistribution(normalized),
       "heuristic mapping from VPIP/PFR/AF; not formal Bayesian update"
     )
+
+  /** Bridge class posterior from kernel pipeline when Strategic mode is active.
+    *
+    * Reads typePosterior directly from StrategicRivalBelief objects in the beliefs map.
+    * This is used when Strategic mode has wired the kernel pipeline and kernel-derived
+    * beliefs are available.
+    */
+  def classPosteriorsFromBeliefs(
+      beliefs: Map[PlayerId, StrategicRivalBelief]
+  ): Map[PlayerId, DiscreteDistribution[StrategicClass]] =
+    beliefs.map { case (id, belief) => id -> belief.typePosterior }

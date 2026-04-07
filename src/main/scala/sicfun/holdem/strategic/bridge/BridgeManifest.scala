@@ -38,7 +38,7 @@ object BridgeManifest:
     BridgeEntry("TableMap",                 "--",     Fidelity.Approximate, Severity.Behavioral,  "rival seats from initSession; hero-only fallback when no rival info"),
 
     // -- Opponent model bridge --
-    BridgeEntry("ClassPosterior",           "Def 14", Fidelity.Approximate, Severity.Structural,  "heuristic from VPIP/PFR/AF, not Bayesian update"),
+    BridgeEntry("ClassPosterior",           "Def 14", Fidelity.Approximate, Severity.Behavioral, "kernel pipeline posterior when Strategic mode; heuristic fallback otherwise"),
 
     // -- Baseline bridge --
     BridgeEntry("RealBaseline",             "Def 9",  Fidelity.Approximate, Severity.Behavioral,  "Monte Carlo equity"),
@@ -70,7 +70,7 @@ object BridgeManifest:
     BridgeEntry("ChainWorld",               "Def 28",     Fidelity.Exact,       Severity.Cosmetic,   "enumerated world algebra; exact"),
     BridgeEntry("GridWorld",                "Def 44",     Fidelity.Exact,       Severity.Cosmetic,   "keyed grid coordinates; exact"),
     BridgeEntry("RiskDecomposition",        "Defs 56A-C", Fidelity.Exact,       Severity.Cosmetic,   "pure telescopic computation; exact given inputs"),
-    BridgeEntry("GridWorldValues",          "Def 44 (v0.31.1)", Fidelity.Approximate, Severity.Structural, "V^{1,0} and V^{0,1} absent without POMDP solver")
+    BridgeEntry("GridWorldValues",          "Def 44 (v0.31.1)", Fidelity.Approximate, Severity.Behavioral, "V^{1,0} and V^{0,1} available via PftDpw when solver loaded; interpolated fallback otherwise")
   )
 
   /** All objects with Structural severity -- these degrade the formal model's coherence. */
