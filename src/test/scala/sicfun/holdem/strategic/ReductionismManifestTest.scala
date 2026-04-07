@@ -55,10 +55,10 @@ class ReductionismManifestTest extends FunSuite:
     // ── Tier 2: Sentinel/dummy objects ──
     Reductionism("KC-001", "strategic/KernelConstructor.scala:29",
       "sentinelHero = PlayerId(\"__sentinel__\") used in production kernel path",
-      Severity.Proxy, "Wave 2"),
+      Severity.Proxy, "Wave 2", resolved = true),
     Reductionism("KC-002", "strategic/KernelConstructor.scala:37",
       "dummyPublicState fabricated for kernel updates instead of real game state",
-      Severity.Proxy, "Wave 2"),
+      Severity.Proxy, "Wave 2", resolved = true),
     Reductionism("EI-001", "strategic/ExploitationInterpolation.scala:92",
       "sentinelHero + fabricated PublicState duplicated from KernelConstructor",
       Severity.Proxy, "Wave 2"),

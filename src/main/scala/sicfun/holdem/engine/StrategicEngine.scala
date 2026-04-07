@@ -28,6 +28,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
     _sessionState.nn
 
   def currentHandActive: Boolean = _handActive
+  def isSessionInitialized: Boolean = _sessionState != null
 
   /** Initialize session with rival IDs. Uses uniform priors unless existing beliefs provided. */
   def initSession(
@@ -54,7 +55,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
     _handActive = true
     _heroCards = Some(heroCards)
 
-  /** Start a new hand without hero cards (fallback — uses position-based bucket). */
+  /** Start a new hand without hero cards (fallback — uses neutral middle bucket). */
   def startHand(): Unit =
     require(_sessionState != null, "Session not initialized — call initSession first")
     _handActive = true
@@ -71,6 +72,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
     val session = _sessionState.nn
     if !session.rivalBeliefs.contains(actor) then return
 
+    // REDUCTIONISM: showdown signals never flow through observeAction
     val signal = TotalSignal(
       actionSignal = bridgeActionSignal(action, gameState),
       showdown = None
@@ -79,6 +81,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
     val kernelProfile = buildKernelProfile()
     val exploitConfigs = session.rivalBeliefs.keys.map(id => id -> config.exploitConfig).toMap
 
+    System.err.println("[REDUCTIONISM] StrategicEngine.observeAction: exploitabilityFn=constant(0.0), detector=NeverDetect — safety apparatus is inert")
     val result = Dynamics.fullStep[StrategicRivalBelief](
       rivalStates = session.rivalBeliefs,
       exploitStates = session.exploitationStates,
@@ -131,26 +134,22 @@ class StrategicEngine(val config: StrategicEngine.Config):
 
   /** End the current hand. Preserves session beliefs for carry-over across hands. */
   def endHand(showdownResult: Option[Map[PlayerId, HoleCards]] = None): Unit =
+    if showdownResult.exists(_.nonEmpty) then
+      System.err.println("[REDUCTIONISM] StrategicEngine.endHand: showdown data discarded — wire ShowdownKernel update")
     _handActive = false
     _heroCards = None
 
-  /** Estimate hero hand bucket (0-9 equity decile) from actual hand strength.
-    * Falls back to position-based heuristic if no hero cards were provided.
-    */
   private def estimateHeroBucket(gameState: GameState): Int =
     _heroCards match
       case Some(cards) =>
         val strength = HandStrengthEstimator.fastGtoStrength(cards, gameState.board, gameState.street)
         math.min(9, math.max(0, (strength * 10.0).toInt))
       case None =>
-        gameState.position match
-          case Position.Button | Position.Cutoff                    => 7
-          case Position.SmallBlind | Position.BigBlind              => 4
-          case Position.UTG | Position.UTG1 | Position.UTG2         => 4
-          case Position.Middle | Position.Hijack                    => 5
+        5 // Neutral middle bucket — no card info available
 
   /** Bridge GameState -> strategic PublicState for the kernel pipeline. */
   private def bridgePublicState(gameState: GameState): PublicState =
+    // REDUCTIONISM: PublicState is hero-only, actionHistory=empty — rival seats and history missing
     val heroId = PlayerId("hero")
     PublicState(
       street = gameState.street,
@@ -180,18 +179,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
       stage = gameState.street
     )
 
-  /** Action prior P(action_category | strategic_class) for the tempered likelihood. */
   private def actionPrior(cls: StrategicClass, cat: PokerAction.Category): Double =
-    import PokerAction.Category.*
-    cls match
-      case StrategicClass.Value => cat match
-        case Fold => 0.05; case Check => 0.35; case Call => 0.40; case Raise => 0.20
-      case StrategicClass.Bluff => cat match
-        case Fold => 0.10; case Check => 0.10; case Call => 0.15; case Raise => 0.65
-      case StrategicClass.SemiBluff => cat match
-        case Fold => 0.05; case Check => 0.15; case Call => 0.30; case Raise => 0.50
-      case StrategicClass.Marginal => cat match
-        case Fold => 0.15; case Check => 0.40; case Call => 0.35; case Raise => 0.10
+    config.actionPriors.getOrElse((cls, cat), 0.25)
 
   /** Build the tempered likelihood function for kernel updates. */
   private def buildLikelihoodFn(): TemperedLikelihoodFn =
@@ -213,18 +202,38 @@ class StrategicEngine(val config: StrategicEngine.Config):
   /** Build the joint kernel profile for all rivals. */
   private def buildKernelProfile(): JointKernelProfile[StrategicRivalBelief] =
     val likelihood = buildLikelihoodFn()
-    val actionKernel = KernelConstructor.buildActionKernel[StrategicRivalBelief](
+    val actionKernel = KernelConstructor.buildActionKernelFull[StrategicRivalBelief](
       StrategicRivalBelief.updater,
       likelihood
     )
     val blindShowdown = new ShowdownKernel[StrategicRivalBelief]:
-      def apply(state: StrategicRivalBelief, showdown: ShowdownSignal): StrategicRivalBelief = state
-    val fullKernel = KernelConstructor.composeFullKernel(actionKernel, blindShowdown)
+      def apply(state: StrategicRivalBelief, showdown: ShowdownSignal): StrategicRivalBelief =
+        System.err.println("[REDUCTIONISM] ShowdownKernel is no-op — Def 18 showdown evidence discarded")
+        state
+    val fullKernel = KernelConstructor.composeFullKernelFromFull(actionKernel, blindShowdown)
     JointKernelProfile(
       _sessionState.nn.rivalBeliefs.keys.map(id => id -> fullKernel).toMap
     )
 
 object StrategicEngine:
+
+  /** Default action priors P(action_category | strategic_class).
+    * These are initial estimates pending calibration from showdown data.
+    * Exposed in Config so callers can override with calibrated values.
+    */
+  val defaultActionPriors: Map[(StrategicClass, sicfun.holdem.types.PokerAction.Category), Double] = {
+    import sicfun.holdem.types.PokerAction.Category.*
+    Map(
+      (StrategicClass.Value, Fold) -> 0.05, (StrategicClass.Value, Check) -> 0.35,
+      (StrategicClass.Value, Call) -> 0.40, (StrategicClass.Value, Raise) -> 0.20,
+      (StrategicClass.Bluff, Fold) -> 0.10, (StrategicClass.Bluff, Check) -> 0.10,
+      (StrategicClass.Bluff, Call) -> 0.15, (StrategicClass.Bluff, Raise) -> 0.65,
+      (StrategicClass.SemiBluff, Fold) -> 0.05, (StrategicClass.SemiBluff, Check) -> 0.15,
+      (StrategicClass.SemiBluff, Call) -> 0.30, (StrategicClass.SemiBluff, Raise) -> 0.50,
+      (StrategicClass.Marginal, Fold) -> 0.15, (StrategicClass.Marginal, Check) -> 0.40,
+      (StrategicClass.Marginal, Call) -> 0.35, (StrategicClass.Marginal, Raise) -> 0.10
+    )
+  }
 
   /** Configuration for a StrategicEngine session. */
   final case class Config(
@@ -238,7 +247,8 @@ object StrategicEngine:
         retreatRate = 0.1,
         adaptationTolerance = 0.05
       ),
-      temperedConfig: TemperedLikelihood.TemperedConfig = TemperedLikelihood.TemperedConfig.twoLayer(0.7, 0.01)
+      temperedConfig: TemperedLikelihood.TemperedConfig = TemperedLikelihood.TemperedConfig.twoLayer(0.7, 0.01),
+      actionPriors: Map[(StrategicClass, sicfun.holdem.types.PokerAction.Category), Double] = defaultActionPriors
   )
 
   /** Per-session state: rival beliefs and exploitation states that survive across hands. */
