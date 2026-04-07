@@ -4,6 +4,17 @@ import sicfun.holdem.types.*
 import munit.FunSuite
 import sicfun.core.Card
 
+/**
+ * Tests for [[PokerFeatures]] 5-dimensional feature extraction (with hand strength).
+ *
+ * Validates:
+ *   - PokerFeatures case class: dimension matches values length
+ *   - Feature name constants: count and documented order
+ *   - Individual feature correctness: potOdds, stackToPot, streetOrdinal, positionOrdinal
+ *   - handStrengthProxy: preflop returns 0.5, postflop returns [0,1], strong > weak hand
+ *   - All features are in [0, 1] on both preflop and river boards
+ *   - Caching: repeated calls with same inputs return same results
+ */
 class PokerFeaturesTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))

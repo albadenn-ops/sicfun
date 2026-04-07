@@ -5,8 +5,21 @@ import sicfun.holdem.types.*
 import sicfun.holdem.cfr.*
 import sicfun.holdem.equity.HoldemCombinator
 
-/** Measures batch CFR GPU throughput vs sequential CPU baseline. */
+/** Measures batch CFR GPU throughput vs sequential CPU baseline.
+  *
+  * Creates a batch of preflop decision trees (one per hero hand) and solves them all
+  * using [[HoldemCfrSolver.solveBatchDecisionPolicies]], which dispatches to the GPU
+  * when available. Then compares against a sequential loop that solves each tree
+  * individually on the CPU.
+  *
+  * This benchmark isolates the batch dispatch overhead and GPU parallelism benefit
+  * for CFR workloads. The speedup depends on batch size (more trees = better GPU
+  * utilization) and tree complexity (more iterations = more work per tree).
+  *
+  * Usage: sbt "runMain sicfun.holdem.bench.HoldemCfrBatchBenchmark [batchSize] [iterations]"
+  */
 object HoldemCfrBatchBenchmark:
+  /** Entry point. Runs warmup, then timed batch and sequential baselines, reports speedup. */
   def main(args: Array[String]): Unit =
     val batchSize = if args.length > 0 then args(0).toInt else 100
     val iterations = if args.length > 1 then args(1).toInt else 1500

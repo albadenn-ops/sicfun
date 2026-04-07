@@ -9,11 +9,44 @@ import java.nio.file.Files
 import scala.jdk.CollectionConverters.*
 import scala.util.Try
 
+/**
+  * Tests for [[HandEngine]] and [[HandState]] event-sourcing behavior.
+  *
+  * This suite validates the core event-sourcing guarantees:
+  *
+  * '''State machine tests''':
+  *   - Empty hand creation with correct initial state.
+  *   - Single event application updates metadata correctly.
+  *   - Idempotency: duplicate events are silently absorbed.
+  *   - Conflict detection: same sequence with different payload is rejected.
+  *   - Out-of-order delivery: events are inserted in sorted sequence order.
+  *   - Hand ID mismatch is rejected.
+  *   - `lastUpdatedAt` tracks the maximum timestamp seen.
+  *   - Batch application with duplicates produces correct unique state.
+  *   - `currentStreet`, `currentBoard`, and `playerIds` reflect applied events.
+  *
+  * '''toGameState tests''':
+  *   - Returns `None` for a player with no events.
+  *   - Returns the correct snapshot from the player's most recent event.
+  *   - Each player gets their own independent view.
+  *
+  * '''Snapshot roundtrip tests''' (via [[HandStateSnapshotIO]]):
+  *   - Save/load preserves all fields including optional `decisionTimeMillis` and `betHistory`.
+  *   - Reloaded state is idempotent with further event application.
+  *   - Tampered metadata (mismatched `lastUpdatedAt`) is detected on load.
+  *
+  * '''Performance test''':
+  *   - p95 `applyEvent` latency is under 1ms for realistic hand sizes (20 events/hand).
+  */
 class HandEngineTest extends FunSuite:
 
+  /** Parses a 2-character card token (e.g. "As") or fails the test. */
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
+  /** Factory for creating test PokerEvent instances with sensible defaults.
+    * All parameters are overridable for test-specific scenarios.
+    */
   private def makeEvent(
       handId: String = "h1",
       seq: Long = 0L,

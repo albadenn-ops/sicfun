@@ -36,6 +36,15 @@ object HeadsUpGpuSmokeGate:
 
   private val AllowedOptionKeys = Set("table", "trials", "maxMatchups", "seed", "nativePath")
 
+  /** Entry point. Configures the native CUDA runtime, runs a single MC batch, and
+    * validates three things:
+    *   1. All result values are finite (no NaN/Infinity).
+    *   2. win + tie + loss sums to ~1.0 for every entry.
+    *   3. Telemetry confirms CUDA engine was used (not silent CPU fallback).
+    *
+    * This is intentionally fast (128 matchups default) — it exists to catch total
+    * breakage, not subtle numerical errors (that is the POC gate's job).
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     require(config.trials > 0, "trials must be positive")

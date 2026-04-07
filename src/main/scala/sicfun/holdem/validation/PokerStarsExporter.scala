@@ -6,24 +6,59 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-/** Result of chunking hand records for export. */
+/** Result of chunking hand records for export.
+  *
+  * @param chunkIndex 0-based index of this chunk in the export sequence
+  * @param handCount  number of hands in this chunk
+  * @param text       the full PokerStars-format text for all hands in this chunk
+  */
 final case class ExportChunk(
     chunkIndex: Int,
     handCount: Int,
     text: String
 )
 
-/** Exports HandRecords to PokerStars format parseable by HandHistoryImport. */
+/** Exports simulated [[HandRecord]]s to PokerStars hand history text format.
+  *
+  * The output is designed to be round-trippable through [[sicfun.holdem.history.HandHistoryImport]]:
+  * export simulated hands -> parse them back -> build opponent profiles. This enables
+  * the validation pipeline to test the full import/profiling stack against known ground truth.
+  *
+  * The exporter handles:
+  *   - Standard PokerStars header format (hand ID, stakes, timestamp, seats)
+  *   - Blind posting and hole card dealing
+  *   - Per-street action formatting with correct raise/bet terminology
+  *   - Showdown sections when the hand goes to showdown
+  *   - Chunked export for incremental convergence testing
+  *
+  * Timestamps are synthetic, starting from 2026-01-01 12:00:00 and incrementing by
+  * 1 second per hand to satisfy the parser's timestamp extraction.
+  */
 object PokerStarsExporter:
   private val BaseTimestamp = LocalDateTime.of(2026, 1, 1, 12, 0, 0)
   private val TimeFmt = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
   private val StartingStack = 100.0
 
+  /** Export all hand records as a single PokerStars-format string.
+    *
+    * @param records     the simulated hand records to export
+    * @param heroName    hero's display name in the output
+    * @param villainName villain's display name in the output
+    * @return the complete hand history text
+    */
   def exportHands(records: Vector[HandRecord], heroName: String, villainName: String): String =
     val sb = new StringBuilder(records.length * 800)
     records.foreach(r => appendHand(sb, r, heroName, villainName))
     sb.toString()
 
+  /** Export hand records in chunks of `chunkSize` hands each.
+    *
+    * Used by the convergence analysis to feed progressively larger subsets through
+    * the profiling pipeline and measure how quickly leaks are detected.
+    *
+    * @param chunkSize number of hands per chunk (default: 1000)
+    * @return a vector of [[ExportChunk]]s, each containing the text for one chunk
+    */
   def exportChunked(
       records: Vector[HandRecord],
       heroName: String,
@@ -34,6 +69,12 @@ object PokerStarsExporter:
       ExportChunk(idx, chunk.length, exportHands(chunk.toVector, heroName, villainName))
     }.toVector
 
+  /** Append one hand in PokerStars format to the StringBuilder.
+    *
+    * Generates the standard sections: header (hand ID, stakes, table, seats),
+    * blind postings, hole cards, per-street actions with proper bet/raise formatting,
+    * optional showdown, and summary separator.
+    */
   private def appendHand(sb: StringBuilder, record: HandRecord, heroName: String, villainName: String): Unit =
     val ts = BaseTimestamp.plusSeconds(record.handNumber.toLong)
     val recordVillainName = if record.villainName.trim.nonEmpty then record.villainName else villainName
@@ -74,6 +115,7 @@ object PokerStarsExporter:
     sb.append("*** SUMMARY ***\n")
     sb.append("\n\n")
 
+  /** Append the PokerStars street header (e.g., "*** FLOP *** [Ah Kd 7c]"). */
   private def appendStreetHeader(sb: StringBuilder, street: Street, board: Board): Unit =
     street match
       case Street.Flop =>
@@ -89,6 +131,12 @@ object PokerStarsExporter:
         sb.append(s"*** RIVER *** [$flopTurn] [$river]\n")
       case _ => ()
 
+  /** Append a single action in PokerStars format.
+    *
+    * Raises facing a bet use "raises X to Y" format. Bets (raises when not facing
+    * a bet) use "bets X" format. The `actorCommitted` tracks how much the actor
+    * has already put in this street to compute the correct "to" amount.
+    */
   private def appendAction(sb: StringBuilder, action: RecordedAction, actorCommitted: Double): Unit =
     val name = action.player
     action.action match
@@ -105,10 +153,12 @@ object PokerStarsExporter:
         else
           sb.append(s"$name: bets ${money(amount)}\n")
 
+  /** Compute initial per-player committed amounts from blind posting. */
   private def initialCommitted(record: HandRecord, heroName: String, villainName: String): Map[String, Double] =
     if record.heroIsButton then Map(heroName -> 0.5, villainName -> 1.0)
     else Map(heroName -> 1.0, villainName -> 0.5)
 
+  /** Update per-player committed amounts after an action (Call adds toCall, Raise adds amount). */
   private def updateCommitted(
       committed: Map[String, Double],
       action: RecordedAction

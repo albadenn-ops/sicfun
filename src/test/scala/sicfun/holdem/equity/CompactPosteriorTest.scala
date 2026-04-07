@@ -5,6 +5,16 @@ import sicfun.core.{Card, Prob}
 import Prob.*
 import sicfun.holdem.types.*
 
+/**
+  * Unit tests for CompactPosterior construction via buildCompactPosterior.
+  *
+  * Verifies:
+  *   - Correct conversion from hypotheses + posterior arrays to Prob-weighted flat arrays
+  *   - Zero-weight hypothesis filtering (only positive-weight hands are included)
+  *   - Normalization of un-normalized input (weights summing to != 1.0)
+  *   - Rejection of all-zero posteriors
+  *   - Lazy distribution materialization produces correct DiscreteDistribution
+  */
 class CompactPosteriorTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))

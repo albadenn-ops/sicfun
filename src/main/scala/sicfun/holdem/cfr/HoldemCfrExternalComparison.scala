@@ -12,14 +12,54 @@ import ujson.{Arr, Num, Obj, Str, Value}
 
 /** Compares SICFUN CFR spot exports against an external solver/provider export.
   *
+  * This is the cross-validation framework for verifying that different CFR
+  * implementations (Scala, native CPU, native GPU, or external solvers like
+  * TexasSolver) produce consistent strategies. It operates on JSON exports
+  * rather than live solver calls, enabling offline batch comparison.
+  *
   * The expected input is the `external-comparison.json` emitted by
   * [[HoldemCfrApproximationReport]] plus a provider file with the same spot ids
   * and at least a `policy` object per spot. `bestAction` and `actionEvs` are
   * optional on the provider side.
+  *
+  * '''Comparison metrics:'''
+  *  - '''TV distance''' (Total Variation distance): Half the sum of absolute
+  *    differences between reference and external policy probabilities across all
+  *    actions. TV distance of 0 means identical policies; 1 means completely
+  *    disjoint support. This is the primary convergence metric.
+  *  - '''Best-action agreement''': Whether the reference and external agree on
+  *    the highest-EV (or highest-probability) action. Ties are handled by checking
+  *    whether the best-action sets intersect.
+  *  - '''EV RMSE''': Root mean squared error of per-action expected values, when
+  *    both sides provide `actionEvs`. This catches cases where policies agree but
+  *    the underlying value estimates diverge.
+  *  - '''Spot signature''': A canonical string encoding the full spot specification
+  *    (board, hero, villain range, bet history, actions) so that the comparison
+  *    can verify both sides solved the same problem, not just matching by spot id.
+  *
+  * '''Gate evaluation:''' The comparison enforces configurable thresholds on the
+  * above metrics. A gate PASS requires all thresholds to be satisfied and at
+  * least one threshold to be configured (to prevent vacuous passes).
+  *
+  * Usage: `runMain sicfun.holdem.cfr.HoldemCfrExternalComparison --reference=... --external=... --maxMeanTv=0.001`
   */
 object HoldemCfrExternalComparison:
+  /** Epsilon for floating-point comparison when validating that a declared bestAction
+    * is consistent with the action values. Allows for minor rounding differences.
+    */
   private val BestActionConsistencyEpsilon = 1e-4
 
+  /** A single spot parsed from either the reference or external JSON dataset.
+    *
+    * @param id               Unique identifier for the spot (e.g., "hu_preflop_button_open")
+    * @param spotSignature    Optional canonical encoding of the full spot specification for
+    *                         cross-validation that both sides solved the same problem
+    * @param candidateActions Union of all actions seen in policy/actionEvs/declared actions
+    * @param policy           Normalized probability distribution over actions (sums to 1.0)
+    * @param actionEvs        Optional per-action expected values (empty if not provided)
+    * @param bestAction       The single declared or derived best action
+    * @param bestActions      Set of actions tied for best (may be larger than 1 due to ties)
+    */
   final case class ParsedSpot(
       id: String,
       spotSignature: Option[String],
@@ -41,6 +81,14 @@ object HoldemCfrExternalComparison:
   ):
     require(label.trim.nonEmpty, "dataset label must be non-empty")
 
+  /** Configurable quality gate thresholds. At least one threshold must be set
+    * for a gate evaluation to pass (prevents vacuous success).
+    *
+    * @param maxMeanTvDistance       Maximum allowed mean TV distance across all matched spots
+    * @param maxSpotTvDistance       Maximum allowed TV distance for any single spot
+    * @param minBestActionAgreement  Minimum fraction of spots where best actions agree [0,1]
+    * @param maxMeanEvRmse          Maximum allowed mean EV RMSE across matched spots
+    */
   final case class Thresholds(
       maxMeanTvDistance: Option[Double],
       maxSpotTvDistance: Option[Double],
@@ -48,6 +96,7 @@ object HoldemCfrExternalComparison:
       maxMeanEvRmse: Option[Double]
   )
 
+  /** Per-spot comparison result between reference and external policies. */
   final case class SpotComparison(
       id: String,
       spotSignatureStatus: String,
@@ -63,6 +112,7 @@ object HoldemCfrExternalComparison:
       extraActionsInExternal: Vector[String]
   )
 
+  /** Aggregate statistics across all matched spots. */
   final case class AggregateComparison(
       referenceSpotCount: Int,
       externalSpotCount: Int,
@@ -154,6 +204,11 @@ object HoldemCfrExternalComparison:
       )
     yield result
 
+  /** Main comparison entry point used by both the CLI and programmatic callers.
+    *
+    * Loads both JSON datasets, optionally filters by spot ids, runs the comparison,
+    * writes output artifacts, and returns the result (or Left on gate failure).
+    */
   private[cfr] def compareFiles(
       referencePath: Path,
       externalPath: Path,
@@ -179,6 +234,9 @@ object HoldemCfrExternalComparison:
     val json = ujson.read(Files.readString(path, StandardCharsets.UTF_8))
     parseDataset(json, fallbackLabel = path.getFileName.toString)
 
+  /** Compares two parsed datasets by joining on spot id, computing per-spot
+    * metrics, aggregating, and evaluating the quality gate.
+    */
   private[cfr] def compareDatasets(
       reference: ParsedDataset,
       external: ParsedDataset,
@@ -245,6 +303,16 @@ object HoldemCfrExternalComparison:
           require(filtered.nonEmpty, s"$datasetRole dataset does not contain any selected spot ids")
         dataset.copy(spots = filtered)
 
+  /** Parses a single spot from the JSON dataset.
+    *
+    * Handles the following:
+    *  - Extracts and normalizes the policy distribution
+    *  - Parses optional actionEvs, candidateActions, and bestAction
+    *  - Canonicalizes all action labels (e.g., "raise:20" -> "RAISE:20.000")
+    *  - Derives bestActions from actionEvs (if present) or policy (as fallback)
+    *  - Validates bestAction consistency with the derived best actions
+    *  - Computes and validates the spot signature for cross-dataset matching
+    */
   private def parseSpot(value: Value): ParsedSpot =
     val obj = value.obj
     val id = obj.get("id").map(_.str).getOrElse(
@@ -321,6 +389,11 @@ object HoldemCfrExternalComparison:
         throw new IllegalArgumentException(s"$label must contain non-empty strings, found $other")
     }.toVector
 
+  /** Normalizes a probability distribution: filters out zero/negative weights,
+    * validates at least one positive entry exists, and divides by the total so
+    * the result sums to 1.0. This handles raw policy weights from external solvers
+    * that may not be pre-normalized.
+    */
   private def normalizeDistribution(values: Map[String, Double], label: String): Map[String, Double] =
     val negative = values.collectFirst { case (action, probability) if probability < 0.0 => action }
     require(negative.isEmpty, s"$label contains negative weight for '${negative.get}'")
@@ -445,6 +518,15 @@ object HoldemCfrExternalComparison:
     val normalized = normalizeDistribution(weights.toMap, label)
     normalized.toVector.sortBy(_._1)
 
+  /** Builds a canonical spot signature string from the spot's full specification.
+    *
+    * The signature encodes: street, position, hero hand, sorted board cards, pot/toCall/stack
+    * amounts (to 6 decimal places), bet history, sorted candidate actions, and the normalized
+    * villain range (hands sorted alphabetically with probabilities to 8 decimal places).
+    *
+    * This deterministic encoding ensures two datasets that describe the same poker situation
+    * will produce identical signatures regardless of JSON key ordering or float formatting.
+    */
   private def buildSpotSignature(
       street: String,
       position: String,
@@ -470,6 +552,10 @@ object HoldemCfrExternalComparison:
   private def canonicalizeHoleCards(token: String): String =
     CliHelpers.parseHoleCards(token.trim).toToken
 
+  /** Canonicalizes action labels into a consistent format: FOLD, CHECK, CALL,
+    * or RAISE:amount (with 3 decimal places). Handles variations like "bet:20",
+    * "RAISE=20", "Raise 20", etc. from different solver output formats.
+    */
   private def canonicalizeAction(raw: String, label: String): String =
     val trimmed = raw.trim
     require(trimmed.nonEmpty, s"$label must not contain blank action labels")
@@ -507,6 +593,15 @@ object HoldemCfrExternalComparison:
   private def renderRaise(amount: Double): String =
     String.format(Locale.ROOT, "RAISE:%.3f", java.lang.Double.valueOf(amount))
 
+  /** Computes per-spot comparison metrics between a reference and external spot.
+    *
+    * TV distance = 0.5 * sum(|ref_policy[a] - ext_policy[a]|) for all actions a.
+    * This is a standard measure of distribution divergence bounded in [0, 1].
+    * Actions present in one policy but not the other are treated as having 0 probability.
+    *
+    * EV RMSE is computed only over actions where both sides provide EV values.
+    * Best-action agreement uses set intersection to handle ties gracefully.
+    */
   private def compareSpot(reference: ParsedSpot, external: ParsedSpot): SpotComparison =
     val comparedActions = dedupePreservingOrder(
       reference.candidateActions ++
@@ -556,6 +651,10 @@ object HoldemCfrExternalComparison:
       extraActionsInExternal = external.candidateActions.filterNot(referenceDeclaredActions.contains)
     )
 
+  /** Aggregates per-spot comparison results into summary statistics.
+    * Also identifies unmatched spots (present in one dataset but not the other)
+    * and spots with mismatched or missing signatures.
+    */
   private def buildAggregate(
       referenceIds: Vector[String],
       externalIds: Vector[String],
@@ -600,6 +699,18 @@ object HoldemCfrExternalComparison:
       unmatchedExternalSpotIds = externalIds.filterNot(referenceSet.contains)
     )
 
+  /** Evaluates the quality gate against the aggregate comparison statistics.
+    *
+    * A gate passes only when ALL of the following hold:
+    *  - At least one spot was matched between datasets
+    *  - No reference spots are missing from the external dataset
+    *  - No spot signature mismatches detected
+    *  - At least one proof threshold is configured
+    *  - All configured thresholds are satisfied
+    *
+    * Returns a GateResult with passed=true if all checks pass, otherwise
+    * passed=false with a list of failure reasons.
+    */
   private def evaluateGate(aggregate: AggregateComparison, thresholds: Thresholds): GateResult =
     val failures = Vector.newBuilder[String]
 
@@ -813,6 +924,10 @@ object HoldemCfrExternalComparison:
         Left(s"--$key must be between 0 and 1")
       case _ => Right(())
 
+  /** Finds all actions tied for the maximum value in the given scores map.
+    * Uses BestActionConsistencyEpsilon to handle floating-point ties.
+    * Actions are sorted alphabetically for deterministic ordering.
+    */
   private def argMaxActions(policy: Map[String, Double], orderedActions: Vector[String]): Vector[String] =
     val actions =
       if orderedActions.nonEmpty then dedupePreservingOrder(orderedActions).sorted

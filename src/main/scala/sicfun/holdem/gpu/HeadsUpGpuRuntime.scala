@@ -53,22 +53,27 @@ object HeadsUpGpuRuntime:
       detail: Option[String] = None
   )
 
-  private val ProviderProperty = "sicfun.gpu.provider"
+  // ── Configuration property/env-var keys ──────────────────────────────────────
+  // Each pair follows the convention: JVM system property + OS environment variable.
+  // Resolved via GpuRuntimeSupport.resolveNonEmpty, which checks ScopedRuntimeProperties
+  // (test overlay) first, then system properties, then env vars.
+
+  private val ProviderProperty = "sicfun.gpu.provider"          // Selects the active provider backend
   private val ProviderEnv = "sicfun_GPU_PROVIDER"
-  private val FallbackToCpuProperty = "sicfun.gpu.fallbackToCpu"
+  private val FallbackToCpuProperty = "sicfun.gpu.fallbackToCpu" // Enables JVM CPU fallback on GPU failure
   private val FallbackToCpuEnv = "sicfun_GPU_FALLBACK_TO_CPU"
-  private val NativePathProperty = "sicfun.gpu.native.path"
+  private val NativePathProperty = "sicfun.gpu.native.path"      // Explicit absolute path to the GPU DLL
   private val NativePathEnv = "sicfun_GPU_NATIVE_PATH"
-  private val NativeLibProperty = "sicfun.gpu.native.lib"
+  private val NativeLibProperty = "sicfun.gpu.native.lib"        // Library name for System.loadLibrary
   private val NativeLibEnv = "sicfun_GPU_NATIVE_LIB"
-  private val DefaultNativeLibrary = "sicfun_gpu_kernel"
-  private val NativePackedIoProperty = "sicfun.gpu.native.packedIo"
+  private val DefaultNativeLibrary = "sicfun_gpu_kernel"         // Default DLL name (sicfun_gpu_kernel.dll)
+  private val NativePackedIoProperty = "sicfun.gpu.native.packedIo"       // Enable packed f32 I/O path
   private val NativePackedIoEnv = "sicfun_GPU_NATIVE_PACKED_IO"
-  private val NativePackedExactIoProperty = "sicfun.gpu.native.packedExactIo"
+  private val NativePackedExactIoProperty = "sicfun.gpu.native.packedExactIo" // Also use packed I/O for exact mode
   private val NativePackedExactIoEnv = "sicfun_GPU_NATIVE_PACKED_EXACT_IO"
-  private val NativeEngineProperty = "sicfun.gpu.native.engine"
+  private val NativeEngineProperty = "sicfun.gpu.native.engine"  // "cpu" or "cuda" -- selects compute engine inside native code
   private val NativeEngineEnv = "sicfun_GPU_NATIVE_ENGINE"
-  private val NativeWarmupProperty = "sicfun.gpu.native.warmup"
+  private val NativeWarmupProperty = "sicfun.gpu.native.warmup"  // Enable/disable GPU warmup on first availability check
   private val NativeWarmupEnv = "sicfun_GPU_NATIVE_WARMUP"
   private val NativeWarmupMatchupsProperty = "sicfun.gpu.native.warmupMatchups"
   private val NativeWarmupMatchupsEnv = "sicfun_GPU_NATIVE_WARMUP_MATCHUPS"
@@ -82,8 +87,14 @@ object HeadsUpGpuRuntime:
   private val OpenCLLibEnv = "sicfun_OPENCL_NATIVE_LIB"
   private val DefaultOpenCLLibrary = "sicfun_opencl_kernel"
 
+  /** Atomically-updated telemetry from the most recent computeBatch call.
+    * Allows callers to inspect provider, success/failure, and detail after the call.
+    */
   private val telemetryRef = new AtomicReference[BatchTelemetry](null)
 
+  /** Resets all cached native library load state and telemetry -- used only in tests
+    * to ensure each test gets a clean provider configuration.
+    */
   private[holdem] def resetLoadCacheForTests(): Unit =
     telemetryRef.set(null)
     NativeJniProvider.resetLoadCacheForTests()
@@ -256,6 +267,14 @@ object HeadsUpGpuRuntime:
           monteCarloSeedBase = 0x00000000BADC0FFEL
         )
 
+    /** Performs a one-time GPU warmup (JIT compilation, memory allocation, driver init)
+      * by running a small throwaway batch through both the legacy and packed API paths.
+      *
+      * The warmup is guarded by `warmupDoneRef` CAS to guarantee it runs at most once.
+      * On Windows with WDDM, the first CUDA kernel launch can trigger a multi-second
+      * driver initialisation delay; doing this proactively avoids latency spikes during
+      * real computation.
+      */
     private def ensureNativeWarmup(requestedTrials: Int, monteCarloSeedBase: Long): Unit =
       if !nativeWarmupEnabled then
         ()
@@ -334,6 +353,16 @@ object HeadsUpGpuRuntime:
             val detail = Option(ex.getMessage).filter(_.nonEmpty).getOrElse(ex.getClass.getSimpleName)
             GpuRuntimeSupport.log(s"native warmup skipped: $detail")
 
+    /** Attempts the packed f32 I/O code path.
+      *
+      * The packed API sends `Int` packed keys (lowId|highId in a single 32-bit value)
+      * and receives `Float` results, reducing JNI transfer overhead by ~50% compared
+      * to the legacy f64 path. The native DLL computes per-matchup seeds on-device in
+      * Monte Carlo mode, further reducing host-to-device bandwidth.
+      *
+      * Returns `None` if the packed API is unavailable (older DLL without the symbol),
+      * causing the caller to fall back to [[computeBatchLegacyPath]].
+      */
     private def computeBatchPackedFastPath(
         packedKeys: Array[Long],
         keyMaterial: Array[Long],
@@ -400,6 +429,12 @@ object HeadsUpGpuRuntime:
             packedApiSupportRef.set(java.lang.Boolean.FALSE)
             None
 
+    /** Legacy f64 JNI code path.
+      *
+      * Unpacks each key into separate lowId/highId arrays (both `Int`), pre-computes
+      * per-matchup seeds on the JVM side, and receives results as `Double` arrays.
+      * Used when the packed API is unavailable or when exact-mode packed I/O is disabled.
+      */
     private def computeBatchLegacyPath(
         packedKeys: Array[Long],
         keyMaterial: Array[Long],
@@ -670,9 +705,13 @@ object HeadsUpGpuRuntime:
         telemetryRef.set(BatchTelemetry(provider = provider.id, success = false, detail = reason))
     result.map(_.values)
 
+  /** Reads the configured provider string, defaulting to "native" (JNI/CUDA). */
   private def configuredProvider: String =
     GpuRuntimeSupport.resolveNonEmptyLower(ProviderProperty, ProviderEnv).getOrElse("native")
 
+  /** Maps the configured provider string to the corresponding Provider object.
+    * Unknown providers are logged as errors and mapped to DisabledProvider.
+    */
   private def activeProvider: Provider =
     configuredProvider match
       case "native" => NativeJniProvider
@@ -690,6 +729,9 @@ object HeadsUpGpuRuntime:
   private def describeNativeStatus(status: Int): String =
     GpuRuntimeSupport.describeNativeStatus(status)
 
+  /** Maps the integer engine code returned by `HeadsUpGpuNativeBindings.lastEngineCode()`
+    * to a human-readable label. Codes: 1=cpu, 2=cuda, 3=cpu-fallback, 4=opencl.
+    */
   private def describeNativeEngine(code: Int): String =
     code match
       case 1 => "cpu"
@@ -702,5 +744,6 @@ object HeadsUpGpuRuntime:
   private def describeOpenCLStatus(status: Int): String =
     GpuRuntimeSupport.describeOpenCLStatus(status)
 
+  /** Pre-flight validation: packedKeys and keyMaterial must have equal length. */
   private def validateBatchShape(packedKeys: Array[Long], keyMaterial: Array[Long]): Unit =
     require(packedKeys.length == keyMaterial.length, "packedKeys and keyMaterial must have equal length")

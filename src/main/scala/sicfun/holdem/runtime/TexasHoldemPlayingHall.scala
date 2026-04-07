@@ -333,6 +333,7 @@ object TexasHoldemPlayingHall:
     private var activeArtifactOpt = Option.empty[TrainedPokerActionModel]
     private var preflopEngineOpt = Option.empty[RealTimeAdaptiveEngine]
     private var postflopEngineOpt = Option.empty[RealTimeAdaptiveEngine]
+    private var strategicEngineOpt = Option.empty[StrategicEngine]
     private var heroNet = 0.0
     private var heroWins = 0
     private var heroTies = 0
@@ -396,11 +397,15 @@ object TexasHoldemPlayingHall:
     private def postflopEngine: RealTimeAdaptiveEngine =
       postflopEngineOpt.getOrElse(throw new IllegalStateException("postflop engine not initialized"))
 
-    /** Loads or bootstraps the initial PokerActionModel and builds preflop/postflop engines. */
+    /** Loads or bootstraps the initial PokerActionModel and builds preflop/postflop engines.
+      * Initializes the strategic engine if heroMode is Strategic.
+      */
     private def initializeArtifact(): Unit =
       val (initialArtifact, _) = loadInitialArtifact(config, modelsRoot)
       activeArtifactOpt = Some(initialArtifact)
       rebuildEngines()
+      if config.heroMode == HeroMode.Strategic then
+        strategicEngineOpt = Some(new StrategicEngine(StrategicEngine.Config()))
 
     private def playHands(): Unit =
       var handNo = 1
@@ -423,6 +428,13 @@ object TexasHoldemPlayingHall:
         rng = rng
       )
       val deal = dealHand(tableScenario.modeledPositions, rng)
+      strategicEngineOpt.foreach { engine =>
+        if !engine.isSessionInitialized then
+          val rivalIds = tableScenario.activePositions
+            .filterNot(_ == config.heroPosition)
+            .map(pos => sicfun.holdem.strategic.PlayerId(pos.toString))
+          engine.initSession(rivalIds)
+      }
       val result = resolveHand(
         deal = deal,
         preflopEngine = preflopEngine,
@@ -435,7 +447,8 @@ object TexasHoldemPlayingHall:
         collectVillainTraining = collectVillainTraining,
         collectDdreTraining = collectDdreTraining,
         exactGtoCache = exactGtoCache,
-        exactGtoCacheStats = exactGtoCacheStats
+        exactGtoCacheStats = exactGtoCacheStats,
+        strategicEngineOpt = strategicEngineOpt
       )
 
       recordTrainingSamples(handNo, tableId, result)
@@ -614,7 +627,8 @@ object TexasHoldemPlayingHall:
       collectVillainTraining: Boolean,
       collectDdreTraining: Boolean,
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
-      exactGtoCacheStats: GtoCacheStats
+      exactGtoCacheStats: GtoCacheStats,
+      strategicEngineOpt: Option[StrategicEngine]
   ): HandResult =
     new HandResolver(
       deal = deal,
@@ -628,7 +642,8 @@ object TexasHoldemPlayingHall:
       collectVillainTraining = collectVillainTraining,
       collectDdreTraining = collectDdreTraining,
       exactGtoCache = exactGtoCache,
-      exactGtoCacheStats = exactGtoCacheStats
+      exactGtoCacheStats = exactGtoCacheStats,
+      strategicEngineOpt = strategicEngineOpt
     ).play()
 
   /** Resolves a single hand from preflop through showdown. This class encapsulates all mutable
@@ -658,7 +673,8 @@ object TexasHoldemPlayingHall:
       collectVillainTraining: Boolean,
       collectDdreTraining: Boolean,
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
-      exactGtoCacheStats: GtoCacheStats
+      exactGtoCacheStats: GtoCacheStats,
+      strategicEngineOpt: Option[StrategicEngine]
   ):
     private val heroPosition = tableScenario.heroPosition
     private val preflopOrder = tableScenario.modeledPositions
@@ -702,10 +718,12 @@ object TexasHoldemPlayingHall:
       * after the net is finalized.
       */
     def play(): HandResult =
+      strategicEngineOpt.foreach(_.startHand(deal.holeCardsFor(heroPosition)))
       if !handOver then playPreflop()
       if !handOver then playPostflopStreet(Street.Flop)
       if !handOver then playPostflopStreet(Street.Turn)
       if !handOver then playPostflopStreet(Street.River)
+      strategicEngineOpt.foreach(_.endHand())
       val heroNet =
         if handOver && outcome > 0 then roundMoney(pot - contributionOf(heroPosition))
         else if handOver && outcome < 0 then -contributionOf(heroPosition)
@@ -835,6 +853,10 @@ object TexasHoldemPlayingHall:
       villainActions += action
       recordObservation(position, state, action)
       if firstVillainDecision.isEmpty then firstVillainDecision = Some((state, action))
+      strategicEngineOpt.foreach { engine =>
+        val rivalId = sicfun.holdem.strategic.PlayerId(position.toString)
+        engine.observeAction(rivalId, action, state)
+      }
 
     private def appendReviewLine(playerName: String, suffix: String): Unit =
       reviewHistoryLines += s"$playerName: $suffix"
@@ -997,26 +1019,11 @@ object TexasHoldemPlayingHall:
               )
             )
         case HeroMode.Strategic =>
-          // TODO(Task 8): wire StrategicEngine here; delegate to GTO in the interim.
-          multiwayRecommendationFor(
-            actor = heroPosition,
-            state = state,
-            candidateActions = candidates
-          ).map(_.bestAction)
-            .getOrElse(
-              GtoSolveEngine.gtoResponds(
-                hand = deal.holeCardsFor(heroPosition),
-                state = state,
-                candidates = candidates,
-                mode = config.gtoMode,
-                opponentPosterior = tableRanges.rangeFor(focusVillainPosition),
-                baseEquityTrials = config.equityTrials,
-                rng = rng,
-                perspective = 0,
-                exactGtoCache = exactGtoCache,
-                exactGtoCacheStats = exactGtoCacheStats
-              )
-            )
+          strategicEngineOpt match
+            case Some(engine) =>
+              engine.decide(state, candidates)
+            case None =>
+              candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
       val normalized = normalizeAction(
         action = sampled,
         toCall = toCall,

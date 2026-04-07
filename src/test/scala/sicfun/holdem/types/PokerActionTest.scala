@@ -5,10 +5,25 @@ import sicfun.holdem.model.*
 import munit.FunSuite
 import sicfun.core.Card
 
+/**
+  * Tests for [[PokerAction]], [[PokerAction.Category]], [[GameState]] derived metrics,
+  * and [[PokerFeatures]] feature extraction.
+  *
+  * This suite validates:
+  *   - '''Category mapping''': Each [[PokerAction]] variant maps to the correct coarsened
+  *     [[PokerAction.Category]] (used as ML label space).
+  *   - '''Category count''': Exactly 4 categories exist (Fold, Check, Call, Raise).
+  *   - '''potOdds computation''': Correct fraction and zero-toCall edge case.
+  *   - '''Validation''': Negative pot is rejected.
+  *   - '''Feature extraction''': [[PokerFeatures.extract]] produces the correct dimension,
+  *     hand strength defaults to 0.5 preflop, and is in [0, 1] on the river.
+  */
 class PokerActionTest extends FunSuite:
+  /** Parses a 2-character card token (e.g. "As") or fails the test. */
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
+  /** Creates canonical hole cards from two card tokens. */
   private def hole(a: String, b: String): HoleCards =
     HoleCards.from(Vector(card(a), card(b)))
 

@@ -7,6 +7,22 @@ import sicfun.holdem.validation.{LeakInjectedVillain, NoLeak}
 
 import scala.util.Random
 
+/** Tests for the pluggable [[VillainStrategy]] interface and its two
+  * implementations: [[EquityBasedStrategy]] (fast heuristic) and
+  * [[CfrVillainStrategy]] (equilibrium-based CFR solver).
+  *
+  * Coverage:
+  *   - '''EquityBasedStrategy''': strong hands do not fold facing a bet,
+  *     weak hands fold most of the time, and strong hands value-bet
+  *     when checked to
+  *   - '''HeadsUpSimulator pluggability''': a custom always-call/check
+  *     strategy can be injected and the simulator respects it
+  *   - '''CfrVillainStrategy''': produces valid actions from equilibrium
+  *     solves across different hands and seeds, all returned actions
+  *     belong to the candidate set
+  *   - '''CfrVillainStrategy caching''': repeated equivalent solve spots
+  *     hit the cache (first call = miss, second call = hit)
+  */
 class VillainStrategyTest extends FunSuite:
 
   private val AhAs = HoleCards(Card(Rank.Ace, Suit.Hearts), Card(Rank.Ace, Suit.Spades))

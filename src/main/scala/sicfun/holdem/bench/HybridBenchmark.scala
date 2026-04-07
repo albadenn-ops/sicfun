@@ -13,6 +13,9 @@ object HybridBenchmark:
   private final case class DeviceRun(elapsedMs: Long, throughput: Double):
     def elapsedSeconds: Double = elapsedMs.toDouble / 1000.0
 
+  /** Runs a single compute device on the full matchup batch and returns the elapsed time
+    * and throughput (matchups/sec). Returns Left(statusCode) on device failure.
+    */
   private def runSingleDevice(
       device: HeadsUpHybridDispatcher.ComputeDevice,
       lowIds: Array[Int],
@@ -40,6 +43,12 @@ object HybridBenchmark:
         if elapsedMs > 0L then n.toDouble / (elapsedMs.toDouble / 1000.0) else 0.0
       Right(DeviceRun(elapsedMs, throughput))
 
+  /** Entry point. Discovers all available compute devices (CUDA, OpenCL, CPU), runs
+    * each in isolation (cold + warm) to establish single-device baselines, then runs
+    * the hybrid multi-device dispatcher twice (cold + warm) to measure parallel dispatch
+    * overhead and throughput. Reports per-device breakdown showing matchup allocation
+    * and individual device timings within the hybrid run.
+    */
   def main(args: Array[String]): Unit =
     val maxMatchups = args.headOption.flatMap(s => scala.util.Try(s.toLong).toOption).getOrElse(4000L)
     val trials = args.lift(1).flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(200)

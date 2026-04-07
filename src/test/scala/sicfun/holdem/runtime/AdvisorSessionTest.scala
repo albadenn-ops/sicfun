@@ -13,6 +13,21 @@ import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
 import scala.util.Random
 
+/** Tests for [[AdvisorSession]], [[AdvisorCommandParser]], and the interactive advisor state machine.
+  *
+  * Covers three areas:
+  *  1. '''Command parsing:''' Verifying that user input strings ("new", "h AcKh", "v call",
+  *     "board Ts9h8d", "?", etc.) are parsed into the correct [[AdvisorCommand]] variants.
+  *  2. '''Session state machine:''' Testing the core hand lifecycle — starting new hands,
+  *     posting blinds, recording actions (raise/call/fold/check), dealing board cards,
+  *     alternating hero position between hands, and computing session statistics.
+  *  3. '''Opponent memory:''' Verifying that villain observations are persisted to the
+  *     [[OpponentProfileStore]], buffered mid-hand and flushed at hand boundaries or on quit,
+  *     and correctly restored on undo.
+  *
+  * Uses a shared low-trial-count [[RealTimeAdaptiveEngine]] (50 bunching, 200 equity trials)
+  * to keep tests fast while still exercising the full inference pipeline.
+  */
 class AdvisorSessionTest extends FunSuite:
   // Shared low-trial-count engine for fast tests
   private lazy val (engine, tableRanges) = buildTestEngine()

@@ -4,6 +4,20 @@ import munit.FunSuite
 import sicfun.core.Card
 import sicfun.holdem.types.*
 
+/** Tests for [[SlumbotActionCodec]] — the Slumbot wire protocol parser and encoder.
+  *
+  * Verifies:
+  *  - '''Empty action:''' An empty action string yields button-first preflop state with
+  *    correct pot (1.5 BB), to-call (0.5 BB), and stack (199.5 BB).
+  *  - '''Button open:''' A `b200` raise from the button is parsed as a villain raise (1.0 BB
+  *    increment) when hero is big blind, with correct state updates.
+  *  - '''Button limp:''' A `c` call from the button leaves big blind with checking option
+  *    (to-call = 0).
+  *  - '''Street advancement:''' A preflop open-call followed by a flop check (`b200c/k`)
+  *    correctly advances to the Flop street with the dealt board visible.
+  *  - '''Raise encoding:''' `incrementForAction` maps a Raise(2.0 BB) to `b300` (street
+  *    bet-to of 300 chips = current 100 + increment of 200).
+  */
 class SlumbotActionCodecTest extends FunSuite:
 
   private def card(token: String): Card =

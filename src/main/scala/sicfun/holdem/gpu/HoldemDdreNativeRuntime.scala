@@ -3,14 +3,38 @@ import sicfun.holdem.*
 
 import java.util.concurrent.atomic.AtomicReference
 
-/** Runtime wrapper for native DDRE posterior inference providers (CPU and CUDA-compiled provider). */
+/** Runtime wrapper for native DDRE (Decision-Driving Range Estimation) posterior inference via JNI.
+  *
+  * Mirrors the structure of [[HoldemBayesNativeRuntime]] but for the DDRE inference
+  * pathway. DDRE uses a different native implementation that may apply learned
+  * adjustments beyond pure Bayesian updating (e.g. diffusion-model posteriors).
+  *
+  * Manages two separate native libraries:
+  *  - '''CPU backend''' (`sicfun_ddre_native`) -- C implementation for single-threaded inference
+  *  - '''GPU backend''' (`sicfun_ddre_cuda`) -- CUDA-accelerated parallel inference
+  *
+  * ==Thread Safety==
+  * Library loading is CAS-guarded via `AtomicReference`. JNI calls are stateless,
+  * so concurrent calls from different threads are safe.
+  *
+  * ==Integration with HoldemDdreProvider==
+  * This runtime is called by [[HoldemDdreProvider]] when the configured DDRE
+  * provider is `native-cpu` or `native-gpu`. The provider handles fallback to
+  * Bayesian computation if the native library is unavailable.
+  */
 private[holdem] object HoldemDdreNativeRuntime:
+  /** Which native DDRE library to use. */
   enum Backend:
     case Cpu
     case Gpu
 
+  /** Describes whether a specific DDRE backend library is loaded and ready. */
   final case class Availability(available: Boolean, backend: Backend, detail: String)
 
+  /** Result of a successful native DDRE posterior inference.
+    * @param posterior      normalised posterior distribution over hypotheses
+    * @param lastEngineCode native engine code (1=cpu, 2=gpu)
+    */
   final case class NativeInferenceResult(
       posterior: Array[Double],
       lastEngineCode: Int
@@ -57,6 +81,15 @@ private[holdem] object HoldemDdreNativeRuntime:
           detail = reason
         )
 
+  /** Performs DDRE posterior inference using the specified native backend.
+    *
+    * @param backend          CPU or GPU native library
+    * @param observationCount number of sequential observations
+    * @param hypothesisCount  number of hypotheses in the prior
+    * @param prior            prior probability array (length = hypothesisCount)
+    * @param likelihoods      row-major likelihood matrix (length = observationCount * hypothesisCount)
+    * @return `Right(result)` on success, `Left(reason)` on failure
+    */
   def inferPosterior(
       backend: Backend,
       observationCount: Int,
@@ -79,6 +112,9 @@ private[holdem] object HoldemDdreNativeRuntime:
       )
     }
 
+  /** Lower-level in-place variant: writes the posterior into a caller-provided array.
+    * @return `Right(engineCode)` on success, `Left(reason)` on failure
+    */
   private[holdem] def inferPosteriorInPlace(
       backend: Backend,
       observationCount: Int,
@@ -105,6 +141,7 @@ private[holdem] object HoldemDdreNativeRuntime:
         outPosterior = outPosterior
       )
 
+  /** Dispatches the JNI call to the appropriate DDRE backend bindings class. */
   private def inferPosteriorInPlaceUnchecked(
       backend: Backend,
       observationCount: Int,
@@ -202,6 +239,9 @@ private[holdem] object HoldemDdreNativeRuntime:
       case Backend.Cpu => "CPU"
       case Backend.Gpu => "GPU"
 
+  /** Translates native DDRE JNI status codes to human-readable descriptions.
+    * Codes 100-102/124 are shared JNI validation errors; 160-163 are DDRE-specific.
+    */
   def describeStatus(status: Int): String =
     val detail =
       status match

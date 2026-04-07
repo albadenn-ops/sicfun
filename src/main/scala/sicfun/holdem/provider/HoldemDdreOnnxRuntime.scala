@@ -4,11 +4,38 @@ import sicfun.holdem.gpu.*
 
 import java.nio.file.{Files, Path, Paths}
 
-/** Optional ONNX Runtime adapter for DDRE inference.
+/** Optional ONNX Runtime adapter for DDRE posterior inference.
   *
-  * Uses reflection to avoid a hard compile-time dependency on `ai.onnxruntime`.
-  * If runtime classes/model are unavailable, callers receive a descriptive error
-  * and can degrade safely to Bayesian fallback.
+  * This object provides an inference path for DDRE models exported as ONNX files,
+  * enabling the poker engine to use trained neural-network posteriors as an
+  * alternative or complement to pure Bayesian inference.
+  *
+  * ==Reflection-Based Design==
+  * The ONNX Runtime Java API (`ai.onnxruntime`) is accessed entirely via reflection
+  * to avoid a hard compile-time dependency. This means:
+  *  - The project compiles and runs without ONNX Runtime on the classpath.
+  *  - When the runtime is present, it's loaded on first use.
+  *  - If missing, callers get a descriptive `Left` and can fall back to Bayesian.
+  *
+  * ==Artifact Resolution==
+  * Two configuration modes:
+  *  1. '''Artifact directory''' (`sicfun.ddre.onnx.artifactDir`) -- loads metadata
+  *     from [[HoldemDdreArtifactIO]], including validation status, I/O tensor names,
+  *     and execution provider settings.
+  *  2. '''Direct model path''' (`sicfun.ddre.onnx.modelPath`) -- raw ONNX file path
+  *     with individual tensor name overrides. Treated as unvalidated.
+  *
+  * ==CUDA Execution Provider==
+  * When `executionProvider=cuda`, the adapter calls `SessionOptions.addCUDA(deviceIndex)`
+  * to run inference on GPU. Falls back gracefully if CUDA is not available.
+  *
+  * ==I/O Contract==
+  * - Prior input: `float32[1, hypothesisCount]` -- normalised prior probabilities
+  * - Likelihood input: `float32[observationCount, hypothesisCount]` -- per-observation likelihoods
+  * - Posterior output: `float32[1, hypothesisCount]` -- unnormalised posterior (caller normalises)
+  *
+  * All internal computation uses float32 to match ONNX model precision; the JVM
+  * interface accepts and returns double arrays, with conversion at the boundary.
   */
 private[holdem] object HoldemDdreOnnxRuntime:
   final case class Config(
@@ -62,6 +89,11 @@ private[holdem] object HoldemDdreOnnxRuntime:
   private val DefaultLikelihoodInputName = "likelihoods"
   private val DefaultOutputName = "posterior"
 
+  /** Builds an ONNX runtime configuration from system properties / environment variables.
+    * Tries artifact-dir-based resolution first, then falls back to direct model path.
+    *
+    * @return `Right(config)` if a valid configuration was resolved, `Left(reason)` otherwise
+    */
   def configuredConfig(): Either[String, Config] =
     val allowExperimental = GpuRuntimeSupport
       .resolveNonEmpty(AllowExperimentalProperty, AllowExperimentalEnv)
@@ -130,6 +162,9 @@ private[holdem] object HoldemDdreOnnxRuntime:
                 )
               )
 
+  /** Builds an ONNX Config from a loaded artifact descriptor.
+    * Resolves relative model paths against the artifact directory.
+    */
   private[holdem] def configFromArtifact(
       directory: Path,
       artifact: HoldemDdreArtifactIO.OnnxArtifact,
@@ -157,6 +192,15 @@ private[holdem] object HoldemDdreOnnxRuntime:
       rawModel = false
     )
 
+  /** Runs ONNX inference to produce a posterior distribution over hypotheses.
+    *
+    * @param prior            prior probabilities (length = hypothesisCount)
+    * @param likelihoods      row-major likelihood matrix (length = observationCount * hypothesisCount)
+    * @param observationCount number of observations (rows)
+    * @param hypothesisCount  number of hypotheses (columns)
+    * @param config           ONNX runtime configuration (model path, tensor names, etc.)
+    * @return `Right(posterior)` as a double array, or `Left(reason)` on failure
+    */
   def inferPosterior(
       prior: Array[Double],
       likelihoods: Array[Double],
@@ -179,6 +223,19 @@ private[holdem] object HoldemDdreOnnxRuntime:
       else
         runOnnx(prior, likelihoods, observationCount, hypothesisCount, config)
 
+  /** Core ONNX inference implementation using reflection.
+    *
+    * Steps:
+    *  1. Load OrtEnvironment and create SessionOptions (via reflection)
+    *  2. Create an OrtSession from the model file
+    *  3. Convert prior (double[]) to float[][] and likelihoods to float[][]
+    *  4. Create OnnxTensor inputs via reflection
+    *  5. Run the session and extract the posterior output
+    *  6. Close all ONNX resources (tensors, result, session, options)
+    *
+    * When observationCount=0, a dummy row of all-ones likelihoods is used
+    * (the model is expected to handle this as a no-op observation).
+    */
   private def runOnnx(
       prior: Array[Double],
       likelihoods: Array[Double],
@@ -247,6 +304,10 @@ private[holdem] object HoldemDdreOnnxRuntime:
             .getOrElse(ex.getClass.getSimpleName)
         )
 
+  /** Configures ONNX session options: thread counts and CUDA execution provider.
+    * All configuration is done via reflection; failures are silently swallowed
+    * since these are optional performance hints.
+    */
   private def configureSessionOptions(
       sessionOptionsClass: Class[?],
       sessionOptions: AnyRef,
@@ -280,6 +341,10 @@ private[holdem] object HoldemDdreOnnxRuntime:
           catch
             case _: Throwable => ()
 
+  /** Extracts the posterior array from the ONNX Result object.
+    * Tries named output first (`get(String)`), then falls back to index-based (`get(0)`).
+    * Supports float[], double[], float[][], and double[][] output shapes.
+    */
   private def extractPosteriorFromResult(
       result: AnyRef,
       outputName: String,
@@ -317,6 +382,9 @@ private[holdem] object HoldemDdreOnnxRuntime:
         val value = outputValue.getClass.getMethod("getValue").invoke(outputValue)
         flattenNumericOutput(value, expectedSize)
 
+  /** Flattens various ONNX output types (1D array, 2D matrix, Java List) into
+    * a flat Double array. Validates that the result has the expected size.
+    */
   private def flattenNumericOutput(value: Any, expectedSize: Int): Either[String, Array[Double]] =
     val flattened =
       value match
@@ -346,6 +414,9 @@ private[holdem] object HoldemDdreOnnxRuntime:
     else
       Right(flattened)
 
+  /** Calls `close()` on an ONNX resource via reflection, swallowing any exceptions.
+    * Used to clean up tensors, sessions, and results without leaking native memory.
+    */
   private def closeQuietly(resource: AnyRef): Unit =
     if resource != null then
       try

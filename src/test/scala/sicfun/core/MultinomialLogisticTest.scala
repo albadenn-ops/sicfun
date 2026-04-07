@@ -2,6 +2,18 @@ package sicfun.core
 
 import munit.FunSuite
 
+/** Tests for [[MultinomialLogistic]] softmax classifier (training and inference).
+  *
+  * Coverage includes:
+  *  - '''Zero model''': a zero-weight model predicts uniform probabilities across classes.
+  *  - '''Softmax normalization''': predicted probabilities always sum to 1.
+  *  - '''Binary classification''': after training on linearly separable 2D data, the model
+  *    assigns highest probability to the correct class for test inputs.
+  *  - '''Multi-class''': training with 3 classes converges to correct dominant predictions.
+  *  - '''L2 regularization''': regularized weights have smaller magnitude than unregularized.
+  *  - '''Input validation''': wrong feature dimensions, out-of-range labels, non-positive
+  *    iterations, empty datasets, and inconsistent weight/bias shapes are all rejected.
+  */
 class MultinomialLogisticTest extends FunSuite:
   test("zeros model predicts uniform probabilities") {
     val model = MultinomialLogistic.zeros(3, 2)

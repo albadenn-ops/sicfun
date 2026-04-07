@@ -7,6 +7,14 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
 
+/**
+ * Tests for [[PokerActionTrainingDataIO]] TSV training data reader.
+ *
+ * Validates:
+ *   - Successful parsing of valid rows with various card notation formats
+ *   - Street-board consistency validation (e.g. River with 3 board cards is rejected)
+ *   - Missing required column detection
+ */
 class PokerActionTrainingDataIOTest extends FunSuite:
   test("readTsv parses valid rows") {
     val header = "street\tboard\tpotBefore\ttoCall\tposition\tstackBefore\taction\tholeCards"
@@ -50,6 +58,7 @@ class PokerActionTrainingDataIOTest extends FunSuite:
       Files.deleteIfExists(path)
   }
 
+  /** Writes lines to a temporary TSV file for test input. */
   private def writeTempTsv(lines: Vector[String]): Path =
     val path = Files.createTempFile("sicfun-training-", ".tsv")
     Files.write(path, lines.asJava, StandardCharsets.UTF_8)

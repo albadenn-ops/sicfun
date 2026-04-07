@@ -6,9 +6,40 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
 
+/**
+  * Tests for [[BatchTrainer]] multi-shard training pipeline.
+  *
+  * Uses temporary TSV shard files written to the filesystem to simulate realistic
+  * batch training scenarios. Each test creates a temporary directory, writes shards,
+  * runs the pipeline, and cleans up in a `finally` block.
+  *
+  * '''Concatenated mode tests''':
+  *   - Single shard produces an aggregate model with correct sample counts and finite Brier score.
+  *   - Shard processing order is deterministic (sorted by path), regardless of input order.
+  *
+  * '''Per-shard mode tests''':
+  *   - Two shards produce independent reports with per-shard training/evaluation counts.
+  *   - Aggregate Brier score matches the evaluation-count-weighted mean of per-shard scores.
+  *   - No aggregate model is produced.
+  *
+  * '''Empty shard handling''':
+  *   - An empty shard produces a report with NaN Brier score, zero counts, and gate=false.
+  *   - Non-empty shards in the same batch are unaffected.
+  *
+  * '''Reproducibility''': Same inputs + config produce identical results across runs.
+  *
+  * '''Validation''':
+  *   - Empty shard list is rejected.
+  *   - All-empty shard batch is rejected.
+  *
+  * Test data uses 6 rows per shard (Flop, same board, mixed actions) with a 0.25
+  * validation fraction and relaxed Brier gate (2.0) to ensure training always succeeds.
+  */
 class BatchTrainerTest extends FunSuite:
+  /** TSV header matching the format expected by [[PokerActionTrainingDataIO.readTsv]]. */
   private val Header = "street\tboard\tpotBefore\ttoCall\tposition\tstackBefore\taction\tholeCards"
 
+  /** First shard data: 6 flop decisions with a mix of raise, fold, call, and check actions. */
   private val rowsA = Vector(
     "Flop\tTs 9h 8d\t20.0\t10.0\tButton\t200.0\traise:20.0\tAh Kh",
     "Flop\tTs 9h 8d\t20.0\t10.0\tButton\t200.0\tfold\t7c 2d",
@@ -18,6 +49,7 @@ class BatchTrainerTest extends FunSuite:
     "Flop\tTs 9h 8d\t20.0\t0.0\tButton\t200.0\tcheck\t6c 2s"
   )
 
+  /** Second shard data: 6 flop decisions with different hole cards but same board/pot setup. */
   private val rowsB = Vector(
     "Flop\tTs 9h 8d\t20.0\t10.0\tButton\t200.0\tcall\tAc Kc",
     "Flop\tTs 9h 8d\t20.0\t0.0\tButton\t200.0\tcheck\t5c 2h",
@@ -27,6 +59,7 @@ class BatchTrainerTest extends FunSuite:
     "Flop\tTs 9h 8d\t20.0\t0.0\tButton\t200.0\tcheck\t4h 3c"
   )
 
+  /** Test config with fast iterations (250), relaxed Brier gate (2.0), and deterministic seed. */
   private val defaultConfig = BatchTrainerConfig(
     mode = BatchMode.Concatenated,
     learningRate = 0.1,
@@ -159,10 +192,12 @@ class BatchTrainerTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  /** Writes a TSV shard file with the standard header and the given data rows. */
   private def writeShard(path: Path, rows: Vector[String]): Path =
     Files.write(path, (Header +: rows).asJava, StandardCharsets.UTF_8)
     path
 
+  /** Recursively deletes a directory and all its contents (for test cleanup). */
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)

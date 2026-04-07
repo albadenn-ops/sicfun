@@ -7,7 +7,25 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import scala.jdk.CollectionConverters.*
 
+/** Tests for [[HoldemCfrTexasSolverJsonAdapter]], which translates TexasSolver root
+  * strategy JSON dumps into the generic provider format for cross-validation.
+  *
+  * Tests cover:
+  *  - '''Happy path''': A TexasSolver dump with a "strategy" object containing "actions"
+  *    and per-hand strategy vectors is correctly parsed, the hero's policy is extracted
+  *    by matching canonical hole card tokens, and the output passes external comparison
+  *    with zero TV distance.
+  *  - '''Missing hero hand''': When the TexasSolver dump does not contain the reference
+  *    hero hand, the adapter must fail with a clear error message.
+  *  - '''Player mismatch''': When --expectedPlayer is specified but the TexasSolver dump
+  *    reports a different acting player index, the adapter must fail with a diagnostic
+  *    identifying the expected vs actual player.
+  */
 class HoldemCfrTexasSolverJsonAdapterTest extends FunSuite:
+  // End-to-end: creates a reference export with one river spot, a TexasSolver dump
+  // with the same hero hand (KsAs -> canonical AsKs), verifies the adapter extracts
+  // the correct policy, writes valid provider JSON, and passes external comparison
+  // with zero TV distance and 100% best-action agreement.
   test("adapter extracts hero root policy from TexasSolver-style dump and passes external comparison") {
     val root = Files.createTempDirectory("holdem-cfr-texassolver-adapter-")
     try
@@ -101,6 +119,8 @@ class HoldemCfrTexasSolverJsonAdapterTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  // The TexasSolver dump only contains QhQs but the reference spot hero is AsKs.
+  // The adapter must fail with "does not contain strategy for hero hand" error.
   test("adapter fails when TexasSolver dump is missing the reference hero hand") {
     val root = Files.createTempDirectory("holdem-cfr-texassolver-adapter-missing-hand-")
     try
@@ -170,6 +190,8 @@ class HoldemCfrTexasSolverJsonAdapterTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  // The TexasSolver dump reports player=0 but --expectedPlayer=1 is specified.
+  // This catches cases where the solver was run from the wrong player's perspective.
   test("adapter fails when TexasSolver player does not match the expected actor index") {
     val root = Files.createTempDirectory("holdem-cfr-texassolver-adapter-player-mismatch-")
     try

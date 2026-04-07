@@ -12,14 +12,32 @@ import ujson.{Arr, Num, Obj, Str, Value}
   * This adapter intentionally stays file-based. It does not orchestrate the
   * external solver; it translates already-produced root strategy dumps into the
   * comparison contract used by this repo.
+  *
+  * '''Workflow:'''
+  *  1. Run SICFUN's [[HoldemCfrApproximationReport]] to produce `external-comparison.json`
+  *     with the reference spot definitions (hero hand, board, villain range, etc.).
+  *  2. Run TexasSolver externally for each spot, producing per-spot root strategy JSON files.
+  *  3. Run this adapter to read both the reference spots and the TexasSolver output,
+  *     extracting the hero's policy vector from the TexasSolver strategy map and writing
+  *     a provider JSON file compatible with [[HoldemCfrExternalComparison]].
+  *
+  * '''TexasSolver JSON format expected:'''
+  * The adapter looks for a `strategy` object containing an `actions` array (e.g.,
+  * `["FOLD", "CALL", "RAISE:20.000"]`) and a `strategy` map keyed by hand tokens
+  * (e.g., `"AcKh"`) whose values are arrays of action probabilities aligned with
+  * the `actions` array. An optional `player` field identifies the acting player index.
+  *
+  * Usage: `runMain sicfun.holdem.cfr.HoldemCfrTexasSolverJsonAdapter --reference=... --texasDir=... --out=...`
   */
 object HoldemCfrTexasSolverJsonAdapter:
+  /** Result of a successful adapter run. */
   final case class RunResult(
       providerName: String,
       spotCount: Int,
       outPath: Path
   )
 
+  /** Parsed CLI arguments for the adapter. */
   private final case class CliConfig(
       referencePath: Path,
       texasDir: Option[Path],
@@ -31,6 +49,9 @@ object HoldemCfrTexasSolverJsonAdapter:
       outPath: Path
   )
 
+  /** A spot extracted from the SICFUN reference export, carrying enough context
+    * to locate the corresponding TexasSolver output and build the provider JSON.
+    */
   private final case class ReferenceSpot(
       id: String,
       hero: String,
@@ -39,6 +60,9 @@ object HoldemCfrTexasSolverJsonAdapter:
       source: Value
   )
 
+  /** Parsed root strategy from a TexasSolver JSON dump: the action labels,
+    * the policy vector for the hero hand, and the optional acting player index.
+    */
   private final case class TexasRootStrategy(
       actions: Vector[String],
       policyByHero: Map[String, Double],
@@ -74,6 +98,18 @@ object HoldemCfrTexasSolverJsonAdapter:
       )
     yield result
 
+  /** Core adapter logic. Loads reference spots, resolves TexasSolver files,
+    * extracts hero policies, validates player indices, and writes the output JSON.
+    *
+    * @param referencePath  Path to SICFUN's external-comparison.json
+    * @param texasDir       Directory containing per-spot TexasSolver files named `<spotId>.json`
+    * @param texasFile      Alternative: a single TexasSolver file (requires singleSpotId)
+    * @param singleSpotId   When using texasFile, the reference spot id it corresponds to
+    * @param selectedSpotIds Optional subset filter for reference spots
+    * @param expectedPlayer Optional player index to validate against the TexasSolver output
+    * @param providerName   Label for the provider in the output JSON (default: "TexasSolver")
+    * @param outPath        Output path for the provider JSON file
+    */
   private[cfr] def adapt(
       referencePath: Path,
       texasDir: Option[Path],
@@ -109,6 +145,10 @@ object HoldemCfrTexasSolverJsonAdapter:
       case e: Exception =>
         Left(s"holdem CFR TexasSolver adapter failed: ${e.getMessage}")
 
+  /** Loads reference spots from the SICFUN external-comparison.json, optionally
+    * filtered by singleSpotId and/or selectedSpotIds. Each spot must have
+    * id, hero, state, and villainRange fields.
+    */
   private def loadReferenceSpots(
       referencePath: Path,
       singleSpotId: Option[String],
@@ -141,6 +181,10 @@ object HoldemCfrTexasSolverJsonAdapter:
     require(filtered.nonEmpty, "no reference spots matched the selected spot ids")
     filtered
 
+  /** Resolves the filesystem path to the TexasSolver JSON file for a given spot.
+    * In directory mode, looks for `<spotId>.json` under texasDir.
+    * In single-file mode, uses the provided texasFile path directly.
+    */
   private def resolveTexasPath(
       spotId: String,
       texasDir: Option[Path],
@@ -160,6 +204,16 @@ object HoldemCfrTexasSolverJsonAdapter:
         require(Files.exists(path), s"TexasSolver file for spot '$spotId' does not exist: $path")
         path
 
+  /** Loads and parses a TexasSolver root strategy JSON file.
+    *
+    * Navigates the JSON to find the strategy container (which may be the root object
+    * or nested under a "strategy" key), extracts the action labels, and pulls the
+    * hero's policy vector by matching the canonical hole cards token against the
+    * strategy map keys.
+    *
+    * @param path      Path to the TexasSolver JSON dump
+    * @param heroToken The hero's hole cards token (e.g., "AcKh") to look up in the strategy
+    */
   private def loadTexasRootStrategy(path: Path, heroToken: String): TexasRootStrategy =
     val json = ujson.read(Files.readString(path, StandardCharsets.UTF_8))
     val container = resolveStrategyContainer(json, path)
@@ -181,6 +235,10 @@ object HoldemCfrTexasSolverJsonAdapter:
       }
     )
 
+  /** Navigates the JSON structure to find the strategy container. TexasSolver
+    * dumps may nest the strategy under a "strategy" key or place actions/strategy
+    * at the root level. This method handles both layouts.
+    */
   private def resolveStrategyContainer(root: Value, path: Path): collection.Map[String, Value] =
     val obj = root.obj
     obj.get("strategy") match
@@ -191,6 +249,13 @@ object HoldemCfrTexasSolverJsonAdapter:
           s"TexasSolver file '$path' does not contain a root strategy object with actions and strategy"
         )
 
+  /** Extracts the hero's policy vector from the TexasSolver strategy map.
+    *
+    * The strategy map is keyed by hand tokens (e.g., "AcKh", "KhAc"). This method
+    * canonicalizes each key using [[CliHelpers.parseHoleCards]] and matches against
+    * the canonical hero token. Validates exactly one match exists and the vector
+    * length matches the expected action count.
+    */
   private def extractHeroPolicy(
       strategyMap: collection.Map[String, Value],
       canonicalHero: String,
@@ -217,6 +282,9 @@ object HoldemCfrTexasSolverJsonAdapter:
     require(policy.exists(_ > 0.0), s"TexasSolver file '$path' contains all-zero policy for '$canonicalHero'")
     policy
 
+  /** Builds the provider JSON object for a single spot, combining the reference
+    * spot's state/hero/villainRange with the TexasSolver's extracted policy.
+    */
   private def buildProviderSpot(
       spot: ReferenceSpot,
       texasStrategy: TexasRootStrategy,
@@ -237,6 +305,10 @@ object HoldemCfrTexasSolverJsonAdapter:
       "player" -> texasStrategy.actingPlayer.map(Num(_)).getOrElse(ujson.Null)
     )
 
+  /** Validates that the TexasSolver's acting player index matches the expected
+    * player, if specified. This catches cases where the solver was run from the
+    * wrong player's perspective (e.g., hero is player 0 but Texas solved for player 1).
+    */
   private def validateExpectedPlayer(
       actualPlayer: Option[Int],
       expectedPlayer: Option[Int],

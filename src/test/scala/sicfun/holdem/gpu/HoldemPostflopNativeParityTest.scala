@@ -8,6 +8,27 @@ import sicfun.core.{Card, DiscreteDistribution}
 
 import java.nio.file.{Files, Paths}
 
+/** Parity tests for [[HoldemPostflopNativeRuntime]] -- verifying that native C/CUDA
+  * postflop equity computation agrees with the pure-JVM exact equity calculation.
+  *
+  * These tests require `sicfun_postflop_native.dll` (CPU) and optionally
+  * `sicfun_postflop_cuda.dll` (GPU) to be present in `src/main/native/build/`.
+  * Tests are skipped when the DLLs are not available.
+  *
+  * Coverage includes:
+  *  - '''Flop Monte Carlo parity''': native MC equity stays within 4% of exact equity
+  *    across diverse flop spots (high cards, flush draws, sets, straight draws).
+  *  - '''Turn Monte Carlo parity''': tighter 3% tolerance with more trials on turn boards.
+  *  - '''River exactness''': with all 5 community cards known, native results must match
+  *    exact equity perfectly (no sampling variance) and be deterministic.
+  *  - '''Overlap validation''': verifies that overlapping cards (hero card on board)
+  *    produce the expected native error (status=127).
+  *  - '''Determinism''': same hero/board/villains/seed produces identical results.
+  *  - '''Auto-engine fallback''': tests that the "auto" engine mode successfully falls
+  *    back to CPU when CUDA is unavailable.
+  *  - '''CUDA engine''': when the GPU DLL is present and CUDA is available, verifies
+  *    that CUDA-forced computation succeeds.
+  */
 class HoldemPostflopNativeParityTest extends FunSuite:
   private val ProviderProperty = "sicfun.postflop.provider"
   private val NativePathProperty = "sicfun.postflop.native.path"
@@ -33,6 +54,9 @@ class HoldemPostflopNativeParityTest extends FunSuite:
   private def board(tokens: String*): Board =
     Board.from(tokens.map(card))
 
+  /** Configures the postflop native runtime in CPU mode and runs the thunk.
+    * Skips gracefully if the native DLL is not found or fails to load.
+    */
   private def withNativeRuntime[A](thunk: => A): Unit =
     if !Files.isRegularFile(nativeDll) then
       println(s"Skipping postflop native parity test: library not found at $nativeDll")
@@ -52,6 +76,9 @@ class HoldemPostflopNativeParityTest extends FunSuite:
           thunk
       }
 
+  /** Runs a single hero-vs-villain postflop native computation and extracts the
+    * single result row. Fails the test if the native call returns an error.
+    */
   private def runSingleNative(
       hero: HoleCards,
       board: Board,

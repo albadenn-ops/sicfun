@@ -2,6 +2,21 @@ package sicfun.holdem.history
 
 import munit.FunSuite
 
+/** Tests for the PostgreSQL schema state detection logic in
+  * [[OpponentProfileStorePersistence]].
+  *
+  * These are pure-logic unit tests (no database connection required) that
+  * verify the `postgresStoreState` function correctly classifies the
+  * schema state as Empty, Ready, or Partial based on the sets of existing
+  * tables and columns:
+  *
+  *   - '''Empty''': no required tables exist -> safe to bootstrap from scratch
+  *   - '''Ready''': all 5 required tables with all required columns present
+  *   - '''Partial (missing tables)''': some tables present, some missing;
+  *     case-insensitive table name matching is verified
+  *   - '''Partial (missing columns)''': all tables exist but a required column
+  *     (e.g. `payload`) was dropped
+  */
 class OpponentProfileStorePersistenceTest extends FunSuite:
   test("postgres store state treats missing store tables as an empty bootstrap state") {
     assertEquals(

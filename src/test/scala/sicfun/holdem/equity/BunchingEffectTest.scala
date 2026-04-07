@@ -6,14 +6,32 @@ import sicfun.core.Card
 
 import scala.util.Random
 
+/**
+  * Tests for the bunching-effect engine and its supporting types (TableFormat, TableRanges).
+  *
+  * Covers:
+  *   - TableFormat preflop ordering correctness and foldsBeforeOpener logic
+  *   - TableRanges default parsing, custom overrides, and open/fold probability queries
+  *   - BunchingEffect input validation (empty folds, villain-in-folds, non-positive trials)
+  *   - Adjusted range properties: dead-card exclusion, normalization, seed determinism
+  *   - Full compute pipeline: bunching delta finiteness, equity trial counts
+  *   - computeForOpener convenience API consistency with explicit fold construction
+  *
+  * Uses low trial counts for speed; these tests verify correctness, not statistical precision.
+  * The CPU preflop backend is forced via system property to avoid GPU dependency in tests.
+  */
 class BunchingEffectTest extends FunSuite:
   private val PreflopBackendProperty = "sicfun.holdem.preflopEquityBackend"
 
+  /** Executes a block with the preflop equity backend forced to CPU,
+    * ensuring tests don't depend on GPU availability.
+    */
   private def withCpuPreflopBackend[A](thunk: => A): A =
     TestSystemPropertyScope.withSystemProperties(
       Vector(PreflopBackendProperty -> Some("cpu"))
     )(thunk)
 
+  // -- Test helpers for card/hand construction --
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 

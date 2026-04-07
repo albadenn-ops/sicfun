@@ -30,6 +30,12 @@ object HeadsUpCanonicalExactTuner:
   private val NativeCudaMaxChunkMatchupsProperty = "sicfun.gpu.native.cuda.maxChunkMatchups"
   private val AllowedOptionKeys = Set("maxMatchups", "seed", "candidates", "warmup")
 
+  /** A single (blockSize, maxChunkMatchups) candidate to benchmark.
+    *
+    * @param name               human-readable label (e.g. "128x512" or "default")
+    * @param blockSize          CUDA threads per block (None = use runtime default)
+    * @param maxChunkMatchups   max matchups per GPU dispatch chunk (None = use runtime default)
+    */
   private final case class Candidate(
       name: String,
       blockSize: Option[Int],
@@ -56,6 +62,10 @@ object HeadsUpCanonicalExactTuner:
     Candidate("256x1024", Some(256), Some(1024))
   )
 
+  /** Entry point. Forces native CUDA provider, runs an optional warmup candidate,
+    * then benchmarks all configured (blockSize x maxChunkMatchups) combinations.
+    * The fastest candidate is reported at the end.
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     require(config.maxMatchups > 0L, "maxMatchups must be positive")
@@ -85,11 +95,15 @@ object HeadsUpCanonicalExactTuner:
     val best = successful.minBy(_._2)
     println(f"best=${best._1} elapsed=${best._2}%.3fs")
 
+  /** Applies a candidate's CUDA parameters (or clears them to use defaults) and runs
+    * a canonical table build, returning elapsed seconds (None on failure).
+    */
   private def runCandidate(
       maxMatchups: Long,
       seed: Long,
       candidate: Candidate
   ): (String, Option[Double]) =
+    // Set or clear the system properties — the native runtime reads these on each batch call.
     candidate.blockSize match
       case Some(value) => sys.props.update(NativeCudaBlockSizeProperty, value.toString)
       case None => sys.props.remove(NativeCudaBlockSizeProperty)
@@ -135,6 +149,9 @@ object HeadsUpCanonicalExactTuner:
       warmup = CliHelpers.requireBooleanOption(options, "warmup", true)
     )
 
+  /** Parses a comma-separated candidate list. Each token is either "default" (use runtime
+    * defaults) or "NxM" where N=blockSize and M=maxChunkMatchups (e.g. "128x512").
+    */
   private def parseCandidates(raw: String): Vector[Candidate] =
     CliHelpers.requireCsvTokens(raw, "candidates").map {
       case value if value.equalsIgnoreCase("default") =>

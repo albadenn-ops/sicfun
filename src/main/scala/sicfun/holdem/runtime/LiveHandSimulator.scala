@@ -14,11 +14,26 @@ import java.util.Locale
 import scala.jdk.CollectionConverters.*
 import scala.util.Random
 
-/** Runnable end-to-end simulator that exercises:
-  *  - ActionModel training
-  *  - Real-time adaptive range inference/decision
-  *  - HandEngine event ingestion + snapshot persistence
-  *  - Signal generation from snapshot + model artifact
+/** Runnable end-to-end simulator that exercises the full SICFUN pipeline:
+  *  - ActionModel training (MultinomialLogistic with synthetic data)
+  *  - Real-time adaptive range inference and decision via [[RealTimeAdaptiveEngine]]
+  *  - HandEngine event ingestion and snapshot persistence
+  *  - Signal generation from snapshot + model artifact via [[GenerateSignals]]
+  *
+  * '''Purpose:'''
+  * This is primarily an integration smoke test / demo runner.  It constructs a fixed
+  * flop scenario (Ts9h8d board), trains a lightweight action model on synthetic data,
+  * seeds the engine with villain observations matching a configurable archetype
+  * (Nit/Tag/Lag/CallingStation/Maniac), runs a hero decision, persists the hand
+  * state snapshot and model artifact to temp files, generates signals, and reports
+  * the result.  Useful for verifying that all components integrate correctly without
+  * needing real hand histories or external services.
+  *
+  * '''Archetype simulation:'''
+  * The `styleActionPool` method maps each [[PlayerArchetype]] to a weighted action
+  * distribution.  For example, a Nit folds 80% and calls 20%, while a Maniac raises
+  * 50%, calls 30%, and folds 20%.  These observations are fed to
+  * [[engine.observeVillainResponseToRaise]] to bias the archetype posterior.
   *
   * Usage:
   *   runMain sicfun.holdem.runtime.LiveHandSimulator [--key=value ...]
@@ -39,6 +54,16 @@ object LiveHandSimulator:
       keepArtifacts: Boolean
   )
 
+  /** Result of a complete simulation run.
+    *
+    * @param bestAction       The action recommended by the adaptive engine.
+    * @param heroEquityMean   Hero's estimated equity (0..1) against the inferred villain range.
+    * @param heroEquityStdErr Standard error of the equity estimate (from Monte Carlo sampling).
+    * @param archetypeMap     The most likely villain archetype after observation seeding.
+    * @param topPosterior     Top N most likely villain hands with probabilities.
+    * @param signalCount      Number of signals generated from the hand snapshot.
+    * @param artifactRoot     Path to the temp directory with artifacts (None if cleaned up).
+    */
   final case class RunResult(
       bestAction: PokerAction,
       heroEquityMean: Double,
@@ -75,9 +100,23 @@ object LiveHandSimulator:
       result <- runConfig(config)
     yield result
 
+  /** Execute the full simulation pipeline with the given configuration.
+    *
+    * Steps:
+    * 1. Build a fixed flop board (Ts9h8d) and two game states (villain observation + hero decision).
+    * 2. Train an action model on synthetic data (strong/medium/weak hands mapped to raise/call/fold).
+    * 3. Create a [[RealTimeAdaptiveEngine]] with the trained model.
+    * 4. Seed the engine with `adaptiveObservations` villain response actions drawn from the
+    *    configured archetype's action pool to bias the Bayesian archetype posterior.
+    * 5. Run the engine's `decide` method to get the hero recommendation.
+    * 6. Build a simulated [[HandState]] snapshot and persist it + the model artifact to temp files.
+    * 7. Run signal generation and read back the signal audit log.
+    * 8. Return the [[RunResult]] with decision, equity, archetype, posterior, and signal count.
+    */
   private def runConfig(config: CliConfig): Either[String, RunResult] =
     try
       val rng = new Random(config.seed)
+      // Fixed flop board for the simulation scenario.
       val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
       require(
         board.cards.forall(cardValue => !config.hero.contains(cardValue)),
@@ -208,6 +247,13 @@ object LiveHandSimulator:
       case e: Exception =>
         Left(s"live hand simulation failed: ${e.getMessage}")
 
+  /** Generate synthetic training data for the action model.
+    *
+    * Maps hand strength to expected actions: strong hands (AA) -> Raise,
+    * medium hands (QcJc) -> Call, weak hands (7c2d) -> Fold.
+    * Also includes Check samples for zero-toCall states.
+    * Each category is replicated 24x (12x for Check) to give the model enough samples.
+    */
   private def syntheticTrainingData(
       state: GameState
   ): Seq[(GameState, HoleCards, PokerAction)] =
@@ -221,6 +267,11 @@ object LiveHandSimulator:
       Vector.fill(24)((state, weak, PokerAction.Fold)) ++
       Vector.fill(12)((checkState, medium, PokerAction.Check))
 
+  /** Build a simulated [[HandState]] by constructing synthetic poker events and replaying
+    * them through [[HandEngine]].  Creates a two-event sequence: villain raises on the flop,
+    * then hero responds with the given action.  Used to test snapshot persistence and signal
+    * generation without needing a real hand history.
+    */
   private def simulatedHandState(board: Board, heroAction: PokerAction): HandState =
     val handId = "live-sim-hand-001"
     val startedAt = 1_800_000_000_000L
@@ -314,6 +365,16 @@ object LiveHandSimulator:
           case _ =>
             Left("--villainStyle must be one of: nit, tag, lag, callingstation, station, maniac")
 
+  /** Map a villain archetype to a weighted action pool for seeding observations.
+    *
+    * Each archetype has a characteristic action distribution (expressed as repeated
+    * elements in a vector, so random selection produces the right frequencies):
+    *  - Nit: 80% fold, 20% call (extremely tight, never raises).
+    *  - Tag: 50% fold, 40% call, 10% raise (tight-aggressive, selective raises).
+    *  - Lag: 30% fold, 50% call, 20% raise (loose-aggressive, frequent raises).
+    *  - CallingStation: 20% fold, 70% call, 10% raise (calls too often, rarely raises).
+    *  - Maniac: 20% fold, 30% call, 50% raise (hyper-aggressive, raise-heavy).
+    */
   private def styleActionPool(archetype: PlayerArchetype): Vector[PokerAction] =
     archetype match
       case PlayerArchetype.Nit =>

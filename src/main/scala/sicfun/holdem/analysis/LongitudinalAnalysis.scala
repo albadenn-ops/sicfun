@@ -117,6 +117,9 @@ object LongitudinalAnalysis:
     val windows = scala.collection.mutable.ArrayBuffer.empty[WindowSnapshot]
     var start = minTs
     var windowIndex = 0
+    // Two-pointer window iteration: `left` and `right` track the half-open interval
+    // [start, end) over the sorted event array. Because both pointers only advance
+    // forward, the overall iteration is O(n) across all windows (not O(n * windows)).
     var left = 0
     var right = 0
     val totalEvents = orderedVector.length
@@ -124,8 +127,10 @@ object LongitudinalAnalysis:
     while start <= maxTs do
       val end = start + config.windowSizeMillis
 
+      // Advance `left` to the first event >= window start.
       while left < totalEvents && orderedVector(left).occurredAtEpochMillis < start do
         left += 1
+      // Advance `right` to the first event >= window end (exclusive boundary).
       while right < totalEvents && orderedVector(right).occurredAtEpochMillis < end do
         right += 1
 
@@ -172,6 +177,10 @@ object LongitudinalAnalysis:
       meanDrift = meanDrift
     )
 
+  /** Converts a [[PokerEvent]] into the (GameState, PokerAction) pair needed by
+    * [[PlayerSignature.compute]]. Reconstructs the game state from the event's
+    * snapshot fields (pot before action, stack before action, etc.).
+    */
   private def eventToObservation(event: PokerEvent): (GameState, PokerAction) =
     (
       GameState(

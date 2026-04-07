@@ -15,7 +15,16 @@ import scala.util.Random
 import scala.util.control.NonFatal
 import scala.util.hashing.MurmurHash3
 
-/** High-level villain archetypes used by the real-time adaptive engine. */
+/** High-level villain archetypes used by the real-time adaptive engine.
+  *
+  * These five categories partition the space of villain playing styles along two axes:
+  *   - '''Tightness''' (range width): Nit < Tag < Lag ~ Maniac ~ CallingStation
+  *   - '''Aggression''' (bet/raise frequency): Nit < CallingStation < Tag < Lag < Maniac
+  *
+  * The adaptive engine maintains a Bayesian posterior over these archetypes
+  * (see [[ArchetypePosterior]]) and updates it online as villain actions are observed.
+  * The posterior is used to blend response profiles for EV estimation.
+  */
 enum PlayerArchetype:
   case Nit
   case Tag
@@ -23,7 +32,16 @@ enum PlayerArchetype:
   case CallingStation
   case Maniac
 
-/** Normalized posterior over villain archetypes. */
+/** Normalized posterior distribution over villain archetypes.
+  *
+  * Invariants:
+  *   - Must define a weight for every PlayerArchetype (all 5 archetypes).
+  *   - All weights must be finite and non-negative.
+  *   - Weights must sum to 1.0 (within 1e-9 tolerance).
+  *
+  * The MAP (Maximum A Posteriori) estimate is the archetype with the highest weight,
+  * accessible via [[mapEstimate]].
+  */
 final case class ArchetypePosterior(weights: Map[PlayerArchetype, Double]):
   require(weights.nonEmpty, "archetype posterior must be non-empty")
   require(
@@ -50,12 +68,28 @@ object ArchetypePosterior:
     val p = 1.0 / archetypes.length.toDouble
     ArchetypePosterior(archetypes.map(a => a -> p).toMap)
 
-/** Small telemetry snapshot for inference caching efficiency. */
+/** Telemetry snapshot for posterior inference cache hit/miss tracking.
+  * Used to monitor caching efficiency in performance diagnostics.
+  */
 final case class AdaptiveCacheStats(inferenceHits: Long, inferenceMisses: Long):
   require(inferenceHits >= 0L, "inferenceHits must be non-negative")
   require(inferenceMisses >= 0L, "inferenceMisses must be non-negative")
 
-/** Optional equilibrium baseline configuration (CFR) for exploitability-aware blending. */
+/** Configuration for the optional CFR equilibrium baseline that can be blended with
+  * the adaptive recommendation.
+  *
+  * When enabled, the engine solves a shallow CFR game at each decision point and
+  * either blends the CFR policy with the adaptive policy ([[blendWeight]]) or uses
+  * the CFR policy as a guardrail to prevent the adaptive policy from drifting too
+  * far from equilibrium.
+  *
+  * Two trust gates control when the baseline is applied:
+  *   1. '''Local exploitability gate''': if the CFR solve's local exploitability exceeds
+  *      [[maxLocalExploitabilityForTrust]], the baseline is untrusted and the adaptive
+  *      recommendation is used alone.
+  *   2. '''Action regret guardrail''': if the blended action's regret vs. the CFR best
+  *      action exceeds [[maxBaselineActionRegret]], the CFR best action overrides.
+  */
 final case class EquilibriumBaselineConfig(
     iterations: Int = 1_200,
     blendWeight: Double = 0.35,
@@ -88,6 +122,11 @@ final case class EquilibriumBaselineConfig(
     "villainReraiseMultipliers must be finite and > 1.0"
   )
 
+/** Tracks which decision path produced the final recommendation.
+  *   - AdaptiveOnly: pure adaptive (no baseline or baseline untrusted/unavailable)
+  *   - BlendedWithBaseline: adaptive EV blended with CFR baseline EV
+  *   - BaselineGuardrail: CFR best action overrode adaptive due to excessive regret
+  */
 enum AdaptationDecisionSource:
   case AdaptiveOnly
   case BlendedWithBaseline
@@ -211,14 +250,14 @@ final class RealTimeAdaptiveEngine(
         )
     }.toMap
 
-  private val adaptiveResponseModel = new UniformVillainResponseModel:
-    override def responseProfile(
-        state: GameState,
-        heroAction: PokerAction
-    ): VillainResponseProfile =
-      heroAction match
-        case PokerAction.Raise(_) => blendedRaiseResponse(archetypePosteriorRef.get())
-        case _ => VillainResponseProfile(0.0, 1.0, 0.0)
+  // Hand-strength-aware response model: modulates the blended archetype
+  // fold/call/raise profile by each villain hand's strength.  Strong villain
+  // hands fold less (and raise more), weak hands fold more.  This fixes the
+  // critical bug where fold equity was identical for hero raises with AA vs 23o.
+  private val adaptiveResponseModel: VillainResponseModel =
+    new HandStrengthResponseModel(
+      baseProfileFn = () => blendedRaiseResponse(archetypePosteriorRef.get())
+    )
 
   def archetypePosterior: ArchetypePosterior = archetypePosteriorRef.get()
 
@@ -501,6 +540,9 @@ final class RealTimeAdaptiveEngine(
       throw new IllegalArgumentException(s"villain position $villainPos is not part of table format")
     )
 
+  /** Truncates a range to at most maxHands by keeping the highest-probability hands.
+    * Used for the low-latency posterior path to keep equity calculations bounded.
+    */
   private def compactRange(
       range: DiscreteDistribution[HoleCards],
       maxHands: Int
@@ -632,6 +674,10 @@ final class RealTimeAdaptiveEngine(
       bestAction = baseline.bestAction
     )
 
+  /** Blends adaptive and baseline EVs using linear interpolation:
+    * blendedEV = (1 - weight) * adaptiveEV + weight * baselineEV.
+    * Picks the action with the highest blended EV.
+    */
   private def blendRecommendationWithBaseline(
       baseRecommendation: ActionRecommendation,
       baseline: HoldemCfrSolution,
@@ -653,6 +699,10 @@ final class RealTimeAdaptiveEngine(
       bestAction = best.action
     )
 
+  /** Computes the regret of choosing `chosenAction` vs. the CFR best action.
+    * Regret = max(0, bestBaselineEV - chosenActionEV). Returns +Inf if the chosen
+    * action is not in the baseline's evaluation set.
+    */
   private def baselineActionRegret(
       baseline: HoldemCfrSolution,
       chosenAction: PokerAction

@@ -85,6 +85,10 @@ object HeadsUpBackendComparison:
       throughput: Double
   )
 
+  /** Entry point. Runs warmup iterations, then timed runs on all three backends (JVM CPU,
+    * native CPU, native CUDA), validates native results against the JVM baseline, and
+    * reports three speedup ratios: native-cpu/jvm, native-cuda/jvm, native-cuda/native-cpu.
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     require(config.cpuParallelism > 0, "cpuParallelism must be positive")

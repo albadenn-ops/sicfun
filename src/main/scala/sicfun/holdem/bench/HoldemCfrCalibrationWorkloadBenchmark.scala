@@ -17,6 +17,13 @@ object HoldemCfrCalibrationWorkloadBenchmark:
       seed: Long = 42L
   )
 
+  /** Entry point. Runs a HeadsUpSimulator self-play loop with a CFR villain for the
+    * configured number of hands. Reports cache hit rate, wall time per hand, solve time
+    * breakdown by provider, and profiled native stage breakdown (prepare/spec/solve/unpack).
+    *
+    * The workload is realistic: it includes posterior caching, auto-provider selection,
+    * and villain range inference — not just isolated CFR solves.
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     validateConfig(config)

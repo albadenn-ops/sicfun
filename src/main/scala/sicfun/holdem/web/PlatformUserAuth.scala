@@ -15,7 +15,33 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 import scala.util.control.NonFatal
 
-/** Lightweight platform user-auth module (local credentials + optional OIDC providers). */
+/** Lightweight platform user-auth module (local credentials + optional OIDC providers).
+  *
+  * Provides a complete authentication system for the hand-history review web UI:
+  *
+  * '''Local auth:'''
+  *   - Password hashing via PBKDF2WithHmacSHA256 (210,000 iterations, 256-bit key, 128-bit salt)
+  *   - Registration (email + password) and login with rate limiting
+  *   - User profiles with display name, preferred hero name, site, and timezone
+  *
+  * '''OIDC auth:'''
+  *   - Google OIDC with PKCE (Proof Key for Code Exchange) for public clients
+  *   - State parameter verification to prevent CSRF attacks on the OAuth flow
+  *   - Automatic account linking when OIDC email matches an existing local account
+  *
+  * '''Session management:'''
+  *   - 32-byte cryptographically random session tokens
+  *   - Configurable TTL (default 12 hours)
+  *   - CSRF tokens generated per session for mutation endpoint protection
+  *   - HttpOnly, SameSite=Lax cookie attributes (optionally Secure for HTTPS)
+  *
+  * '''Storage:'''
+  *   - JSON file-based user store (designed for single-instance deployments)
+  *   - In-memory session store (sessions lost on restart)
+  *   - In-memory OIDC state store with TTL-based cleanup
+  *
+  * @see [[HandHistoryReviewServer]] which integrates this module for auth middleware
+  */
 object PlatformUserAuth:
   private val LocalProviderId = "local"
   private val DefaultSessionCookieName = "sicfun_session"

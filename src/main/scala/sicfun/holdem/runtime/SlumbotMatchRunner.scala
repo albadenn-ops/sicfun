@@ -2,7 +2,7 @@ package sicfun.holdem.runtime
 
 import sicfun.core.Card
 import sicfun.holdem.cli.CliHelpers
-import sicfun.holdem.engine.{HeroDecisionPipeline, VillainObservation}
+import sicfun.holdem.engine.{EquilibriumBaselineConfig, HeroDecisionPipeline, VillainObservation}
 import sicfun.holdem.equity.{PreflopFold, TableFormat, TableRanges}
 import sicfun.holdem.model.{CalibrationGate, CalibrationSummary, ModelVersion, PokerActionModel, PokerActionModelArtifactIO, TrainedPokerActionModel}
 import sicfun.holdem.types.*
@@ -18,12 +18,36 @@ import scala.util.Random
 
 import ujson.{Num, Obj, Str, Value}
 
-/** Slumbot action-string parser/encoder mirroring heads-up betting-state semantics. */
+/** Slumbot action-string parser/encoder for heads-up no-limit Hold'em.
+  *
+  * Translates between the Slumbot HTTP API's compact action-string format and SICFUN's
+  * internal [[PokerAction]] / [[GameState]] types.  The Slumbot format uses:
+  *  - `k` for check, `c` for call, `f` for fold, `bNNN` for bet/raise to NNN chips.
+  *  - `/` as the street delimiter (preflop/flop/turn/river).
+  *  - Fixed 50/100 blinds with 20,000-chip stacks (200 BB).
+  *
+  * '''Key differences from ACPC protocol:'''
+  *  - Check is `k` (not embedded in `c`).
+  *  - Raise target is a street-relative chip amount after `b` (not a total hand contribution).
+  *  - All values are in chips (not big blinds); conversion uses `chipsToBb` / `bbToChips`.
+  *
+  * '''Seat mapping:'''
+  *  - Actual player 0 = big blind (out of position postflop).
+  *  - Actual player 1 = button/small blind (in position postflop).
+  *  - Preflop: button (player 1) acts first; postflop: big blind (player 0) acts first.
+  *
+  * @see [[SlumbotMatchRunner]] for the match runner that uses this codec.
+  */
 private[holdem] object SlumbotActionCodec:
   val SmallBlindChips = 50
   val BigBlindChips = 100
   val StackSizeChips = 20000
 
+  /** A single parsed action step within a Slumbot action string.
+    *
+    * Captures the actor, the action taken, and the full game state before the action was applied
+    * (for villain observation recording and archetype learning).
+    */
   final case class ActionStep(
       actualActor: Int,
       relativeActor: Int,
@@ -35,6 +59,12 @@ private[holdem] object SlumbotActionCodec:
       lastBetSizeBeforeChips: Int
   )
 
+  /** Fully reconstructed state after parsing a Slumbot action string.
+    *
+    * Contains the current street, board, pot, to-call, stack remaining, per-player chip
+    * contributions, bet history, and all parsed action steps.  Also tracks whether the
+    * hand is over (fold or all-in resolution) and who acts next.
+    */
   final case class ParsedActionState(
       action: String,
       heroActual: Int,
@@ -71,6 +101,18 @@ private[holdem] object SlumbotActionCodec:
           )
         )
 
+  /** Parse a Slumbot action string into a fully reconstructed [[ParsedActionState]].
+    *
+    * Walks the action string character by character, maintaining a complete betting state
+    * machine (street contributions, bet levels, min-raise tracking, street advancement).
+    * Each action token (`k`/`c`/`f`/`bNNN`) produces an [[ActionStep]] with the pre-action
+    * state snapshot.
+    *
+    * @param action     Raw Slumbot action string (e.g., "b200c/kb300").
+    * @param heroActual Actual player index for the hero (0 = BB, 1 = BTN).
+    * @param fullBoard  The full dealt board (up to 5 cards); sliced per street.
+    * @return           `Right(ParsedActionState)` on success, `Left(error)` on illegal input.
+    */
   def parse(
       action: String,
       heroActual: Int,
@@ -284,6 +326,11 @@ private[holdem] object SlumbotActionCodec:
     catch
       case error: IllegalArgumentException => Left(error.getMessage)
 
+  /** Encode a [[PokerAction]] as a Slumbot action increment string for the API.
+    *
+    * Maps Fold -> "f", Check/Call -> "k"/"c" (based on to-call), and Raise -> "bNNN"
+    * where NNN is the new street-level bet-to in chips.
+    */
   def incrementForAction(parsed: ParsedActionState, action: PokerAction): String =
     action match
       case PokerAction.Fold => "f"
@@ -354,7 +401,37 @@ private[holdem] object SlumbotActionCodec:
   private def relativeActorId(actualActor: Int, heroActual: Int): Int =
     if actualActor == heroActual then 0 else 1
 
-/** Match runner that plays hands against Slumbot HTTP endpoints. */
+/** Match runner that plays heads-up hands against the Slumbot HTTP API.
+  *
+  * Slumbot (slumbot.com) is a publicly available poker bot built on neural-network CFR.
+  * This runner connects to its JSON API, plays a configurable number of hands, and logs
+  * decisions and outcomes for offline analysis.
+  *
+  * '''Match lifecycle:'''
+  *  1. Call `/api/new_hand` to start a session and receive hole cards + client position.
+  *  2. Parse the Slumbot action string to reconstruct game state.
+  *  3. When it's hero's turn, run the decision pipeline (adaptive or GTO) and send the
+  *     chosen action via `/api/act`.
+  *  4. Repeat until the hand is terminal (winnings field appears in the response).
+  *  5. Record the outcome and start the next hand using the session token.
+  *
+  * '''Hero modes:'''
+  *  - `Adaptive` — Uses [[RealTimeAdaptiveEngine]] with Bayesian range inference and
+  *    archetype learning from villain raise responses.
+  *  - `Gto` — Uses [[HeroDecisionPipeline.decideHero]] with CFR-based equilibrium solving.
+  *
+  * '''Output artifacts:'''
+  *  - `hands.tsv` — Per-hand log with position, hole cards, board, winnings, and action string.
+  *  - `decisions.tsv` — Per-decision log with state, candidates, chosen action, and wire action.
+  *  - `summary.txt` — Aggregate statistics via [[MatchRunnerSupport.writeSummary]].
+  *
+  * '''Resilience:'''
+  *  - HTTP requests retry up to 3 times with 300ms backoff on failure.
+  *  - The API client validates response structure and reports Slumbot-side errors.
+  *
+  * @see [[SlumbotActionCodec]] for the action string parser/encoder.
+  * @see [[AcpcMatchRunner]] for the similar runner that uses the ACPC TCP protocol.
+  */
 object SlumbotMatchRunner:
   private final case class Config(
       hands: Int,
@@ -369,9 +446,22 @@ object SlumbotMatchRunner:
       cfrVillainHands: Int,
       cfrEquityTrials: Int,
       seed: Long,
-      timeoutMillis: Long
+      timeoutMillis: Long,
+      enableBaseline: Boolean,
+      baselineBlendWeight: Double,
+      decisionBudgetMillis: Long
   )
 
+  /** Parsed JSON response from a Slumbot API call.
+    *
+    * @param oldAction   Action string before the latest server-side action (for delta tracking).
+    * @param action      Current cumulative action string including all actions so far.
+    * @param clientPos   Hero's actual player index (0 = BB, 1 = BTN).
+    * @param holeCards   Hero's hole cards as 2-char tokens (e.g., ["As", "Ah"]).
+    * @param board       Community cards as 2-char tokens (grows as streets are dealt).
+    * @param token       Session token for continuing the match (passed to subsequent calls).
+    * @param winnings    Present only when the hand is terminal; hero's signed chip result.
+    */
   private final case class SlumbotApiResponse(
       oldAction: String,
       action: String,
@@ -379,20 +469,29 @@ object SlumbotMatchRunner:
       holeCards: Vector[String],
       board: Vector[String],
       token: Option[String],
-      winnings: Option[Int]
+      winnings: Option[Int],
+      oppHoleCards: Vector[String]
   )
 
+  /** Result of a single completed Slumbot hand, used for logging and statistics. */
   private final case class HandOutcome(
       token: String,
       heroPosition: Position,
       heroHole: HoleCards,
+      villainHole: Option[HoleCards],
       board: Board,
       finalAction: String,
       winningsChips: Int,
       decisionCount: Int,
-      villainObservationCount: Int
+      villainObservationCount: Int,
+      villainObservations: Vector[VillainObservation]
   )
 
+  /** HTTP client wrapper for the Slumbot JSON API.
+    *
+    * Handles serialization/deserialization with ujson, retries (up to 3 attempts with
+    * 300ms backoff), and error extraction from the `error_msg` response field.
+    */
   private final class SlumbotApiClient(baseUrl: String, timeoutMillis: Long):
     private val client = HttpClient.newBuilder()
       .connectTimeout(Duration.ofMillis(math.max(1000L, timeoutMillis)))
@@ -447,7 +546,8 @@ object SlumbotMatchRunner:
         holeCards = obj.get("hole_cards").map(asStringVector).getOrElse(Vector.empty),
         board = obj.get("board").map(asStringVector).getOrElse(Vector.empty),
         token = obj.get("token").map(_.str),
-        winnings = obj.get("winnings").map(asInt)
+        winnings = obj.get("winnings").map(asInt),
+        oppHoleCards = obj.get("bot_hole_cards").map(asStringVector).getOrElse(Vector.empty)
       )
 
     private def asInt(value: Value): Int =
@@ -485,9 +585,13 @@ object SlumbotMatchRunner:
   def run(args: Array[String]): Either[String, MatchRunnerSupport.RunSummary] =
     parseArgs(args).flatMap(config => new Runner(config).run())
 
+  /** Orchestrates a Slumbot match: plays hands via the API, runs hero decisions,
+    * logs outcomes and decision traces, and writes a final summary.
+    */
   private final class Runner(config: Config):
     private val handsPath = config.outDir.resolve("hands.tsv")
     private val decisionsPath = config.outDir.resolve("decisions.tsv")
+    private val showdownsPath = config.outDir.resolve("showdowns.tsv")
     private val summaryPath = config.outDir.resolve("summary.txt")
 
     private val tableRanges = TableRanges.defaults(TableFormat.NineMax)
@@ -496,15 +600,26 @@ object SlumbotMatchRunner:
 
     private var handsWriterOpt = Option.empty[BufferedWriter]
     private var decisionsWriterOpt = Option.empty[BufferedWriter]
+    private var showdownsWriterOpt = Option.empty[BufferedWriter]
 
     private val stats = new MatchRunnerSupport.MatchStatistics()
 
     private val (artifact, modelId) = loadArtifact(config)
+    private val baselineConfig =
+      if config.enableBaseline then
+        Some(EquilibriumBaselineConfig(
+          iterations = config.cfrIterations,
+          blendWeight = config.baselineBlendWeight,
+          maxVillainHands = config.cfrVillainHands,
+          equityTrials = config.cfrEquityTrials
+        ))
+      else None
     private val engine = HeroDecisionPipeline.newAdaptiveEngine(
       tableRanges = tableRanges,
       model = artifact.model,
       bunchingTrials = config.bunchingTrials,
-      equityTrials = config.equityTrials
+      equityTrials = config.equityTrials,
+      equilibriumBaselineConfig = baselineConfig
     )
     private val api = new SlumbotApiClient(config.baseUrl, config.timeoutMillis)
 
@@ -513,11 +628,13 @@ object SlumbotMatchRunner:
         Files.createDirectories(config.outDir)
         handsWriterOpt = Some(Files.newBufferedWriter(handsPath, StandardCharsets.UTF_8))
         decisionsWriterOpt = Some(Files.newBufferedWriter(decisionsPath, StandardCharsets.UTF_8))
-        writeLine(handsWriter, "hand\theroPosition\theroHole\tboard\twinningsChips\twinningsBb\tdecisions\tvillainObservations\taction")
+        showdownsWriterOpt = Some(Files.newBufferedWriter(showdownsPath, StandardCharsets.UTF_8))
+        writeLine(handsWriter, "hand\theroPosition\theroHole\tvillainHole\tboard\twinningsChips\twinningsBb\tdecisions\tvillainObservations\taction")
         writeLine(
           decisionsWriter,
           "hand\tdecisionIndex\tstreet\theroPosition\tpotBeforeBb\ttoCallBb\tstackBb\tcandidates\tchosenAction\tapiAction"
         )
+        writeLine(showdownsWriter, "street\tboard\tpotBefore\ttoCall\tposition\tstackBefore\taction\tholeCards")
 
         var tokenOpt = Option.empty[String]
         var handNo = 1
@@ -526,6 +643,7 @@ object SlumbotMatchRunner:
           tokenOpt = Some(outcome.token)
           recordOutcome(outcome)
           appendHandLog(handNo, outcome)
+          appendShowdownTrainingData(outcome)
           maybeReport(handNo)
           handNo += 1
 
@@ -538,7 +656,17 @@ object SlumbotMatchRunner:
       finally
         handsWriterOpt.foreach(closeQuietly)
         decisionsWriterOpt.foreach(closeQuietly)
+        showdownsWriterOpt.foreach(closeQuietly)
 
+    /** Play a single hand against Slumbot.
+      *
+      * Calls `newHand` to get hole cards and position, then loops: parse the action string,
+      * collect villain observations, and when it's hero's turn, run the decision pipeline
+      * and send the action via `act`.  Continues until the response contains `winnings`.
+      *
+      * Villain raise-response tracking: when hero raises and the next villain action arrives,
+      * it's fed to the engine for archetype learning.
+      */
     private def playHand(handNo: Int, tokenOpt: Option[String]): HandOutcome =
       var response = api.newHand(tokenOpt)
       var token = response.token.orElse(tokenOpt).getOrElse(
@@ -581,15 +709,21 @@ object SlumbotMatchRunner:
 
         response.winnings match
           case Some(winnings) =>
+            val villainHole =
+              if response.oppHoleCards.length == 2 then
+                Some(parseHoleCards(response.oppHoleCards))
+              else None
             return HandOutcome(
               token = token,
               heroPosition = heroPosition,
               heroHole = heroHole,
+              villainHole = villainHole,
               board = board,
               finalAction = response.action,
               winningsChips = winnings,
               decisionCount = decisionIndex,
-              villainObservationCount = villainObservations.length
+              villainObservationCount = villainObservations.length,
+              villainObservations = villainObservations
             )
           case None =>
             if parsed.nextActorActual != heroActual then
@@ -638,7 +772,8 @@ object SlumbotMatchRunner:
           cfrIterations = config.cfrIterations,
           cfrVillainHands = config.cfrVillainHands,
           cfrEquityTrials = config.cfrEquityTrials,
-          rng = rng
+          rng = rng,
+          decisionBudgetMillis = Some(config.decisionBudgetMillis)
         )
       )
 
@@ -669,6 +804,7 @@ object SlumbotMatchRunner:
           handNo.toString,
           outcome.heroPosition.toString,
           outcome.heroHole.toToken,
+          outcome.villainHole.map(_.toToken).getOrElse("-"),
           outcome.board.cards.map(_.toToken).mkString,
           outcome.winningsChips.toString,
           PokerFormatting.fmtDouble(outcome.winningsChips.toDouble / SlumbotActionCodec.BigBlindChips.toDouble, 3),
@@ -713,6 +849,39 @@ object SlumbotMatchRunner:
 
     private def decisionsWriter: BufferedWriter =
       decisionsWriterOpt.getOrElse(throw new IllegalStateException("decisions writer not initialized"))
+
+    private def showdownsWriter: BufferedWriter =
+      showdownsWriterOpt.getOrElse(throw new IllegalStateException("showdowns writer not initialized"))
+
+    /** Write villain observation training data for hands that reached showdown.
+      *
+      * For each villain action in a showdown hand, writes a row to showdowns.tsv
+      * pairing the action with the villain's revealed hole cards.  This produces
+      * supervised training data for the action model: P(action | hand, state).
+      */
+    private def appendShowdownTrainingData(outcome: HandOutcome): Unit =
+      outcome.villainHole.foreach { vHole =>
+        outcome.villainObservations.foreach { obs =>
+          val state = obs.state
+          val boardStr =
+            if state.board.size == 0 then "-"
+            else state.board.cards.map(_.toToken).mkString(" ")
+          val actionStr = PokerFormatting.renderAction(obs.action)
+          writeLine(
+            showdownsWriter,
+            Vector(
+              state.street.toString,
+              boardStr,
+              PokerFormatting.fmtDouble(state.pot, 3),
+              PokerFormatting.fmtDouble(state.toCall, 3),
+              state.position.toString,
+              PokerFormatting.fmtDouble(state.stackSize, 3),
+              actionStr,
+              vHole.toToken
+            ).mkString("\t")
+          )
+        }
+      }
 
   private def loadArtifact(config: Config): (TrainedPokerActionModel, String) =
     config.modelArtifactDir match
@@ -794,6 +963,11 @@ object SlumbotMatchRunner:
         seed <- CliHelpers.parseLongOptionEither(options, "seed", 42L)
         timeoutMillis <- CliHelpers.parseLongOptionEither(options, "timeoutMillis", 15000L)
         _ <- if timeoutMillis > 0L then Right(()) else Left("--timeoutMillis must be > 0")
+        enableBaseline = options.get("enableBaseline").exists(_.toLowerCase(Locale.ROOT) == "true")
+        baselineBlendWeight <- CliHelpers.parseDoubleOptionEither(options, "baselineBlendWeight", 0.35)
+        _ <- if baselineBlendWeight >= 0.0 && baselineBlendWeight <= 1.0 then Right(()) else Left("--baselineBlendWeight must be in [0, 1]")
+        decisionBudgetMillis <- CliHelpers.parseLongOptionEither(options, "decisionBudgetMillis", 1L)
+        _ <- if decisionBudgetMillis > 0L then Right(()) else Left("--decisionBudgetMillis must be > 0")
       yield
         Config(
           hands = hands,
@@ -808,7 +982,10 @@ object SlumbotMatchRunner:
           cfrVillainHands = cfrVillainHands,
           cfrEquityTrials = cfrEquityTrials,
           seed = seed,
-          timeoutMillis = timeoutMillis
+          timeoutMillis = timeoutMillis,
+          enableBaseline = enableBaseline,
+          baselineBlendWeight = baselineBlendWeight,
+          decisionBudgetMillis = decisionBudgetMillis
         )
 
   private def parseOutDir(options: Map[String, String]): Either[String, Path] =

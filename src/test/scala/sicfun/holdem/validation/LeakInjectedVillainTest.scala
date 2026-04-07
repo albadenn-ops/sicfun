@@ -4,6 +4,20 @@ import munit.FunSuite
 import sicfun.core.{Card, Rank, Suit}
 import sicfun.holdem.types.{Board, PokerAction, Position, Street}
 
+/** Tests for [[LeakInjectedVillain]], the simulated opponent wrapper
+  * that applies [[InjectedLeak]] deviations on top of a GTO baseline.
+  *
+  * Validates three key behaviors:
+  *   1. When no leak's predicate matches the current spot, the villain
+  *      passes through the GTO action unchanged (leakFired = false).
+  *   2. When a leak does apply (e.g. OverfoldsToAggression on a wet
+  *      river with a large facing bet and a weak capped hand), the
+  *      villain deviates to the leak's prescribed action and reports
+  *      the leak ID in the decision result.
+  *   3. Baseline noise (independent of any leak) randomly perturbs the
+  *      chosen action at the configured noise rate, producing a
+  *      statistically predictable number of deviations over many trials.
+  */
 class LeakInjectedVillainTest extends FunSuite:
 
   test("villain returns GTO action when no leak applies"):

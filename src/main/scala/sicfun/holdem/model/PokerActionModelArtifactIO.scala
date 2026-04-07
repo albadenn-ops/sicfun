@@ -9,7 +9,25 @@ import java.nio.file.{Files, Path, Paths}
 import java.util.Properties
 import scala.jdk.CollectionConverters.*
 
-/** Serializes and deserializes [[TrainedPokerActionModel]] artifacts to/from a directory.
+/**
+ * Directory-based artifact persistence for trained poker action models in sicfun.
+ *
+ * This object handles the full save/load lifecycle for [[TrainedPokerActionModel]] artifacts.
+ * Each artifact is stored as a directory containing four files that separate metadata from
+ * numeric parameters, enabling easy inspection and comparison between model versions.
+ *
+ * Key design decisions:
+ *   - '''Four-file layout''': Metadata (Properties), weights (TSV matrix), bias (TSV vector),
+ *     and category index (TSV mapping) are stored separately. This allows diffing individual
+ *     components and inspecting metadata without loading the full weight matrix.
+ *   - '''Lossless numeric round-tripping''': All doubles are serialized with
+ *     [[java.lang.Double.toString]], which preserves all 64 bits of IEEE 754 precision.
+ *   - '''Format versioning''': The `format.version` key in metadata allows future schema
+ *     evolution without breaking existing artifacts.
+ *   - '''Lifecycle state persistence''': Retirement timestamp and reason are stored in
+ *     metadata, so a model's full lifecycle is recoverable from the artifact directory alone.
+ *
+ * Serializes and deserializes [[TrainedPokerActionModel]] artifacts to/from a directory.
   *
   * '''Directory layout:'''
   *   - `metadata.properties` — model version, calibration summary, gate config, sample counts
@@ -98,6 +116,9 @@ object PokerActionModelArtifactIO:
       retirementReason = readOptional(metadata, "lifecycle.retirementReason")
     )
 
+  /** Writes all model metadata to a Java Properties file, including version info,
+   * calibration metrics, gate thresholds, sample counts, evaluation strategy, and lifecycle state.
+   */
   private def writeMetadata(path: Path, artifact: TrainedPokerActionModel): Unit =
     val props = Properties()
     props.setProperty("format.version", FormatVersion)
@@ -132,6 +153,7 @@ object PokerActionModelArtifactIO:
     }
     props
 
+  /** Writes the weight matrix as a TSV file, one row per class (tab-delimited feature weights). */
   private def writeWeights(path: Path, weights: Vector[Vector[Double]]): Unit =
     withWriter(path) { writer =>
       weights.foreach { row =>
@@ -140,6 +162,7 @@ object PokerActionModelArtifactIO:
       }
     }
 
+  /** Reads the weight matrix TSV, validating row and column counts match the metadata. */
   private def readWeights(path: Path, expectedRows: Int, expectedCols: Int): Vector[Vector[Double]] =
     require(Files.exists(path), s"missing weights file: $path")
     val lines = Files.readAllLines(path, StandardCharsets.UTF_8).asScala.toVector.filter(_.nonEmpty)
@@ -150,12 +173,14 @@ object PokerActionModelArtifactIO:
       cols.map(_.toDouble)
     }
 
+  /** Writes the bias vector as a single tab-delimited TSV row. */
   private def writeBias(path: Path, bias: Vector[Double]): Unit =
     withWriter(path) { writer =>
       writer.write(bias.map(java.lang.Double.toString).mkString("\t"))
       writer.newLine()
     }
 
+  /** Reads the bias vector from a single-row TSV file, validating the expected element count. */
   private def readBias(path: Path, expectedCount: Int): Vector[Double] =
     require(Files.exists(path), s"missing bias file: $path")
     val lines = Files.readAllLines(path, StandardCharsets.UTF_8).asScala.toVector.filter(_.nonEmpty)
@@ -164,6 +189,7 @@ object PokerActionModelArtifactIO:
     require(values.length == expectedCount, s"expected $expectedCount bias values, got ${values.length}")
     values
 
+  /** Writes the category-to-index mapping as a two-column TSV (category name, index), sorted by index. */
   private def writeCategoryIndex(path: Path, categoryIndex: Map[PokerAction.Category, Int]): Unit =
     val rows = categoryIndex.toVector.sortBy(_._2)
     withWriter(path) { writer =>
@@ -173,6 +199,7 @@ object PokerActionModelArtifactIO:
       }
     }
 
+  /** Reads the category-to-index mapping from a two-column TSV file, validating no duplicates. */
   private def readCategoryIndex(path: Path): Map[PokerAction.Category, Int] =
     require(Files.exists(path), s"missing category index file: $path")
     val rows = Files.readAllLines(path, StandardCharsets.UTF_8).asScala.toVector.filter(_.nonEmpty)

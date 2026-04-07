@@ -51,6 +51,20 @@ object Dynamics:
           id -> state
     }
 
+  /** Full rival-state update under a specific chain world (Def 23, world-aware overload).
+    *
+    * Extracts the appropriate JointKernelProfile from a WorldIndexedKernelProfile
+    * for the given ChainWorld and applies it.
+    */
+  def fullRivalUpdate[M <: RivalBeliefState](
+      rivalStates: Map[PlayerId, M],
+      signal: TotalSignal,
+      publicState: PublicState,
+      worldProfile: WorldIndexedKernelProfile[M],
+      world: ChainWorld
+  ): Map[PlayerId, M] =
+    fullRivalUpdate(rivalStates, signal, publicState, worldProfile.forWorld(world))
+
   /** Counterfactual reference world (Def 24).
     *
     * The non-manipulative counterfactual world is the joint reference
@@ -65,6 +79,20 @@ object Dynamics:
       refProfile: JointKernelProfile[M]
   ): Map[PlayerId, M] =
     fullRivalUpdate(rivalStates, signal, publicState, refProfile)
+
+  /** Counterfactual reference world with explicit ChainWorld (Def 24, world-aware overload).
+    *
+    * Uses ChainWorld(Ref, Off) or ChainWorld(Ref, On) to select the correct
+    * reference kernel from a WorldIndexedKernelProfile.
+    */
+  def counterfactualReferenceWorld[M <: RivalBeliefState](
+      rivalStates: Map[PlayerId, M],
+      signal: TotalSignal,
+      publicState: PublicState,
+      worldProfile: WorldIndexedKernelProfile[M],
+      world: ChainWorld
+  ): Map[PlayerId, M] =
+    fullRivalUpdate(rivalStates, signal, publicState, worldProfile, world)
 
   /** Full dynamics step: rival update + exploitation update.
     *

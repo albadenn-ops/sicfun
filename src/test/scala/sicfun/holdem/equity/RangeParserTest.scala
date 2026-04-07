@@ -4,12 +4,30 @@ import sicfun.holdem.types.*
 import munit.FunSuite
 import sicfun.core.Card
 
+/**
+  * Tests for the poker range notation parser.
+  *
+  * Verifies correct combo counts for all notation types:
+  *   - Suited (AKs = 4), offsuit (AKo = 12), any (AK = 16)
+  *   - Pair plus ranges (QQ+ = 18 = 3 pairs * 6 combos)
+  *   - Non-pair plus ranges (ATs+ = 16 = 4 kickers * 4 suited combos)
+  *   - Pair dash ranges (99-66 = 24 = 4 pairs * 6 combos)
+  *   - Suited dash ranges (A5s-A2s = 16 = 4 kickers * 4 suited combos)
+  *
+  * Also tests:
+  *   - Overlap deduplication: "AK, AKs" produces 16 hands (not 20), with suited double-weighted
+  *   - Weighted tokens: colon, at-sign, and percentage weight separators
+  *   - Weight accumulation for overlapping tokens
+  *   - Error handling: empty ranges, malformed weights, invalid suitedness, incompatible ranges
+  */
 class RangeParserTest extends FunSuite:
+  /** Helper: parses a range and returns the number of distinct concrete hands. */
   private def count(range: String): Int =
     RangeParser.parseWithHands(range) match
       case Left(err) => fail(err)
       case Right(result) => result.hands.size
 
+  /** Helper: parses a range and returns the probability assigned to a specific hand. */
   private def prob(range: String, a: String, b: String): Double =
     RangeParser.parseWithHands(range) match
       case Left(err) => fail(err)

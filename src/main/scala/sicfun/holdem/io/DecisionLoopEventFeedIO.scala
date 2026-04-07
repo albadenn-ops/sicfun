@@ -8,7 +8,30 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import scala.jdk.CollectionConverters.*
 
-/** Reads an append-only TSV event feed for the always-on decision loop.
+/**
+ * Append-only TSV event feed reader and writer for the sicfun real-time decision loop.
+ *
+ * This is the primary I/O layer for the always-on poker advisor session. As the
+ * decision loop observes live poker actions, each event is appended to a TSV feed
+ * file. The incremental reader allows the processing pipeline to poll for new events
+ * by tracking a byte offset, avoiding re-parsing the entire file on each iteration.
+ *
+ * Key design decisions:
+ *   - '''Append-only format''': The feed file is never rewritten in-place. Each new
+ *     event is appended as a single TSV row. This makes the format safe for concurrent
+ *     readers (one writer, many readers) and crash-recoverable.
+ *   - '''Byte-offset-based incremental reads''': [[readIncremental]] uses
+ *     [[java.io.RandomAccessFile]] to seek directly to the last-read position,
+ *     making poll cycles O(new events) rather than O(total events).
+ *   - '''Truncation recovery''': If the file shrinks (e.g. log rotation), the reader
+ *     detects the condition (`byteOffset > fileLength`) and resets to the beginning,
+ *     re-validating the header before resuming.
+ *   - '''Thread-safe appends''': The [[append]] method synchronizes on a shared lock
+ *     object to prevent interleaved writes from multiple threads.
+ *   - '''UTF-8 via ISO-8859-1 bridge''': [[RandomAccessFile.readLine]] returns bytes
+ *     interpreted as ISO-8859-1; we re-decode as UTF-8 to handle non-ASCII correctly.
+ *
+ * Reads an append-only TSV event feed for the always-on decision loop.
   *
   * Header:
   *   handId, sequenceInHand, playerId, occurredAtEpochMillis, street, position,
@@ -19,14 +42,25 @@ object DecisionLoopEventFeedIO:
     "handId\tsequenceInHand\tplayerId\toccurredAtEpochMillis\tstreet\tposition\tboard" +
       "\tpotBefore\ttoCall\tstackBefore\taction\tdecisionTimeMillis\tbetHistory"
 
+  /** Lowercase column names parsed from the header, used for validation on read. */
   private val ExpectedColumns = Header.split("\t", -1).map(_.trim.toLowerCase).toVector
+
+  /** Synchronization lock for thread-safe append operations. */
   private val appendLock = new AnyRef
 
+  /** A parsed event paired with its 1-based line number in the feed file, for error reporting. */
   final case class FeedEvent(lineNumber: Int, event: PokerEvent)
 
+  /** Reads the entire feed file and returns all events. Convenience overload accepting a string path. */
   def read(path: String): Vector[FeedEvent] =
     read(Paths.get(path))
 
+  /** Reads the entire feed file, validates the header, and parses all non-empty data rows.
+   *
+   * @param path the feed file path
+   * @return all events in file order, each tagged with its line number
+   * @throws IllegalArgumentException if the file is missing, empty, or has a header mismatch
+   */
   def read(path: Path): Vector[FeedEvent] =
     require(Files.exists(path), s"event feed file not found: $path")
     val lines = Files.readAllLines(path, StandardCharsets.UTF_8).asScala.toVector
@@ -93,6 +127,16 @@ object DecisionLoopEventFeedIO:
     finally
       raf.close()
 
+  /** Parses a single TSV row into a [[PokerEvent]].
+   *
+   * Expects exactly 13 tab-separated columns matching the header layout.
+   * Each field is validated individually (enums, numeric ranges, card tokens).
+   *
+   * @param path   file path for error messages
+   * @param rowNum 1-based row number for error messages
+   * @param line   the raw TSV line to parse
+   * @return the deserialized poker event
+   */
   private def deserializeEvent(path: Path, rowNum: Int, line: String): PokerEvent =
     val cols = line.split("\t", -1).toVector
     require(cols.length == 13, s"$path:$rowNum expected 13 columns, got ${cols.length}")
@@ -132,12 +176,18 @@ object DecisionLoopEventFeedIO:
       betHistory = betHistory
     )
 
+  /** Serializes a [[PokerAction]] to its TSV string representation.
+   * Fold/Check/Call are plain tokens; Raise includes the amount after a colon.
+   */
   private def serializeAction(action: PokerAction): String = action match
     case PokerAction.Fold => "Fold"
     case PokerAction.Check => "Check"
     case PokerAction.Call => "Call"
     case PokerAction.Raise(a) => s"Raise:$a"
 
+  /** Parses a poker action from its TSV string form. Case-insensitive.
+   * Raise amounts must be positive, finite numbers.
+   */
   private def deserializeAction(raw: String, path: Path, rowNum: Int): PokerAction =
     raw.trim.toLowerCase match
       case "fold" => PokerAction.Fold
@@ -152,6 +202,7 @@ object DecisionLoopEventFeedIO:
       case _ =>
         throw new IllegalArgumentException(s"$path:$rowNum invalid action: $raw")
 
+  /** Parses a board from space-separated card tokens, or returns [[Board.empty]] for "-" or empty. */
   private def deserializeBoard(raw: String, path: Path, rowNum: Int): Board =
     if raw == "-" || raw.isEmpty then Board.empty
     else
@@ -161,6 +212,9 @@ object DecisionLoopEventFeedIO:
       }
       Board.from(cards)
 
+  /** Parses bet history from pipe-delimited "playerIndex:action" entries.
+   * Returns empty vector for "-" or empty string.
+   */
   private def deserializeBetHistory(raw: String, path: Path, rowNum: Int): Vector[BetAction] =
     if raw == "-" || raw.isEmpty then Vector.empty
     else
@@ -173,6 +227,14 @@ object DecisionLoopEventFeedIO:
         BetAction(player, deserializeAction(actionRaw, path, rowNum))
       }
 
+  /** Appends a single poker event to the feed file, creating the file with a header if absent.
+   *
+   * Thread-safe: synchronizes on an internal lock to prevent interleaved writes.
+   * Parent directories are created automatically if they do not exist.
+   *
+   * @param path  the feed file path
+   * @param event the poker event to append
+   */
   def append(path: Path, event: PokerEvent): Unit =
     appendLock.synchronized {
       Option(path.getParent).foreach(parent => Files.createDirectories(parent))

@@ -4,6 +4,18 @@ import sicfun.holdem.types.*
 import munit.FunSuite
 import sicfun.core.{BayesianRange, Card, DiscreteDistribution}
 
+/**
+ * Tests for the [[TrainedPokerActionModel]] lifecycle: training, calibration, gating,
+ * retirement, and integration with the [[sicfun.core.BayesianRange]] inference engine.
+ *
+ * Validates:
+ *   - [[PokerActionModel.trainVersioned]] produces artifacts with correct metadata,
+ *     calibration, and passing quality gates
+ *   - Holdout-split vs. external-evaluation strategies are correctly applied
+ *   - Brier score gate enforcement (failOnGate=true throws on gate failure)
+ *   - Retirement marks the artifact as retired with reason
+ *   - Trained models integrate with BayesianRange.update and produce sensible posteriors
+ */
 class ModelLifecycleTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
@@ -24,6 +36,7 @@ class ModelLifecycleTest extends FunSuite:
     betHistory = Vector.empty
   )
 
+  /** Generates synthetic training data: alternating (hand1=AhKh, Raise) and (hand2=7c2d, Fold) pairs. */
   private def trainingData(size: Int): Seq[(GameState, HoleCards, PokerAction)] =
     Seq.fill(size)(Seq(
       (state, hand1, PokerAction.Raise(20.0)),

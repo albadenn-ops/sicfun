@@ -335,3 +335,187 @@ class TheoremValidationTest extends munit.FunSuite:
   test("RevealSchedule: classify returns Unknown for missing rival/stage"):
     val sched = RevealSchedule(Map.empty)
     assertEquals(sched.classify(PlayerId("v1"), sicfun.holdem.types.Street.Turn, Ev(0.5)), RevealDecision.Unknown)
+
+  // ========================================================================
+  // Proposition 9.1: Formal exploitability via SecurityValue
+  // eps(b; pi) >= 0 and eps_deploy >= max pointwise exploitabilities
+  // ========================================================================
+
+  test("Proposition 9.1: exploitability is non-negative and deployment >= pointwise"):
+    // Create a trivial rival profile that returns uniform action distribution
+    val mkProfile: Double => JointRivalProfile = (ev: Double) =>
+      new JointRivalProfile:
+        def actionDistribution(
+            rivalId: PlayerId,
+            publicState: PublicState,
+            rivalState: RivalBeliefState
+        ): Map[sicfun.holdem.types.PokerAction.Category, Double] =
+          Map(
+            sicfun.holdem.types.PokerAction.Category.Fold  -> 0.25,
+            sicfun.holdem.types.PokerAction.Category.Check -> 0.25,
+            sicfun.holdem.types.PokerAction.Category.Call  -> 0.25,
+            sicfun.holdem.types.PokerAction.Category.Raise -> 0.25
+          )
+
+    val profileA = mkProfile(10.0)
+    val profileB = mkProfile(3.0)
+    val profileC = mkProfile(7.0)
+    val profileClass = RivalProfileClass(IndexedSeq(profileA, profileB, profileC))
+
+    // Simulate two "belief points" with different hero value functions:
+    // Belief 1: hero values are 10, 3, 7 against the three profiles
+    val heroValue1: JointRivalProfile => Ev = p =>
+      if p eq profileA then Ev(10.0)
+      else if p eq profileB then Ev(3.0)
+      else Ev(7.0)
+
+    // Belief 2: hero values are 8, 6, 5
+    val heroValue2: JointRivalProfile => Ev = p =>
+      if p eq profileA then Ev(8.0)
+      else if p eq profileB then Ev(6.0)
+      else Ev(5.0)
+
+    // Compute security values: min over profiles
+    val secActual1 = SecurityValue.compute(heroValue1, profileClass)  // min(10, 3, 7) = 3
+    val secActual2 = SecurityValue.compute(heroValue2, profileClass)  // min(8, 6, 5) = 5
+
+    assertEqualsDouble(secActual1.value, 3.0, Tol)
+    assertEqualsDouble(secActual2.value, 5.0, Tol)
+
+    // Suppose the optimal policy has security values 5.0 and 6.0 at these beliefs
+    val secOptimal1 = Ev(5.0)
+    val secOptimal2 = Ev(6.0)
+
+    // Pointwise exploitability
+    val eps1 = PointwiseExploitability.compute(secOptimal1, secActual1)  // 5 - 3 = 2
+    val eps2 = PointwiseExploitability.compute(secOptimal2, secActual2)  // 6 - 5 = 1
+
+    // Non-negativity
+    assert(eps1 >= Ev.Zero, "Pointwise exploitability must be >= 0")
+    assert(eps2 >= Ev.Zero, "Pointwise exploitability must be >= 0")
+    assertEqualsDouble(eps1.value, 2.0, Tol)
+    assertEqualsDouble(eps2.value, 1.0, Tol)
+
+    // Deployment exploitability = max over belief set
+    val epsDeploy = DeploymentExploitability.compute(IndexedSeq(eps1, eps2))
+    assertEqualsDouble(epsDeploy.value, 2.0, Tol)
+
+    // Deployment exploitability >= any individual pointwise exploitability
+    assert(epsDeploy >= eps1)
+    assert(epsDeploy >= eps2)
+
+  // ========================================================================
+  // Theorem 9: Bellman-safe certificates guarantee adaptation safety
+  // If B_beta dominates B* and satisfies (C1)-(C4), then the induced
+  // safe-feasible policy is AS-strong with budget epsilon_adapt = max B*.
+  // ========================================================================
+
+  test("Theorem 9: B* fixed point yields valid certificate"):
+    // 2-state toy: losses [2.0, 1.0] and [0.0] (terminal)
+    val robustLosses = Array(Array(2.0, 1.0), Array(0.0))
+    val gamma = 0.5
+    val bStar = SafetyBellman.computeBStar(robustLosses, gamma)
+
+    // B* is a fixed point: T_safe(B*) ≈ B*
+    val tResult = SafetyBellman.tSafe(bStar, robustLosses, gamma)
+    for s <- bStar.indices do
+      assertEqualsDouble(tResult(s), bStar(s), 1e-8)
+
+    // B* dominates itself (trivially)
+    assert(SafetyBellman.certificateDominates(bStar, bStar))
+
+    // Required budget is finite and non-negative
+    val budget = SafetyBellman.requiredAdaptationBudget(bStar)
+    assert(budget >= 0.0)
+    assert(budget < 1e10)
+
+  test("Theorem 9: certificate-safe action set restricts unsafe actions"):
+    val robustLosses = Array(Array(1.0, 10.0), Array(0.5, 0.5))
+    val gamma = 0.5
+    val bStar = SafetyBellman.computeBStar(robustLosses, gamma)
+
+    // At state 0, action 1 has loss=10.0 which exceeds B*(0)
+    val safeActions = SafetyBellman.safeActionSet(0, bStar, robustLosses, gamma)
+    assert(safeActions.contains(0), "low-loss action should be safe")
+    assert(!safeActions.contains(1), "high-loss action should be unsafe")
+
+  test("Theorem 9: safe-feasible selector + certificate → bounded regret"):
+    // 3 states, terminal at state 2
+    val robustLosses = Array(Array(1.0, 3.0), Array(0.5, 2.0), Array(0.0))
+    val gamma = 0.5
+    val bStar = SafetyBellman.computeBStar(robustLosses, gamma, tolerance = 1e-14)
+
+    // B* is a valid certificate: exact fixed point → T_safe(B*) = B*
+    val cert = SafetyBellman.Certificate(bStar.clone(), terminalStates = Set.empty)
+    assert(cert.isValid(robustLosses, gamma, maxBound = 100.0),
+      "Certificate from B* should be structurally valid")
+
+    // Safe-feasible action at each state should have loss <= B*(s)
+    val qValues0 = Array(5.0, 8.0) // action 1 has higher Q but may be unsafe
+    val safe0 = SafetyBellman.safeActionSet(0, bStar, robustLosses, gamma)
+    val chosen0 = SafetyBellman.safeFeasibleAction(qValues0, safe0)
+    // The chosen action's loss + gamma*maxB <= B*(s)
+    val maxB = bStar.max
+    assert(
+      robustLosses(0)(chosen0) + gamma * maxB <= bStar(0) + 1e-10,
+      "safe-feasible action must satisfy Bellman bound"
+    )
+
+  test("Theorem 9: TotalVulnerability bounds deployment + adaptation"):
+    val baseline = DeploymentBaseline(Ev(0.03), 50, "Theorem 9 test")
+    val bStar = SafetyBellman.computeBStar(Array(Array(1.0), Array(0.0)), 0.5)
+    val epsilonAdapt = Ev(SafetyBellman.requiredAdaptationBudget(bStar))
+    val (total, fidelity) = TotalVulnerability.compute(baseline, epsilonAdapt)
+
+    // Total = baseline + adaptation budget
+    assertEqualsDouble(total.value, baseline.baselineExploitability.value + epsilonAdapt.value, 1e-12)
+    // Both are finite approximations
+    assertEquals(fidelity, Fidelity.Approximate)
+
+  // ========================================================================
+  // Proposition 9.7: Telescopic risk decomposition along canonical chain
+  // L_robust(omega_n) - L_robust(omega_0) = sum Delta_risk(k, k+1)
+  // ========================================================================
+
+  test("Proposition 9.7: telescopic risk identity on canonical chain"):
+    val chain = ChainWorld.canonicalChain
+    // Simulate robust losses: risk increases as layers add information
+    val losses = IndexedSeq(Ev(1.0), Ev(2.5), Ev(4.0), Ev(6.0))
+    val profile = RiskDecomposition.ChainRiskProfile(chain, losses)
+    val (totalGap, increments) = profile.telescopicDecomposition
+
+    // Total gap = L(last) - L(first) = 6.0 - 1.0 = 5.0
+    assertEqualsDouble(totalGap.value, 5.0, Tol)
+
+    // Sum of increments = total gap (telescopic identity)
+    val sumInc = increments.map(_.riskDelta).reduce(_ + _)
+    assertEqualsDouble(sumInc.value, totalGap.value, Tol)
+
+    // Individual increments: 1.5, 1.5, 2.0
+    assertEqualsDouble(increments(0).riskDelta.value, 1.5, Tol)
+    assertEqualsDouble(increments(1).riskDelta.value, 1.5, Tol)
+    assertEqualsDouble(increments(2).riskDelta.value, 2.0, Tol)
+
+  test("Proposition 9.7: risk and value decompositions share chain ordering"):
+    val chain = ChainWorld.canonicalChain
+    val losses = IndexedSeq(Ev(1.0), Ev(3.0), Ev(2.0), Ev(5.0))
+    val values = IndexedSeq(Ev(10.0), Ev(12.0), Ev(11.0), Ev(15.0))
+
+    val riskProfile = RiskDecomposition.ChainRiskProfile(chain, losses)
+    val riskEdges = riskProfile.riskIncrements
+
+    val valueEdges = (0 until chain.size - 1).map { k =>
+      ChainEdgeDelta(chain(k), chain(k + 1), values(k + 1) - values(k))
+    }
+
+    // Both use the same chain ordering
+    for k <- riskEdges.indices do
+      assertEquals(riskEdges(k).from, valueEdges(k).from)
+      assertEquals(riskEdges(k).to, valueEdges(k).to)
+
+    // Efficiency metrics are well-defined where risk is nonzero
+    val effs = RiskDecomposition.edgeEfficiencies(valueEdges, riskEdges)
+    for (from, to, eff) <- effs do
+      eff match
+        case Some(e) => assert(!e.isNaN && !e.isInfinite)
+        case None    => () // zero risk is valid

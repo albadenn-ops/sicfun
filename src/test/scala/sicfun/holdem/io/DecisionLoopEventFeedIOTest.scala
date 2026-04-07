@@ -7,7 +7,18 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import scala.jdk.CollectionConverters.*
 
+/**
+ * Tests for [[DecisionLoopEventFeedIO]] append-only TSV event feed.
+ *
+ * Validates:
+ *   - Append creates the file with a header and subsequent appends do not duplicate the header
+ *   - Incremental read correctly tracks byte offsets and returns only new events
+ *   - Header validation on incremental reads
+ *   - Recovery from file truncation/rotation (file shrinks below the last-read offset)
+ *   - Tolerance of empty files during rotation (returns empty, resets offset to 0)
+ */
 class DecisionLoopEventFeedIOTest extends FunSuite:
+  /** Creates a test event for a two-player preflop scenario, alternating hero/villain by sequence parity. */
   private def event(sequence: Long, action: PokerAction): PokerEvent =
     PokerEvent(
       handId = "feed-hand-1",

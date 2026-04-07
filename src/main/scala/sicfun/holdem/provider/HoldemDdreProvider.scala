@@ -8,24 +8,54 @@ import sicfun.core.{DiscreteDistribution, Metrics, Probability}
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.util.control.NonFatal
 
-/** Phase-1 DDRE provider facade.
+/** Phase-1 DDRE (Decision-Driving Range Estimation) provider facade.
   *
-  * Default behavior is fully disabled (`mode=off`, `provider=disabled`), so the
-  * existing Bayesian path remains unchanged until DDRE is explicitly enabled.
+  * This object provides an alternative posterior inference path that can use
+  * trained models (native C/CUDA, ONNX neural networks) instead of pure Bayesian
+  * updating. It integrates with the range inference engine as an optional overlay.
+  *
+  * ==Operating Modes==
+  * Controlled by `sicfun.ddre.mode`:
+  *  - `"off"` (default) -- DDRE is completely disabled; pure Bayesian path only.
+  *  - `"shadow"` -- DDRE runs in parallel with Bayesian but results are discarded;
+  *    used for offline quality monitoring without affecting live decisions.
+  *  - `"blend-canary"` -- DDRE posterior is blended with Bayesian at weight `alpha`;
+  *    considered decision-driving (requires validated artifacts).
+  *  - `"blend-primary"` -- DDRE posterior replaces Bayesian at weight `alpha`;
+  *    also decision-driving.
+  *
+  * ==Provider Backends==
+  * Controlled by `sicfun.ddre.provider`:
+  *  - `"disabled"` (default) -- no inference; always returns failure.
+  *  - `"synthetic"` -- heuristic scaffold using sqrt(prior) * geometric-mean(likelihoods);
+  *    useful only for plumbing tests.
+  *  - `"native-cpu"` / `"native-gpu"` -- JNI-based via [[HoldemDdreNativeRuntime]].
+  *  - `"onnx"` -- ONNX Runtime via [[HoldemDdreOnnxRuntime]].
+  *
+  * ==Safety Guards==
+  *  - '''Legal mask''': removes impossible hands (overlapping with hero/board) from
+  *    the raw posterior and renormalises.
+  *  - '''Entropy guard''': rejects posteriors below a minimum entropy threshold,
+  *    preventing over-confident predictions from untrained models.
+  *  - '''Timeout''': configurable latency limit for inference calls.
+  *  - '''Artifact validation gate''': decision-driving modes require
+  *    `decisionDrivingAllowed=true` on the ONNX artifact (set by [[HoldemDdreOfflineGate]]).
   */
 private[holdem] object HoldemDdreProvider:
+  /** DDRE operating modes, controlling how the posterior is used. */
   enum Mode:
-    case Off
-    case Shadow
-    case BlendCanary
-    case BlendPrimary
+    case Off           // Completely disabled
+    case Shadow        // Runs but results are discarded (monitoring only)
+    case BlendCanary   // Blended with Bayesian, decision-driving
+    case BlendPrimary  // Primary posterior source, decision-driving
 
+  /** Available DDRE inference backends. */
   enum Provider:
-    case Disabled
-    case Synthetic
-    case NativeCpu
-    case NativeGpu
-    case Onnx
+    case Disabled    // No inference
+    case Synthetic   // Heuristic scaffold (not a trained model)
+    case NativeCpu   // C native library via JNI
+    case NativeGpu   // CUDA native library via JNI
+    case Onnx        // ONNX Runtime (neural network models)
 
   final case class Config(
       mode: Mode,
@@ -92,6 +122,19 @@ private[holdem] object HoldemDdreProvider:
       timeoutMillis = configuredTimeoutMillis
     )
 
+  /** Runs DDRE posterior inference for the given prior, observations, and action model.
+    *
+    * Dispatches to the configured provider backend, applies the legal mask and
+    * entropy guard, and enforces the timeout constraint.
+    *
+    * @param prior        prior distribution over villain hole cards
+    * @param observations villain actions and corresponding game states
+    * @param actionModel  trained action likelihood model
+    * @param hero         hero's hole cards (for legal masking)
+    * @param board        community cards (for legal masking)
+    * @param config       DDRE configuration (mode, provider, alpha, guards)
+    * @return `Right(result)` with the masked posterior, or `Left(failure)` with diagnostics
+    */
   def inferPosterior(
       prior: DiscreteDistribution[HoleCards],
       observations: Seq[(PokerAction, GameState)],
@@ -223,6 +266,12 @@ private[holdem] object HoldemDdreProvider:
           )
         )
 
+  /** Generates a synthetic posterior using a heuristic formula:
+    * `score = sqrt(prior) * geometric_mean(likelihoods)`.
+    *
+    * This is NOT a trained model -- it's a rough approximation used only for
+    * testing the DDRE plumbing without requiring a real model artifact.
+    */
   private def syntheticPosterior(
       prior: DiscreteDistribution[HoleCards],
       observations: Seq[(PokerAction, GameState)],
@@ -315,6 +364,10 @@ private[holdem] object HoldemDdreProvider:
           )
         }
 
+  /** Builds the observation x hypothesis likelihood matrix for DDRE inference.
+    * Non-finite or non-positive likelihoods are clamped to MinLikelihood.
+    * Returns an empty array when there are no observations.
+    */
   private[holdem] def buildLikelihoodMatrix(
       observations: Seq[(PokerAction, GameState)],
       actionModel: PokerActionModel,
@@ -340,6 +393,10 @@ private[holdem] object HoldemDdreProvider:
         obsIdx += 1
       matrix
 
+  /** Converts a raw posterior array (from native or ONNX inference) into a
+    * normalised `DiscreteDistribution[HoleCards]`. Validates that all values
+    * are finite and non-negative, and that total mass is positive.
+    */
   private[holdem] def distributionFromPosteriorArray(
       hypotheses: Vector[HoleCards],
       posterior: Array[Double],
@@ -364,6 +421,15 @@ private[holdem] object HoldemDdreProvider:
       else if total <= Eps then Left(s"${label}_zero_mass")
       else Right(DiscreteDistribution(weights.result()).normalized)
 
+  /** Removes impossible hands from the posterior and renormalises.
+    *
+    * A hand is impossible if either of its cards appears in the hero's hole cards
+    * or on the board. This legal mask is critical for DDRE because unlike Bayesian
+    * inference (which starts from a legal prior), neural-network outputs may
+    * assign mass to impossible card combinations.
+    *
+    * @return `Right(masked)` if any legal mass remains, `Left(reason)` otherwise
+    */
   private[holdem] def applyLegalMask(
       posterior: DiscreteDistribution[HoleCards],
       hero: HoleCards,

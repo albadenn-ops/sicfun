@@ -89,3 +89,55 @@ class StrategicValueTest extends munit.FunSuite:
     )
     assertEquals(vocab.perRivalDeltas.size, 1)
     assertEqualsDouble(vocab.fourWorld.deltaControl.value, 2.0, Tol)
+
+  // ---- FourWorld keyed accessors (Wave 1) -----------------------------------
+
+  test("FourWorld keyed accessor: (Attrib, ClosedLoop) -> v11"):
+    val fw = FourWorld(Ev(10.0), Ev(7.0), Ev(6.0), Ev(4.0))
+    assertEqualsDouble(fw(GridWorld(LearningChannel.Attrib, PolicyScope.ClosedLoop)).value, 10.0, Tol)
+
+  test("FourWorld keyed accessor: (Attrib, OpenLoop) -> v10"):
+    val fw = FourWorld(Ev(10.0), Ev(7.0), Ev(6.0), Ev(4.0))
+    assertEqualsDouble(fw(GridWorld(LearningChannel.Attrib, PolicyScope.OpenLoop)).value, 7.0, Tol)
+
+  test("FourWorld keyed accessor: (Blind, ClosedLoop) -> v01"):
+    val fw = FourWorld(Ev(10.0), Ev(7.0), Ev(6.0), Ev(4.0))
+    assertEqualsDouble(fw(GridWorld(LearningChannel.Blind, PolicyScope.ClosedLoop)).value, 6.0, Tol)
+
+  test("FourWorld keyed accessor: (Blind, OpenLoop) -> v00"):
+    val fw = FourWorld(Ev(10.0), Ev(7.0), Ev(6.0), Ev(4.0))
+    assertEqualsDouble(fw(GridWorld(LearningChannel.Blind, PolicyScope.OpenLoop)).value, 4.0, Tol)
+
+  test("FourWorld keyed accessors round-trip all GridWorld.all elements"):
+    val fw = FourWorld(Ev(10.0), Ev(7.0), Ev(6.0), Ev(4.0))
+    val expected = Seq(4.0, 6.0, 7.0, 10.0)
+    val actual = GridWorld.all.map(gw => fw(gw).value).sorted
+    assertEquals(actual, expected.toIndexedSeq)
+
+  test("Theorem 4 decomposition holds under keyed accessors"):
+    val fw = FourWorld(Ev(10.0), Ev(7.0), Ev(6.0), Ev(4.0))
+    val v00 = fw(GridWorld(LearningChannel.Blind, PolicyScope.OpenLoop))
+    val reconstructed = v00 + fw.deltaControl + fw.deltaSigStar + fw.deltaInteraction
+    assertEqualsDouble(
+      reconstructed.value,
+      fw(GridWorld(LearningChannel.Attrib, PolicyScope.ClosedLoop)).value,
+      Tol
+    )
+
+  // ---- ChainEdgeDelta / ChainRiskDelta (Wave 1) ----------------------------
+
+  test("ChainEdgeDelta stores from/to/delta"):
+    val from = ChainWorld(LearningChannel.Blind, ShowdownMode.Off)
+    val to = ChainWorld(LearningChannel.Ref, ShowdownMode.Off)
+    val edge = ChainEdgeDelta(from, to, Ev(3.5))
+    assertEquals(edge.from, from)
+    assertEquals(edge.to, to)
+    assertEqualsDouble(edge.delta.value, 3.5, Tol)
+
+  test("ChainRiskDelta stores from/to/riskDelta"):
+    val from = ChainWorld(LearningChannel.Attrib, ShowdownMode.Off)
+    val to = ChainWorld(LearningChannel.Attrib, ShowdownMode.On)
+    val risk = ChainRiskDelta(from, to, Ev(-1.2))
+    assertEquals(risk.from, from)
+    assertEquals(risk.to, to)
+    assertEqualsDouble(risk.riskDelta.value, -1.2, Tol)

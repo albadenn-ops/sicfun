@@ -2,12 +2,22 @@ package sicfun.holdem.gpu
 
 import munit.FunSuite
 
-/** Tests for OpenCL compute device behavior in the hybrid dispatcher.
+/** Tests for OpenCL compute device behaviour in the hybrid dispatcher.
   *
   * Since OpenCL hardware may not be available in CI, these tests use
-  * FunctionalComputeDevice with kind="opencl" to exercise the dispatcher's
-  * handling of OpenCL-typed devices: weight scaling, exact-mode filtering,
-  * and failover ordering.
+  * `FunctionalComputeDevice` with `kind="opencl"` to exercise the dispatcher's
+  * handling of OpenCL-typed devices without requiring an actual iGPU.
+  *
+  * Coverage includes:
+  *  - '''Exact-mode exclusion''': OpenCL devices with `supportsExact=false` are
+  *    filtered out from exact-mode (modeCode=0) dispatches, ensuring only CPU/CUDA
+  *    handle enumerative computation.
+  *  - '''Monte Carlo participation''': OpenCL devices participate normally in
+  *    Monte Carlo batches, receiving their proportional share of work.
+  *  - '''Failover to CPU''': when an OpenCL device fails (e.g. status 204 = kernel
+  *    execution failure), the CPU rescue candidate recovers the failed slice.
+  *  - '''Weight scaling''': verifies that CUDA devices receive proportionally more
+  *    work than OpenCL when both are present, reflecting the typical throughput gap.
   */
 class HeadsUpOpenCLDispatchTest extends FunSuite:
   override def beforeEach(context: BeforeEach): Unit =

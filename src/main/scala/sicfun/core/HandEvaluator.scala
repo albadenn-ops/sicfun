@@ -254,12 +254,29 @@ object HandEvaluator:
       c6 != c4 &&
       c6 != c5
 
+  /** Packs category strength and up to 5 tiebreak ranks into a single Int.
+    *
+    * Layout (MSB to LSB): [category:4][t0:4][t1:4][t2:4][t3:4][t4:4] = 24 bits used.
+    * Since category strength is 0-8 and rank values are 0-14, each fits in 4 bits.
+    * Natural Int comparison on the packed result gives correct hand strength ordering.
+    */
   private inline def packRank(categoryStrength: Int, t0: Int, t1: Int, t2: Int, t3: Int, t4: Int): Int =
     (((((categoryStrength << 4) | t0) << 4 | t1) << 4 | t2) << 4 | t3) << 4 | t4
 
   private inline def unpackRank(packed: Int): HandRank =
     HandRank(packed)
 
+  /** Core 5-card evaluation returning a packed Int encoding category + tiebreakers.
+    *
+    * Uses ThreadLocal scratch arrays for rank counting to avoid allocation on the hot path.
+    * The rank frequency distribution (uniqueCount) determines the hand category:
+    *  - 5 unique ranks: HighCard, Straight, Flush, or StraightFlush
+    *  - 4 unique ranks: OnePair
+    *  - 3 unique ranks: TwoPair or ThreeOfKind
+    *  - 2 unique ranks: FullHouse or FourOfKind
+    *
+    * Tiebreakers are sorted in descending significance order and packed into the result.
+    */
   private def evaluate5Packed(c0: Card, c1: Card, c2: Card, c3: Card, c4: Card): Int =
     val r0 = c0.rank.value
     val r1 = c1.rank.value
@@ -273,6 +290,9 @@ object HandEvaluator:
         c2.suit == c3.suit &&
         c3.suit == c4.suit
 
+    // ThreadLocal scratch arrays: reused across calls to avoid allocation.
+    // rankCounts[r] tracks how many cards have rank r (indexed by rank value 2..14).
+    // uniqueRanks collects the distinct rank values seen.
     val rankCounts = rankCountScratch.get()
     val uniqueRanks = uniqueRankScratch.get()
     var uniqueCount = 0
@@ -304,16 +324,21 @@ object HandEvaluator:
 
     val packed =
       if uniqueCount == 5 then
+        // All 5 ranks distinct: could be HighCard, Straight, Flush, or StraightFlush.
         val mn = math.min(math.min(math.min(math.min(r0, r1), r2), r3), r4)
         val mx = math.max(math.max(math.max(math.max(r0, r1), r2), r3), r4)
         val sum = r0 + r1 + r2 + r3 + r4
+        // Wheel (A-2-3-4-5): with 5 distinct ranks, min=2, max=14, sum=28 is unique to this case.
         val wheel = mx == 14 && mn == 2 && sum == 28
+        // Normal straight: 5 consecutive ranks have max - min = 4.
         val isStraight = (mx - mn == 4) || wheel
         if isStraight then
           val high = if wheel then 5 else mx
           if isFlush then packRank(HandCategory.StraightFlush.strength, high, 0, 0, 0, 0)
           else packRank(HandCategory.Straight.strength, high, 0, 0, 0, 0)
         else
+          // Insertion sort the 5 unique ranks in descending order for tiebreaker packing.
+          // Insertion sort is optimal for n=5 (fewer comparisons than more complex algorithms).
           var i = 1
           while i < uniqueCount do
             val value = uniqueRanks(i)
@@ -342,6 +367,7 @@ object HandEvaluator:
               uniqueRanks(4)
             )
       else if uniqueCount == 4 then
+        // 4 unique ranks with 5 cards: exactly one pair. Find the pair rank and sort the 3 kickers.
         var pair = 0
         var s0 = 0
         var s1 = 0
@@ -358,6 +384,8 @@ object HandEvaluator:
             singles += 1
           i += 1
 
+        // Sort 3 kicker ranks in descending order using a 3-element sorting network.
+        // This is a branchless-style sort: exactly 3 compare-and-swap operations.
         if s0 < s1 then
           val tmp = s0
           s0 = s1
@@ -372,6 +400,7 @@ object HandEvaluator:
           s1 = tmp
         packRank(HandCategory.OnePair.strength, pair, s0, s1, s2, 0)
       else if uniqueCount == 3 then
+        // 3 unique ranks with 5 cards: either three-of-a-kind (3+1+1) or two pair (2+2+1).
         var trip = 0
         var k0 = 0
         var k1 = 0
@@ -408,6 +437,7 @@ object HandEvaluator:
             p1 = tmp
           packRank(HandCategory.TwoPair.strength, p0, p1, kicker, 0, 0)
       else
+        // 2 unique ranks with 5 cards: either four-of-a-kind (4+1) or full house (3+2).
         val ra = uniqueRanks(0)
         val rb = uniqueRanks(1)
         val ca = rankCounts(ra)
@@ -420,6 +450,8 @@ object HandEvaluator:
           val pair = if ca == 2 then ra else rb
           packRank(HandCategory.FullHouse.strength, trip, pair, 0, 0, 0)
 
+    // Reset only the slots we touched in rankCounts (sparse cleanup).
+    // This is essential since the array is reused across calls via ThreadLocal.
     var clearIndex = 0
     while clearIndex < uniqueCount do
       rankCounts(uniqueRanks(clearIndex)) = 0

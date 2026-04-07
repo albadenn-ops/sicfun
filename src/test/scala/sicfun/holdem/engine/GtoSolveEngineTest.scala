@@ -4,6 +4,19 @@ import munit.FunSuite
 import sicfun.core.Card
 import sicfun.holdem.types.*
 
+/** Tests for [[GtoSolveEngine]].
+  *
+  * Validates:
+  *   - '''Suit canonicalization''': isomorphic hands (same ranks, different suits) produce
+  *     identical signatures; different hands produce different signatures.
+  *   - '''Policy filtering''': orderedPositiveProbabilities correctly strips zero/negative entries.
+  *   - '''Policy sampling''': sampleActionByPolicy handles empty vectors (fallback) and
+  *     single-action deterministic cases.
+  *   - '''CFR parametrization''': iteration/villain-hand counts scale correctly by street
+  *     and candidate count (preflop > river; 3-candidate > 2-candidate).
+  *   - '''Action hashing''': deterministic and collision-resistant for different action sets.
+  *   - '''Fast GTO mode''': single-candidate trivially returns, strong hands never fold.
+  */
 class GtoSolveEngineTest extends FunSuite:
 
   private def card(token: String): Card =

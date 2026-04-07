@@ -3,7 +3,16 @@ package sicfun.holdem.history
 import java.nio.file.{Path, Paths}
 import java.util.Locale
 
-/** Persistence target for opponent-memory storage. */
+/** Persistence target for opponent-memory storage.
+  *
+  * Represents where opponent profiles are stored. Two backends are supported:
+  *   - [[OpponentMemoryTarget.Json]]: local JSON file (simple, portable)
+  *   - [[OpponentMemoryTarget.Postgres]]: PostgreSQL database (shared, durable)
+  *
+  * The target is parsed from CLI arguments by [[OpponentMemoryTarget.parse]], which
+  * auto-detects PostgreSQL URLs (jdbc:postgresql://, postgresql://, postgres://) and
+  * falls back to a filesystem path for everything else.
+  */
 sealed trait OpponentMemoryTarget
 
 /** Parses and validates opponent-memory target definitions. */
@@ -19,6 +28,17 @@ object OpponentMemoryTarget:
     require(jdbcUrl.trim.nonEmpty, "jdbcUrl must be non-empty")
     require(effectiveSchema.matches("[A-Za-z_][A-Za-z0-9_]*"), s"invalid PostgreSQL schema '$schema'")
 
+  /** Parse a raw string into an OpponentMemoryTarget.
+    *
+    * Detects PostgreSQL URLs by prefix (jdbc:postgresql:, postgresql://, postgres://)
+    * and normalizes them to the jdbc:postgresql: form. Everything else is treated as
+    * a filesystem path for JSON storage. Validates the schema as a PostgreSQL identifier.
+    *
+    * @param raw      the raw target string (filesystem path or PostgreSQL URL)
+    * @param user     optional PostgreSQL user
+    * @param password optional PostgreSQL password
+    * @param schema   PostgreSQL schema name (default: "public")
+    */
   def parse(
       raw: String,
       user: Option[String] = None,

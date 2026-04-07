@@ -4,8 +4,23 @@ import sicfun.holdem.io.DecisionLoopEventFeedIO
 
 import java.nio.file.{Files, Path, Paths}
 
-/** Imports external site hand histories, builds persistent opponent profiles, and optionally
-  * exports normalized `PokerEvent` rows for existing sicfun tooling.
+/** CLI tool for importing external hand histories and building opponent profiles.
+  *
+  * Pipeline:
+  *   1. Parse a hand history file from disk (auto-detects site or uses --site flag)
+  *   2. Build [[OpponentProfile]]s via `OpponentProfile.fromImportedHands`
+  *   3. Optionally persist profiles to JSON file or PostgreSQL via [[OpponentProfileStorePersistence]]
+  *   4. Optionally export normalized PokerEvent rows to a feed file for replay tooling
+  *
+  * The hero is excluded from opponent profiles. Multiple output targets can be combined
+  * (e.g., both --store and --feedOut in the same run).
+  *
+  * Usage:
+  * {{{
+  * runMain sicfun.holdem.history.ImportOpponentProfiles \
+  *   --input=hand_history.txt --site=pokerstars --heroName=MyName \
+  *   --store=data/opponents.json --feedOut=data/events.tsv
+  * }}}
   */
 object ImportOpponentProfiles:
   final case class RunSummary(
@@ -49,6 +64,10 @@ object ImportOpponentProfiles:
           println(s"${profile.playerName}: hands=${profile.handsObserved} archetype=${profile.archetypePosterior.mapEstimate} hints=$hints")
         }
 
+  /** Execute the import pipeline: parse file, build profiles, write outputs.
+    *
+    * @return Right(summary) on success, Left(error message) on failure
+    */
   def run(args: Array[String]): Either[String, RunSummary] =
     for
       config <- parseArgs(args)
@@ -69,6 +88,11 @@ object ImportOpponentProfiles:
       profiles = profiles
     )
 
+  /** Optionally export normalized PokerEvent rows to a feed file for replay tooling.
+    *
+    * Events are sorted by (timestamp, handId, sequenceInHand) for chronological ordering.
+    * Fails if the output file already exists (to prevent accidental overwrites).
+    */
   private def maybeWriteFeed(
       feedOut: Option[Path],
       hands: Vector[ImportedHand]
@@ -84,6 +108,11 @@ object ImportOpponentProfiles:
           orderedEvents.foreach(event => DecisionLoopEventFeedIO.append(path, event))
           Right(())
 
+  /** Optionally persist profiles to the opponent profile store (JSON or PostgreSQL).
+    *
+    * Loads the current store, upserts the new profiles, and saves back.
+    * Uses merge semantics: existing profiles for the same player are updated, not replaced.
+    */
   private def maybeWriteStore(
       storeTarget: Option[OpponentMemoryTarget],
       profiles: Vector[OpponentProfile]

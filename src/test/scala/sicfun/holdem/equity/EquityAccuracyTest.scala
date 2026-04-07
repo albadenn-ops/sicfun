@@ -11,11 +11,16 @@ import munit.FunSuite
   * be loaded or generated.
   */
 class EquityAccuracyTest extends FunSuite:
+  /** Lazily loaded canonical exact table; shared across all tests in this suite.
+    * Loading may trigger table generation on first access (potentially slow).
+    */
   private lazy val canonicalExactTable: HeadsUpEquityCanonicalTable =
     CanonicalExactTableTestFixture.load()
 
-  // ---- ComparePublishedSpecificMatchups: 7 matchups from cardfight.com ----
+  // ---- ComparePublishedSpecificMatchups: 7 specific hero-vs-villain matchups from cardfight.com ----
+  // These test our exact equity against known published values for specific hand matchups.
 
+  /** Maximum allowed difference in percentage points between our equity and the published value. */
   private val SpecificMatchupTolerancePp = 1.2 // percentage points
 
   ComparePublishedSpecificMatchups.Matchups.foreach { row =>
@@ -31,16 +36,20 @@ class EquityAccuracyTest extends FunSuite:
     }
   }
 
-  // ---- ComparePublishedPreflopVsRandom: 17 rows from caniwin.com ----
+  // ---- ComparePublishedPreflopVsRandom: 17 preflop hand classes from caniwin.com ----
   // Snapshot circa 2026-02; live page shows slight drift as of 2026-03-23.
-  // These are supporting equity evidence, not exact current reference.
+  // These test preflop equity of top hand classes vs a random hand using two models:
+  //   - Combo-uniform: each concrete combo weighted equally
+  //   - Class-uniform: each hand class weighted equally (then combos within uniformly)
+  // These are supporting equity evidence (sanity guards), not exact parity checks.
 
-  // The source table is published with truncated percentages and a model that does not
-  // perfectly align with our exact combo-conditioned formulation for every class.
-  // Keep these as sanity guards (coarse agreement), not exact parity checks.
+  /** Per-row tolerance for combo-uniform preflop equity vs published values. */
   private val PreflopComboPerRowTolerancePp = 1.75
+  /** Mean absolute error tolerance across all rows for combo-uniform model. */
   private val PreflopComboMeanTolerancePp = 0.80
+  /** Per-row tolerance for class-uniform preflop equity vs published values. */
   private val PreflopClassPerRowTolerancePp = 1.95
+  /** Mean absolute error tolerance across all rows for class-uniform model. */
   private val PreflopClassMeanTolerancePp = 1.10
 
   test("preflop vs random: combo-uniform model matches published within tolerance") {

@@ -289,3 +289,18 @@ class StrategicEngineTest extends FunSuite:
       after.probabilityOf(StrategicClass.Value),
       1e-10
     )
+
+  test("FrequencyAnomalyDetection fires when rival shows high aggression"):
+    val config = StrategicEngine.Config(
+      detector = FrequencyAnomalyDetection(window = 5, threshold = 0.5)
+    )
+    val engine = new StrategicEngine(config)
+    engine.initSession(rivalIds = Vector(PlayerId("v1")))
+    engine.startHand(testHeroCards)
+    val initialBeta = engine.sessionState.exploitationStates(PlayerId("v1")).beta
+    // Observe 5 raises in a row to trigger detection (100% aggression > 50% threshold)
+    for _ <- 1 to 5 do
+      engine.observeAction(PlayerId("v1"), PokerAction.Raise(50.0), minimalState)
+    val finalBeta = engine.sessionState.exploitationStates(PlayerId("v1")).beta
+    assert(finalBeta < initialBeta,
+      s"Beta should retreat after detected modeling: initial=$initialBeta, final=$finalBeta")

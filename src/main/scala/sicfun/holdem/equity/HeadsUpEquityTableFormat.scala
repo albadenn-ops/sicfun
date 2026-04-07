@@ -44,17 +44,23 @@ final case class HeadsUpEquityTableMeta(
   */
 object HeadsUpEquityTableFormat:
   /** File magic number: ASCII `"SIFU"` (0x53 0x49 0x46 0x55). */
+  /** File magic number: ASCII `"SIFU"` (0x53 0x49 0x46 0x55). Used to identify valid table files. */
   val Magic: Int = 0x53494655 // "SIFU"
+  /** Current binary format version. Incremented on breaking changes to the file layout. */
   val Version: Int = 1
+  /** Mode code for exact (exhaustive enumeration) equity computation. */
   val ModeExact: Int = 0
+  /** Mode code for Monte Carlo sampled equity computation. */
   val ModeMonteCarlo: Int = 1
 
+  /** Converts a numeric mode code to its string representation for display/metadata. */
   def codeToModeString(code: Int): String =
     code match
       case ModeExact => "exact"
       case ModeMonteCarlo => "mc"
       case other => s"unknown($other)"
 
+  /** Converts a mode string ("exact" or anything else -> Monte Carlo) to its numeric code. */
   def modeStringToCode(mode: String): Int =
     mode match
       case "exact" => ModeExact

@@ -7,7 +7,24 @@ import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 import sicfun.holdem.equity.HoldemEquity
 
+/** Integration tests for the compact posterior representation in [[HoldemBayesProvider]].
+  *
+  * The compact posterior (`HoldemEquity.CompactPosterior`) is a fixed-size array
+  * representation of the posterior distribution, designed for hot-path equity
+  * computation without `Map` overhead. These tests verify that:
+  *
+  *  - The compact posterior included in `UpdateResult` is non-empty and matches
+  *    the full `DiscreteDistribution` posterior entry-by-entry.
+  *  - Equity computed via the compact posterior matches equity computed via the
+  *    full Map-based posterior to within 1e-3.
+  *  - Empty observations (no updates) produce a compact posterior matching the
+  *    normalised prior.
+  *
+  * All tests force the Scala provider to isolate compact-posterior construction
+  * from native backend availability.
+  */
 class CompactPosteriorBayesIntegrationTest extends FunSuite:
+  /** Forces the Scala Bayesian provider and resets auto-selection state for test isolation. */
   private def withScalaBayesProvider[A](thunk: => A): A =
     TestSystemPropertyScope.withSystemProperties(Seq("sicfun.bayes.provider" -> Some("scala"))) {
       HoldemBayesProvider.resetAutoProviderForTests()
@@ -21,6 +38,10 @@ class CompactPosteriorBayesIntegrationTest extends FunSuite:
   private def hole(a: String, b: String): HoleCards =
     HoleCards.from(Vector(card(a), card(b)))
 
+  /** Builds a simple action model with small deterministic weights.
+    * The weights are non-trivial enough to produce different likelihoods per hypothesis
+    * but small enough that no single action dominates overwhelmingly.
+    */
   private def trivialActionModel: PokerActionModel =
     val classCount = PokerAction.categories.length
     val featureCount = PokerFeatures.dimension

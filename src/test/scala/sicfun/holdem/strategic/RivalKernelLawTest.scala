@@ -74,3 +74,44 @@ class RivalKernelLawTest extends munit.FunSuite:
     assertEquals(KernelVariant.values.length, 4)
     val names = KernelVariant.values.map(_.toString).toSet
     assertEquals(names, Set("Ref", "Attrib", "Blind", "Design"))
+
+  test("KernelVariant.toLearningChannel round-trips correctly"):
+    assertEquals(KernelVariant.Ref.toLearningChannel, LearningChannel.Ref)
+    assertEquals(KernelVariant.Attrib.toLearningChannel, LearningChannel.Attrib)
+    assertEquals(KernelVariant.Blind.toLearningChannel, LearningChannel.Blind)
+    assertEquals(KernelVariant.Design.toLearningChannel, LearningChannel.Design)
+
+  test("blind worlds (Blind, Off) and (Blind, On) are behaviorally equivalent (both identity)"):
+    val belief = new RivalBeliefState:
+      def update(signal: ActionSignal, publicState: PublicState): RivalBeliefState = this
+
+    val actionKernel = new ActionKernel[RivalBeliefState]:
+      def apply(state: RivalBeliefState, signal: ActionSignal): RivalBeliefState =
+        new RivalBeliefState:
+          def update(signal: ActionSignal, publicState: PublicState): RivalBeliefState = this
+
+    val designKernel = new ActionKernel[RivalBeliefState]:
+      def apply(state: RivalBeliefState, signal: ActionSignal): RivalBeliefState =
+        new RivalBeliefState:
+          def update(signal: ActionSignal, publicState: PublicState): RivalBeliefState = this
+
+    val sdKernel = new ShowdownKernel[RivalBeliefState]:
+      def apply(state: RivalBeliefState, showdown: ShowdownSignal): RivalBeliefState =
+        new RivalBeliefState:
+          def update(signal: ActionSignal, publicState: PublicState): RivalBeliefState = this
+
+    val blindOff = KernelConstructor.composeFullKernelForWorld(
+      ChainWorld(LearningChannel.Blind, ShowdownMode.Off), actionKernel, designKernel, sdKernel
+    )
+    val blindOn = KernelConstructor.composeFullKernelForWorld(
+      ChainWorld(LearningChannel.Blind, ShowdownMode.On), actionKernel, designKernel, sdKernel
+    )
+
+    val sd = ShowdownSignal(Vector(RevealedHand(PlayerId("v1"), Vector.empty)))
+    val signal = TotalSignal(dummySignal, Some(sd))
+
+    val resultOff = blindOff.apply(belief, signal, dummyPublicState)
+    val resultOn = blindOn.apply(belief, signal, dummyPublicState)
+
+    assert(resultOff eq belief, "Blind Off must return same state")
+    assert(resultOn eq belief, "Blind On must return same state")

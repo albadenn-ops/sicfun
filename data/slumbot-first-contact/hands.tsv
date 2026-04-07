@@ -1,0 +1,11 @@
+hand	heroPosition	heroHole	board	winningsChips	winningsBb	decisions	villainObservations	action
+1	BigBlind	TcQh	Js9d2c	300	3.000	2	3	b200b300c/b300f
+2	Button	4hQh		100	1.000	1	1	b300f
+3	BigBlind	5cJc	Kh9h3s5h	600	6.000	3	4	b200b300c/b300c/b600f
+4	Button	Tc6h	AhJd5c	250	2.500	2	3	b250c/kb250f
+5	BigBlind	8cQc		50	0.500	0	1	f
+6	Button	Kc9s	Qh6s3c	300	3.000	2	3	b300c/kb300f
+7	BigBlind	Tc6s	Js9c5h7s	600	6.000	3	4	b200b300c/b300c/b600f
+8	Button	7sQs	Ts8c4dAd8s	-12000	-120.000	5	8	b300c/kb300c/kb600c/kb1200b6000b10800c
+9	BigBlind	AdQs	Kd5c3s2s	1150	11.500	3	4	b200b450c/b700c/b1750f
+10	Button	2hKh		100	1.000	1	1	b300f

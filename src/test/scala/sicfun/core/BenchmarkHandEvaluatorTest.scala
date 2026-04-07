@@ -1,5 +1,12 @@
 package sicfun.core
 
+/** Tests for [[BenchmarkHandEvaluator]] micro-benchmark harness.
+  *
+  * Validates that:
+  *  - The benchmark runs successfully with small parameters and produces finite metrics.
+  *  - categorize5 agrees with evaluate5 on all sampled hands (mismatchCount == 0).
+  *  - Invalid CLI options produce a Left (error) result rather than throwing.
+  */
 class BenchmarkHandEvaluatorTest extends munit.FunSuite:
   test("run returns finite metrics and zero mismatches on deterministic sample") {
     val result = BenchmarkHandEvaluator.run(Array(

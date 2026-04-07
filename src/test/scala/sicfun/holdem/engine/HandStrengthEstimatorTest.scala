@@ -4,6 +4,18 @@ import munit.FunSuite
 import sicfun.core.Card
 import sicfun.holdem.types.*
 
+/** Tests for [[HandStrengthEstimator]].
+  *
+  * Validates the hand evaluation heuristics used by the fast GTO path and archetype
+  * villain decision model:
+  *   - Preflop strength: pocket aces are high, 72o is low, suited > offsuit.
+  *   - Made-hand category: flush on board scores high.
+  *   - Draw potential: 4-flush gets a bonus, no-draw hands get near-zero.
+  *   - Tight-run detection: connected ranks and wheel-ace straights.
+  *   - Clamp utility: bounds enforcement.
+  *   - Fast GTO strength: delegates to preflop on empty board.
+  *   - Street strength: incorporates board information postflop.
+  */
 class HandStrengthEstimatorTest extends FunSuite:
 
   private def card(token: String): Card =

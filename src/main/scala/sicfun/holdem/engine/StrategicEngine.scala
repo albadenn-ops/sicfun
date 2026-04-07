@@ -103,7 +103,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       publicState = pubState,
       kernelProfile = kernelProfile,
       exploitConfigs = exploitConfigs,
-      detector = NeverDetect,
+      detector = config.detector,
       exploitabilityFn = beta => computeExploitabilityEstimate(beta),
       epsilonNE = 0.01
     )
@@ -344,7 +344,8 @@ object StrategicEngine:
         adaptationTolerance = 0.05
       ),
       temperedConfig: TemperedLikelihood.TemperedConfig = TemperedLikelihood.TemperedConfig.twoLayer(0.7, 0.01),
-      actionPriors: Map[(StrategicClass, sicfun.holdem.types.PokerAction.Category), Double] = defaultActionPriors
+      actionPriors: Map[(StrategicClass, sicfun.holdem.types.PokerAction.Category), Double] = defaultActionPriors,
+      detector: DetectionPredicate = FrequencyAnomalyDetection(window = 20, threshold = 0.6)
   )
 
   /** Rival seat information provided at session init. */

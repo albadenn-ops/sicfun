@@ -7,20 +7,51 @@ import sicfun.holdem.cfr.{HoldemCfrConfig, HoldemCfrSolver}
 import scala.collection.mutable
 import scala.util.Random
 
-/** Unified GTO decision system with cached CFR solving and fast heuristic path.
+/** Unified GTO (Game Theory Optimal) decision system with cached CFR solving and a
+  * fast heuristic fallback path.
   *
-  * Extracted from TexasHoldemPlayingHall where gtoHeroResponds and
-  * gtoVillainResponds were near-identical (only difference: posterior source).
-  * Both villainPosteriorForHeroGto and heroPosteriorForGto just called
-  * tableRanges.rangeFor(position), so the unified gtoResponds takes the
-  * opponent posterior as a parameter.
+  * This object provides the GTO decision-making layer for the playing hall. It supports
+  * two modes:
+  *
+  *   - '''Fast mode''': Uses [[HandStrengthEstimator.fastGtoStrength]] with threshold-based
+  *     heuristics to make quick decisions without running a solver. Suitable for low-latency
+  *     or high-volume simulation contexts.
+  *
+  *   - '''Exact mode''': Runs [[HoldemCfrSolver.solveShallowDecisionPolicy]] to compute a
+  *     proper mixed-strategy equilibrium at the decision point. Results are cached by a
+  *     canonical suit-invariant key to avoid redundant solves for strategically equivalent
+  *     spots (e.g., AsKs and AhKh on isomorphic boards produce the same cache key).
+  *
+  * Key design decisions:
+  *   - '''Suit canonicalization''': All 24 suit permutations are tried to find the
+  *     lexicographically smallest (hero, board) representation. This dramatically improves
+  *     cache hit rates by collapsing suit-isomorphic situations into one key.
+  *   - '''Quantized cache keys''': Pot, toCall, and stack are quantized into buckets to
+  *     increase cache reuse for nearby bet sizes.
+  *   - '''CFR parametrization''': Iteration count, villain hand count, and equity trials
+  *     are scaled by street and candidate count. Preflop gets more resources; binary
+  *     (2-candidate) spots get reduced budgets.
+  *   - '''LRU-ish eviction''': When the cache exceeds [[MaxGtoCacheEntries]], it is
+  *     fully cleared (simple but effective for bounded memory).
+  *
+  * Extracted from TexasHoldemPlayingHall where gtoHeroResponds and gtoVillainResponds
+  * were near-identical (only difference: posterior source). The unified [[gtoResponds]]
+  * takes the opponent posterior as a parameter.
   */
 private[holdem] object GtoSolveEngine:
 
+  /** Controls which GTO decision path is used.
+    *   - Fast: heuristic threshold-based decisions using [[HandStrengthEstimator]]
+    *   - Exact: full CFR solve via [[HoldemCfrSolver]]
+    */
   enum GtoMode:
     case Fast
     case Exact
 
+  /** Cache key for exact GTO solutions. Uses canonical (suit-invariant) representations
+    * of hero cards and board, plus quantized pot/stack/toCall buckets, to maximize
+    * cache reuse across strategically equivalent spots.
+    */
   private[holdem] final case class GtoSolveCacheKey(
       perspective: Int,
       canonicalHeroPacked: Long,
@@ -33,18 +64,27 @@ private[holdem] object GtoSolveEngine:
       baseEquityTrials: Int
   )
 
+  /** Result of suit canonicalization: the lexicographically minimal hero+board encoding
+    * and the suit permutation that produced it.
+    */
   private[holdem] final case class CanonicalSuitContext(
       canonicalHeroPacked: Long,
       canonicalBoardPacked: Long,
       suitMap: Array[Int]
   )
 
+  /** Cached CFR solution: the action probability distribution and best action, plus
+    * the provider string identifying which solver produced it (e.g., "native-batch", "jvm").
+    */
   private[holdem] final case class GtoCachedPolicy(
       orderedActionProbabilities: Vector[(PokerAction, Double)],
       bestAction: PokerAction,
       provider: String
   )
 
+  /** Mutable telemetry counters tracking cache hit/miss rates and which solver providers
+    * served or computed each result. Used for performance diagnostics.
+    */
   private[holdem] final case class GtoCacheStats(
       var hits: Long = 0L,
       var misses: Long = 0L,
@@ -65,7 +105,41 @@ private[holdem] object GtoSolveEngine:
     private def increment(counter: mutable.Map[String, Long], provider: String): Unit =
       counter.update(provider, counter(provider) + 1L)
 
+  /** Upper bound on cached GTO policies. When exceeded, the entire cache is cleared.
+    * 500K entries balances memory usage against hit rate for long-running match sessions.
+    */
   private[holdem] val MaxGtoCacheEntries = 500000
+
+  /** GTO threshold configuration for the fast heuristic decision path.
+    * Default values are initial estimates pending calibration from CFR solver output.
+    */
+  final case class GtoThresholds(
+      raiseThreshold: Map[Street, Double],
+      foldMargin: Map[Street, Double],
+      raiseGap: Map[Street, Double]
+  )
+
+  /** Default thresholds preserving the original hardcoded values. */
+  val defaultThresholds: GtoThresholds = GtoThresholds(
+    raiseThreshold = Map(
+      Street.Preflop -> 0.78,
+      Street.Flop    -> 0.74,
+      Street.Turn    -> 0.71,
+      Street.River   -> 0.68
+    ),
+    foldMargin = Map(
+      Street.Preflop -> 0.05,
+      Street.Flop    -> 0.03,
+      Street.Turn    -> 0.01,
+      Street.River   -> -0.01
+    ),
+    raiseGap = Map(
+      Street.Preflop -> 0.27,
+      Street.Flop    -> 0.24,
+      Street.Turn    -> 0.22,
+      Street.River   -> 0.20
+    )
+  )
 
   /** Unified GTO decision dispatcher. Replaces the near-identical
     * gtoHeroResponds / gtoVillainResponds pair.
@@ -109,6 +183,16 @@ private[holdem] object GtoSolveEngine:
             exactGtoCacheStats = exactGtoCacheStats
           )
 
+  /** Solves a GTO decision point using CFR with caching.
+    *
+    * Flow:
+    *   1. Compute the canonical suit-invariant (hero, board) signature.
+    *   2. Build a cache key from the canonical signature + quantized game state.
+    *   3. If cached, sample an action from the stored policy.
+    *   4. If not cached, configure and run [[HoldemCfrSolver.solveShallowDecisionPolicy]],
+    *      then cache the result and sample an action.
+    *   5. On solver failure, fall back to uniform random selection to preserve run continuity.
+    */
   private def solveGtoByCfr(
       hand: HoleCards,
       state: GameState,
@@ -184,6 +268,20 @@ private[holdem] object GtoSolveEngine:
             exactGtoCacheStats.recordMiss("random-fallback")
             candidates(rng.nextInt(candidates.length))
 
+  /** Fast heuristic GTO decision path (no solver).
+    *
+    * Uses [[HandStrengthEstimator.fastGtoStrength]] to get a deterministic strength
+    * estimate, then applies street-dependent thresholds with mixed-strategy regions:
+    *
+    * '''Check-to-act (toCall <= 0):'''
+    *   - Pure raise above pureRaiseThreshold, mixed raise in a transition zone,
+    *     check otherwise.
+    *
+    * '''Facing a bet (toCall > 0):'''
+    *   - Fold below foldThreshold (pot-odds + street margin).
+    *   - Call between foldThreshold and raiseThreshold.
+    *   - Mixed raise above raiseThreshold with probability proportional to excess strength.
+    */
   private def fastGtoResponds(
       hand: HoleCards,
       state: GameState,
@@ -220,29 +318,35 @@ private[holdem] object GtoSolveEngine:
       else
         foldCandidate.getOrElse(PokerAction.Fold)
 
-  private def fastGtoRaiseThreshold(street: Street): Double =
-    street match
-      case Street.Preflop => 0.78
-      case Street.Flop    => 0.74
-      case Street.Turn    => 0.71
-      case Street.River   => 0.68
+  /** Minimum strength for a pure (always) raise in the fast GTO path.
+    * Decreases from preflop (0.78) to river (0.68) as board information increases.
+    */
+  private def fastGtoRaiseThreshold(street: Street, thresholds: GtoThresholds = defaultThresholds): Double =
+    thresholds.raiseThreshold.getOrElse(street, 0.65)
 
-  private def fastGtoFoldMargin(street: Street): Double =
-    street match
-      case Street.Preflop => 0.05
-      case Street.Flop    => 0.03
-      case Street.Turn    => 0.01
-      case Street.River   => -0.01
+  /** Extra margin added to pot odds to determine the fold threshold.
+    * Positive = tighter than pot odds (preflop); negative = looser (river).
+    */
+  private def fastGtoFoldMargin(street: Street, thresholds: GtoThresholds = defaultThresholds): Double =
+    thresholds.foldMargin.getOrElse(street, 0.02)
 
-  private def fastGtoRaiseGap(street: Street): Double =
-    street match
-      case Street.Preflop => 0.27
-      case Street.Flop    => 0.24
-      case Street.Turn    => 0.22
-      case Street.River   => 0.20
+  /** Gap between fold threshold and raise threshold in the fast GTO path.
+    * Narrower on later streets as decisions become more polarized.
+    */
+  private def fastGtoRaiseGap(street: Street, thresholds: GtoThresholds = defaultThresholds): Double =
+    thresholds.raiseGap.getOrElse(street, 0.22)
 
   // --- CFR parametrization ---
+  // These methods scale CFR solver resources (iterations, villain hands, equity trials)
+  // by street and candidate count. The rationale: preflop has the widest ranges and
+  // needs more iterations; binary decisions (2 candidates) can converge faster.
 
+  /** Computes the number of CFR iterations for a GTO solve.
+    *
+    * Base iterations scale linearly with baseEquityTrials / 3, clamped to [72, 224].
+    * Street adjustments: preflop gets +32; turn and river get progressive discounts.
+    * Binary decisions (2 candidates) apply a 0.60x reduction with per-street floors.
+    */
   private[holdem] def gtoIterations(
       street: Street,
       baseEquityTrials: Int,
@@ -266,6 +370,10 @@ private[holdem] object GtoSolveEngine:
     else
       streetBase
 
+  /** Maximum number of villain hands sampled from the posterior for CFR solving.
+    * Decreases by street (56 preflop -> 16 river) since later streets have narrower ranges.
+    * Binary decisions reduce by 12 with a floor of 16.
+    */
   private[holdem] def gtoMaxVillainHands(
       street: Street,
       candidateCount: Int
@@ -278,6 +386,10 @@ private[holdem] object GtoSolveEngine:
         case Street.River   => 16
     if candidateCount <= 2 then math.max(16, base - 12) else base
 
+  /** Number of Monte Carlo equity trials used inside each CFR iteration.
+    * Scales with baseEquityTrials but divides more aggressively on later streets.
+    * Binary decisions apply 0.65x reduction with per-street floors.
+    */
   private[holdem] def gtoEquityTrials(
       street: Street,
       baseEquityTrials: Int,
@@ -302,6 +414,9 @@ private[holdem] object GtoSolveEngine:
 
   // --- Cache key construction ---
 
+  /** Builds a cache key for a GTO solve, using the canonical (suit-invariant) hero+board
+    * signature and quantized game-state buckets to maximize cache reuse.
+    */
   private[holdem] def buildGtoSolveCacheKey(
       perspective: Int,
       hand: HoleCards,
@@ -336,6 +451,9 @@ private[holdem] object GtoSolveEngine:
   private def quantizeStack(stack: Double): Int =
     math.round(stack / 5.0).toInt
 
+  /** Deterministic RNG seed for CFR equity calculations, derived from the canonical
+    * game signature. Ensures reproducibility for the same strategic situation.
+    */
   private def exactEquitySeed(
       perspective: Int,
       baseEquityTrials: Int,
@@ -352,7 +470,12 @@ private[holdem] object GtoSolveEngine:
     )
 
   // --- Canonical board signature ---
+  // Suit canonicalization collapses suit-isomorphic situations into a single
+  // canonical form. For example, AsKs on Qs-Jd-3h is strategically identical to
+  // AhKh on Qh-Jc-3s. By trying all 24 suit permutations and picking the
+  // lexicographically smallest encoding, we ensure these map to the same cache key.
 
+  /** All 24 permutations of 4 suits (0=spades, 1=hearts, 2=diamonds, 3=clubs). */
   private val SuitPermutations: Array[Array[Int]] =
     Array(
       Array(0, 1, 2, 3), Array(0, 1, 3, 2), Array(0, 2, 1, 3), Array(0, 2, 3, 1),
@@ -363,6 +486,14 @@ private[holdem] object GtoSolveEngine:
       Array(3, 1, 0, 2), Array(3, 1, 2, 0), Array(3, 2, 0, 1), Array(3, 2, 1, 0)
     )
 
+  /** Finds the lexicographically smallest (hero, board) encoding across all 24 suit permutations.
+    *
+    * For each permutation, remaps hero cards and board cards, sorts the board, packs both
+    * into Long values, and keeps the permutation that yields the smallest (heroPacked, boardPacked)
+    * pair under lexicographic ordering. This is the core of suit canonicalization for caching.
+    *
+    * @return a CanonicalSuitContext with the minimal encoding and the winning suit map
+    */
   private[holdem] def canonicalHeroBoardContext(hand: HoleCards, board: Board): CanonicalSuitContext =
     val boardSize = board.cards.length
     val remappedBoardIds = new Array[Int](boardSize)
@@ -400,22 +531,29 @@ private[holdem] object GtoSolveEngine:
       suitMap = bestSuitMap
     )
 
+  /** Convenience wrapper: returns just the canonical (heroPacked, boardPacked) pair. */
   private[holdem] def canonicalHeroBoardSignature(hand: HoleCards, board: Board): (Long, Long) =
     val context = canonicalHeroBoardContext(hand, board)
     (context.canonicalHeroPacked, context.canonicalBoardPacked)
 
+  /** Remaps hole cards through a suit permutation and packs into a combinatorial index. */
   private[holdem] def canonicalizeHoleCards(hand: HoleCards, suitMap: Array[Int]): Int =
     val firstId = remapCardId(hand.first, suitMap)
     val secondId = remapCardId(hand.second, suitMap)
     packHoleCardsId(firstId, secondId)
 
+  /** Remaps a card's suit through the permutation and returns a unique card ID (0..51). */
   private def remapCardId(card: Card, suitMap: Array[Int]): Int =
     val mappedSuit = suitMap(card.suit.ordinal)
     (mappedSuit * 13) + card.rank.ordinal
 
+  /** Packs two ordered card IDs into a compact Long for comparison. */
   private def packRemappedHoleCards(lowId: Int, highId: Int): Long =
     ((lowId.toLong << 6) | highId.toLong) & 0xFFFL
 
+  /** Packs two card IDs into a unique combinatorial index (order-independent).
+    * Uses the triangular number formula: C(52,2) = 1326 possible hole card combos.
+    */
   private def packHoleCardsId(firstId: Int, secondId: Int): Int =
     if firstId < secondId then
       (firstId * (103 - firstId)) / 2 + (secondId - firstId - 1)
@@ -424,6 +562,9 @@ private[holdem] object GtoSolveEngine:
 
   // --- Action hashing ---
 
+  /** Deterministic hash of a candidate action vector for cache key construction.
+    * Uses the standard polynomial hash (multiply by 31, add element hash).
+    */
   private[holdem] def hashActions(actions: Vector[PokerAction]): Int =
     var hash = 1
     var idx = 0
@@ -432,6 +573,7 @@ private[holdem] object GtoSolveEngine:
       idx += 1
     hash
 
+  /** Maps a single PokerAction to a stable integer for hashing. */
   private def hashAction(action: PokerAction): Int =
     action match
       case PokerAction.Fold => 1
@@ -442,6 +584,9 @@ private[holdem] object GtoSolveEngine:
 
   // --- Policy sampling ---
 
+  /** Filters an action probability map to only positive-probability actions, preserving
+    * the original candidate ordering. Zero, negative, and non-finite probabilities are dropped.
+    */
   private[holdem] def orderedPositiveProbabilities(
       actions: Vector[PokerAction],
       probabilities: Map[PokerAction, Double]
@@ -452,6 +597,12 @@ private[holdem] object GtoSolveEngine:
       else None
     }
 
+  /** Samples an action from a mixed-strategy policy using the inverse CDF method.
+    *
+    * Generates a uniform random target in [0, total_probability), then walks through
+    * the ordered (action, probability) pairs accumulating mass until the target is reached.
+    * Returns the fallback action if the ordered vector is empty or total mass is zero.
+    */
   private[holdem] def sampleActionByPolicy(
       ordered: Vector[(PokerAction, Double)],
       fallback: PokerAction,
@@ -476,6 +627,10 @@ private[holdem] object GtoSolveEngine:
 
   // --- Utilities ---
 
+  /** Stafford variant of MurmurHash3 finalizer for 64-bit mixing.
+    * Produces a well-distributed hash from an arbitrary Long input.
+    * Used to generate deterministic RNG seeds for CFR equity calculations.
+    */
   private def mix64(value: Long): Long =
     var z = value + 0x9E3779B97F4A7C15L
     z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L

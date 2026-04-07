@@ -4,16 +4,33 @@ import sicfun.holdem.types.*
 import munit.FunSuite
 import sicfun.core.Card
 
+/** Tests for [[LongitudinalAnalysis.analyze]], which detects behavioral drift
+  * across sliding time windows over a player's event stream.
+  *
+  * Coverage includes:
+  *   - Single-window case (no drift possible, zero aggregates)
+  *   - Significant drift between passive and aggressive windows
+  *   - Player-id filtering from a mixed-player stream
+  *   - Skipping windows below the minimum event threshold
+  *   - Start-inclusive / end-exclusive window boundary semantics
+  *   - Rejection when no events match the requested player
+  *   - Consistency of maxDrift / meanDrift with computed drift distances
+  */
 class LongitudinalAnalysisTest extends FunSuite:
+  /** Parses a card token, failing the test on invalid input. */
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
+  /** Builds a synthetic [[PokerEvent]] with a derived toCall amount based on
+    * the action type. Uses a fixed flop board (Ts 9h 8d) and Button position.
+    */
   private def event(
       playerId: String,
       timestamp: Long,
       sequence: Long,
       action: PokerAction
   ): PokerEvent =
+    // Derive toCall from action: calls/folds/raises face a bet; checks do not
     val toCall = action match
       case PokerAction.Call      => 10.0
       case PokerAction.Check     => 0.0

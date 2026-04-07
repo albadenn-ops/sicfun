@@ -6,7 +6,20 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Locale
 
-/** Canonical remembered-player identity record used across aliases/profiles. */
+/** Canonical remembered-player identity record used across aliases/profiles.
+  *
+  * A RememberedPlayer is the top-level entity in the identity system: it represents
+  * a single real-world player who may have multiple screen names (aliases) across
+  * different sites. The `playerUid` is a deterministic SHA-256 hash derived from
+  * the site and normalized name, ensuring stable identity across store operations.
+  *
+  * @param playerUid     deterministic unique identifier (SHA-256 hash)
+  * @param canonicalSite the primary site this player is known from
+  * @param canonicalName the primary screen name for this player
+  * @param profileUid    UID of the associated behavioral profile
+  * @param modelUid      optional UID of a SICFUN-local trained model
+  * @param behaviorUid   optional UID of the behavior fingerprint
+  */
 final case class RememberedPlayer(
     playerUid: String,
     canonicalSite: String,
@@ -63,19 +76,41 @@ final case class BehaviorFingerprint(
   require(uid.trim.nonEmpty, "uid must be non-empty")
   require(payload.trim.nonEmpty, "payload must be non-empty")
 
-/** Identity normalization and deterministic UID/fingerprint derivation helpers. */
+/** Identity normalization and deterministic UID/fingerprint derivation helpers.
+  *
+  * The identity system works at three levels:
+  *   1. '''Player identity''' — maps a (site, name) pair to a stable `playerUid` via SHA-256.
+  *      SICFUN-local players additionally incorporate the model UID and behavior UID.
+  *   2. '''Profile identity''' — maps behavioral data to a stable `profileUid`. For
+  *      SICFUN-local players, this equals the behavior UID; for external players,
+  *      it is a SHA-256 hash of (site, name).
+  *   3. '''Behavior fingerprint''' — a content-addressable hash of the player's
+  *      statistical signature (action frequencies, archetype posteriors, raise responses)
+  *      used for dedup and identity fallback.
+  *
+  * All UIDs are deterministic (same inputs always produce the same hash), making the
+  * system idempotent across repeated imports.
+  */
 object OpponentIdentity:
   val SicfunLocalSite = "sicfun@localhost"
 
+  /** Normalize a site name to lowercase for consistent identity derivation. */
   def normalizeSite(site: String): String =
     site.trim.toLowerCase(Locale.ROOT)
 
   def normalizePlayerName(playerName: String): String =
     playerName.trim
 
+  /** Compute the alias lookup key: "normalized_site\0lowercase_name". */
   def aliasKey(site: String, playerName: String): String =
     s"${normalizeSite(site)}\u0000${playerName.trim.toLowerCase(Locale.ROOT)}"
 
+  /** Compute a content-addressable behavior fingerprint from profile statistics.
+    *
+    * Hashes the player's signature vector, raise response counts, and archetype
+    * posterior probabilities into a deterministic SHA-256 UID. Two profiles with
+    * identical behavioral statistics will produce the same fingerprint.
+    */
   def fingerprint(profile: OpponentProfile): BehaviorFingerprint =
     val signatureKey = profile.signature.values.map(formatDouble).mkString(",")
     val responseKey = s"${profile.raiseResponses.folds}:${profile.raiseResponses.calls}:${profile.raiseResponses.raises}"
@@ -85,6 +120,12 @@ object OpponentIdentity:
     val payload = s"signature=$signatureKey|responses=$responseKey|archetypes=$archetypeKey"
     BehaviorFingerprint(uid = sha256Hex(s"behavior|$payload"), payload = payload)
 
+  /** Derive the deterministic player UID.
+    *
+    * For SICFUN-local players (site = "sicfun@localhost") with a model UID,
+    * the hash incorporates the model UID and behavior UID for uniqueness.
+    * For external players, the hash uses site + lowercase name.
+    */
   def defaultPlayerUid(
       site: String,
       playerName: String,
@@ -97,6 +138,11 @@ object OpponentIdentity:
     else
       sha256Hex(s"player|$normalizedSite|${playerName.trim.toLowerCase(Locale.ROOT)}")
 
+  /** Derive the deterministic profile UID.
+    *
+    * SICFUN-local players use the behavior UID directly (profile = behavior).
+    * External players use SHA-256("profile|site|name").
+    */
   def defaultProfileUid(
       site: String,
       playerName: String,
@@ -106,6 +152,12 @@ object OpponentIdentity:
     if normalizedSite == SicfunLocalSite then behaviorUid
     else sha256Hex(s"profile|$normalizedSite|${playerName.trim.toLowerCase(Locale.ROOT)}")
 
+  /** Ensure a profile has all identity fields populated (playerUid, profileUid, behaviorUid).
+    *
+    * If any UID is missing, it is derived deterministically from the profile's
+    * site, name, and behavioral statistics. This is idempotent — calling it on
+    * an already-identified profile returns the same values.
+    */
   def ensureProfileIdentity(profile: OpponentProfile): OpponentProfile =
     val normalizedSite = normalizeSite(profile.site)
     val normalizedName = normalizePlayerName(profile.playerName)
@@ -124,6 +176,7 @@ object OpponentIdentity:
       modelUid = cleanedModelUid
     )
 
+  /** Create a RememberedPlayer from a profile, ensuring identity fields are populated. */
   def defaultPlayer(profile: OpponentProfile): RememberedPlayer =
     val identified = ensureProfileIdentity(profile)
     RememberedPlayer(

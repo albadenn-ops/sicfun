@@ -3,8 +3,31 @@ import sicfun.holdem.cli.*
 
 import java.nio.file.{Path, Paths}
 
-/** CLI entrypoint for training and exporting versioned poker action models. */
+/**
+ * Command-line interface for training and exporting versioned poker action models in sicfun.
+ *
+ * This is the production entry point for offline model training. It reads a TSV training
+ * data file (via [[PokerActionTrainingDataIO]]), trains a multinomial logistic regression
+ * model (via [[PokerActionModel.trainVersioned]]), and persists the complete artifact
+ * (via [[PokerActionModelArtifactIO]]).
+ *
+ * Usage: `TrainPokerActionModel <trainingTsvPath> <artifactOutputDir> [--key=value ...]`
+ *
+ * The CLI supports all training hyperparameters (learning rate, iterations, L2 lambda),
+ * evaluation configuration (holdout split vs. external evaluation set), quality gating
+ * (max Brier score threshold), and provenance metadata (model ID, schema version, source).
+ *
+ * Key design decisions:
+ *   - '''Either-based error handling''': The `run` method returns `Either[String, RunResult]`
+ *     for clean composition in test harnesses. The `main` method wraps this with exit codes.
+ *   - '''All options have sensible defaults''': Only the training file and output directory
+ *     are required. All hyperparameters and metadata fields have production-ready defaults.
+ *   - '''Separation of parsing and execution''': `parseArgs` returns a `CliConfig` case class,
+ *     which `runConfig` consumes. This makes the CLI logic testable without filesystem side effects.
+ *
+ * CLI entrypoint for training and exporting versioned poker action models. */
 object TrainPokerActionModel:
+  /** Parsed CLI configuration holding all training parameters and metadata. */
   private final case class CliConfig(
       trainingPath: String,
       outputDir: Path,
@@ -22,8 +45,10 @@ object TrainPokerActionModel:
       trainedAtEpochMillis: Long
   )
 
+  /** Result of a successful training run: the output directory and the trained artifact. */
   final case class RunResult(outputDir: Path, artifact: TrainedPokerActionModel)
 
+  /** Main entry point: trains the model and prints results to stdout, or errors to stderr with exit(1). */
   def main(args: Array[String]): Unit =
     run(args) match
       case Right(result) =>
@@ -43,12 +68,16 @@ object TrainPokerActionModel:
         System.err.println(error)
         sys.exit(1)
 
+  /** Parses arguments and runs the training pipeline. Returns Left(error) or Right(result). */
   def run(args: Array[String]): Either[String, RunResult] =
     for
       config <- parseArgs(args)
       result <- runConfig(config)
     yield result
 
+  /** Executes the training pipeline: reads data, trains model, saves artifact.
+   * Wraps all exceptions as Left(error message).
+   */
   private def runConfig(config: CliConfig): Either[String, RunResult] =
     try
       val trainingData = PokerActionTrainingDataIO.readTsv(config.trainingPath)
@@ -75,6 +104,11 @@ object TrainPokerActionModel:
     catch
       case e: Exception => Left(s"training failed: ${e.getMessage}")
 
+  /** Parses command-line arguments into a [[CliConfig]].
+   *
+   * The first two positional arguments are the training TSV path and output directory.
+   * Remaining arguments are parsed as `--key=value` options via [[CliHelpers.parseOptionsAllowBlankValues]].
+   */
   private def parseArgs(args: Array[String]): Either[String, CliConfig] =
     if args.contains("--help") || args.contains("-h") then Left(usage)
     else if args.length < 2 then Left(usage)

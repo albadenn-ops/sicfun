@@ -7,6 +7,34 @@ import sicfun.core.{Card, DiscreteDistribution}
 
 import java.nio.file.Paths
 
+/** Comprehensive tests for [[HoldemCfrSolver]], the main entry point for Hold'em CFR solving.
+  *
+  * Tests are organized in several categories:
+  *
+  *  - '''Directional sanity''': Verifies that premium hands (AA) prefer non-fold actions
+  *    and trash hands (72o) against strong ranges prefer fold — basic game-theory sanity.
+  *
+  *  - '''Cross-backend parity''': Tests that scala-fixed, native-cpu, native-gpu, and
+  *    native-cpu-fixed backends produce strategies close to the scala reference. Each
+  *    backend test gracefully skips when the native library is unavailable.
+  *
+  *  - '''Provider fallback''': Verifies that when native libraries are missing (invalid
+  *    paths), the solver falls back to the scala backend instead of failing.
+  *
+  *  - '''Solve mode consistency''': Verifies that decision-only solve (`solveDecisionPolicy`)
+  *    and full solve (`solve`) produce identical root policies, and that shallow solve
+  *    preserves the CFR mixed strategy when raises are present.
+  *
+  *  - '''Direct shortcuts''': Tests that fold/check/call-only spots (no raises) use the
+  *    "direct" analytical shortcut (provider="direct") instead of running CFR iterations.
+  *
+  *  - '''Exact equity''': Verifies exact postflop equity computation on river boards
+  *    matches the exact evaluator, and gracefully falls back on turn/flop boards.
+  *
+  *  - '''Postflop lookahead''': Tests that enabling lookahead (extending the game tree
+  *    one street forward) changes the optimal decision in specific turn spots and is
+  *    a no-op on river spots where no future street exists.
+  */
 class HoldemCfrSolverTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
@@ -19,6 +47,7 @@ class HoldemCfrSolverTest extends FunSuite:
       fail(s"missing default diagnostic spot: $id")
     )
 
+  /** Scoped system property override with native runtime cache reset for test isolation. */
   private def withSystemProperties[A](properties: Map[String, String])(thunk: => A): A =
     TestSystemPropertyScope.withSystemProperties(properties.toSeq.map { case (key, value) => key -> Some(value) }) {
       HoldemCfrNativeRuntime.resetLoadCacheForTests()
@@ -29,6 +58,8 @@ class HoldemCfrSolverTest extends FunSuite:
         HoldemCfrSolver.resetAutoProviderForTests()
     }
 
+  // AA vs a weak range (72o-heavy) preflop: the solver must return a normalized
+  // policy summing to 1.0 and must NOT recommend folding pocket aces.
   test("CFR baseline returns normalized policy and non-fold best action for premium hero hand") {
     val hero = hole("Ac", "Ad")
     val state = GameState(
@@ -71,6 +102,8 @@ class HoldemCfrSolverTest extends FunSuite:
     assert(solution.villainSupport > 0)
   }
 
+  // 72o vs {AA:70%, KK:30%} with a 28bb call into 5bb pot: folding is clearly
+  // optimal, and the solver should assign >65% probability to fold.
   test("CFR baseline favors fold against very strong range and expensive call") {
     val hero = hole("7c", "2d")
     val state = GameState(
@@ -111,6 +144,8 @@ class HoldemCfrSolverTest extends FunSuite:
     assert(solution.provider.nonEmpty)
   }
 
+  // Cross-arithmetic parity: scala-fixed (Q1.30 integer) must agree on best action
+  // and stay within 0.08 probability tolerance of the double-precision scala baseline.
   test("scala-fixed full solve stays close to scala on preflop spot") {
     withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
       val hero = hole("Ac", "Ad")
@@ -160,6 +195,8 @@ class HoldemCfrSolverTest extends FunSuite:
     }
   }
 
+  // Fallback test: when the native CPU library path points to a nonexistent file,
+  // the solver must silently fall back to provider="scala" instead of failing.
   test("native CPU provider falls back to scala when native path is invalid") {
     val missingNativePath = Paths
       .get(System.getProperty("java.io.tmpdir"), s"sicfun-cfr-native-missing-${System.nanoTime()}.dll")
@@ -368,6 +405,8 @@ class HoldemCfrSolverTest extends FunSuite:
     }
   }
 
+  // The decision-only path (solveDecisionPolicy) skips exploitability diagnostics
+  // but must produce exactly the same root policy as the full solve (solve).
   test("decision-only solve matches full solve root policy") {
     withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
       val hero = hole("Ac", "Kd")
@@ -658,6 +697,9 @@ class HoldemCfrSolverTest extends FunSuite:
       }
   }
 
+  // When the only candidate actions are fold/call (no raises), the solver should
+  // use the "direct" analytical shortcut that computes optimal play from equity
+  // without running any CFR iterations.
   test("decision-only solve uses direct shortcut when root has no raise branch") {
     val hero = hole("Ac", "Kd")
     val state = GameState(
@@ -701,6 +743,8 @@ class HoldemCfrSolverTest extends FunSuite:
     )
   }
 
+  // The shallow solver must produce the exact same mixed strategy as the decision-only
+  // CFR path when raises are present (it delegates to solveDecisionPolicy).
   test("shallow decision solver preserves decision-only CFR root policy on one-reraise hall tree") {
     withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
       val hero = hole("Ac", "Kd")
@@ -823,6 +867,8 @@ class HoldemCfrSolverTest extends FunSuite:
     }
   }
 
+  // Exact postflop equity is only available on the river (5 board cards).
+  // On the turn (4 board cards), it should return None.
   test("exact postflop equity falls back on turn") {
     val hero = hole("Ac", "Kd")
     val board = Board.from(Vector(card("2c"), card("7d"), card("Jh"), card("Qc")))
@@ -874,6 +920,10 @@ class HoldemCfrSolverTest extends FunSuite:
     }
   }
 
+  // The turn probe spot (AcKd on 2c7dJhQc, facing a 4bb bet) is a marginal call
+  // when evaluating only the current street. With postflop lookahead (adding the
+  // river betting round), the solver accounts for future betting disadvantage and
+  // correctly switches to fold as the optimal action.
   test("postflop lookahead flips the turn probe benchmark from call to fold") {
     withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
       val spot = defaultSpot("hu_turn_button_vs_probe")
@@ -913,6 +963,8 @@ class HoldemCfrSolverTest extends FunSuite:
     }
   }
 
+  // On the river there is no future street, so postflopLookahead=true must produce
+  // identical policies to postflopLookahead=false (no extra nodes in the game tree).
   test("postflop lookahead is a no-op on river spots") {
     withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
       val spot = defaultSpot("hu_river_bluffcatch")

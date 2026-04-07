@@ -4,6 +4,30 @@ import sicfun.holdem.types.*
 
 import munit.FunSuite
 
+/**
+  * Tests for [[AdvisorCommandParser]] REPL input parsing.
+  *
+  * This suite provides comprehensive coverage of the advisor REPL command grammar,
+  * organized by command category:
+  *
+  * '''Singleton commands''': `new`, `advise`/`?`/`advice`, `review`, `session`/`stats`,
+  * `undo`, `help`, `quit`/`exit`/`q` -- verified with case-insensitivity and synonyms.
+  *
+  * '''Hero hole cards''': Parsing with "hero"/"h" prefix, separate tokens ("h Ac Kh"),
+  * concatenated tokens ("h AcKh"), bare 4-character tokens ("AcKh"), and invalid cards.
+  *
+  * '''Hero actions''': `h raise 6`, `h bet 8.5` (bet = raise alias), `h call`, `h fold`,
+  * `h check`, with error cases for missing/invalid/zero/negative raise amounts.
+  *
+  * '''Villain actions''': Mirrors hero actions with "v"/"villain" prefix, plus showdown
+  * parsing ("v show QhQs", "v show Qh Qs", "v shows", "v showdown").
+  *
+  * '''Board''': Concatenated ("board Ts9h8d") and spaced ("board Ts 9h 8d") notations,
+  * "b" prefix shorthand, single-card boards, and invalid card detection.
+  *
+  * '''Edge cases''': Empty input, whitespace-only input, unrecognized commands, leading/
+  * trailing whitespace trimming, standalone "h"/"v"/"board" without sub-commands.
+  */
 class AdvisorCommandParserTest extends FunSuite:
 
   // ---- Singleton commands ----

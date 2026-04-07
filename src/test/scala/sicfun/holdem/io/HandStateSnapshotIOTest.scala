@@ -8,10 +8,24 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
 
+/**
+ * Tests for [[HandStateSnapshotIO]] directory-based hand state persistence.
+ *
+ * Validates:
+ *   - Save/load roundtrip preserves single and multiple events, all poker actions,
+ *     board cards, bet history, decision times, and empty event lists
+ *   - All Position and Street enum values survive the roundtrip
+ *   - Directory creation for nested paths
+ *   - String path overload convenience methods
+ *   - Load-time validation: non-existent directory, event count mismatch,
+ *     duplicate sequences, and header corruption
+ */
 class HandStateSnapshotIOTest extends FunSuite:
+  /** Parses a card token string, failing the test if invalid. */
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
+  /** Factory method for creating test events. Board is auto-generated based on street. */
   private def event(
       handId: String,
       sequence: Long,
@@ -47,6 +61,7 @@ class HandStateSnapshotIOTest extends FunSuite:
       betHistory = betHistory
     )
 
+  /** Creates a temp directory, runs the test body, then recursively deletes the directory. */
   private def withTempDir(testName: String)(f: Path => Unit): Unit =
     val dir = Files.createTempDirectory(s"sicfun-snapshot-$testName-")
     try f(dir)

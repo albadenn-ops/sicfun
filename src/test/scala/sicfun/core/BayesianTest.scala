@@ -4,6 +4,20 @@ import munit.FunSuite
 import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 
+/** Tests for [[BayesianRange]] sequential Bayesian inference over discrete hypothesis spaces.
+  *
+  * Validates the core Bayesian update mechanics:
+  *  - A single update shifts probability mass toward the hypothesis consistent with
+  *    the observed action (e.g., observing a raise increases P(strong hand)).
+  *  - The posterior remains normalized (probabilities sum to 1) after updates.
+  *  - Sequential updates via `updateAll` accumulate evidence and progressively narrow
+  *    the distribution (repeated raises concentrate belief on the strong hand).
+  *  - An empty observation sequence leaves the prior unchanged.
+  *  - `BayesianRange.uniform` initializes equal weights across all hypotheses.
+  *
+  * Uses a trained PokerActionModel on a T-9-8 flop where QJ (made straight) maps to
+  * Raise and 72o (junk) maps to Fold.
+  */
 class BayesianTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))

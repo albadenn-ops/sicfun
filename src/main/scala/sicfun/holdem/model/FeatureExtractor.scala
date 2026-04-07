@@ -1,6 +1,24 @@
 package sicfun.holdem.model
 import sicfun.holdem.types.*
 
+/**
+ * Observable feature extraction for the sicfun poker action classification pipeline.
+ *
+ * This file defines the 8-dimensional observable feature vector used by the [[ActionDataset]]
+ * builder and the [[SignalBuilder]] risk scorer. Unlike [[PokerFeatures]] (which includes
+ * hand-strength estimates requiring private hole cards), [[ObservableFeatures]] uses only
+ * publicly visible game state information, making it suitable for:
+ *   - '''Opponent modeling''': Features can be computed for any observed player action
+ *     without knowing their hole cards
+ *   - '''Real-time signal scoring''': The risk scorer needs features from the current
+ *     game state without requiring equity computation
+ *   - '''Dataset generation''': Training data for action classification models that
+ *     learn from observed actions alone
+ *
+ * All features are normalized to [0, 1] to ensure stable gradient behavior during
+ * multinomial logistic regression training.
+ */
+
 /** A fixed-dimension vector of observable (public) features extracted from a [[PokerEvent]].
   *
   * Unlike [[PokerFeatures]], this does not include hand-strength estimates derived

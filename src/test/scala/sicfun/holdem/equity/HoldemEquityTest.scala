@@ -6,6 +6,24 @@ import sicfun.core.{Card, Deck, DiscreteDistribution, HandEvaluator}
 
 import scala.util.Random
 
+/**
+  * Comprehensive tests for the core HoldemEquity calculation engine.
+  *
+  * Covers:
+  *   - equityExact: deterministic win on complete board, tie detection, range string input
+  *   - equityMonteCarlo: matching exact results on complete boards, range string input
+  *   - equityMonteCarloMulti: correct tie splitting in multi-way pots, outright wins
+  *   - equityExactMulti: exact share computation validated against manual board enumeration
+  *     on both turn (1 missing card) and flop (2 missing cards) boards
+  *   - Input validation: non-positive trials, hero-board overlap, preflop rejection for
+  *     exact multi, empty villain ranges, impossible non-overlapping villain sampling
+  *   - evCall: rejection of invalid numeric inputs
+  *   - Accelerated batch path: cpu-emulated GPU provider exercises the batch codepath
+  *
+  * Manual enumeration tests independently compute equity by iterating all remaining cards
+  * and evaluating hands, then compare against the engine's output to within floating-point
+  * tolerance (1e-12).
+  */
 class HoldemEquityTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
@@ -16,6 +34,7 @@ class HoldemEquityTest extends FunSuite:
   private def board(tokens: String*): Board =
     Board.from(tokens.map(card))
 
+  /** Local k-subset combination generator for manual enumeration in test assertions. */
   private def combinations[A](items: IndexedSeq[A], k: Int): Iterator[Vector[A]] =
     require(k >= 0 && k <= items.length)
     def loop(start: Int, kLeft: Int, acc: Vector[A]): Iterator[Vector[A]] =
@@ -27,6 +46,7 @@ class HoldemEquityTest extends FunSuite:
         }
     loop(0, k, Vector.empty)
 
+  /** Computes C(n,k) for assertion denominators in manual enumeration tests. */
   private def combinationsCount(n: Int, k: Int): Long =
     require(k >= 0 && k <= n)
     if k == 0 || k == n then 1L

@@ -41,7 +41,7 @@ class ReductionismManifestTest extends FunSuite:
       Severity.Silent, "Wave 4", resolved = true),
     Reductionism("SE-002", "engine/StrategicEngine.scala:90",
       "detector = NeverDetect — opponent detection permanently disabled",
-      Severity.Silent, "Wave 4"),
+      Severity.Silent, "Wave 4", resolved = true),
     Reductionism("SE-003", "engine/StrategicEngine.scala:259",
       "ShowdownKernel classifies revealed hands and hard-shifts posterior",
       Severity.Silent, "Wave 3", resolved = true),

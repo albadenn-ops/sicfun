@@ -3,6 +3,18 @@ package sicfun.holdem.runtime
 import munit.FunSuite
 import sicfun.holdem.types.*
 
+/** Tests for [[MatchRunnerSupport]] — shared match runner statistics, logging, and summary output.
+  *
+  * Covers:
+  *  - '''Zero state:''' A fresh `MatchStatistics` starts with all counters at zero.
+  *  - '''Win/loss/tie tracking:''' Recording outcomes correctly updates wins, losses, ties,
+  *    net chips, and position breakdowns (button vs. big blind).
+  *  - '''BB/100 calculation:''' Verifying the standard poker win-rate metric computation.
+  *  - '''Summary output format:''' `writeSummary` produces the expected human-readable format
+  *    with labeled fields (hands, net chips, bb/100, hero mode, model ID).
+  *  - '''Decision log format:''' `appendDecisionLog` produces correctly tab-separated fields
+  *    with all expected columns (hand, decision index, street, position, pot, candidates, etc.).
+  */
 class MatchRunnerSupportTest extends FunSuite:
 
   test("MatchStatistics starts at zero"):

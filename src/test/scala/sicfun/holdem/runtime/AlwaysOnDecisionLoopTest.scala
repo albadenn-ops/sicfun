@@ -12,6 +12,28 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
 
+/** Tests for [[AlwaysOnDecisionLoop]] — the polling-based live decision service.
+  *
+  * Verifies the full lifecycle of the always-on loop:
+  *  - '''Feed consumption:''' Reading incremental events from a TSV feed file, updating
+  *    per-hand state snapshots, and persisting byte offsets for resumption.
+  *  - '''Decision emission:''' Producing hero recommendations for hero-originated events,
+  *    writing decision logs, signal audit logs, context archives, and snapshot files.
+  *  - '''Scheduled retraining:''' Triggering model retraining after N decisions, recording
+  *    retrain success/failure in the model-updates log, and hot-swapping the active model.
+  *  - '''Feed rotation:''' Handling empty feeds (e.g., log rotation) by resetting the
+  *    byte offset to zero and resuming cleanly when the feed is repopulated.
+  *  - '''CFR baseline:''' Verifying that CFR columns (attribution, blend weight, regret,
+  *    exploitability, deviation gaps) appear in the decisions log when CFR is enabled.
+  *  - '''Opponent memory:''' Preloading remembered archetype posteriors from persisted
+  *    opponent profile stores, and persisting new villain observations back after processing.
+  *  - '''Hero raise tracking:''' Scoping pending hero raises per hand ID to avoid cross-hand
+  *    villain response attribution.
+  *  - '''Archetype replay:''' Composing remembered priors with session raise-response counts
+  *    to reconstruct the archetype posterior after a restart.
+  *  - '''Observation deduplication:''' Merging remembered villain events with current-hand
+  *    events, excluding duplicates by (handId, sequence, playerId) key.
+  */
 class AlwaysOnDecisionLoopTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card token: $token"))

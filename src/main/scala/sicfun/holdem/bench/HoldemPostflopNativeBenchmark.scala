@@ -11,7 +11,19 @@ import sicfun.holdem.bench.BenchSupport.{card, hole}
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 
-/** Benchmark harness for postflop Monte Carlo runtime backends. */
+/** Benchmark harness for postflop Monte Carlo runtime backends.
+  *
+  * Compares equity computation latency across four backend modes:
+  *   - '''scala''': pure JVM Monte Carlo (no native code)
+  *   - '''native-cpu''': C++ CPU via JNI
+  *   - '''native-cuda''': CUDA GPU via JNI
+  *   - '''native-auto''': runtime selects best available native engine
+  *
+  * Uses a fixed flop scenario (AcKh on Ts9h8d) with a configurable number of villain
+  * hands and MC trials. Reports mean/median/min/max latency and speedup vs Scala baseline.
+  *
+  * Usage: sbt "runMain sicfun.holdem.bench.HoldemPostflopNativeBenchmark [--key=value ...]"
+  */
 object HoldemPostflopNativeBenchmark:
   private final case class Config(
       warmupRuns: Int = 2,

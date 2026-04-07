@@ -1,3 +1,36 @@
+/*
+ * CfrNativeSolverCore.hpp -- Pure C++ CFR (Counterfactual Regret Minimization)
+ * solver engine, shared by both CPU and GPU JNI bindings.
+ *
+ * Provides three solver variants:
+ *   1. solve()       — Full CFR with double-precision arithmetic. Returns average
+ *                      strategies for all infosets and the root expected value.
+ *   2. solve_root()  — Same as solve() but only returns the average strategy for
+ *                      a single specified root infoset (saves copying all strategies
+ *                      back through JNI when only the root decision matters).
+ *   3. solve_fixed() — Fixed-point CFR using Q30 probabilities and Q13 values.
+ *                      Avoids floating-point entirely for deterministic, bit-exact
+ *                      results across platforms. Includes overflow protection via
+ *                      emergency rescaling (halving) of regret/strategy accumulators.
+ *
+ * The tree is represented as flat arrays (node_types, node_starts, node_counts,
+ * edge_child_ids, etc.) matching the layout serialized by the Scala JNI caller.
+ * All three variants use recursive DFS (via C++ generic lambdas with self-call)
+ * — unlike the GPU kernel in CfrBatchCudaKernel.cuh which uses iterative DFS.
+ *
+ * Node types: 0=terminal, 1=chance, 2=player0, 3=player1.
+ *
+ * Key design decisions:
+ *   - Template on float type F allows sharing train_impl between double and
+ *     potential float instantiations without code duplication.
+ *   - Inline action buffers (kInlineActionBufferSize=8) avoid heap allocation
+ *     for typical poker game trees. Heap fallback for larger trees.
+ *   - Branchless regret matching avoids branch misprediction on the
+ *     positive-sum vs uniform fallback path.
+ *   - Fixed-point variant uses round-to-nearest (not truncation) for Q30 shifts
+ *     to match the Scala reference implementation exactly.
+ */
+
 #pragma once
 
 #include <algorithm>
@@ -7,6 +40,9 @@
 #include <limits>
 #include <vector>
 
+/* CFR_FORCE_INLINE: cross-platform forced inlining for hot-path functions.
+ * MSVC uses __forceinline; GCC/Clang use __attribute__((always_inline)).
+ * Also handles nvcc compilation (__CUDACC__) which uses MSVC-style on Windows. */
 #if defined(_MSC_VER) || defined(__CUDACC__)
 #define CFR_FORCE_INLINE __forceinline
 #else
@@ -15,33 +51,56 @@
 
 namespace cfrnative {
 
+/* Status codes shared with JNI callers. 0 = success; 100+ = errors.
+ * These match the constants in CfrSolver.scala for cross-layer consistency. */
 constexpr int kStatusOk = 0;
-constexpr int kStatusNullArray = 100;
-constexpr int kStatusLengthMismatch = 101;
-constexpr int kStatusReadFailure = 102;
-constexpr int kStatusInvalidMode = 111;
-constexpr int kStatusWriteFailure = 124;
-constexpr int kStatusInvalidRootNode = 146;
-constexpr int kStatusInvalidIterations = 147;
-constexpr int kStatusInvalidNodeType = 148;
-constexpr int kStatusInvalidNodeLayout = 149;
-constexpr int kStatusInvalidChildIndex = 150;
-constexpr int kStatusInvalidInfoSetIndex = 151;
-constexpr int kStatusInfoSetActionMismatch = 152;
-constexpr int kStatusInvalidChanceProbabilities = 153;
+constexpr int kStatusNullArray = 100;             /* JNI array argument was null */
+constexpr int kStatusLengthMismatch = 101;        /* array sizes don't match expected dimensions */
+constexpr int kStatusReadFailure = 102;           /* JNI array read failed */
+constexpr int kStatusInvalidMode = 111;           /* unrecognized solver mode */
+constexpr int kStatusWriteFailure = 124;          /* JNI array write failed */
+constexpr int kStatusInvalidRootNode = 146;       /* root_node_id out of range */
+constexpr int kStatusInvalidIterations = 147;     /* iterations <= 0 or averaging_delay < 0 */
+constexpr int kStatusInvalidNodeType = 148;       /* node type not in {0,1,2,3} */
+constexpr int kStatusInvalidNodeLayout = 149;     /* node_starts/node_counts out of range */
+constexpr int kStatusInvalidChildIndex = 150;     /* edge_child_ids references invalid node */
+constexpr int kStatusInvalidInfoSetIndex = 151;   /* infoset index out of range or wrong player */
+constexpr int kStatusInfoSetActionMismatch = 152; /* node action count != infoset action count */
+constexpr int kStatusInvalidChanceProbabilities = 153; /* negative or zero-sum chance probs */
 
-constexpr int kNodeTerminal = 0;
-constexpr int kNodeChance = 1;
-constexpr int kNodePlayer0 = 2;
-constexpr int kNodePlayer1 = 3;
+/* Node type constants matching the Scala GameTree encoding. */
+constexpr int kNodeTerminal = 0;  /* leaf node — has a utility value, no children */
+constexpr int kNodeChance = 1;    /* nature/chance node — children weighted by edge probs */
+constexpr int kNodePlayer0 = 2;   /* player 0 decision node */
+constexpr int kNodePlayer1 = 3;   /* player 1 decision node */
+
+/* Stack-allocated action buffer size. 8 covers all HoldemDecisionGame trees
+ * (max ~6 actions: fold/check/call/bet sizes). Falls back to heap if exceeded. */
 constexpr int kInlineActionBufferSize = 8;
+
+/* Fixed-point arithmetic scales for solve_fixed():
+ *   Q30 for probabilities: 1.0 = 2^30 = 1,073,741,824
+ *   Q13 for values/utilities: 1.0 = 2^13 = 8,192
+ * The different scales balance precision (probabilities need ~9 decimal digits)
+ * against range (values can exceed 1.0 by large factors in pot-sized bets). */
 constexpr int kProbScaleBits = 30;
-constexpr int kProbScale = 1 << kProbScaleBits;
+constexpr int kProbScale = 1 << kProbScaleBits;     /* 2^30 ≈ 1.07 billion */
 constexpr int kFixedValScaleBits = 13;
-constexpr int kFixedValScale = 1 << kFixedValScaleBits;
+constexpr int kFixedValScale = 1 << kFixedValScaleBits; /* 2^13 = 8192 */
+
+/* Rescale thresholds: when any accumulator exceeds 1/4 of the integer range,
+ * halve the entire infoset's accumulators to prevent overflow on the next update.
+ * This matches the Scala CfrSolver's emergency rescaling logic. */
 constexpr int kRegretRescaleThreshold = INT32_MAX / 4;
 constexpr int64_t kStrategyRescaleThreshold = INT64_MAX / 4;
 
+/*
+ * TreeSpec: game tree specification for double-precision CFR.
+ * All arrays use flat indexing. Nodes are numbered 0..N-1. Edges (parent->child
+ * links) are numbered 0..E-1. For each node, node_starts[i] is the first edge
+ * index and node_counts[i] is how many children it has. terminal_utilities are
+ * from player 0's perspective (player 1 = negated internally by CFR).
+ */
 struct TreeSpec {
   int iterations = 0;
   int averaging_delay = 0;
@@ -60,15 +119,24 @@ struct TreeSpec {
   std::vector<int> infoset_action_counts;
 };
 
+/* SolveOutput: result from solve() — average strategies for all infosets
+ * (flat array indexed by infoset_offset + action_idx) and the game value. */
 struct SolveOutput {
   std::vector<double> average_strategies;
   double expected_value_player0 = 0.0;
 };
 
+/* RootSolveOutput: result from solve_root() — only the root infoset's strategy. */
 struct RootSolveOutput {
   std::vector<double> root_strategy;
 };
 
+/*
+ * TreeSpecFixed: game tree specification for fixed-point CFR (solve_fixed).
+ * Same topology as TreeSpec, but edge_probabilities_raw and terminal_utilities_raw
+ * are Q30 and Q13 fixed-point integers respectively. This avoids all floating-point
+ * arithmetic for deterministic, bit-exact results matching the Scala implementation.
+ */
 struct TreeSpecFixed {
   int iterations = 0;
   int averaging_delay = 0;
@@ -87,11 +155,24 @@ struct TreeSpecFixed {
   std::vector<int> infoset_action_counts;
 };
 
+/* SolveOutputFixed: result from solve_fixed() — Q30 average strategies and Q13 EV. */
 struct SolveOutputFixed {
-  std::vector<int> average_strategies_raw;
-  int expected_value_player0_raw = 0;
+  std::vector<int> average_strategies_raw;  /* Q30 probabilities per action */
+  int expected_value_player0_raw = 0;       /* Q13 expected value for player 0 */
 };
 
+/*
+ * Validates a TreeSpec for structural correctness before solving. Checks:
+ *   - Positive iterations and non-negative averaging delay
+ *   - Consistent array sizes (node arrays all same length, etc.)
+ *   - Valid root node ID
+ *   - Terminal nodes have 0 children; non-terminal nodes have > 0 children
+ *   - Chance node edge probabilities are finite, non-negative, and sum > 0
+ *   - Chance nodes have infoset == -1 (no information set)
+ *   - Player nodes reference valid infosets with matching player and action count
+ *   - All edge child IDs reference valid node indices
+ * Returns kStatusOk or a specific error code.
+ */
 inline int validate_tree(const TreeSpec& spec) {
   if (spec.iterations <= 0 || spec.averaging_delay < 0) {
     return kStatusInvalidIterations;
@@ -195,6 +276,13 @@ inline int validate_tree(const TreeSpec& spec) {
   return kStatusOk;
 }
 
+/*
+ * Computes strategy averaging weight for a given CFR iteration.
+ * During the delay period (iteration <= averaging_delay), returns 0 (no averaging).
+ * After delay: returns 1 for uniform averaging, or (iteration - delay) for linear
+ * averaging (which gives more weight to later, more-converged iterations).
+ * Branchless: multiplies by the active flag (0 or 1).
+ */
 CFR_FORCE_INLINE int averaging_weight(const TreeSpec& spec, const int iteration) {
   const int delayed_iteration = iteration - spec.averaging_delay;
   // Branchless: active=0 when delayed<=0, so whole expression collapses to 0.
@@ -204,12 +292,22 @@ CFR_FORCE_INLINE int averaging_weight(const TreeSpec& spec, const int iteration)
   return active * (spec.linear_averaging ? delayed_iteration : 1);
 }
 
+/* Fixed-point overload — same logic as the double-precision version. */
 CFR_FORCE_INLINE int averaging_weight(const TreeSpecFixed& spec, const int iteration) {
   const int delayed_iteration = iteration - spec.averaging_delay;
   const int active = static_cast<int>(delayed_iteration > 0);
   return active * (spec.linear_averaging ? delayed_iteration : 1);
 }
 
+/*
+ * Regret matching: converts cumulative regret values into a current strategy
+ * (probability distribution). Actions with positive regret get probability
+ * proportional to their regret; if no action has positive regret, falls back
+ * to uniform. Template on F (double or float) for reuse across precision levels.
+ *
+ * Uses branchless arithmetic: computes both the normalized and uniform paths,
+ * then blends them based on whether positive_sum > 0, avoiding a branch.
+ */
 template <typename F>
 CFR_FORCE_INLINE void regret_matching_fp(
     const std::vector<F>& regrets,
@@ -246,6 +344,7 @@ CFR_FORCE_INLINE void regret_matching_fp(
   }
 }
 
+/* Double-precision convenience wrapper for regret_matching_fp. */
 inline void regret_matching(
     const std::vector<double>& regrets,
     const int start,
@@ -254,6 +353,14 @@ inline void regret_matching(
   regret_matching_fp(regrets, start, count, out_strategy);
 }
 
+/*
+ * SolveWorkspace: mutable working state for a CFR training run.
+ *   infoset_offsets  — prefix-sum array: infoset_offsets[i] is the flat index
+ *                      where infoset i's action entries begin in the strategy arrays.
+ *   cumulative_regret — running sum of counterfactual regrets per action (F=double or float).
+ *   cumulative_strategy — running sum of reach-weighted strategies per action.
+ *   chance_edge_weights — pre-normalized chance probabilities (sum to 1.0 per chance node).
+ */
 template <typename F>
 struct SolveWorkspace {
   std::vector<int> infoset_offsets;
@@ -262,6 +369,12 @@ struct SolveWorkspace {
   std::vector<F> chance_edge_weights;
 };
 
+/*
+ * Extracts the average strategy for a single infoset from cumulative_strategy.
+ * If the cumulative sum > 0, normalizes to a probability distribution.
+ * Otherwise falls back to regret matching on cumulative_regret as a best-effort
+ * approximation (this happens when the infoset was never reached during training).
+ */
 template <typename F>
 inline void materialize_average_strategy_for_infoset(
     const TreeSpec& spec,
@@ -297,6 +410,23 @@ inline void materialize_average_strategy_for_infoset(
   }
 }
 
+/*
+ * Core CFR training loop. Validates the tree, builds the workspace (infoset
+ * offsets, zero-initialized accumulators, normalized chance weights), then runs
+ * spec.iterations passes of the CFR algorithm.
+ *
+ * Each iteration does a full DFS traversal of the game tree via a recursive
+ * lambda 'cfr'. At each player node:
+ *   1. Compute current strategy via regret matching on cumulative_regret.
+ *   2. Recurse into each child, passing updated reach probabilities.
+ *   3. Compute counterfactual regret for each action:
+ *        regret(a) = opponent_reach * (action_value(a) - node_value)
+ *      For player 1, the sign flips because utilities are from player 0's POV.
+ *   4. Update cumulative_regret (with CFR+ clamping if enabled).
+ *   5. Update cumulative_strategy weighted by avg_weight * acting_player_reach.
+ *
+ * Returns kStatusOk on success, or a validation error code.
+ */
 template <typename F>
 inline int train_impl(const TreeSpec& spec, SolveWorkspace<F>& workspace) {
   const int validation = validate_tree(spec);
@@ -420,6 +550,11 @@ inline int train_impl(const TreeSpec& spec, SolveWorkspace<F>& workspace) {
   return kStatusOk;
 }
 
+/*
+ * Full CFR solve: trains the workspace, then extracts average strategies for
+ * all infosets and computes the root expected value by traversing the tree
+ * once more using the average strategies.
+ */
 template <typename F>
 inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
   SolveWorkspace<F> workspace;
@@ -471,10 +606,17 @@ inline int solve_impl(const TreeSpec& spec, SolveOutput& output) {
   return kStatusOk;
 }
 
+/* Public entry point for double-precision CFR. */
 inline int solve(const TreeSpec& spec, SolveOutput& output) {
   return solve_impl<double>(spec, output);
 }
 
+/*
+ * Root-only CFR solve: trains the workspace, then extracts the average strategy
+ * for only the specified root infoset. Used by the JNI solveTreeRoot entry point
+ * when the caller only needs the decision at a single infoset (avoids copying
+ * the entire strategy array back through JNI).
+ */
 template <typename F>
 inline int solve_root_impl(const TreeSpec& spec, const int root_infoset_index, RootSolveOutput& output) {
   SolveWorkspace<F> workspace;
@@ -498,10 +640,14 @@ inline int solve_root_impl(const TreeSpec& spec, const int root_infoset_index, R
   return kStatusOk;
 }
 
+/* Public entry point for root-only double-precision CFR. */
 inline int solve_root(const TreeSpec& spec, const int root_infoset_index, RootSolveOutput& output) {
   return solve_root_impl<double>(spec, root_infoset_index, output);
 }
 
+/* Validates a TreeSpecFixed — same structural checks as validate_tree but
+ * for fixed-point arrays (edge_probabilities_raw, terminal_utilities_raw).
+ * Chance probabilities must be non-negative integers summing to > 0. */
 inline int validate_tree_fixed(const TreeSpecFixed& spec) {
   if (spec.iterations <= 0 || spec.averaging_delay < 0) {
     return kStatusInvalidIterations;
@@ -605,6 +751,8 @@ inline int validate_tree_fixed(const TreeSpecFixed& spec) {
   return kStatusOk;
 }
 
+/* Q30 * Q30 -> Q30 probability multiplication: (left * right) >> 30.
+ * Uses int64_t intermediate to avoid overflow (two Q30 values can be up to ~10^9). */
 CFR_FORCE_INLINE int multiply_prob_raw(const int left, const int right) {
   return static_cast<int>((static_cast<int64_t>(left) * static_cast<int64_t>(right)) >> kProbScaleBits);
 }
@@ -625,11 +773,16 @@ CFR_FORCE_INLINE int round_shift_30_signed(const int64_t product) {
   return (rounded ^ static_cast<int>(sign_mask)) - static_cast<int>(sign_mask);
 }
 
+/* Q13_value * Q30_prob -> Q13 result via round_shift_30_signed.
+ * Used to weight utility values by probabilities in fixed-point CFR. */
 CFR_FORCE_INLINE int multiply_fixed_by_prob_raw(const int value_raw, const int probability_raw) {
   return round_shift_30_signed(
       static_cast<int64_t>(value_raw) * static_cast<int64_t>(probability_raw));
 }
 
+/* Writes a uniform Q30 probability distribution: each action gets kProbScale/count,
+ * with the remainder distributed to the first (remainder) actions to sum exactly
+ * to kProbScale. This avoids floating-point rounding issues. */
 inline void write_uniform_probabilities_raw(const int count, int* __restrict__ out_strategy_raw) {
   const int base = kProbScale / count;
   const int remainder = kProbScale - (base * count);
@@ -638,6 +791,12 @@ inline void write_uniform_probabilities_raw(const int count, int* __restrict__ o
   }
 }
 
+/*
+ * Normalizes non-negative int64 weights to Q30 probabilities summing to kProbScale.
+ * Uses the "last positive gets the remainder" trick to ensure exact summation.
+ * Pre-reduces weights by right-shifting if they could overflow when multiplied
+ * by kProbScale. Falls back to uniform if all weights are zero.
+ */
 inline void normalize_non_negative_weights_to_prob_raw(
     const int64_t* __restrict__ weights,
     const int count,
@@ -685,6 +844,9 @@ inline void normalize_non_negative_weights_to_prob_raw(
   }
 }
 
+/* Same as normalize_non_negative_weights_to_prob_raw but reads from a contiguous
+ * subrange of a vector<int> (edge weights for a single chance node). Simpler
+ * because int32 weights don't need the overflow pre-reduction step. */
 inline void normalize_non_negative_edge_weights_to_prob_raw(
     const std::vector<int>& weights,
     const int start,
@@ -719,6 +881,8 @@ inline void normalize_non_negative_edge_weights_to_prob_raw(
   }
 }
 
+/* Saturating cast from int64 to int32. Clamps to [INT32_MIN, INT32_MAX] to
+ * prevent undefined behavior from overflow in fixed-point accumulation. */
 inline int checked_fixed_raw(const int64_t raw) {
   return static_cast<int>(std::clamp(
       raw,

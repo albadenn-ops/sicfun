@@ -10,6 +10,23 @@ import sicfun.holdem.types.*
 
 import scala.util.Random
 
+/** Tests for showdown card consumption in the opponent profiling pipeline.
+  *
+  * Validates that showdown-revealed hole cards flow correctly through the
+  * full simulation-to-profile path and produce meaningful exploit hints:
+  *
+  *   - '''Overcall leak detection''': a villain with high-severity Overcalls
+  *     leak reaches showdown often enough with weak hands to trigger the
+  *     "shown down weak hands" exploit hint.
+  *   - '''GTO false-positive control''': a GTO-baseline villain (NoLeak)
+  *     reaches showdown but does NOT produce spurious showdown-specific
+  *     exploit hints — confirming the hint rules have adequate thresholds.
+  *   - '''Historical showdown bias''': feeding a heavy premium-hand showdown
+  *     history into [[RangeInferenceEngine.inferPosterior]] shifts the
+  *     posterior probability of premium combos upward, but the shift stays
+  *     mild (< 15% relative change), preventing over-fitting to small
+  *     showdown samples.
+  */
 class ShowdownConsumptionTest extends FunSuite:
   override val munitTimeout = scala.concurrent.duration.Duration(600, "s")
 

@@ -53,12 +53,16 @@ trait SpotPolarization:
   ): Map[Sizing, Double] =
     candidates.map(s => s -> polarization(s, publicState, rivalState)).toMap
 
-/** Uniform polarization (stub): all sizings are equally informative.
-  * Returns 0.5 for every sizing. Used as a baseline or when
-  * polarization analysis is disabled.
+/** Uniform polarization baseline: all sizings are equally informative.
+  * Returns 0.5 for every sizing. Used as the no-information baseline
+  * when polarization analysis is disabled or as a reference for
+  * measuring information gain of other implementations.
+  *
+  * This is analogous to BlindActionKernel — a real baseline object,
+  * not a placeholder for a missing implementation.
   */
 object UniformPolarization extends SpotPolarization:
-  def fidelity: Fidelity = Fidelity.Approximate
+  def fidelity: Fidelity = Fidelity.Exact
 
   def polarization(
       sizing: Sizing,

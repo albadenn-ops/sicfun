@@ -28,16 +28,24 @@ object Prob:
   inline def Half: Prob = Scale >> 1
 
   extension (p: Prob)
+    /** Access the raw Int32 representation. */
     inline def raw: Int = p
+    /** Convert to Double by dividing by the scale factor (2^30). */
     inline def toDouble: Double = p.toDouble / Scale
 
+    // Addition and subtraction are straightforward since both operands share the same scale.
     inline def +(q: Prob): Prob = p + q
     inline def -(q: Prob): Prob = p - q
 
-    /** Multiply two probabilities. Uses Long intermediate to avoid overflow. */
+    /** Multiply two probabilities. Uses Long intermediate to avoid overflow.
+      *
+      * Without the Long promotion, multiplying two Prob values (each up to 2^30)
+      * would overflow Int32. The product is right-shifted by 30 to restore the scale:
+      * (p * 2^30) * (q * 2^30) >> 30 = p * q * 2^30.
+      */
     inline def *(q: Prob): Prob = ((p.toLong * q.toLong) >> 30).toInt
 
-    /** Divide by an integer (e.g. boardCount). Truncates. */
+    /** Divide by an integer (e.g. boardCount). Truncates toward zero. */
     inline def /(n: Int): Prob = p / n
 
     inline def >(q: Prob): Boolean = p > q

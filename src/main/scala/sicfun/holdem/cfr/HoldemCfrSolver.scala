@@ -12,7 +12,36 @@ import java.util.concurrent.atomic.AtomicReference
 import scala.collection.mutable.{ArrayBuffer, HashMap}
 import scala.util.Random
 
-/** Configuration for decision-time Hold'em CFR solves. */
+/** Configuration for decision-time Hold'em CFR solves.
+  *
+  * @param iterations              Number of CFR iterations to run. More iterations yield better
+  *                                convergence toward Nash equilibrium but increase solve time.
+  *                                Typical: 1500 for analysis, 200-400 for real-time decisions.
+  * @param cfrPlus                 Whether to use CFR+ (floor negative cumulative regrets to zero).
+  *                                CFR+ converges faster than vanilla CFR in practice.
+  * @param averagingDelay          Number of initial iterations to skip before accumulating
+  *                                average strategy. Early strategies are noisy; skipping them
+  *                                improves final policy quality without costing extra iterations.
+  * @param linearAveraging         Weight iteration t's strategy by t (instead of uniformly).
+  *                                Later strategies are better, so linear weighting yields faster
+  *                                convergence of the average strategy.
+  * @param maxVillainHands         Maximum number of villain hands to retain in the support.
+  *                                Higher values give more accurate results but increase tree size
+  *                                and solve time. Villain hands are sorted by posterior weight
+  *                                and the top-k are kept.
+  * @param equityTrials            Monte Carlo trials for estimating hero-vs-villain equity.
+  *                                Higher values reduce equity noise but increase prep time.
+  *                                Not used on the river (exact equity computed instead).
+  * @param includeVillainReraises  Whether to model villain 3-bet responses to hero raises.
+  *                                Adds depth to the game tree but increases solve time.
+  * @param villainReraiseMultipliers Multipliers for villain reraise sizing (e.g., 2.0 = pot-sized 3-bet).
+  * @param postflopLookahead       Whether to extend the game tree one street beyond the current
+  *                                board for non-river postflop spots. Adds a chance node dealing
+  *                                the next card and a betting round, improving decision accuracy.
+  * @param postflopBetFractions    Bet sizing fractions of pot for postflop lookahead streets.
+  * @param preferNativeBatch       Whether to prefer native GPU/CPU batch equity computation.
+  * @param rngSeed                 Seed for Monte Carlo equity estimation reproducibility.
+  */
 final case class HoldemCfrConfig(
     iterations: Int = 1_500,
     cfrPlus: Boolean = true,
@@ -44,7 +73,30 @@ final case class HoldemCfrConfig(
     "postflopBetFractions must be non-empty when postflopLookahead is enabled"
   )
 
-/** Solved CFR baseline for a single decision point. */
+/** Solved CFR baseline for a single decision point.
+  *
+  * Contains the full solution including mixed strategy, per-action EVs, and
+  * exploitability diagnostics. This is the "heavyweight" result type used for
+  * offline analysis and reporting. For real-time decisions, use
+  * [[HoldemCfrDecisionPolicy]] instead.
+  *
+  * @param actionProbabilities     Nash equilibrium mixed strategy: probability of each action
+  * @param actionEvaluations       Per-action expected values under the converged strategy
+  * @param bestAction              Highest-EV action (argmax of actionEvaluations)
+  * @param expectedValuePlayer0    Game value under the average strategy (hero's expected payoff)
+  * @param heroRootBestResponseValue  Value hero could get by best-responding at root (upper bound)
+  * @param villainBestResponseValue   Value hero gets when villain best-responds (lower bound)
+  * @param rootDeviationGap        How much hero gains by switching to best response at root.
+  *                                Measures how far hero's current strategy is from optimal.
+  * @param villainDeviationGap     How much villain gains by switching to best response.
+  *                                Measures how exploitable the hero's strategy is.
+  * @param localExploitability     Sum of root + villain deviation gaps. The key convergence
+  *                                metric — zero means exact Nash equilibrium.
+  * @param iterations              Number of CFR iterations that produced this solution
+  * @param infoSetKey              Information set identifier for the hero's root decision
+  * @param villainSupport          Number of villain hands in the support (after trimming)
+  * @param provider                Which solver backend was used (e.g., "scala", "native-cpu")
+  */
 final case class HoldemCfrSolution(
     actionProbabilities: Map[PokerAction, Double],
     actionEvaluations: Vector[ActionEvaluation],
@@ -120,15 +172,36 @@ private[holdem] final case class HoldemCfrProfiledDecisionPolicy(
     nativeProfile: Option[HoldemCfrNativeDecisionProfile]
 )
 
-/** CFR baseline solver for a heads-up decision abstraction.
+/** CFR baseline solver for heads-up Hold'em decision abstraction.
   *
-  * This module integrates with existing project equity engines:
-  *  - preflop: optional native/hybrid batch path via [[HeadsUpGpuRuntime]]
-  *  - fallback and postflop: [[HoldemEquity.equityMonteCarlo]]
+  * This is the main entry point for computing Nash equilibrium strategies for
+  * poker decision points. It builds a game tree abstraction from the current
+  * board, hero hand, villain range, and candidate actions, then solves it
+  * using Counterfactual Regret Minimization via the [[CfrSolver]] backend.
   *
-  * Optional postflop lookahead adds one future betting round after a root
-  * check/call before falling back to equity realization on the resulting
-  * board.
+  * '''Architecture:'''
+  *  - '''Provider selection''': Supports multiple backends — pure Scala (double
+  *    and fixed-point), native CPU, native GPU, and auto-selection via benchmarking.
+  *    The provider is chosen via system property `sicfun.cfr.provider` or automatic
+  *    speed comparison.
+  *  - '''Equity integration''': Uses preflop batch computation via [[HeadsUpGpuRuntime]],
+  *    postflop batch via [[HoldemPostflopNativeRuntime]], exact river evaluation via
+  *    [[HandEvaluator]], and Monte Carlo fallback via [[HoldemEquity.equityMonteCarlo]].
+  *  - '''Game tree''': The [[HoldemDecisionGame]] inner class implements the
+  *    [[CfrSolver.ExtensiveFormGame]] interface. The root is a chance node sampling
+  *    the villain's hand, followed by hero's action choice, optional villain response
+  *    (reraise), and terminal equity evaluation.
+  *  - '''Postflop lookahead''': Optionally adds one future street's betting round
+  *    (check/bet/fold/call) after non-fold root actions, improving decision quality
+  *    for flop and turn spots at the cost of larger game trees.
+  *  - '''Caching''': Equity lookups and villain support orderings are cached via
+  *    ConcurrentHashMaps to avoid redundant computation across solves.
+  *  - '''Direct shortcuts''': Spots with only fold/check/call actions (no raises)
+  *    are solved analytically without CFR iterations. The "direct shallow" path
+  *    extends this to spots with raises by solving a minimax problem over villain
+  *    reraise responses.
+  *  - '''Batch GPU solving''': Multiple hero hands facing the same situation can
+  *    be solved in a single GPU kernel launch, amortizing kernel overhead.
   */
 object HoldemCfrSolver:
   private val Epsilon = 1e-12
@@ -245,6 +318,24 @@ object HoldemCfrSolver:
       mask: Long
   )
 
+  /** Full CFR solve with exploitability diagnostics.
+    *
+    * This is the primary entry point for offline analysis. It:
+    *  1. Prepares the game tree (trims villain support, computes equities, builds responses)
+    *  2. Runs CFR for the configured number of iterations
+    *  3. Extracts the average strategy at the hero's root information set
+    *  4. Computes per-action EVs and exploitability metrics
+    *
+    * For real-time decisions where exploitability metrics are not needed,
+    * use [[solveDecisionPolicy]] instead (faster, returns only the mixed strategy).
+    *
+    * @param hero              Hero's hole cards
+    * @param state             Current game state (street, board, pot, position, etc.)
+    * @param villainPosterior  Probability distribution over villain's possible hands
+    * @param candidateActions  Actions available to hero at this decision point
+    * @param config            CFR solver configuration
+    * @return Full solution with policy, EVs, and exploitability diagnostics
+    */
   def solve(
       hero: HoleCards,
       state: GameState,
@@ -302,6 +393,13 @@ object HoldemCfrSolver:
       provider = providerLabel(policySolve.provider)
     )
 
+  /** Lightweight CFR solve returning only the root mixed policy.
+    *
+    * Skips exploitability diagnostics and per-action EV computation.
+    * Faster than [[solve]] and sufficient for real-time decision making.
+    * First attempts terminal root shortcuts (fold/check/call-only spots),
+    * then falls back to full CFR if needed.
+    */
   def solveDecisionPolicy(
       hero: HoleCards,
       state: GameState,
@@ -423,6 +521,18 @@ object HoldemCfrSolver:
             )
           )
 
+  /** Batch solve for multiple hero hands facing the same public state.
+    *
+    * When GPU batch solving is available and all hands produce compatible tree
+    * topologies, solves all hands in a single GPU kernel launch. This amortizes
+    * the kernel overhead across many hands (typically used when computing policies
+    * for an entire range of hero hands at once).
+    *
+    * Falls back to sequential single-tree solves when:
+    *  - GPU is unavailable
+    *  - Any hand requires the scala-only solve path
+    *  - The batch GPU solve fails
+    */
   def solveBatchDecisionPolicies(
       heroHands: IndexedSeq[HoleCards],
       state: GameState,
@@ -519,6 +629,13 @@ object HoldemCfrSolver:
         }
         Right(policies)
 
+  /** Builds a GPU batch specification from individual tree specs.
+    *
+    * Validates that all specs share identical topology (node types, edge structure,
+    * info set layout), then packs per-tree terminal utilities and chance weights
+    * into flat arrays for efficient GPU transfer. The topology arrays are shared
+    * across all trees in the batch.
+    */
   private def buildBatchTreeSpec(
       specs: IndexedSeq[HoldemCfrNativeRuntime.NativeTreeSpec]
   ): HoldemCfrNativeRuntime.BatchTreeSpec =
@@ -904,6 +1021,15 @@ object HoldemCfrSolver:
     else
       directShallowMultiMixedReraiseValue(probabilities, baseValues, mixedReraises.toVector)
 
+  /** Attempts to solve the root decision analytically for terminal-only spots.
+    *
+    * When the hero's only options are fold/check/call (no raises), the game tree
+    * has no branching beyond the root, so the optimal action can be computed
+    * directly from equity without running CFR iterations. This shortcut avoids
+    * building and iterating the full game tree.
+    *
+    * Returns None if the spot contains raise actions or requires postflop lookahead.
+    */
   private def maybeSolveTerminalRootPolicy(
       hero: HoleCards,
       state: GameState,

@@ -3,6 +3,14 @@ import sicfun.holdem.types.*
 
 import munit.FunSuite
 
+/** Tests for [[LiveHandSimulator]] — the end-to-end integration smoke test runner.
+  *
+  * Verifies:
+  *  - '''Happy path:''' A full simulation run (model training, archetype seeding, hero
+  *    decision, snapshot persistence, signal generation) completes successfully with
+  *    non-zero signals, a non-empty posterior, and one of the expected candidate actions.
+  *  - '''Invalid input:''' An unsupported villain style ("robot") returns a Left error.
+  */
 class LiveHandSimulatorTest extends FunSuite:
   test("run executes end-to-end and returns recommendation plus signals") {
     val result = LiveHandSimulator.run(Array(

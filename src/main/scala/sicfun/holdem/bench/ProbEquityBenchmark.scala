@@ -14,6 +14,12 @@ object ProbEquityBenchmark:
   private def board(tokens: String*): Board =
     Board.from(tokens.map(card))
 
+  /** Entry point. Runs an interleaved A/B benchmark comparing `equityExact` (Double
+    * arithmetic) vs `equityExactProb` (Int32 fixed-point arithmetic via FixedVal/Prob).
+    * Interleaving on even/odd runs mitigates JIT and GC ordering bias. After timing,
+    * runs both paths once more and prints a correctness comparison (win/tie/loss/equity
+    * values and the absolute equity difference between the two implementations).
+    */
   def main(args: Array[String]): Unit =
     val warmup = if args.length > 0 then args(0).toInt else 5
     val runs = if args.length > 1 then args(1).toInt else 20

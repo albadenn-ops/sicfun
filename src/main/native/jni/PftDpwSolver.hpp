@@ -74,6 +74,7 @@ struct Particle {
 struct ParticleBelief {
   std::vector<Particle> particles;
   mutable std::vector<double> cdf_;
+  mutable double cdf_total_ = 0.0;
   mutable bool cdf_valid_ = false;
 
   /* Normalize weights so they sum to 1.0.
@@ -92,26 +93,26 @@ struct ParticleBelief {
     cdf_valid_ = false;  // invalidate CDF on normalize
   }
 
-  /* Build (or reuse) cached CDF for O(log n) weighted sampling. */
+  /* Build (or reuse) cached unnormalized CDF for O(log n) weighted sampling.
+   * Stores the raw prefix sums and the total separately, avoiding an O(n)
+   * normalization pass.  sample() scales the draw by cdf_total_ instead. */
   void ensure_cdf() const {
     if (cdf_valid_) return;
     const int n = size();
     cdf_.resize(n);
-    if (n == 0) return;
+    if (n == 0) { cdf_total_ = 0.0; cdf_valid_ = true; return; }
     cdf_[0] = particles[0].weight;
     for (int i = 1; i < n; ++i) cdf_[i] = cdf_[i-1] + particles[i].weight;
-    if (cdf_[n-1] > 0.0) {
-      const double inv = 1.0 / cdf_[n-1];
-      for (int i = 0; i < n; ++i) cdf_[i] *= inv;
-    }
-    cdf_[n-1] = 1.0;  // clamp last entry to avoid floating-point gaps
+    cdf_total_ = cdf_[n-1];
     cdf_valid_ = true;
   }
 
-  /* Sample a particle index weighted by belief, using cached CDF + binary search. */
+  /* Sample a particle index weighted by belief, using cached CDF + binary search.
+   * u must be in [0, 1). Scaled to [0, cdf_total_) for the unnormalized CDF. */
   int sample(double u) const {
     ensure_cdf();
-    auto it = std::lower_bound(cdf_.begin(), cdf_.end(), u);
+    const double scaled = u * cdf_total_;
+    auto it = std::lower_bound(cdf_.begin(), cdf_.end(), scaled);
     return static_cast<int>(std::min(
         static_cast<size_t>(it - cdf_.begin()),
         cdf_.empty() ? 0u : cdf_.size() - 1));
@@ -223,12 +224,18 @@ struct TreeNode {
     return -1;
   }
 
+  /* Cached belief-averaged reward per action (Def 29).
+   * Initialized to NaN; computed on first access and reused thereafter.
+   * Valid because a node's belief is immutable once created. */
+  std::vector<double> r_bar_cache;
+
   /* Add a new action to this node's action set, initializing statistics to zero. */
   void add_action(int action_id) {
     action_ids.push_back(action_id);
     q_values.push_back(0.0);
     action_visits.push_back(0);
     obs_children.emplace_back();
+    r_bar_cache.push_back(std::numeric_limits<double>::quiet_NaN());
   }
 };
 
@@ -264,21 +271,23 @@ PFT_FORCE_INLINE int select_action_ucb(const TreeNode& node, double ucb_c) {
  * -------------------------------------------------------------------------*/
 
 /* Should we expand a new action? True when the current action count is within
- * the progressive widening threshold: |A(b)| <= k_a * N(b)^alpha_a. */
+ * the progressive widening threshold: |A(b)| <= k_a * N(b)^alpha_a.
+ * Uses exp(alpha*log(x)) instead of pow(x, alpha) (~10x faster). */
 PFT_FORCE_INLINE bool should_widen_actions(const TreeNode& node,
                                             double k_a, double alpha_a) {
-  const double threshold = k_a * std::pow(
-      static_cast<double>(node.visit_count + 1), alpha_a);
+  const double n = static_cast<double>(node.visit_count + 1);
+  const double threshold = k_a * std::exp(alpha_a * std::log(n));
   return static_cast<double>(node.num_actions()) <= threshold;
 }
 
 /* Should we expand a new observation branch for action_idx?
- * True when: |O(b,a)| <= k_o * N(b,a)^alpha_o. */
+ * True when: |O(b,a)| <= k_o * N(b,a)^alpha_o.
+ * Uses exp(alpha*log(x)) instead of pow(x, alpha) (~10x faster). */
 PFT_FORCE_INLINE bool should_widen_obs(const TreeNode& node, int action_idx,
                                         double k_o, double alpha_o) {
   const int n_obs = static_cast<int>(node.obs_children[action_idx].size());
-  const double threshold = k_o * std::pow(
-      static_cast<double>(node.action_visits[action_idx] + 1), alpha_o);
+  const double n = static_cast<double>(node.action_visits[action_idx] + 1);
+  const double threshold = k_o * std::exp(alpha_o * std::log(n));
   return static_cast<double>(n_obs) <= threshold;
 }
 
@@ -289,9 +298,20 @@ PFT_FORCE_INLINE bool should_widen_obs(const TreeNode& node, int action_idx,
 PFT_FORCE_INLINE double belief_averaged_reward(const ParticleBelief& belief,
                                                 int action,
                                                 const GenerativeModel& model) {
+  const int n = belief.size();
+  const auto* particles = belief.particles.data();
+  const double* rewards = model.reward_table;
+  const int na = model.num_actions;
   double r_bar = 0.0;
-  for (const auto& p : belief.particles) {
-    r_bar += p.weight * model.reward(p.state_idx, action);
+  int i = 0;
+  for (; i + 3 < n; i += 4) {
+    r_bar += particles[i].weight   * rewards[particles[i].state_idx   * na + action]
+           + particles[i+1].weight * rewards[particles[i+1].state_idx * na + action]
+           + particles[i+2].weight * rewards[particles[i+2].state_idx * na + action]
+           + particles[i+3].weight * rewards[particles[i+3].state_idx * na + action];
+  }
+  for (; i < n; ++i) {
+    r_bar += particles[i].weight * rewards[particles[i].state_idx * na + action];
   }
   return r_bar;
 }
@@ -312,24 +332,39 @@ inline ParticleBelief particle_filter_update(
     const GenerativeModel& model,
     std::mt19937_64& rng) {
   ParticleBelief next;
-  next.particles.reserve(static_cast<size_t>(belief.size()));
+  const int n = belief.size();
+  /* Pre-size output to max possible count.  Direct indexed writes avoid
+   * the per-element capacity check that push_back would perform, and
+   * resize() for trivial Particle is a single memset (~1ns for 100 particles). */
+  next.particles.resize(static_cast<size_t>(n));
 
-  for (const auto& p : belief.particles) {
+  /* Precompute stride constants: obs_likelihood is laid out as
+   * [state * num_actions * num_obs + action * num_obs + obs].
+   * Since action and obs_id are constant across particles, factor them out. */
+  const int obs_stride = model.num_actions * model.num_obs;
+  const int obs_base = action * model.num_obs + obs_id;
+  int write_idx = 0;
+  for (int i = 0; i < n; ++i) {
+    const auto& p = belief.particles[i];
     const int next_state = model.transition(p.state_idx, action);
-    const double lik = model.obs_prob(next_state, action, obs_id);
+    const double lik = model.obs_likelihood[next_state * obs_stride + obs_base];
     if (lik > 0.0) {
-      next.particles.push_back({next_state, p.weight * lik});
+      next.particles[write_idx] = {next_state, p.weight * lik};
+      ++write_idx;
     }
   }
 
-  if (next.particles.empty()) {
+  if (write_idx == 0) {
     /* Particle degeneracy: resample uniformly from original belief. */
-    std::uniform_int_distribution<int> dist(0, belief.size() - 1);
-    for (int j = 0; j < belief.size(); ++j) {
+    std::uniform_int_distribution<int> dist(0, n - 1);
+    for (int j = 0; j < n; ++j) {
       const int idx = dist(rng);
       const int ns = model.transition(belief.particles[idx].state_idx, action);
-      next.particles.push_back({ns, 1.0});
+      next.particles[j] = {ns, 1.0};
     }
+  } else {
+    /* Shrink to actual count (no reallocation, just adjusts size). */
+    next.particles.resize(static_cast<size_t>(write_idx));
   }
 
   next.normalize();
@@ -379,13 +414,13 @@ struct PftTree {
     nodes.reserve(static_cast<size_t>(max_n));
   }
 
-  /* Add a new node with the given belief and depth.
+  /* Add a new node with the given belief (moved) and depth.
    * Returns the node ID, or -1 if the tree is full (capacity exceeded). */
-  int add_node(const ParticleBelief& belief, int depth) {
+  int add_node(ParticleBelief belief, int depth) {
     if (node_count >= max_nodes) return -1;
     nodes.emplace_back();
     const int id = node_count++;
-    nodes[id].belief = belief;
+    nodes[id].belief = std::move(belief);
     nodes[id].depth = depth;
     return id;
   }
@@ -426,8 +461,12 @@ inline double simulate(PftTree& tree, int node_id,
   const int action_idx = select_action_ucb(node, cfg.ucb_c);
   const int action_id = node.action_ids[action_idx];
 
-  /* Immediate belief-averaged reward (Def 29). */
-  const double r_bar = belief_averaged_reward(node.belief, action_id, model);
+  /* Immediate belief-averaged reward (Def 29), cached per (node, action). */
+  double r_bar = node.r_bar_cache[action_idx];
+  if (std::isnan(r_bar)) {
+    r_bar = belief_averaged_reward(node.belief, action_id, model);
+    node.r_bar_cache[action_idx] = r_bar;
+  }
 
   double sim_reward;
 
@@ -455,22 +494,26 @@ inline double simulate(PftTree& tree, int node_id,
     /* Create new child node with particle-filter updated belief. */
     ParticleBelief child_belief =
         particle_filter_update(node.belief, action_id, obs_id, model, rng);
-    const int child_id = tree.add_node(child_belief, node.depth + 1);
 
-    if (child_id < 0) {
+    if (tree.node_count >= tree.max_nodes) {
       /* Tree overflow: fall back to rollout from the new belief. */
       return r_bar + cfg.gamma *
              random_rollout(child_belief, model, cfg, node.depth + 1, rng);
     }
+    /* Move particle vector into tree node, avoiding a deep copy. */
+    const int child_id = tree.add_node(std::move(child_belief), node.depth + 1);
     node.obs_children[action_idx].push_back({obs_id, child_id});
     sim_reward = r_bar + cfg.gamma * simulate(tree, child_id, model, cfg, rng);
 
   } else {
-    /* Reuse an existing observation child (uniform random selection). */
+    /* Reuse an existing observation child.
+     * Fast path: skip RNG call when there is only one child (common
+     * in early DPW phases where most actions have a single obs branch). */
     auto& obs_list = node.obs_children[action_idx];
-    std::uniform_int_distribution<int> obs_dist(
-        0, static_cast<int>(obs_list.size()) - 1);
-    const int child_id = obs_list[obs_dist(rng)].second;
+    const int child_id = (obs_list.size() == 1)
+        ? obs_list[0].second
+        : obs_list[std::uniform_int_distribution<int>(
+              0, static_cast<int>(obs_list.size()) - 1)(rng)].second;
     sim_reward = r_bar + cfg.gamma * simulate(tree, child_id, model, cfg, rng);
   }
 

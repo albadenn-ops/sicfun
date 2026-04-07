@@ -3,7 +3,22 @@ package sicfun.holdem.analysis
 import munit.FunSuite
 import sicfun.holdem.types.*
 
+/** Tests for [[PlayerSignature.compute]] and [[PlayerSignature.distance]].
+  *
+  * [[PlayerSignature.compute]] converts a sequence of (GameState, PokerAction) observations
+  * into a fixed-dimension behavioral feature vector (fold/raise/call/check rates, entropy,
+  * average pot-odds when calling).
+  *
+  * Coverage includes:
+  *   - Correct output dimension matching featureNames
+  *   - Pure single-action streams (all folds, all raises) produce rate = 1.0
+  *   - Mixed actions produce correct fractional rates and positive entropy
+  *   - Rejection of empty observation sequences
+  *   - avgPotOddsWhenCalling edge cases (no calls, all calls)
+  *   - Distance symmetry (self-distance = 0), positivity, dimension mismatch rejection
+  */
 class PlayerSignatureTest extends FunSuite:
+  /** Builds a minimal [[GameState]] for signature computation tests. */
   private def gs(pot: Double = 10.0, toCall: Double = 2.0): GameState =
     GameState(
       street = Street.Preflop,

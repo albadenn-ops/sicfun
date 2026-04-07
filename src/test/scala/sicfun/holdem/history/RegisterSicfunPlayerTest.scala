@@ -2,6 +2,19 @@ package sicfun.holdem.history
 
 import munit.FunSuite
 
+/** Tests for the [[RegisterSicfunPlayer]] CLI tool's argument parsing
+  * and data structure accessibility.
+  *
+  * Validates that:
+  *   - `--help` and `-h` return usage text as a Left result
+  *   - Missing required options (`--store`, `--sourceSite`, `--playerName`)
+  *     produce errors naming the missing flag
+  *   - [[RegisterSicfunPlayer.RunSummary]] fields are accessible after
+  *     construction (smoke test for the case class)
+  *
+  * These tests exercise only CLI parsing, not the actual registration logic
+  * (which requires a populated store with a matching source profile).
+  */
 class RegisterSicfunPlayerTest extends FunSuite:
   test("run with --help returns usage") {
     val result = RegisterSicfunPlayer.run(Array("--help"))

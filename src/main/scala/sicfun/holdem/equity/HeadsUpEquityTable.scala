@@ -475,12 +475,29 @@ object HeadsUpEquityTable:
     val estimate = HoldemEquity.equityMonteCarlo(hero, Board.empty, dist, trials, rng)
     EquityResultWithError(estimate.winRate, estimate.tieRate, estimate.lossRate, estimate.stderr)
 
+  /** SplitMix64 hash function for deriving deterministic per-matchup Monte Carlo seeds.
+    * Takes a combined key (seedBase XOR keyMaterial) and produces a well-distributed 64-bit hash.
+    * This ensures each matchup gets a unique, reproducible random sequence regardless of
+    * computation order or parallelism level.
+    *
+    * Constants are from the SplitMix64 PRNG by Sebastiano Vigna.
+    */
   private inline def mix64(value: Long): Long =
-    var z = value + 0x9E3779B97F4A7C15L
+    var z = value + 0x9E3779B97F4A7C15L   // golden ratio constant
     z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L
     z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL
     z ^ (z >>> 31)
 
+/**
+  * Thread-safe lazy cache for full (non-canonical) heads-up equity lookups.
+  *
+  * Computes equity on first access for a given hero/villain pair and caches the result
+  * in a [[ConcurrentHashMap]] keyed by packed Long. Subsequent lookups for the same
+  * pair (in either order) return the cached result with appropriate perspective flipping.
+  *
+  * @param mode                computation mode (exact or Monte Carlo)
+  * @param monteCarloSeedBase  base seed for deterministic per-matchup RNG derivation
+  */
 final class HeadsUpEquityCache(mode: HeadsUpEquityTable.Mode, monteCarloSeedBase: Long):
   private val cache = new ConcurrentHashMap[Long, EquityResultWithError]()
 
@@ -507,7 +524,22 @@ final class HeadsUpEquityCache(mode: HeadsUpEquityTable.Mode, monteCarloSeedBase
         if prev != null then prev else computed
     HeadsUpEquityTable.flipIfNeeded(base, key.flipped)
 
+/**
+  * Binary I/O for [[HeadsUpEquityTable]] (full, non-canonical) files.
+  *
+  * Uses the shared binary format defined in [[HeadsUpEquityTableFormat]] with 8-byte (Long)
+  * packed keys. Each entry is: key (Long) + win (Double) + tie (Double) + loss (Double) + stderr (Double).
+  *
+  * @see [[HeadsUpEquityCanonicalTableIO]] for the canonical table variant (4-byte Int keys)
+  * @see [[HeadsUpEquityTableIOUtil]] for the shared header/entry read/write routines
+  */
 object HeadsUpEquityTableIO:
+  /** Writes a full heads-up equity table to a binary file.
+    *
+    * @param path  output file path
+    * @param table the table to serialize
+    * @param meta  header metadata (must have `canonical = false`)
+    */
   def write(path: String, table: HeadsUpEquityTable, meta: HeadsUpEquityTableMeta): Unit =
     require(!meta.canonical, "meta.canonical must be false for full heads-up table")
     val out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(path)))

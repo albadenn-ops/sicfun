@@ -13,6 +13,46 @@ import java.util.Base64
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import scala.jdk.CollectionConverters.*
 
+/** Tests for [[HandHistoryReviewServer]], the embedded HTTP server that
+  * exposes the hand history review service via a REST API.
+  *
+  * Uses real HTTP requests against a locally-bound server (port 0 for
+  * ephemeral allocation) with configurable backends (immediate, blocking,
+  * and busy) to test concurrency and timeout behavior.
+  *
+  * Coverage:
+  *   - '''Shutdown grace period''': millisecond-to-second rounding for
+  *     `HttpServer.stop` delay
+  *   - '''Health / readiness probes''': JSON fields (ok, ready, draining,
+  *     acceptingAnalysisJobs, model source, rate limit config, queue stats),
+  *     security headers (X-Content-Type-Options, X-Frame-Options, CSP)
+  *   - '''Static content''': serves index.html from the configured static dir
+  *   - '''Upload size enforcement''': 413 for oversized payloads
+  *   - '''Basic auth''': protects UI and analysis routes while leaving health
+  *     and readiness probes open; returns 401 + WWW-Authenticate header
+  *   - '''Platform user auth''': local registration, profile updates, per-user
+  *     job ownership isolation, session management, and logout
+  *   - '''OIDC flow''': advertises Google provider, completes authorization
+  *     redirect + callback with a fake OIDC provider
+  *   - '''Drain signal''': flips readiness to 503, rejects new analysis jobs,
+  *     recovers when signal file is removed
+  *   - '''Async job lifecycle''': submit returns 202 with job ID + status URL,
+  *     server remains responsive during analysis, polling returns running/
+  *     completed status with Retry-After headers
+  *   - '''Rate limiting''': per-bucket (submit, job-status) limits with 429
+  *     responses; zero limits disable throttling; trusted client IP header
+  *     isolates rate limit buckets per proxied client; ambiguous/invalid
+  *     header values fall back to remote address; trusted proxy allowlist
+  *   - '''Bounded queue''': 503 when max concurrent + queued jobs exceeded;
+  *     readiness degrades to "queue-full"
+  *   - '''Error surfacing''': terminal failure status with 500 error code
+  *   - '''Analysis timeout''': stuck jobs fail with 504; timed-out workers
+  *     keep readiness failed until the worker thread exits
+  *   - '''End-to-end proof''': async review of an exact-GTO hall export
+  *     through the full server pipeline
+  *   - '''Bind error''': duplicate port binding returns a descriptive error
+  *   - '''Default host''': direct launches default to 127.0.0.1
+  */
 class HandHistoryReviewServerTest extends FunSuite:
 
   private val httpClient = HttpClient.newHttpClient()

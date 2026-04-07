@@ -22,18 +22,36 @@ import scala.util.Random
   * }}}
   */
 object GenerateHeadsUpCanonicalTable:
+  // --- System property / environment variable keys for configuration ---
   private val ProviderProperty = "sicfun.gpu.provider"
   private val ProviderEnv = "sicfun_GPU_PROVIDER"
+  // Exact reuse: when enabled, if a full exact artifact already exists, we can copy it
+  // directly (or extract a subset) instead of re-computing. This is a significant time
+  // saver for repeated generation runs.
   private val ExactReuseEnabledProperty = "sicfun.canonical.exact.reuse.enabled"
   private val ExactReuseEnabledEnv = "sicfun_CANONICAL_EXACT_REUSE_ENABLED"
   private val ExactReusePathProperty = "sicfun.canonical.exact.reuse.path"
   private val ExactReusePathEnv = "sicfun_CANONICAL_EXACT_REUSE_PATH"
+  // Prime-before-timing: run a tiny 1-matchup batch first to warm up JNI/GPU paths,
+  // so that the reported elapsedSeconds reflects steady-state throughput.
   private val ExactPrimeBeforeTimingProperty = "sicfun.canonical.exact.primeBeforeTiming"
   private val ExactPrimeBeforeTimingEnv = "sicfun_CANONICAL_EXACT_PRIME_BEFORE_TIMING"
   private val DefaultExactReusePath = "data/heads-up-equity-canonical-exact-cuda-full.bin"
+  // Binary format sizes for minimal artifact validation (header + entries).
   private val CanonicalHeaderBytes = 50L
   private val CanonicalEntryBytes = 36L
 
+  /** Entry point. Generation follows a three-tier fast-path strategy:
+    *
+    *   1. '''Exact reuse:''' If a full exact artifact exists on disk, copy it directly
+    *      or extract the requested subset (avoids any computation).
+    *   2. '''GPU streaming:''' Write results directly from GPU batch output to disk
+    *      without materializing the full table in JVM memory (saves heap).
+    *   3. '''Standard build:''' Build the in-memory table via parallel CPU/GPU workers,
+    *      then serialize.
+    *
+    * Each tier falls through to the next if its preconditions are not met.
+    */
   def main(args: Array[String]): Unit =
     import scala.util.boundary, boundary.break
     var startedAt = System.nanoTime()
@@ -158,6 +176,17 @@ object GenerateHeadsUpCanonicalTable:
       val elapsedSeconds = (System.nanoTime() - startedAt).toDouble / 1_000_000_000.0
       println(f"elapsedSeconds=$elapsedSeconds%.3f")
 
+  /** Tier 1: Exact reuse fast-path. Checks if a previously generated full exact artifact
+    * exists and can satisfy the current request.
+    *
+    * Two sub-paths:
+    *   - '''Direct copy:''' if the full table is requested and the artifact covers all keys,
+    *     just copy the file (zero computation).
+    *   - '''Subset write:''' if fewer than all keys are requested, load the artifact, extract
+    *     the matching subset, and write a new smaller file.
+    *
+    * @return Some(outcome) if reuse succeeded, None if the fast-path does not apply
+    */
   private def maybeWriteFromExactArtifact(
       outputPath: String,
       maxMatchups: Long,
@@ -216,9 +245,22 @@ object GenerateHeadsUpCanonicalTable:
               Some(ExactReuseOutcome(count = selected.size, sourcePath = source, copiedDirectly = false))
         }
 
+  /** Minimum valid file size for an artifact with the given entry count. Used to reject
+    * truncated or corrupted artifacts before attempting to parse them.
+    */
   private def minimalExpectedArtifactSize(entryCount: Int): Long =
     CanonicalHeaderBytes + CanonicalEntryBytes * entryCount.toLong
 
+  /** Tier 2: GPU streaming without in-memory table materialization.
+    *
+    * When exact mode + GPU backend, we can send the entire canonical batch to the GPU,
+    * get results back, and write them directly to the output file using
+    * [[HeadsUpEquityCanonicalTableIO.writeFromBatch]]. This avoids building a
+    * Map[Int, EquityResult] in JVM memory, which can be significant for the full
+    * 169-choose-2 = 14,196 canonical key set.
+    *
+    * @return Some(count) if streaming succeeded, None if preconditions not met
+    */
   private def maybeWriteExactGpuWithoutTableMaterialization(
       outputPath: String,
       mode: HeadsUpEquityTable.Mode,
@@ -302,6 +344,12 @@ object GenerateHeadsUpCanonicalTable:
       copiedDirectly: Boolean
   )
 
+  /** Resolves the default compute backend by probing available GPU providers.
+    *
+    * Priority: configured provider > native > hybrid > CPU fallback.
+    * This allows the CLI to auto-detect the best backend without requiring
+    * the user to specify it explicitly.
+    */
   private def preferredDefaultBackend(): HeadsUpEquityTable.ComputeBackend =
     val configuredProvider = GpuRuntimeSupport.resolveNonEmptyLower(ProviderProperty, ProviderEnv)
     configuredProvider match

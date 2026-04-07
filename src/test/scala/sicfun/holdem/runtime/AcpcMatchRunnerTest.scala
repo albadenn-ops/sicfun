@@ -11,8 +11,23 @@ import java.nio.file.{Files, Path}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
+/** Tests for [[AcpcActionCodec]] parsing/encoding and the [[AcpcMatchRunner]] integration.
+  *
+  * Covers the ACPC wire protocol round-trip: parsing MATCHSTATE strings into structured
+  * states, encoding hero actions back into wire format, computing terminal hand values,
+  * and running a single-hand session against a fake in-process dealer.
+  *
+  * The tests use fixed ACPC betting strings and MATCHSTATE lines to verify:
+  *  - Correct seat mapping (button/big-blind) and chip contribution tracking.
+  *  - Raise target accumulation across streets (cumulative vs. street-relative).
+  *  - All-in call detection when encoded as a raise-to-stack token.
+  *  - Terminal state valuation (fold and showdown).
+  *  - End-to-end runner lifecycle (connect, play one hand, write output artifacts).
+  */
 class AcpcMatchRunnerTest extends FunSuite:
   override val munitTimeout: Duration = 120.seconds
+
+  // ---- AcpcActionCodec unit tests ----
 
   test("empty ACPC betting gives button first preflop decision") {
     val parsed = AcpcActionCodec.parseBetting("", heroActual = 1, fullBoard = Board.empty).fold(fail(_), identity)
@@ -103,6 +118,8 @@ class AcpcMatchRunnerTest extends FunSuite:
     assertEquals(parsed.totalContributionByActualChips, Vector(20000, 20000))
   }
 
+  // ---- End-to-end integration test with a fake in-process ACPC dealer ----
+
   test("ACPC runner completes a one-hand session against a fake dealer") {
     val root = Files.createTempDirectory("acpc-runner-test-")
     val out = root.resolve("out")
@@ -141,6 +158,12 @@ class AcpcMatchRunnerTest extends FunSuite:
         deleteRecursively(root)
   }
 
+  /** Runs a minimal ACPC dealer on the given server socket.
+    *
+    * Accepts one connection, performs the VERSION handshake, sends an initial MATCHSTATE,
+    * reads the client's action response, and sends a terminal state (either fold or showdown).
+    * This simulates a single-hand dealer for integration testing.
+    */
   private def runFakeDealer(server: ServerSocket): Unit =
     val socket = server.accept()
     val reader = new BufferedReader(new InputStreamReader(socket.getInputStream, StandardCharsets.US_ASCII))

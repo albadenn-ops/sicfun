@@ -15,7 +15,23 @@ import java.util.Locale
 import scala.collection.mutable
 import scala.util.Random
 
-/** Core hand-history analysis service behind the review web API. */
+/** Core hand-history analysis service behind the review web API.
+  *
+  * Orchestrates the full analysis pipeline when a user uploads a hand history:
+  *   1. Normalize hero name (strip forum suffixes)
+  *   2. Parse the hand history text via [[HandHistoryImport]]
+  *   3. For each imported hand: resolve hero identity, extract hero decisions,
+  *      build a [[RealTimeAdaptiveEngine]] per hand, compute per-decision EV analysis
+  *   4. Build opponent profiles from the imported hands
+  *   5. Assemble the [[AnalysisResponse]] with decisions, opponents, warnings, and trace
+  *
+  * The service is stateless (no mutable state between analyze() calls) and thread-safe.
+  * Each call creates fresh engine instances with the configured parameters.
+  *
+  * @param config      service configuration (MC trial counts, time budget, max decisions)
+  * @param actionModel the trained PokerActionModel for range inference
+  * @param modelSource human-readable description of the model source (e.g. "artifact:v2")
+  */
 final class HandHistoryReviewService private (
     config: HandHistoryReviewService.ServiceConfig,
     actionModel: PokerActionModel,
@@ -23,6 +39,12 @@ final class HandHistoryReviewService private (
 ):
   import HandHistoryReviewService.*
 
+  /** Analyze a hand history upload and return a structured response.
+    *
+    * @param request the analysis request containing the raw hand history text, optional site, and hero name
+    * @return Right(response) with per-decision analysis, opponent profiles, and trace data,
+    *         or Left(error) if parsing or analysis fails
+    */
   def analyze(request: AnalysisRequest): Either[String, AnalysisResponse] =
     val normalizedHeroName = request.heroName.map(HandHistoryImport.normalizePlayerName).filter(_.nonEmpty)
     val normalizedRequest = request.copy(
@@ -45,6 +67,7 @@ final class HandHistoryReviewService private (
         response <- buildResponse(imported, normalizedRequest, requestTrace)
       yield response
 
+  /** Serialize an AnalysisResponse to a ujson Value for HTTP response rendering. */
   def writeJson(response: AnalysisResponse): Value =
     Obj(
       "site" -> Str(response.site),
@@ -63,6 +86,12 @@ final class HandHistoryReviewService private (
       "trace" -> writeTrace(response.trace)
     )
 
+  /** Build the full analysis response from imported hands.
+    *
+    * Analyzes each hand individually (skipping hands without hero hole cards),
+    * aggregates decisions and warnings, builds opponent profiles, and assembles
+    * the comprehensive trace for debugging and verification.
+    */
   private def buildResponse(
       imported: Vector[ImportedHand],
       request: AnalysisRequest,

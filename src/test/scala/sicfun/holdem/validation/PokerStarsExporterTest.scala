@@ -5,6 +5,22 @@ import sicfun.core.{Card, Rank, Suit}
 import sicfun.holdem.history.{HandHistoryImport, HandHistorySite}
 import sicfun.holdem.types.{Board, HoleCards, PokerAction, Street}
 
+/** Tests for [[PokerStarsExporter]], which converts simulation [[HandRecord]]s
+  * into PokerStars-format hand history text for review upload.
+  *
+  * Coverage includes:
+  *   - Basic format correctness: PokerStars header, game type, player names,
+  *     section markers (HOLE CARDS, FLOP, SHOW DOWN, SUMMARY)
+  *   - Action rendering: fold text, showdown section when no fold occurs
+  *   - Chunking: `exportChunked` splits records into correctly sized chunks
+  *   - Roundtrip parsing: exported text re-parses through [[HandHistoryImport]]
+  *     for single and multi-hand exports
+  *   - Mirrored seat metadata: hero-as-big-blind swaps seat numbers, button
+  *     assignment, and blind posting correctly
+  *   - Multi-opponent identity: per-record villain names override the default
+  *   - Raise amount conversion: simulator raise totals map to correct
+  *     "raises $X to $Y" PokerStars text format
+  */
 class PokerStarsExporterTest extends FunSuite:
 
   private def makeRecord(

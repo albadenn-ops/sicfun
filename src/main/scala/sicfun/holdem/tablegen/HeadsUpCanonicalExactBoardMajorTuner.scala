@@ -38,6 +38,13 @@ object HeadsUpCanonicalExactBoardMajorTuner:
   private val AllowedOptionKeys =
     Set("maxMatchups", "seed", "warmup", "chunkBoards", "scoreThreads", "matchThreads", "prepareBoardsPerBlock")
 
+  /** A single CUDA launch parameter combination to benchmark.
+    *
+    * @param chunkBoards           number of boards per GPU chunk dispatch
+    * @param scoreThreads          CUDA threads per block for the scoring kernel
+    * @param matchThreads          CUDA threads per block for the matchup evaluation kernel
+    * @param prepareBoardsPerBlock boards prepared per block in the board preparation kernel
+    */
   private final case class Candidate(
       chunkBoards: Int,
       scoreThreads: Int,
@@ -64,6 +71,10 @@ object HeadsUpCanonicalExactBoardMajorTuner:
         prepare <- prepareBoardsPerBlock
       yield Candidate(chunk, score, matching, prepare)
 
+  /** Entry point. Forces native CUDA provider with board-major exact mode enabled,
+    * runs an optional warmup, then benchmarks every candidate from the parameter grid.
+    * Reports the fastest candidate at the end.
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     require(config.maxMatchups > 0L, "maxMatchups must be positive")
@@ -101,12 +112,18 @@ object HeadsUpCanonicalExactBoardMajorTuner:
     val best = successful.minBy(_._2)
     println(f"best=${best._1} elapsed=${best._2}%.3fs")
 
+  /** Applies the candidate's CUDA parameters via system properties and runs a full
+    * canonical table build, measuring elapsed wall time. Returns the candidate name
+    * paired with elapsed seconds (None on failure).
+    */
   private def runCandidate(
       maxMatchups: Long,
       seed: Long,
       candidate: Candidate,
       tag: String
   ): (String, Option[Double]) =
+    // Set CUDA launch parameters via system properties — the native runtime reads these
+    // to configure kernel launches for this specific run.
     sys.props.update(ChunkBoardsProperty, candidate.chunkBoards.toString)
     sys.props.update(ScoreThreadsProperty, candidate.scoreThreads.toString)
     sys.props.update(MatchThreadsProperty, candidate.matchThreads.toString)

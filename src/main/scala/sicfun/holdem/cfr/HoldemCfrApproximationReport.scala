@@ -16,13 +16,38 @@ import ujson.{Arr, Num, Obj, Str, Value}
 
 /** Offline diagnostics for the repo's CFR approximation quality.
   *
-  * Runs a fixed suite of representative heads-up spots and reports the solver's
-  * own local quality metrics: root deviation gap, villain deviation gap,
-  * local exploitability, plus a machine-readable external-comparison export.
+  * Runs a fixed suite of representative heads-up poker spots covering all streets
+  * (preflop through river) and multiple positions, then reports the solver's own
+  * local quality metrics for each spot:
+  *  - '''Root deviation gap''': how much hero could gain by switching to a best-response
+  *    at the root, measuring how far the hero's strategy is from optimal.
+  *  - '''Villain deviation gap''': how much villain could gain by switching to a
+  *    best-response, measuring how exploitable our villain model is.
+  *  - '''Local exploitability''': sum of root + villain deviation gaps, the key
+  *    convergence metric. Lower is better; zero means Nash equilibrium.
+  *
+  * Outputs:
+  *  - Console summary with aggregate statistics
+  *  - Optional file outputs: summary.txt, spots.tsv, external-comparison.json
+  *
+  * The external-comparison JSON export includes full spot specifications (board, ranges,
+  * bet history, spot signatures) enabling cross-validation against external solvers
+  * like TexasSolver via [[HoldemCfrExternalComparison]].
+  *
+  * The default suite contains 6 carefully chosen spots that cover:
+  *  - Preflop open from button
+  *  - Flop defense from big blind
+  *  - Turn facing a probe bet
+  *  - Turn bet-or-check as aggressor
+  *  - River bluff-catching
+  *  - River bet-or-check from big blind
   */
 object HoldemCfrApproximationReport:
   private val IsoFormatter = DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC)
 
+  /** A diagnostic spot definition: a fully specified poker decision point that
+    * can be solved by CFR and whose solution quality can be measured.
+    */
   final case class DiagnosticSpot(
       id: String,
       hero: HoleCards,
@@ -48,6 +73,10 @@ object HoldemCfrApproximationReport:
       probability: Double
   )
 
+  /** Full spot export for external comparison, including the complete spot specification
+    * (board, ranges, bet history, spot signature) and the solved policy/EV/exploitability.
+    * This is serialized to JSON for cross-validation with external solvers.
+    */
   final case class ExternalComparisonSpot(
       id: String,
       spotSignature: String,
@@ -76,6 +105,9 @@ object HoldemCfrApproximationReport:
     require(spotSignature.trim.nonEmpty, "export spotSignature must be non-empty")
     require(candidateActions.nonEmpty, "export candidateActions must be non-empty")
 
+  /** Aggregate quality statistics across all spots in a suite run.
+    * Used for both console output and JSON export.
+    */
   final case class AggregateStats(
       spotCount: Int,
       meanLocalExploitability: Double,
@@ -245,6 +277,15 @@ object HoldemCfrApproximationReport:
       result <- runSuite(config.suiteName, DefaultSuite, config.cfrConfig, config.outDir)
     yield result
 
+  /** Runs the full diagnostic suite: solves each spot, computes exploitability
+    * metrics, builds aggregate statistics, and optionally writes output files.
+    *
+    * @param suiteName Name for the suite (used in output labeling)
+    * @param spots     The diagnostic spots to solve
+    * @param cfrConfig CFR solver configuration (iterations, averaging, etc.)
+    * @param outDir    Optional output directory for summary.txt, spots.tsv, external-comparison.json
+    * @return Right(RunResult) on success, Left(error) on failure
+    */
   private[cfr] def runSuite(
       suiteName: String,
       spots: Vector[DiagnosticSpot],
@@ -301,6 +342,9 @@ object HoldemCfrApproximationReport:
       case e: Exception =>
         Left(s"holdem CFR approximation report failed: ${e.getMessage}")
 
+  /** Computes aggregate quality statistics (mean/max exploitability, deviation gaps,
+    * provider distribution) across all solved spots.
+    */
   private def buildAggregate(spotResults: Vector[SpotResult]): AggregateStats =
     def meanOf(f: SpotResult => Double): Double =
       if spotResults.isEmpty then 0.0 else spotResults.map(f).sum / spotResults.size.toDouble
@@ -399,6 +443,10 @@ object HoldemCfrApproximationReport:
         ).mkString("\t")
       }
 
+  /** Converts a solved spot result into the full export format for external comparison.
+    * Includes the spot specification (board, ranges, etc.), spot signature, solved policy,
+    * per-action EVs, and exploitability metrics.
+    */
   private def exportSpot(result: SpotResult): ExternalComparisonSpot =
     val spot = result.spot
     val solution = result.solution
@@ -504,6 +552,11 @@ object HoldemCfrApproximationReport:
       "provider" -> Str(spot.provider)
     )
 
+  /** Builds a canonical spot signature that uniquely identifies the poker situation.
+    * The signature encodes street, position, hero, board, pot geometry, bet history,
+    * candidate actions, and normalized villain range in a deterministic format.
+    * Used to verify that reference and external datasets solved the same problem.
+    */
   private def buildSpotSignature(spot: DiagnosticSpot): String =
     val normalizedRange = spot.villainRange.normalized.weights.toVector
       .collect { case (hand, probability) if probability > 0.0 =>

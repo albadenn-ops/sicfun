@@ -9,6 +9,10 @@ import sicfun.core.DiscreteDistribution
   * formal sense (Def 14). This bridge provides a best-effort mapping from
   * engine-level opponent model data (if available) to formal beliefs.
   *
+  * v0.31.1 note: the heuristic mapping from VPIP/PFR/AF to class posteriors
+  * is NOT a Bayesian update. It does not use tempered likelihoods or kernel
+  * decomposition. The output is classified as Approximate, not Exact.
+  *
   * Fidelity: Approximate (engine uses VPIP/PFR/AF stats, not strategic-class posteriors)
   */
 object OpponentModelBridge:

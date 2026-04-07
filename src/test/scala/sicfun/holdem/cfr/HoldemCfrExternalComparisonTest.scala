@@ -7,6 +7,26 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import scala.jdk.CollectionConverters.*
 
+/** Tests for [[HoldemCfrExternalComparison]], the cross-validation framework that
+  * compares SICFUN CFR solutions against external solver datasets.
+  *
+  * Tests cover:
+  *  - '''TV distance and best-action agreement''': Verifying that compareDatasets
+  *    correctly computes Total Variation distance (half L1 norm of policy differences)
+  *    and tracks whether reference and external agree on the highest-EV action.
+  *  - '''Gate enforcement''': Testing that compareFiles writes output artifacts (summary,
+  *    JSON) even when a quality gate fails, enabling post-mortem analysis.
+  *  - '''Missing spot detection''': Verifying that the comparison rejects datasets
+  *    where the external provider is missing reference spots.
+  *  - '''Spot id filtering''': Testing the --spotIds restriction that limits comparison
+  *    to a subset of spots, and rejects unknown spot ids.
+  *  - '''Data validation''': bestAction consistency checks against candidateActions and actionEvs.
+  *  - '''Action label normalization''': Verifying that provider-specific action labels
+  *    (e.g., "bet 8" vs "RAISE:8.000") are canonicalized before comparison.
+  *  - '''Spot signature drift detection''': Catching state changes behind the same spot id.
+  *  - '''Tied best-action handling''': When policies are exactly tied, best-action sets
+  *    must intersect for agreement (not require exact match on tiebreak).
+  */
 class HoldemCfrExternalComparisonTest extends FunSuite:
   private def withSystemProperties(properties: Map[String, String])(thunk: => Unit): Unit =
     TestSystemPropertyScope.withSystemProperties(properties.toSeq.map { case (key, value) => key -> Some(value) }) {
@@ -18,6 +38,9 @@ class HoldemCfrExternalComparisonTest extends FunSuite:
         HoldemCfrSolver.resetAutoProviderForTests()
     }
 
+  // Two-spot test: spot-1 has close policies (TV=0.05), spot-2 has divergent policies
+  // (TV=0.15) with different best actions. Verifies aggregate metrics, per-spot metrics,
+  // and that the lenient gate (maxMeanTvDistance=1.0) passes.
   test("compareDatasets computes TV distance and best-action agreement") {
     val reference = HoldemCfrExternalComparison.ParsedDataset(
       label = "sicfun",
@@ -97,6 +120,8 @@ class HoldemCfrExternalComparisonTest extends FunSuite:
     assertEqualsDouble(spot2.tvDistance, 0.15, 1e-9)
   }
 
+  // Tests that even when a gate fails (minBestActionAgreement=1.0 but policies
+  // disagree), the comparison still writes output artifacts for post-mortem analysis.
   test("compareFiles enforces optional gates after writing outputs") {
     val root = Files.createTempDirectory("holdem-cfr-external-compare-gate-")
     try
@@ -166,6 +191,8 @@ class HoldemCfrExternalComparisonTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  // External dataset has only spot-1 but reference has spot-1 and spot-2.
+  // The comparison must fail with a "missing 1 reference spot" error.
   test("compareFiles fails when the external dataset misses reference spots") {
     val root = Files.createTempDirectory("holdem-cfr-external-compare-missing-")
     try
@@ -225,6 +252,8 @@ class HoldemCfrExternalComparisonTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  // When --spotIds is used to select only spot-1, the comparison ignores spot-2
+  // (which is missing from the external dataset) and passes with zero TV distance.
   test("compareFiles can restrict the gate to selected spot ids") {
     val root = Files.createTempDirectory("holdem-cfr-external-compare-spotids-")
     try
@@ -290,6 +319,8 @@ class HoldemCfrExternalComparisonTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  // Selecting a spot id that does not exist in either dataset must fail early
+  // with an error message identifying the unknown id.
   test("compareFiles rejects unknown selected spot ids") {
     val root = Files.createTempDirectory("holdem-cfr-external-compare-unknown-spotids-")
     try
@@ -345,6 +376,8 @@ class HoldemCfrExternalComparisonTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  // A dataset with bestAction="CALL" but candidateActions=["CHECK","RAISE:8.000"]
+  // must be rejected during loading since the best action is outside the action set.
   test("loadDataset rejects bestAction outside the declared action set") {
     val root = Files.createTempDirectory("holdem-cfr-external-compare-bad-bestaction-")
     try
@@ -374,6 +407,8 @@ class HoldemCfrExternalComparisonTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  // A dataset where bestAction="CHECK" but actionEvs show RAISE:8.000 has higher EV
+  // must be rejected as inconsistent — the declared best action contradicts the EVs.
   test("loadDataset rejects bestAction inconsistent with actionEvs") {
     val root = Files.createTempDirectory("holdem-cfr-external-compare-inconsistent-bestaction-")
     try
@@ -404,6 +439,10 @@ class HoldemCfrExternalComparisonTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  // Tests action label canonicalization: "check" -> "CHECK", "bet 8" -> "RAISE:8.000".
+  // Also verifies that unnormalized policy weights (e.g., 2.0/1.0) are normalized to
+  // probabilities (0.667/0.333), bestAction is derived from actionEvs, and spot
+  // signatures are computed from the state/range fields.
   test("loadDataset accepts SICFUN export shape, canonicalizes action labels, and derives spot signatures") {
     val root = Files.createTempDirectory("holdem-cfr-external-compare-parse-")
     try
@@ -450,6 +489,9 @@ class HoldemCfrExternalComparisonTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  // When both reference and external have exactly tied policies (50/50), both sides
+  // should report bestActions containing both actions, and best-action agreement
+  // should pass because the bestAction sets intersect.
   test("compareDatasets treats tied best actions deterministically across action-order differences") {
     val reference = HoldemCfrExternalComparison.ParsedDataset(
       label = "sicfun",
@@ -498,6 +540,10 @@ class HoldemCfrExternalComparisonTest extends FunSuite:
     assert(result.spotComparisons.head.bestActionMatches)
   }
 
+  // End-to-end test: runs a real SICFUN approximation report, then creates a
+  // "provider" copy with provider-style action labels (e.g., "check", "bet 8.0").
+  // Verifies that normalization yields a perfect match. Then introduces pot drift
+  // (pot+1.0) behind the same spot id and verifies spot-signature mismatch detection.
   test("compareFiles accepts normalized provider labels and rejects state drift behind the same spot id") {
     withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
       val root = Files.createTempDirectory("holdem-cfr-external-compare-e2e-")
@@ -593,6 +639,9 @@ class HoldemCfrExternalComparisonTest extends FunSuite:
     }
   }
 
+  /** Converts SICFUN canonical action labels to TexasSolver-style labels for testing
+    * normalization: "RAISE:x.xxx" -> "bet x.xxx", "FOLD"/"CALL"/"CHECK" -> lowercase.
+    */
   private def providerLabelFor(action: String): String =
     if action.startsWith("RAISE:") then s"bet ${action.stripPrefix("RAISE:")}"
     else action.toLowerCase(java.util.Locale.ROOT)

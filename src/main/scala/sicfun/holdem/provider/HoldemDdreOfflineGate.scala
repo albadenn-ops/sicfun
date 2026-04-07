@@ -11,8 +11,45 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import scala.jdk.CollectionConverters.*
 
-/** Offline validation gate for DDRE ONNX artifacts against exported self-play data. */
+/** Offline validation gate for DDRE ONNX model artifacts.
+  *
+  * This tool evaluates a trained DDRE ONNX model against a dataset of historical
+  * self-play observations, computing quality metrics that determine whether the
+  * model is safe for decision-driving use in the live poker engine.
+  *
+  * ==Validation Pipeline==
+  *  1. Load the ONNX artifact metadata and model from `--artifactDir`
+  *  2. Load evaluation samples from `--dataset` (TSV format from [[HoldemDdreDatasetIO]])
+  *  3. For each sample, run ONNX inference and compute:
+  *     - '''NLL''' (Negative Log-Likelihood) of the actual villain hand under the posterior
+  *     - '''KL divergence''' against the Bayesian reference posterior
+  *     - '''Blocker violations''' -- whether the raw ONNX output assigns mass to
+  *       impossible hands (overlapping with hero's cards or board)
+  *     - '''Latency''' in milliseconds
+  *  4. Aggregate metrics and compare against configurable thresholds
+  *  5. If the gate passes, update the artifact metadata to `validationStatus=validated`
+  *     and set `decisionDrivingAllowed=true`
+  *
+  * ==CLI Usage==
+  * {{{
+  *   runMain sicfun.holdem.provider.HoldemDdreOfflineGate \
+  *     --dataset=data/ddre-training.tsv \
+  *     --artifactDir=models/ddre-v1 \
+  *     --minSamples=100 --maxMeanNll=8.0
+  * }}}
+  *
+  * ==Design Decisions==
+  *  - The gate is intentionally conservative: all thresholds default to strict values
+  *    that require explicit relaxation.
+  *  - Blocker violations are tracked separately from NLL because they indicate a
+  *    structural bug in the model (impossible card assignments), not just poor calibration.
+  *  - The `writeMetadata` flag (default true) persists gate results back into the
+  *    artifact directory, creating a tamper-evident validation chain.
+  */
 object HoldemDdreOfflineGate:
+  /** Configurable quality thresholds for the validation gate.
+    * A model must meet ALL thresholds simultaneously to pass.
+    */
   final case class GateThresholds(
       minSamples: Int = 100,
       maxMeanNll: Double = 8.0,
@@ -31,6 +68,9 @@ object HoldemDdreOfflineGate:
     require(maxFailureRate >= 0.0 && maxFailureRate <= 1.0 && maxFailureRate.isFinite, "maxFailureRate must be in [0,1]")
     require(maxP95LatencyMillis >= 0.0 && maxP95LatencyMillis.isFinite, "maxP95LatencyMillis must be finite and non-negative")
 
+  /** Aggregated results of the offline validation run.
+    * @param gatePass `true` if all thresholds were met and enough samples were evaluated
+    */
   final case class GateSummary(
       totalSamples: Int,
       successfulSamples: Int,
@@ -174,6 +214,9 @@ object HoldemDdreOfflineGate:
     if sorted.nonEmpty then quantile(sorted, q)
     else Double.PositiveInfinity
 
+  /** Checks whether all gate thresholds are met.
+    * Uses a small epsilon tolerance to avoid floating-point edge cases at boundaries.
+    */
   private def gatePasses(
       thresholds: GateThresholds,
       evaluation: EvaluatedSamples,
@@ -190,6 +233,9 @@ object HoldemDdreOfflineGate:
       meanKl <= thresholds.maxMeanKlVsBayes + Eps &&
       p95Latency <= thresholds.maxP95LatencyMillis + Eps
 
+  /** Persists validation metrics back into the artifact metadata file.
+    * Updates validationStatus, decisionDrivingAllowed, and all metric fields.
+    */
   private def persistMetadata(
       config: CliConfig,
       artifact: HoldemDdreArtifactIO.OnnxArtifact,
@@ -217,6 +263,17 @@ object HoldemDdreOfflineGate:
         )
       )
 
+  /** Evaluates a single dataset sample against the ONNX model.
+    *
+    * Steps:
+    *  1. Reconstruct the likelihood matrix from the sample's observations and action model
+    *  2. Run ONNX inference to get a raw posterior
+    *  3. Check for blocker violations (mass on impossible hands)
+    *  4. Apply the legal mask (remove hero/board cards) and renormalise
+    *  5. Compute NLL of the actual villain hand and KL divergence vs Bayesian reference
+    *
+    * @return `Right(metrics)` on success, `Left(reason)` if inference fails
+    */
   private def evaluateSample(
       sample: HoldemDdreDatasetIO.Sample,
       runtimeConfig: HoldemDdreOnnxRuntime.Config,
@@ -311,6 +368,7 @@ object HoldemDdreOfflineGate:
   private def optionalPathOption(options: Map[String, String], key: String): Either[String, Option[Path]] =
     Right(options.get(key).map(Paths.get(_)))
 
+  /** Computes a quantile from a pre-sorted vector using linear interpolation. */
   private def quantile(sorted: Vector[Double], q: Double): Double =
     if sorted.length == 1 then sorted.head
     else

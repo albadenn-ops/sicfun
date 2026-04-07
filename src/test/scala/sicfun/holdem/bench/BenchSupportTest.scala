@@ -4,6 +4,15 @@ import munit.FunSuite
 import sicfun.core.Card
 import sicfun.holdem.types.HoleCards
 
+/** Tests for the [[BenchSupport]] utility object used across all benchmark entry points.
+  *
+  * Coverage includes:
+  *   - `card` parsing valid/invalid tokens
+  *   - `hole` building canonical HoleCards from two tokens
+  *   - `BatchData.size` reflecting packed-key array length
+  *   - `loadBatch` returning non-empty results for "full" and "canonical" tables
+  *   - `loadBatch` rejecting unknown table names
+  */
 class BenchSupportTest extends FunSuite:
 
   test("card parses valid token"):

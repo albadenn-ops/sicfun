@@ -5,6 +5,29 @@ import sicfun.core.{Card, Rank, Suit}
 import sicfun.holdem.types.{Board, Position, Street, PokerAction}
 import scala.util.Random
 
+/** Tests for all six [[InjectedLeak]] types and the [[NoLeak]] sentinel.
+  *
+  * Each leak type is tested along two axes:
+  *   1. '''Predicate correctness''' (`applies`): verifies that the leak
+  *      fires only in the intended spot context (correct street, board
+  *      texture, hand category, pot geometry, and range position) and
+  *      does NOT fire when any guard condition is violated.
+  *   2. '''Deviation correctness''' (`deviate`): verifies the action
+  *      produced when the leak fires (e.g. OverfoldsToAggression -> Fold,
+  *      Overcalls -> Call, OverbluffsTurnBarrel -> Raise at 60% of stack).
+  *
+  * Additionally tests the statistical fire-rate mechanism: severity=0.3
+  * should produce approximately 30% deviations, and severity=0.5 should
+  * produce approximately 50% deviations across all leak types.
+  *
+  * Leak types covered:
+  *   - [[OverfoldsToAggression]] — folds to large bets on wet rivers with weak/capped hands
+  *   - [[Overcalls]] — calls large bets with air/weak hands
+  *   - [[OverbluffsTurnBarrel]] — barrel-bluffs on wet turns with air
+  *   - [[PassiveInBigPots]] — checks strong hands in big pots (low SPR)
+  *   - [[PreflopTooLoose]] — calls preflop with weak/air hands
+  *   - [[PreflopTooTight]] — folds preflop with medium-strength hands
+  */
 class InjectedLeakTest extends FunSuite:
 
   // ── Helpers ──

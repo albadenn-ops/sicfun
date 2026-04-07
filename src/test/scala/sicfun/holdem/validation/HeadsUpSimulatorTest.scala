@@ -6,6 +6,21 @@ import sicfun.holdem.equity.{TableFormat, TableRanges}
 import sicfun.holdem.model.PokerActionModel
 import sicfun.holdem.types.PokerAction
 
+/** Tests for the heads-up hand simulator used in validation proof runs.
+  *
+  * Verifies the core simulation mechanics of [[HeadsUpSimulator]]:
+  *   - Hand records contain valid hand numbers, IDs, hero/villain cards, and actions
+  *   - Hero and villain receive distinct hole cards each hand
+  *   - Different hands deal different cards (non-degeneracy)
+  *   - Hero net profit/loss is bounded by the starting stack (100bb)
+  *   - Both players appear in the action log
+  *   - Fold is always the terminal action when it appears
+  *   - Leak-injected villains record leak firings in the action metadata
+  *   - Deterministic replay: identical seeds produce identical hand outcomes
+  *   - Mirrored seat configuration (hero as button vs. big blind) correctly
+  *     swaps seat numbers, button assignment, and first preflop actor
+  *   - Hero raise responses are surfaced when the villain responds to raises
+  */
 class HeadsUpSimulatorTest extends FunSuite:
 
   private val table = TableRanges.defaults(TableFormat.HeadsUp)

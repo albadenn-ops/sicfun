@@ -1,8 +1,30 @@
-// Phase 1 Baseline Benchmark for SICFUN Native Equity Computation
-// Tests CPU, CUDA, and OpenCL paths via JNI DLL exports with MockJNIEnv.
-//
-// Build: powershell -ExecutionPolicy Bypass -File build_bench.ps1
-// Run:   native_baseline_bench.exe [cpu|cuda|opencl|all] [quick]
+/*
+ * native_baseline_bench.cpp -- Baseline performance benchmark and correctness
+ * validator for sicfun's native equity computation DLLs.
+ *
+ * Part of the sicfun poker analytics system's native acceleration layer.
+ * This standalone benchmark loads the pre-built native DLLs at runtime via
+ * LoadLibraryA / GetProcAddress and calls their JNI-exported functions
+ * directly, without needing a running JVM. A MockJNIEnv provides the minimal
+ * JNI interface (array get/set, exception stubs) needed by the native code.
+ *
+ * Phase 1 -- Performance benchmarks:
+ *   - Tests CPU (sicfun_native_cpu.dll), CUDA (sicfun_gpu_kernel.dll), and
+ *     OpenCL (sicfun_opencl_kernel.dll) paths for heads-up equity computation.
+ *   - Sweeps batch sizes (1 to 16384) and trial counts (100 to 100000).
+ *   - Tests both computeBatch (double arrays) and computeBatchPacked (float
+ *     arrays with packed hole-card IDs) entry points.
+ *   - Reports mean, median, p95, stddev, throughput (matchups/s, trials/s).
+ *
+ * Phase 2 -- Correctness validation:
+ *   - Compares Monte Carlo results from CUDA and OpenCL against CPU as
+ *     the reference. Flags matchups where relative error exceeds 5%.
+ *
+ * Output: tab-separated results appended to validation-output/native-benchmarks/baseline.tsv.
+ *
+ * Build: powershell -ExecutionPolicy Bypass -File build_bench.ps1
+ * Run:   native_baseline_bench.exe [cpu|cuda|opencl|all|validate] [quick]
+ */
 
 #include <windows.h>
 #include <jni.h>
@@ -18,8 +40,12 @@
 #include <iomanip>
 #include <functional>
 
-// ── MockJNIEnv ──────────────────────────────────────────────────────────────
-// Provides minimal JNI interface to call DLL-exported JNI functions without a JVM.
+/* ── MockJNIEnv ──────────────────────────────────────────────────────────────
+ * Provides a minimal JNI interface to call DLL-exported JNI functions without
+ * a running JVM. Implements the subset of JNINativeInterface_ that the native
+ * equity bindings actually use: array length/get/set, exception check/clear,
+ * and stubs for class/method/string lookups (used by config resolution helpers
+ * that read JVM system properties — they gracefully return nullptr here). */
 struct MockJNIEnv {
     struct MockArray {
         void* data;
@@ -82,7 +108,10 @@ struct MockJNIEnv {
     void   unwrap(jarray a) { delete reinterpret_cast<MockArray*>(a); }
 };
 
-// ── JNI function pointer types ──────────────────────────────────────────────
+/* ── JNI function pointer types ──────────────────────────────────────────────
+ * Type aliases for the DLL-exported JNI entry points loaded at runtime.
+ * Each matches the exact C signature of the corresponding Java_sicfun_holdem_*
+ * function in the native DLLs. */
 
 // computeBatch(env, cls, low_ids, high_ids, mode_code, trials, seeds, wins, ties, losses, stderrs)
 typedef jint (JNICALL *FnComputeBatch)(JNIEnv*, jclass, jintArray, jintArray, jint, jint, jlongArray, jdoubleArray, jdoubleArray, jdoubleArray, jdoubleArray);
@@ -96,7 +125,9 @@ typedef jint (JNICALL *FnComputeBatchPackedOnDevice)(JNIEnv*, jclass, jint, jint
 // OpenCL computeBatch(env, cls, device_index, low_ids, high_ids, mode_code, trials, seeds, wins, ties, losses, stderrs)
 typedef jint (JNICALL *FnOclComputeBatch)(JNIEnv*, jclass, jint, jintArray, jintArray, jint, jint, jlongArray, jdoubleArray, jdoubleArray, jdoubleArray, jdoubleArray);
 
-// ── Statistics ──────────────────────────────────────────────────────────────
+/* ── Statistics ──────────────────────────────────────────────────────────────
+ * Computes summary statistics (mean, median, p95, stddev, min, max) from a
+ * vector of timing measurements in milliseconds. Sorts the input in-place. */
 
 struct Stats {
     double mean, median, p95, stddev, min_val, max_val;
@@ -121,7 +152,10 @@ Stats compute_stats(std::vector<double>& v) {
     return s;
 }
 
-// ── Data generation ─────────────────────────────────────────────────────────
+/* ── Data generation ─────────────────────────────────────────────────────────
+ * Generates guaranteed non-overlapping hero/villain matchups for benchmarking.
+ * Uses 4 consecutive cards per matchup: hero=(4k, 4k+1), villain=(4k+2, 4k+3),
+ * giving 13 unique non-overlapping matchups that cycle for larger batch sizes. */
 
 static const int kIdBits = 11;
 
@@ -159,7 +193,9 @@ void generate_matchups(int n, std::vector<jint>& low, std::vector<jint>& high,
     }
 }
 
-// ── TSV writer ──────────────────────────────────────────────────────────────
+/* ── TSV writer ──────────────────────────────────────────────────────────────
+ * Writes one benchmark result as multiple rows in TSV format (one row per
+ * metric: mean_ms, median_ms, p95_ms, stddev_ms, matchups_s, trials_s). */
 
 void write_row(std::ofstream& out, const char* device, const char* mode, const char* func,
                int batch, int trials, const Stats& s) {
@@ -179,7 +215,9 @@ void write_row(std::ofstream& out, const char* device, const char* mode, const c
     }
 }
 
-// ── DLL loading helpers ─────────────────────────────────────────────────────
+/* ── DLL loading helpers ─────────────────────────────────────────────────────
+ * Loads a DLL by primary path, with optional fallback path for alternate
+ * build directories (e.g., build/ vs build-ddre-verify/). */
 
 HMODULE try_load(const char* primary, const char* fallback) {
     HMODULE h = LoadLibraryA(primary);
@@ -192,7 +230,9 @@ F get_fn(HMODULE dll, const char* name) {
     return reinterpret_cast<F>(GetProcAddress(dll, name));
 }
 
-// ── Benchmark runners ───────────────────────────────────────────────────────
+/* ── Benchmark runners ───────────────────────────────────────────────────────
+ * Each runner loads the appropriate DLL, sweeps batch sizes and trial counts,
+ * and writes timing results to the TSV output file. */
 
 void bench_cpu(MockJNIEnv& mock, HMODULE dll, std::ofstream& out, bool quick) {
     auto computeBatch = get_fn<FnComputeBatch>(dll, "Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatch");

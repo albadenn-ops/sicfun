@@ -6,6 +6,10 @@ import sicfun.holdem.strategic.*
   *
   * Maps the engine's equity evaluations to the formal baseline types (Defs 9-10).
   *
+  * v0.31.1 note: these baselines feed into DeploymentBaseline (A10) which
+  * bounds epsilon_base in TotalVulnerability (Corollary 9.3). The approximation
+  * quality here directly affects the safety budget computation.
+  *
   * Fidelity:
   * - RealBaseline: Approximate (engine uses Monte Carlo equity, not exact)
   * - AttributedBaseline: Approximate (per-rival attribution requires kernel decomposition)

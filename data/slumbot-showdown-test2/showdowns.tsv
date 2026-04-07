@@ -1,0 +1,40 @@
+street	board	potBefore	toCall	position	stackBefore	action	holeCards
+Preflop	-	1.500	0.500	Button	199.500	Raise:1.00	Tc7d
+Preflop	-	5.000	1.000	Button	198.000	Call	Tc7d
+Flop	Td 9s 8s	9.000	3.000	Button	197.000	Call	Tc7d
+Turn	Td 9s 8s Qh	18.000	6.000	Button	194.000	Fold	Tc7d
+Preflop	-	4.000	2.000	BigBlind	199.000	Fold	7d5h
+Preflop	-	1.500	0.500	Button	199.500	Raise:1.00	8d4h
+Preflop	-	5.000	1.000	Button	198.000	Call	8d4h
+Flop	Ad Th 7c	10.500	4.500	Button	197.000	Fold	8d4h
+Preflop	-	3.500	1.500	BigBlind	199.000	Raise:5.00	7s9s
+Preflop	-	20.000	5.000	BigBlind	192.500	Fold	7s9s
+Preflop	-	1.500	0.500	Button	199.500	Raise:1.00	9sKs
+Preflop	-	5.000	1.000	Button	198.000	Call	9sKs
+Flop	Ad Qs 7c	10.500	4.500	Button	197.000	Call	9sKs
+Turn	Ad Qs 7c As	26.500	11.500	Button	192.500	Call	9sKs
+River	Ad Qs 7c As 9d	66.500	28.500	Button	181.000	Call	9sKs
+Preflop	-	3.500	1.500	BigBlind	199.000	Call	7c8h
+Flop	Ts 7s 2d	5.000	0.000	BigBlind	197.500	Check	7c8h
+Flop	Ts 7s 2d	9.000	4.000	BigBlind	197.500	Call	7c8h
+Turn	Ts 7s 2d 9c	13.000	0.000	BigBlind	193.500	Check	7c8h
+Turn	Ts 7s 2d 9c	23.000	10.000	BigBlind	193.500	Call	7c8h
+River	Ts 7s 2d 9c Ks	33.000	0.000	BigBlind	183.500	Check	7c8h
+River	Ts 7s 2d 9c Ks	58.000	25.000	BigBlind	183.500	Fold	7c8h
+Preflop	-	1.500	0.500	Button	199.500	Raise:1.00	6h3s
+Preflop	-	5.000	1.000	Button	198.000	Fold	6h3s
+Preflop	-	4.000	2.000	BigBlind	199.000	Call	9dJs
+Flop	Td 8h 6s	6.000	0.000	BigBlind	197.000	Check	9dJs
+Flop	Td 8h 6s	9.000	3.000	BigBlind	197.000	Raise:12.00	9dJs
+Flop	Td 8h 6s	48.000	12.000	BigBlind	182.000	Call	9dJs
+Turn	Td 8h 6s Ac	60.000	0.000	BigBlind	170.000	Raise:24.00	9dJs
+Turn	Td 8h 6s Ac	171.000	63.000	BigBlind	146.000	Fold	9dJs
+Preflop	-	1.500	0.500	Button	199.500	Raise:1.00	QcTd
+Preflop	-	5.000	1.000	Button	198.000	Call	QcTd
+Flop	7s 5s 3c	10.500	4.500	Button	197.000	Call	QcTd
+Turn	7s 5s 3c 9d	26.500	11.500	Button	192.500	Fold	QcTd
+Preflop	-	3.500	1.500	BigBlind	199.000	Call	8cJh
+Flop	7c 3s 2c	5.000	0.000	BigBlind	197.500	Check	8cJh
+Flop	7c 3s 2c	7.500	2.500	BigBlind	197.500	Call	8cJh
+Turn	7c 3s 2c 2d	10.000	0.000	BigBlind	195.000	Check	8cJh
+Turn	7c 3s 2c 2d	15.000	5.000	BigBlind	195.000	Fold	8cJh

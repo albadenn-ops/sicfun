@@ -48,6 +48,11 @@ object HeadsUpRangeGpuBenchmark:
       checksum: Double
   )
 
+  /** Entry point. Builds a synthetic CSR batch, runs both readonly and global memory paths,
+    * and reports throughput comparison. The `readonly` path uses `__ldg` intrinsics for
+    * read-only data (offsets, villain IDs, key material) which can improve cache utilization
+    * on Kepler+ GPUs. The `global` path uses plain global memory loads.
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     require(config.heroes > 0, "heroes must be positive")
@@ -143,6 +148,16 @@ object HeadsUpRangeGpuBenchmark:
     val entryThroughput = batch.entryCount.toDouble / avgSeconds
     Stats(label, avgSeconds, heroThroughput, entryThroughput, checksum)
 
+  /** Builds a synthetic CSR (Compressed Sparse Row) batch for benchmarking.
+    *
+    * CSR format: `offsets[h]..offsets[h+1]` gives the range of villain entries for hero h.
+    * Hero IDs are spread via stride-17 to avoid sequential locality bias. Villain IDs are
+    * spread via stride-31 offset per hero. Key material is constructed from packed IDs with
+    * position mixing to ensure unique seeds. Probabilities use a simple modular pattern.
+    *
+    * The 1225 limit on entriesPerHero comes from C(50,2) = 1225, the maximum number of
+    * disjoint villain hands for any hero (after removing the hero's 2 cards from 52).
+    */
   private def buildSyntheticCsrBatch(heroes: Int, entriesPerHero: Int): CsrBatch =
     val heroIds = new Array[Int](heroes)
     val offsets = new Array[Int](heroes + 1)

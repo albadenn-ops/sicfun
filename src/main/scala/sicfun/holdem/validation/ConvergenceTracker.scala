@@ -4,7 +4,19 @@ import scala.collection.mutable
 import scala.util.boundary
 import scala.util.boundary.break
 
-/** Summary of leak detection convergence for one player. */
+/** Summary of leak detection convergence for one player.
+  *
+  * Answers the question: "After how many hands did the profiling pipeline
+  * stably detect this leak?" Used by [[ValidationScorecard]] to report
+  * detection speed and reliability.
+  *
+  * @param leakId             identifier of the injected leak (e.g. "overcall-big-bets")
+  * @param detected           true if the leak was stably detected (N consecutive positive chunks)
+  * @param firstDetectedChunk the chunk index where stable detection first occurred
+  * @param handsToDetect      number of simulated hands required for stable detection
+  * @param finalConfidence    the confidence score from the last recorded chunk
+  * @param totalFalsePositives cumulative false positive count across all chunks
+  */
 final case class ConvergenceSummary(
     leakId: String,
     detected: Boolean,
@@ -27,9 +39,21 @@ final case class ConvergenceSummary(
 final class ConvergenceTracker(val leakId: String, stabilityThreshold: Int = 2):
   private val chunks = mutable.ArrayBuffer.empty[(Int, Boolean, Double, Int)]
 
+  /** Record the result of one chunk's profiling pass.
+    *
+    * @param chunkIndex     0-based index of the chunk in the simulation
+    * @param detected       whether the profiling pipeline flagged the leak in this chunk
+    * @param confidence     profiler's confidence score for this chunk (0.0 to 1.0)
+    * @param falsePositives number of false positive leak detections in this chunk
+    */
   def recordChunk(chunkIndex: Int, detected: Boolean, confidence: Double, falsePositives: Int): Unit =
     chunks += ((chunkIndex, detected, confidence, falsePositives))
 
+  /** Produce a summary of the convergence analysis.
+    *
+    * @param handsPerChunk number of hands per chunk (used to convert chunk index to hand count)
+    * @return a [[ConvergenceSummary]] with detection status, timing, and false positive count
+    */
   def summary(handsPerChunk: Int): ConvergenceSummary =
     // Require stabilityThreshold consecutive detected chunks for stable detection
     val stableDetectedChunk = findStableDetection()

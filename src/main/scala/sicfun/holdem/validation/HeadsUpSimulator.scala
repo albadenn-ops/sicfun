@@ -7,7 +7,21 @@ import sicfun.holdem.types.*
 import scala.collection.mutable
 import scala.util.Random
 
-/** A single recorded action within a simulated hand, tagged with leak metadata. */
+/** A single recorded action within a simulated hand, tagged with leak metadata.
+  *
+  * Each action captures the game state at the moment of decision (pot size, facing bet,
+  * remaining stack) plus whether a leak deviation actually fired and which leak it was.
+  * This metadata powers both the PokerStars exporter and the convergence analysis.
+  *
+  * @param street      the street on which this action occurred
+  * @param player      player name ("Hero" or villain name)
+  * @param action      the poker action taken (Fold, Check, Call, Raise)
+  * @param potBefore   pot size before this action
+  * @param toCall      amount the player must call (0 if not facing a bet)
+  * @param stackBefore player's stack before this action
+  * @param leakFired   true if an injected leak actually deviated from GTO on this action
+  * @param leakId      identifier of the leak that fired, if any
+  */
 final case class RecordedAction(
     street: Street,
     player: String,
@@ -19,12 +33,38 @@ final case class RecordedAction(
     leakId: Option[String]
 )
 
-/** Complete record of one simulated hand. */
+/** Records how the villain responded to a hero raise on a specific street.
+  *
+  * Used for tracking villain tendencies (fold-to-raise, call-vs-raise, 3-bet frequency)
+  * which feed into the opponent profiling pipeline.
+  */
 final case class HeroRaiseResponseEvent(
     street: Street,
     response: PokerAction
 )
 
+/** Complete record of one simulated heads-up hand.
+  *
+  * Contains everything needed to export the hand in PokerStars format and to
+  * compute validation metrics: both players' hole cards, the community board,
+  * the full action sequence with leak metadata, hero's net chip result, and
+  * how many streets were played before the hand ended.
+  *
+  * @param handId               unique hand identifier (format: "SIM-00000001")
+  * @param handNumber           sequential hand number within the simulation
+  * @param heroCards            hero's hole cards
+  * @param villainCards         villain's hole cards
+  * @param board                final community board (up to 5 cards)
+  * @param actions              ordered sequence of all recorded actions
+  * @param heroNet              hero's net chip result (positive = won, negative = lost)
+  * @param streetsPlayed        number of streets completed (1=preflop only, 4=river)
+  * @param heroSeat             hero's seat number (1 or 2)
+  * @param villainSeat          villain's seat number (1 or 2)
+  * @param heroIsButton         true if hero is the button/small blind
+  * @param heroRaiseResponses   villain's responses to hero raises (for profiling)
+  * @param villainName          villain's display name
+  * @param leakApplicableSpots  count of spots where at least one leak's predicate fired
+  */
 final case class HandRecord(
     handId: String,
     handNumber: Int,
@@ -43,14 +83,35 @@ final case class HandRecord(
 ):
   def buttonSeat: Int = if heroIsButton then heroSeat else villainSeat
 
-/** Focused heads-up hand simulator for validation.
+/** Focused heads-up hand simulator for the validation pipeline.
   *
-  * Hero uses RealTimeAdaptiveEngine in adaptive mode. Villain uses a separate
-  * engine instance for "competent baseline" actions, then passes through
-  * LeakInjectedVillain for potential deviation.
+  * Simulates complete heads-up No Limit Hold'em hands between a hero and a single
+  * leak-injected villain. Hero uses [[RealTimeAdaptiveEngine]] in adaptive mode
+  * (Bayesian range inference, per-candidate EV estimation) when an engine is provided,
+  * or falls back to a fast equity-based heuristic when `heroEngine = None`.
   *
-  * This is intentionally simpler than TexasHoldemPlayingHall — heads-up only,
-  * no side pots, no training data collection.
+  * Villain decision flow:
+  *   1. Compute a "competent baseline" action via the pluggable [[VillainStrategy]]
+  *      (either [[EquityBasedStrategy]] heuristic or [[CfrVillainStrategy]] equilibrium)
+  *   2. Pass through [[LeakInjectedVillain]] which may deviate from the baseline
+  *      based on spot context and leak severity
+  *   3. Validate the final action to ensure game-state consistency (e.g., no Call when
+  *      toCall=0, no Check when facing a bet)
+  *
+  * This is intentionally simpler than [[TexasHoldemPlayingHall]] — heads-up only,
+  * no side pots, no antes, no training data collection. The simplicity makes it
+  * fast enough to simulate millions of hands for convergence analysis.
+  *
+  * @param heroEngine              optional adaptive engine; None = fast equity-based hero
+  * @param villain                 the leak-injected villain to play against
+  * @param seed                    master RNG seed for deck shuffling and decision randomness
+  * @param equityTrialsForCategory Monte Carlo trials for hand-category equity estimation
+  * @param startingStack           starting chip stack for both players
+  * @param smallBlind              small blind amount
+  * @param bigBlind                big blind amount
+  * @param budgetMs                per-decision time budget for the adaptive engine
+  * @param villainStrategy         GTO baseline strategy for villain (heuristic or CFR)
+  * @param heroIsButton            if true, hero is button/SB; if false, hero is BB
   */
 final class HeadsUpSimulator(
     heroEngine: Option[RealTimeAdaptiveEngine] = None,
@@ -72,6 +133,19 @@ final class HeadsUpSimulator(
   private val heroPosition = if heroIsButton then Position.Button else Position.BigBlind
   private val villainPosition = if heroIsButton then Position.BigBlind else Position.Button
 
+  /** Simulate one complete heads-up hand.
+    *
+    * Deals cards, posts blinds, then iterates through streets (preflop -> flop -> turn
+    * -> river) with alternating hero/villain decisions until someone folds or all streets
+    * complete. Handles bet sizing, stack tracking, and showdown evaluation.
+    *
+    * The action loop enforces a maximum of 8 actions per street to prevent infinite
+    * raise-reraise loops, and tracks per-street committed amounts to compute correct
+    * toCall values after raises.
+    *
+    * @param handNumber sequential hand number (used for hand ID generation)
+    * @return a complete [[HandRecord]] with all actions, cards, and the net result
+    */
   def playHand(handNumber: Int): HandRecord =
     // Shuffle deck
     val deck = rng.shuffle(Deck.full)
@@ -258,6 +332,17 @@ final class HeadsUpSimulator(
       leakApplicableSpots = applicableSpots
     )
 
+  /** Decide hero's action: use the adaptive engine if available, otherwise fall back
+    * to the fast equity-based heuristic. The adaptive engine performs full Bayesian
+    * range inference and per-candidate EV estimation within the time budget.
+    *
+    * @param hero                hero's hole cards
+    * @param gs                  current game state
+    * @param board               current community board
+    * @param street              current street
+    * @param villainObservations accumulated observations of villain's actions (for range narrowing)
+    * @return the chosen poker action
+    */
   private def decideHero(
       hero: HoleCards,
       gs: GameState,
@@ -356,6 +441,15 @@ final class HeadsUpSimulator(
         if raiseActions.nonEmpty then raiseActions.head else PokerAction.Check
       else PokerAction.Check
 
+  /** Build the set of candidate actions available in the current game state.
+    *
+    * When facing a bet (toCall > 0): Fold, Call, and optionally Raise (pot-sized)
+    * and all-in (when SPR < 3). When checked to: Check, and optionally small bet
+    * (66% pot), big bet (100% pot), and all-in (when SPR < 3).
+    *
+    * The sizing heuristics are intentionally simple — this simulator does not need
+    * to produce optimal bet sizes, just a reasonable action space for leak testing.
+    */
   private def buildCandidates(gs: GameState): Vector[PokerAction] =
     val candidates = Vector.newBuilder[PokerAction]
     if gs.toCall > 0 then

@@ -5,10 +5,22 @@ import sicfun.holdem.model.*
 import munit.FunSuite
 import sicfun.core.Card
 
+/**
+ * Contract tests for the [[ActionDataset]] domain model and [[DatasetBuilder]].
+ *
+ * Validates:
+ *   - [[PokerEvent]] input validation (empty IDs, street-board consistency, action semantics)
+ *   - [[DatasetBuilder]] temporal integrity checks (duplicate sequences, timestamp regressions)
+ *   - Deterministic output regardless of input ordering
+ *   - Provenance metadata and feature dimension correctness
+ *   - [[DatasetStatistics]] accuracy (class distribution, feature ranges)
+ */
 class ActionDatasetContractTest extends FunSuite:
+  /** Parses a card token string, failing the test if invalid. */
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
+  /** Creates a board matching the expected card count for the given street. */
   private def boardFor(street: Street): Board =
     street match
       case Street.Preflop => Board.empty
@@ -19,6 +31,9 @@ class ActionDatasetContractTest extends FunSuite:
       case Street.River =>
         Board.from(Seq(card("As"), card("Kd"), card("7c"), card("2h"), card("9d")))
 
+  /** Factory method for creating test PokerEvent instances with sensible defaults.
+   * The board is automatically generated based on the street parameter.
+   */
   private def event(
       handId: String = "hand-1",
       sequence: Long = 0L,

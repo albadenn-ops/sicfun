@@ -4,6 +4,22 @@ import munit.FunSuite
 import sicfun.core.{Card, DiscreteDistribution}
 import sicfun.holdem.types.*
 
+/**
+  * Correctness tests for the fixed-point (Prob) equity path vs the floating-point path.
+  *
+  * equityExactProb uses Int32 fixed-point arithmetic (Prob at 2^30 scale) for deterministic,
+  * cache-friendly equity computation. These tests verify that it agrees with equityExact
+  * (Double-based) to within the expected truncation error (~1e-3).
+  *
+  * Test matrix covers:
+  *   - River (0 missing cards): single villain win, all ties
+  *   - Turn (1 missing card): multi-hand range with varied weights, single villain
+  *   - Flop (2 missing cards): uniform range
+  *   - Derived equity value (win + 0.5*tie) agreement
+  *
+  * The tolerance of 1e-3 accounts for the maximum per-step truncation of
+  * boardCount/2^30 in the integer division path.
+  */
 class ProbEquityCorrectnessTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
@@ -14,8 +30,9 @@ class ProbEquityCorrectnessTest extends FunSuite:
   private def board(tokens: String*): Board =
     Board.from(tokens.map(card))
 
-  // Integer division truncation can differ from Double by up to boardCount/2^30
-  // per step. After normalization this is <0.1% relative error.
+  /** Integer division truncation can differ from Double by up to boardCount/2^30
+    * per step. After normalization this is <0.1% relative error.
+    */
   private val tolerance = 1e-3
 
   test("river (0 missing) — single villain, hero wins") {

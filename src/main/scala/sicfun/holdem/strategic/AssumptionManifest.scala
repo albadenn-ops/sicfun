@@ -9,9 +9,11 @@ package sicfun.holdem.strategic
 object AssumptionManifest:
 
   enum EnforcementLevel:
-    case Encoded    // has a computational representation enforced in code
-    case Structural // constraint on the model; verified by design, not code
-    case Recovered  // generalized (primed version) subsumes the original
+    case Encoded      // has a computational representation enforced in code
+    case Structural   // constraint on the model; verified by design, not code
+    case Recovered    // generalized (primed version) subsumes the original
+    case Approximated // has a conservative computational approximation with explicit fidelity
+    case Deferred     // out of constitutive scope; documented but not implemented
 
   final case class AssumptionEntry(
       id: String,
@@ -23,16 +25,18 @@ object AssumptionManifest:
 
   val entries: Vector[AssumptionEntry] = Vector(
     AssumptionEntry(
-      "A1", "Finite action space",
+      "A1'", "Finite action space (v0.31.1: primed)",
       EnforcementLevel.Structural,
       "PokerAction enum (4 categories)",
-      "Hold'em has a finite action set by definition; enforced by PokerAction.Category enum"
+      "Hold'em has a finite action set by definition; enforced by PokerAction.Category enum. " +
+      "v0.31.1 A1' subsumes A1 with explicit sizing quantization via Sizing type"
     ),
     AssumptionEntry(
       "A2", "Common prior over rival types",
       EnforcementLevel.Structural,
       "OpponentModelState.typeDistribution",
-      "All rivals share the same prior type space; the prior is stored in OpponentModelState"
+      "All rivals share the same prior type space; the prior is stored in OpponentModelState. " +
+      "v0.31.1: inherited without code change"
     ),
     AssumptionEntry(
       "A3'", "Non-stationary rival types with changepoint detection",
@@ -41,10 +45,11 @@ object AssumptionManifest:
       "Generalizes A3 (stationary types). A3 recovered when hazardRate -> 0"
     ),
     AssumptionEntry(
-      "A4'", "Own statistical sufficiency",
+      "A4'", "Own statistical sufficiency (v0.31.1: primed)",
       EnforcementLevel.Structural,
       "AugmentedState.scala: OwnEvidence",
-      "xi^S is finite-dimensional; OwnEvidence stores Map[String, Double] summaries"
+      "xi^S is finite-dimensional; OwnEvidence stores Map[String, Double] summaries. " +
+      "v0.31.1 A4' subsumes A4 with explicit finite-dimensionality requirement"
     ),
     AssumptionEntry(
       "A5", "Conditional independence of signals given type",
@@ -68,19 +73,25 @@ object AssumptionManifest:
       "A8", "Discount factor gamma in [0,1)",
       EnforcementLevel.Structural,
       "PftDpwRuntime, WPomcpRuntime configs",
-      "gamma < 1 required by POMDP solvers; validated in native solver configs"
+      "gamma < 1 required by POMDP solvers; validated in native solver configs. " +
+      "v0.31.1: inherited without code change"
     ),
     AssumptionEntry(
       "A9", "Spot-conditioned polarization",
       EnforcementLevel.Encoded,
       "SpotPolarization.scala",
-      "Polarization is spot-dependent. UniformPolarization and PosteriorDivergencePolarization implementations"
+      "Polarization is spot-dependent. PosteriorDivergencePolarization computes true KL divergence " +
+      "D_KL(posterior || prior) when a TemperedLikelihoodFn is provided (Fidelity.Exact); " +
+      "falls back to sizing-extremity proxy otherwise. SpotPolarization.fidelity self-reports"
     ),
     AssumptionEntry(
-      "A10", "Adaptation safety",
+      "A10", "Adaptation safety (v0.31.1: strengthened)",
       EnforcementLevel.Encoded,
-      "AdaptationSafety.scala",
-      "Exploit(pi^S_beta) <= epsilon_NE + delta_adapt. Enforced by betaBar clamping (Theorem 8)"
+      "AdaptationSafety.scala, SafetyBellman.scala, Exploitability.scala",
+      "v0.30.2: Exploit(pi^S_beta) <= epsilon_NE + delta_adapt (betaBar clamping, Theorem 8). " +
+      "v0.31.1: upgraded to AS-strong (Def 57) relative to DeploymentBaseline, " +
+      "Bellman-safe certificates (Defs 58-66), and TotalVulnerability (Corollary 9.3). " +
+      "Legacy scalar safety preserved as compatibility wrapper"
     )
   )
 

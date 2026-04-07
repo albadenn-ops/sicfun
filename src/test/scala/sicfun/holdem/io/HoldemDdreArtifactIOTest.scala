@@ -4,12 +4,24 @@ import munit.FunSuite
 
 import java.nio.file.{Files, Path}
 
+/**
+ * Tests for [[HoldemDdreArtifactIO]] ONNX artifact manifest persistence.
+ *
+ * Validates:
+ *   - Save/load roundtrip preserves minimal artifacts (all optional fields absent)
+ *   - Save/load roundtrip preserves fully populated artifacts (all optional fields present)
+ *   - Load returns Left for non-existent directories
+ *   - OnnxArtifact input validation: blank artifactId, invalid executionProvider,
+ *     negative cudaDevice, non-positive thread counts
+ */
 class HoldemDdreArtifactIOTest extends FunSuite:
+  /** Creates a temp directory, runs the test body, then recursively deletes the directory. */
   private def withTempDir(name: String)(f: Path => Unit): Unit =
     val dir = Files.createTempDirectory(s"sicfun-ddre-artifact-$name-")
     try f(dir)
     finally Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(Files.deleteIfExists(_))
 
+  /** Creates a minimal valid OnnxArtifact with all optional fields set to None/false. */
   private def minimal: HoldemDdreArtifactIO.OnnxArtifact =
     HoldemDdreArtifactIO.OnnxArtifact(
       artifactId = "test-001",

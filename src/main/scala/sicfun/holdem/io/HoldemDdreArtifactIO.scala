@@ -6,13 +6,71 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import java.util.Properties
 
-/** Reads and writes DDRE ONNX artifact manifests.
+/**
+ * Persistence layer for DDRE (Data-Driven Range Estimation) ONNX model artifact manifests.
+ *
+ * DDRE is sicfun's neural-network-based approach to opponent range estimation,
+ * complementing the analytical Bayesian inference path. This IO object manages the
+ * manifest files that describe deployed ONNX models -- their file locations, ONNX Runtime
+ * configuration, validation metrics, and quality gates.
+ *
+ * Key design decisions:
+ *   - '''Separation of existence from approval''': An artifact can exist on disk
+ *     (`validationStatus = "experimental"`) without being cleared for live decision-making
+ *     (`decisionDrivingAllowed = false`). This allows the runtime to load and evaluate
+ *     experimental models for A/B testing or offline analysis while preventing unvalidated
+ *     models from driving live play.
+ *   - '''Quality gate thresholds stored in the manifest''': Gate criteria (max NLL, max KL
+ *     divergence, max failure rate, etc.) are persisted alongside the artifact so that the
+ *     exact promotion criteria are always reproducible from the manifest alone.
+ *   - '''Properties-file format''': Uses Java Properties for simplicity and human readability.
+ *     The format is versioned (`format.version = "1"`) to allow future schema evolution.
+ *   - '''Either-based error handling on load''': Returns `Left(errorMessage)` instead of
+ *     throwing, so callers can gracefully handle missing or corrupt artifacts.
+ *
+ * Reads and writes DDRE ONNX artifact manifests.
   *
   * The manifest separates "an ONNX file exists" from "this model is cleared to
   * drive decisions". Runtime code can then reject smoke or unvalidated artifacts
   * by default while tools still evaluate them explicitly.
   */
 object HoldemDdreArtifactIO:
+  /** Complete manifest for a DDRE ONNX model artifact.
+   *
+   * Groups fields into four logical sections:
+   *   1. '''Identity''': artifactId, source, createdAtEpochMillis, notes
+   *   2. '''Model configuration''': modelFile, input/output tensor names
+   *   3. '''Runtime configuration''': execution provider (cpu/cuda), device, thread counts
+   *   4. '''Validation and gates''': status, metrics, and threshold criteria for promotion
+   *
+   * @param artifactId                unique identifier for this artifact
+   * @param source                    provenance string (e.g. training pipeline name)
+   * @param createdAtEpochMillis      when the artifact was generated
+   * @param modelFile                 filename of the ONNX model within the artifact directory
+   * @param priorInputName            ONNX tensor name for the prior distribution input
+   * @param likelihoodInputName       ONNX tensor name for the likelihood input
+   * @param outputName                ONNX tensor name for the posterior distribution output
+   * @param executionProvider         ONNX Runtime execution provider: "cpu" or "cuda"
+   * @param cudaDevice                CUDA device index (0-based; ignored when executionProvider is "cpu")
+   * @param intraOpThreads            ONNX Runtime intra-op parallelism (None = runtime default)
+   * @param interOpThreads            ONNX Runtime inter-op parallelism (None = runtime default)
+   * @param validationStatus          current status: "experimental", "validated", etc.
+   * @param decisionDrivingAllowed    whether this model is cleared to drive live decisions
+   * @param validationSampleCount     number of samples used in validation (if validated)
+   * @param meanNll                   mean negative log-likelihood from validation
+   * @param meanKlVsBayes             mean KL divergence vs. analytical Bayesian baseline
+   * @param blockerViolationRate      rate at which model violates card-removal constraints
+   * @param failureRate               rate of inference failures during validation
+   * @param p50LatencyMillis          median inference latency in milliseconds
+   * @param p95LatencyMillis          95th percentile inference latency in milliseconds
+   * @param gateMinSamples            minimum validation samples required for promotion
+   * @param gateMaxMeanNll            maximum acceptable mean NLL for promotion
+   * @param gateMaxMeanKlVsBayes      maximum acceptable mean KL divergence for promotion
+   * @param gateMaxBlockerViolationRate maximum acceptable blocker violation rate
+   * @param gateMaxFailureRate        maximum acceptable inference failure rate
+   * @param gateMaxP95LatencyMillis   maximum acceptable p95 latency for promotion
+   * @param notes                     optional free-text notes
+   */
   final case class OnnxArtifact(
       artifactId: String,
       source: String,
@@ -58,6 +116,15 @@ object HoldemDdreArtifactIO:
   private val FormatVersion = "1"
   private val MetadataFileName = "metadata.properties"
 
+  /** Loads an ONNX artifact manifest from a directory.
+   *
+   * Validates the format version and artifact kind before parsing all fields.
+   * Returns `Left(errorMessage)` if the directory is missing, the format is
+   * unsupported, or any required field is absent.
+   *
+   * @param directory the artifact directory containing `metadata.properties`
+   * @return either the parsed artifact or an error message
+   */
   def load(directory: Path): Either[String, OnnxArtifact] =
     try
       require(Files.isDirectory(directory), s"DDRE artifact directory does not exist: $directory")
@@ -105,6 +172,14 @@ object HoldemDdreArtifactIO:
       case ex: Exception =>
         Left(Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName))
 
+  /** Persists an ONNX artifact manifest to a directory, creating it if necessary.
+   *
+   * Writes all fields (including optional ones as empty strings when absent) to
+   * `metadata.properties` in the target directory.
+   *
+   * @param directory target directory (created if absent)
+   * @param artifact  the artifact manifest to serialize
+   */
   def save(directory: Path, artifact: OnnxArtifact): Unit =
     Files.createDirectories(directory)
     val props = Properties()

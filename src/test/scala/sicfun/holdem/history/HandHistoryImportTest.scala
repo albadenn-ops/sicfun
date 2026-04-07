@@ -4,6 +4,27 @@ import sicfun.core.{Card, Rank, Suit}
 
 import munit.FunSuite
 
+/** Tests for the multi-site hand history parser [[HandHistoryImport]].
+  *
+  * Validates parsing of three poker site formats into normalized
+  * [[ImportedHand]] / [[PokerEvent]] structures:
+  *
+  *   - '''PokerStars''': standard heads-up hand with explicit site hint;
+  *     verifies table name, player positions, hero hole cards, event count,
+  *     and detailed pot/stack/action fields for raises and calls
+  *   - '''Winamax''': European format with euro amounts (comma decimals),
+  *     no-colon action syntax; auto-detects site; verifies hand ID, pot
+  *     tracking, and raise amounts
+  *   - '''GGPoker''': short raise syntax ("raises to $X"); auto-detects
+  *     site; verifies all-in handling, board cards on each street, and
+  *     correct event sequencing through river
+  *   - '''Forum hero alias normalization''': PokerStars hands pasted from
+  *     forums where the hero name has a "(HERO)" suffix; verifies the
+  *     alias is stripped and actions resolve to the canonical name
+  *   - '''Showdown card extraction''': hands reaching showdown produce
+  *     correct `showdownCards` maps; hands folded before showdown have
+  *     empty maps; mucked/hidden hands are excluded
+  */
 class HandHistoryImportTest extends FunSuite:
   private val pokerStarsHand =
     """PokerStars Hand #1001:  Hold'em No Limit ($0.50/$1.00 USD) - 2026/03/10 12:00:00 ET

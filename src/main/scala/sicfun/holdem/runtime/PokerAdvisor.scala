@@ -61,6 +61,13 @@ object PokerAdvisor:
       opponentName: Option[String]
   )
 
+  /** Bootstrap the full advisor session: load/train the action model, create the adaptive
+    * engine, load any persisted opponent memory, seed the archetype posterior if applicable,
+    * and build the [[AdvisorSession]] state machine.
+    *
+    * @param config  Parsed CLI configuration.
+    * @return        `Right(AdvisorSession)` on success, `Left(errorMessage)` on failure.
+    */
   private def bootstrap(config: CliConfig): Either[String, AdvisorSession] =
     try
       System.err.print("Bootstrapping action model... ")
@@ -81,6 +88,11 @@ object PokerAdvisor:
       case e: Exception =>
         Left(s"Bootstrap failed: ${e.getMessage}")
 
+  /** Load a trained action model from disk, or bootstrap a synthetic one if no model dir is provided.
+    *
+    * The synthetic bootstrap uses the same simple training data as [[LiveHandSimulator]]:
+    * strong/medium/weak hands mapped to raise/call/fold, trained with multinomial logistic regression.
+    */
   private def loadArtifact(config: CliConfig): TrainedPokerActionModel =
     config.modelDir match
       case Some(dir) =>
@@ -101,6 +113,9 @@ object PokerAdvisor:
           trainedAtEpochMillis = System.currentTimeMillis()
         )
 
+  /** Construct the [[RealTimeAdaptiveEngine]] with the configured trial counts
+    * and optional equilibrium baseline (CFR) configuration.
+    */
   private def buildEngine(
       config: CliConfig,
       artifact: TrainedPokerActionModel,
@@ -115,6 +130,10 @@ object PokerAdvisor:
       equilibriumBaselineConfig = equilibriumBaselineConfig(config)
     )
 
+  /** Build the optional CFR equilibrium baseline configuration.
+    * Returns `None` if `cfrIterations <= 0` (disabled), otherwise constructs the
+    * config with blend weight, exploitability threshold, and villain hand limits.
+    */
   private def equilibriumBaselineConfig(
       config: CliConfig
   ): Option[EquilibriumBaselineConfig] =
@@ -132,6 +151,9 @@ object PokerAdvisor:
         )
       )
 
+  /** Assemble the [[AdvisorSession]] with all runtime dependencies: engine, table ranges,
+    * session config, opponent memory state, and RNG.  This is the entry point for the REPL.
+    */
   private def buildSession(
       config: CliConfig,
       engine: RealTimeAdaptiveEngine,
@@ -159,6 +181,10 @@ object PokerAdvisor:
       opponentMemoryStore = opponentMemoryStore
     )
 
+  /** Look up a previously-saved opponent profile from the store, if all three keys
+    * (store, site, name) are provided.  Returns `None` if any key is missing or
+    * the opponent isn't found.
+    */
   private def loadRememberedOpponent(
       store: Option[OpponentProfileStore],
       config: CliConfig
@@ -168,6 +194,7 @@ object PokerAdvisor:
         profileStore.find(site, name)
       case _ => None
 
+  /** Load the opponent profile store from the configured target (JSON file or PostgreSQL). */
   private def loadRememberedOpponentStore(
       config: CliConfig
   ): Option[OpponentProfileStore] =
@@ -177,6 +204,10 @@ object PokerAdvisor:
     println(s"sicfun poker advisor")
     println(f"  Heads-up | Stack: ${config.stack}%.0f | Blinds: ${config.sb}%.1f/${config.bb}%.1f | Seed: ${config.seed}")
 
+  /** Simple command-line REPL that reads commands from stdin, dispatches them to the
+    * [[AdvisorSession]], and prints results.  The session is immutable-by-replacement:
+    * each command returns an updated session that replaces the current one.
+    */
   private final class ReplRunner(initialSession: AdvisorSession):
     private var session = initialSession
     private var running = true
@@ -333,6 +364,9 @@ object PokerAdvisor:
   private def fmtSigned(v: Double): String =
     if v >= 0 then f"+$v%.1f" else f"$v%.1f"
 
+  /** Convert a CLI threshold value to the internal representation: -1 means "disabled",
+    * which maps to `PositiveInfinity` so all comparisons pass.
+    */
   private def disabledThreshold(raw: Double): Double =
     if raw < 0.0 then Double.PositiveInfinity else raw
 

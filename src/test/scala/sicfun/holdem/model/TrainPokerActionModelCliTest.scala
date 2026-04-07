@@ -6,6 +6,16 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
 
+/**
+ * Tests for the [[TrainPokerActionModel]] CLI entry point.
+ *
+ * Validates:
+ *   - End-to-end training run: reads TSV, trains model, saves artifact directory with
+ *     all expected files (metadata.properties, weights.tsv, bias.tsv, category-index.tsv)
+ *   - Loaded artifact has correct version, schema, source, timestamps, evaluation strategy,
+ *     validation fraction, split seed, and passes the quality gate
+ *   - Invalid CLI options return Left(error message) instead of throwing
+ */
 class TrainPokerActionModelCliTest extends FunSuite:
   test("run trains and saves artifact directory") {
     val header = "street\tboard\tpotBefore\ttoCall\tposition\tstackBefore\taction\tholeCards"

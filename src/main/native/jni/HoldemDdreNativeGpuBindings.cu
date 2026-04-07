@@ -1,3 +1,13 @@
+/*
+ * HoldemDdreNativeGpuBindings.cu -- GPU JNI binding for DDRE posterior inference.
+ *
+ * Structurally identical to HoldemDdreNativeCpuBindings.cpp. The .cu extension
+ * ensures compilation by nvcc into sicfun_gpu_kernel.dll. Reports engine code 2
+ * (GPU) on success. The actual DDRE math runs on CPU via the shared header.
+ *
+ * Compiled into: sicfun_gpu_kernel.dll
+ */
+
 #include <jni.h>
 
 #include <atomic>
@@ -11,6 +21,7 @@ constexpr jint kEngineGpu = 2;
 
 std::atomic<jint> g_last_engine_code(kEngineUnknown);
 
+/* See HoldemBayesNativeCpuBindings.cpp for detailed comments on exception handling. */
 bool clear_pending_jni_exception(JNIEnv* env) {
   if (!env->ExceptionCheck()) {
     return false;
@@ -53,6 +64,11 @@ jdouble* acquire_critical_array(
 
 }  // namespace
 
+/*
+ * JNI entry point: sicfun.holdem.HoldemDdreNativeGpuBindings.inferPosterior()
+ *
+ * Same logic as the CPU DDRE binding. Reports engine code 2 (GPU) on success.
+ */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemDdreNativeGpuBindings_inferPosterior(
     JNIEnv* env,
@@ -138,6 +154,7 @@ Java_sicfun_holdem_HoldemDdreNativeGpuBindings_inferPosterior(
   return ddrenative::kStatusOk;
 }
 
+/* Returns 0 (unknown) or 2 (GPU) depending on whether inferPosterior succeeded. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemDdreNativeGpuBindings_lastEngineCode(
     JNIEnv* /*env*/, jclass /*clazz*/) {

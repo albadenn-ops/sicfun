@@ -6,6 +6,29 @@ import sicfun.holdem.gpu.*
 import sicfun.core.{Card, Deck, HandEvaluator, HandRank}
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Full feature extraction (including hand strength) for the sicfun Bayesian inference pipeline.
+ *
+ * This file provides the 5-dimensional feature vector used by [[PokerActionModel]] for
+ * Bayesian range inference. Unlike [[FeatureExtractor]] (which uses only observable features),
+ * this extractor includes a hand-strength estimate derived from the player's private hole cards,
+ * making it suitable for models that operate within the Bayesian range updater where the hero's
+ * cards are known.
+ *
+ * The hand strength computation is the most expensive operation in the feature extraction
+ * pipeline. Two modes are available, controlled by the `sicfun.poker.handStrength.mode`
+ * system property (or `sicfun_POKER_HAND_STRENGTH_MODE` environment variable):
+ *
+ *   - '''heuristic''' (default): Fast rank-based proxy using hand category and tiebreak scores.
+ *     Suitable for real-time loops where low latency matters more than exact equity.
+ *   - '''exact''': Exhaustive enumeration of all opponent hole-card combinations from the
+ *     remaining deck, computing true equity. Used for high-accuracy offline analysis.
+ *
+ * Results are cached in a thread-safe [[ConcurrentHashMap]] to avoid redundant computation.
+ * The cache is bounded at 100K entries and cleared entirely when full (simple but effective
+ * for the typical bursty access pattern within a single hand analysis).
+ */
+
 /** A normalized feature vector extracted from a [[GameState]] and the player's hole cards.
   *
   * All values are scaled to approximately [0, 1] for consumption by ML models.

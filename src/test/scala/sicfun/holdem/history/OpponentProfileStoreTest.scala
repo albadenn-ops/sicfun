@@ -11,6 +11,34 @@ import java.nio.file.Files
 import java.nio.charset.StandardCharsets
 import scala.jdk.CollectionConverters.*
 
+/** Tests for [[OpponentProfileStore]] and [[OpponentProfile]], covering the
+  * full lifecycle of opponent memory: building profiles from imported hands,
+  * merging, deduplication, persistence, identity management, showdown tracking,
+  * exploit hint generation, and error recovery.
+  *
+  * Coverage:
+  *   - '''Build / deduplicate / save / reload''': import 4 PokerStars hands,
+  *     build a villain profile, verify action summary and archetype, upsert
+  *     twice (idempotency), save to JSON, reload, and assert equality
+  *   - '''Live event observation''': `observeEvent` increments hand count
+  *     and action counters without double-counting duplicate events
+  *   - '''SICFUN player registration''': `registerSicfunPlayer` derives
+  *     stable player UIDs from (modelUid, behaviorUid) and shares profile
+  *     UIDs across players from the same source profile
+  *   - '''Showdown tracking''': showdown-revealed cards flow from import
+  *     through profile, survive merge and JSON roundtrip
+  *   - '''Merge semantics''': overlapping hands are not double-counted;
+  *     lifetime aggregates scale to non-overlapping hands only; showdown
+  *     and identity enrichment from incoming profiles is preserved
+  *   - '''Exploit hints''': premium-heavy, weak-heavy, and pair-heavy
+  *     showdown patterns produce appropriate structured hints with
+  *     deviation metrics and confidence scores
+  *   - '''Error recovery''': corrupt profiles, events, metadata entries,
+  *     and invalid top-level payloads are skipped with stderr warnings
+  *     while valid data is preserved
+  *   - '''Player collapse''': manual collapse with optional profile collapse,
+  *     verified through JSON roundtrip
+  */
 class OpponentProfileStoreTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card token: $token"))

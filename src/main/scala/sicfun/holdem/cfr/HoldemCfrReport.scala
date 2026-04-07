@@ -14,16 +14,26 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import scala.jdk.CollectionConverters.*
 
-/** Offline CFR report/tracking entrypoint.
+/** Offline CFR report and exploitability tracking CLI entrypoint.
   *
-  * Solves a one-street heads-up abstraction and writes:
-  *  - summary.txt
-  *  - policy.tsv
-  *  - exploitability.tsv (append-only tracking)
+  * Solves a single heads-up Hold'em decision spot using [[HoldemCfrSolver]], computes
+  * exploitability diagnostics (root deviation gap, villain deviation gap, local
+  * exploitability), and optionally writes:
+  *  - '''summary.txt''': human-readable solution summary with policy and action EVs
+  *  - '''policy.tsv''': machine-readable policy with per-action probabilities and EVs
+  *  - '''exploitability.tsv''': append-only tracking file for monitoring convergence
+  *    across runs with different iteration counts or parameters
+  *
+  * This tool is designed for offline analysis and quality tracking, not real-time use.
+  * It exposes all [[HoldemCfrConfig]] parameters via CLI flags.
+  *
+  * Usage: `runMain sicfun.holdem.cfr.HoldemCfrReport --hero=AcKh --board=Ts9h8d ...`
   */
 object HoldemCfrReport:
+  /** ISO-8601 UTC formatter for timestamping generated reports. */
   private val IsoFormatter = DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC)
 
+  /** Parsed CLI arguments bundling the spot definition and CFR configuration. */
   private final case class CliConfig(
       hero: HoleCards,
       board: Board,
@@ -38,12 +48,18 @@ object HoldemCfrReport:
       trackFile: Option[Path]
   )
 
+  /** Result of a single-spot CFR report run, bundling the solved strategy
+    * with optional output artifact paths.
+    */
   final case class RunResult(
       solution: HoldemCfrSolution,
       outDir: Option[Path],
       trackFile: Option[Path]
   )
 
+  /** CLI entry point. Parses arguments, runs the solver, and prints a
+    * human-readable summary to stdout. Exits with code 1 on error.
+    */
   def main(args: Array[String]): Unit =
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
@@ -72,12 +88,26 @@ object HoldemCfrReport:
           System.err.println(error)
           sys.exit(1)
 
+  /** Parses CLI arguments and runs the solver, returning the result or an error message.
+    * This is the programmatic entry point (no `sys.exit`).
+    */
   def run(args: Array[String]): Either[String, RunResult] =
     for
       config <- parseArgs(args)
       result <- runConfig(config)
     yield result
 
+  /** Executes the CFR solve for a parsed CLI config.
+    *
+    * Steps:
+    *  1. Validates hero/board card overlap
+    *  2. Constructs a [[GameState]] from the CLI parameters
+    *  3. Calls [[HoldemCfrSolver.solve]] to get a full solution with exploitability metrics
+    *  4. Optionally writes summary.txt and policy.tsv to `outDir`
+    *  5. Optionally appends an exploitability row to a tracking TSV file
+    *
+    * @return Right(RunResult) on success, Left(errorMessage) on failure
+    */
   private def runConfig(config: CliConfig): Either[String, RunResult] =
     try
       require(
@@ -131,6 +161,9 @@ object HoldemCfrReport:
       case e: Exception =>
         Left(s"holdem CFR report failed: ${e.getMessage}")
 
+  /** Builds human-readable summary lines for the report output file.
+    * Includes spot configuration, exploitability metrics, policy, and per-action EVs.
+    */
   private def buildSummaryLines(config: CliConfig, solution: HoldemCfrSolution): Vector[String] =
     Vector(
       "Holdem CFR Report",
@@ -167,6 +200,9 @@ object HoldemCfrReport:
         .mkString("\n")
     )
 
+  /** Writes a machine-readable TSV policy file with columns:
+    * action, probability, expectedValue, best (1 if this is the argmax action, 0 otherwise).
+    */
   private def writePolicy(path: Path, solution: HoldemCfrSolution): Unit =
     val header = "action\tprobability\texpectedValue\tbest"
     val rows = solution.actionEvaluations.map { evaluation =>
@@ -176,6 +212,10 @@ object HoldemCfrReport:
     }
     Files.write(path, (header +: rows).asJava, StandardCharsets.UTF_8)
 
+  /** Appends one row to an exploitability tracking TSV file. Creates the file
+    * with a header if it does not already exist. This enables longitudinal
+    * tracking of solver convergence across runs with different parameters.
+    */
   private def appendExploitabilityRow(path: Path, config: CliConfig, solution: HoldemCfrSolution): Unit =
     val header =
       "generatedAtIso\thero\tboard\tpot\ttoCall\tposition\tstackSize\titerations\tvillainSupport\t" +
@@ -205,6 +245,10 @@ object HoldemCfrReport:
     ).mkString("\t")
     Files.write(path, Vector(row).asJava, StandardCharsets.UTF_8, StandardOpenOption.APPEND)
 
+  /** Parses CLI arguments into a [[CliConfig]], validating all constraints
+    * (non-negative pot, positive stack, valid card tokens, etc.).
+    * Returns Left(usage) for --help, Left(error) for invalid inputs.
+    */
   private def parseArgs(args: Array[String]): Either[String, CliConfig] =
     if args.contains("--help") || args.contains("-h") then Left(usage)
     else
@@ -269,6 +313,10 @@ object HoldemCfrReport:
           trackFile = trackFile
         )
 
+  /** Parses a board from CLI options. Accepts space-separated tokens ("Ts 9h 8d"),
+    * comma-separated ("Ts,9h,8d"), or concatenated ("Ts9h8d"). Returns Board.empty
+    * for empty/none values.
+    */
   private def parseBoardOption(
       options: Map[String, String],
       key: String,
@@ -297,6 +345,9 @@ object HoldemCfrReport:
           catch
             case e: Exception => Left(s"--$key invalid board: ${e.getMessage}")
 
+  /** Parses a poker hand range expression (e.g., "22+,A2s+,K5s+") into a
+    * discrete probability distribution over hole cards, using [[RangeParser]].
+    */
   private def parseRangeOption(
       options: Map[String, String],
       key: String,
@@ -333,6 +384,7 @@ object HoldemCfrReport:
   ): Either[String, Option[Path]] =
     Right(options.get(key).map(Paths.get(_)))
 
+  /** Renders a PokerAction to its canonical string form: FOLD, CHECK, CALL, or RAISE:amount. */
   private def renderAction(action: PokerAction): String =
     action match
       case PokerAction.Fold => "FOLD"

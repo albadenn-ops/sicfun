@@ -5,6 +5,16 @@ import sicfun.holdem.types.*
 
 import java.util.Random
 
+/** Tests for [[HeroDecisionPipeline]].
+  *
+  * Validates the shared hero decision pipeline used by match runners:
+  *   - '''Raise sizing''': correct chip-to-BB conversion, preflop open/facing-open sizes,
+  *     postflop pot-fraction sizes, and empty result when no room to raise.
+  *   - '''Candidate generation''': Check + raises when no call needed; Fold + Call + raises
+  *     when facing a bet.
+  *   - '''Policy sampling''': fallback to highest-probability action on zero mass;
+  *     ability to realize multiple actions from a mixed policy.
+  */
 class HeroDecisionPipelineTest extends FunSuite:
 
   private def ctx(

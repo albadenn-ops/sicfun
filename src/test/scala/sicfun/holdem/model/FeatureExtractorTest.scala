@@ -4,10 +4,22 @@ import munit.FunSuite
 import sicfun.core.Card
 import sicfun.holdem.types.*
 
+/**
+ * Tests for [[FeatureExtractor]] 8-dimensional observable feature extraction.
+ *
+ * Validates:
+ *   - Output dimension is always 8, matching the declared constant
+ *   - All features are normalized to [0, 1]
+ *   - Individual feature correctness: potOdds, streetOrdinal, positionOrdinal,
+ *     boardSize, decisionTime, toCallOverStack, historyLength
+ *   - Edge cases: zero toCall, zero stack (all-in), clamped values (30s decision time, 20 bets)
+ */
 class FeatureExtractorTest extends FunSuite:
+  /** Parses a card token string, failing the test if invalid. */
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
+  /** Factory for creating test PokerEvent instances with configurable game state parameters. */
   private def mkEvent(
       street: Street = Street.Preflop,
       boardTokens: Seq[String] = Seq.empty,

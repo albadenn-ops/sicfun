@@ -4,12 +4,25 @@ import munit.FunSuite
 
 import java.nio.file.{Files, Path}
 
+/**
+ * Tests for [[SignalAuditLogIO]] TSV-based signal audit log persistence.
+ *
+ * Validates:
+ *   - Write/read roundtrip preserves single and multiple signals
+ *   - Write creates header-only file for empty signal lists
+ *   - Append creates file with header if absent, adds to existing file
+ *   - Read rejects non-existent files
+ *   - All SignalLevel values (Info, Warning, Critical) survive the roundtrip
+ *   - String path overload convenience methods
+ */
 class SignalAuditLogIOTest extends FunSuite:
+  /** Creates a temp directory, runs the test body, then recursively deletes the directory. */
   private def withTempDir(name: String)(f: Path => Unit): Unit =
     val dir = Files.createTempDirectory(s"sicfun-signal-log-$name-")
     try f(dir)
     finally Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(Files.deleteIfExists(_))
 
+  /** Creates a test signal envelope with minimal valid fields. */
   private def mkSignal(id: String = "sig-1", handId: String = "h1"): SignalEnvelope =
     SignalEnvelope(
       signalId = id,

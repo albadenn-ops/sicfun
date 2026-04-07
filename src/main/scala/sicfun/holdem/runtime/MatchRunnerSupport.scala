@@ -14,6 +14,22 @@ import java.nio.file.{Files, Path}
   */
 private[holdem] object MatchRunnerSupport:
 
+  /** Immutable snapshot of aggregate match statistics, used for file output and return values.
+    *
+    * @param handsPlayed      Total number of hands completed.
+    * @param heroNetChips     Hero's cumulative signed chip result.
+    * @param heroBbPer100     Win rate in big blinds per 100 hands.
+    * @param heroWins         Number of hands where hero had positive net chips.
+    * @param heroTies         Number of hands where hero broke even (net = 0).
+    * @param heroLosses       Number of hands where hero had negative net chips.
+    * @param buttonHands      Hands played from the button position.
+    * @param buttonNetChips   Net chips accumulated from button position.
+    * @param bigBlindHands    Hands played from the big blind position.
+    * @param bigBlindNetChips Net chips accumulated from big blind position.
+    * @param heroMode         Decision mode used (Adaptive or Gto).
+    * @param modelId          Identifier of the action model artifact used.
+    * @param outDir           Output directory where artifacts were written.
+    */
   final case class RunSummary(
       handsPlayed: Int,
       heroNetChips: Double,
@@ -45,6 +61,11 @@ private[holdem] object MatchRunnerSupport:
     def currentHandsPlayed: Int = handsPlayed
     def currentHeroNetChips: Double = heroNetChips
 
+    /** Record the result of a completed hand, updating all counters and position breakdowns.
+      *
+      * @param heroPosition  Hero's position this hand (Button or BigBlind).
+      * @param heroNetChips  Hero's signed chip result for this hand.
+      */
     def recordOutcome(heroPosition: Position, heroNetChips: Double): Unit =
       this.handsPlayed += 1
       this.heroNetChips += heroNetChips
@@ -61,10 +82,12 @@ private[holdem] object MatchRunnerSupport:
         case other =>
           throw new IllegalStateException(s"unexpected hero position in match runner: $other")
 
+    /** Compute the current bb/100 win rate: (netChips / bbSize / hands) * 100. */
     def currentBbPer100(bigBlindChips: Double): Double =
       if handsPlayed > 0 then (heroNetChips / bigBlindChips / handsPlayed.toDouble) * 100.0
       else 0.0
 
+    /** Freeze the current mutable statistics into an immutable [[RunSummary]] snapshot. */
     def buildSummary(heroMode: HeroMode, modelId: String, outDir: Path, bigBlindChips: Int = 100): RunSummary =
       RunSummary(
         handsPlayed      = handsPlayed,
@@ -82,6 +105,12 @@ private[holdem] object MatchRunnerSupport:
         outDir           = outDir
       )
 
+  /** Write a human-readable summary file with all match statistics.
+    *
+    * @param path    Output file path.
+    * @param label   Section header label (e.g., "ACPC Match Runner", "Slumbot Match Runner").
+    * @param summary The run summary to write.
+    */
   def writeSummary(path: Path, label: String, summary: RunSummary): Unit =
     val lines = Vector(
       s"=== $label ===",
@@ -100,6 +129,11 @@ private[holdem] object MatchRunnerSupport:
     )
     Files.write(path, lines.mkString(System.lineSeparator()).getBytes(StandardCharsets.UTF_8))
 
+  /** Append a tab-separated decision log row to the decisions.tsv file.
+    *
+    * Columns: hand, decisionIndex, street, position, pot, toCall, stack,
+    * candidates (comma-separated), chosenAction, wireAction.
+    */
   def appendDecisionLog(
       writer: BufferedWriter,
       handId: Int,

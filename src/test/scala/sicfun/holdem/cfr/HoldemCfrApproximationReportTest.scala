@@ -7,7 +7,24 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import scala.jdk.CollectionConverters.*
 
+/** Tests for [[HoldemCfrApproximationReport]], the offline diagnostics suite that
+  * solves representative poker spots and measures CFR approximation quality.
+  *
+  * Two main scenarios are tested:
+  *  1. '''Output stability''': A small subset of the default suite is solved with
+  *     reduced iterations, verifying that summary.txt, spots.tsv, and
+  *     external-comparison.json are written correctly with valid structure and content.
+  *  2. '''Exploitability budget''': The full default suite is solved at production
+  *     iteration counts, verifying that mean and per-spot exploitability stay within
+  *     regression budgets. This catches solver quality regressions.
+  *
+  * All tests force the "scala" provider via system properties to ensure deterministic
+  * behavior regardless of native library availability.
+  */
 class HoldemCfrApproximationReportTest extends FunSuite:
+  /** Runs a test block with specified system properties, resetting native runtime
+    * and auto-provider caches before and after to ensure test isolation.
+    */
   private def withSystemProperties(properties: Map[String, String])(thunk: => Unit): Unit =
     TestSystemPropertyScope.withSystemProperties(properties.toSeq.map { case (key, value) => key -> Some(value) }) {
       HoldemCfrNativeRuntime.resetLoadCacheForTests()
@@ -18,6 +35,10 @@ class HoldemCfrApproximationReportTest extends FunSuite:
         HoldemCfrSolver.resetAutoProviderForTests()
     }
 
+  // Verifies that runSuite writes all three output files (summary.txt, spots.tsv,
+  // external-comparison.json) with correct structure, column counts, and valid
+  // exploitability/policy values. Also checks the JSON export includes spot
+  // signatures, villain ranges, bet history, and normalized policies.
   test("approximation report writes stable TSV and external comparison exports") {
     withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
       val root = Files.createTempDirectory("holdem-cfr-approx-report-test-")
@@ -116,6 +137,9 @@ class HoldemCfrApproximationReportTest extends FunSuite:
     }
   }
 
+  // Regression gate: runs the full 6-spot default suite at 1200 iterations and
+  // verifies that mean/max exploitability and per-spot exploitability stay within
+  // historically calibrated budgets. Failures indicate a solver quality regression.
   test("default approximation suite stays within exploitability budget") {
     withSystemProperties(Map("sicfun.cfr.provider" -> "scala")) {
       val result = HoldemCfrApproximationReport.runSuite(

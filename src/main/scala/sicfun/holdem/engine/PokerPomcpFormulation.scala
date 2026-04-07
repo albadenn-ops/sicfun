@@ -12,6 +12,12 @@ import sicfun.holdem.strategic.solver.WPomcpRuntime
   *
   * Public-state layout: pubState index = street * NumPotBuckets * NumStackBuckets + potBucket * NumStackBuckets + stackBucket
   * Streets: 0=Preflop, 1=Flop, 2=Turn, 3=River  -> 4 * 8 * 6 = 192 total pub states.
+  *
+  * Per-round abstraction: the C++ simulate_v2 models each MCTS depth step as one
+  * full betting round — hero acts, all rivals respond, then the street advances.
+  * This means terminal_flags and rival_policy are evaluated per-round, not per
+  * individual action within a betting round. The tradeoff is simplicity (one
+  * action per player per depth) vs fidelity (intra-round re-raises are collapsed).
   */
 object PokerPomcpFormulation:
 
@@ -47,22 +53,31 @@ object PokerPomcpFormulation:
         System.arraycopy(priors, 0, result, base, numActions)
     result
 
+  /** Per-class action distribution: (foldP, passiveP, raiseP) per StrategicClass.
+    * Exposed as a val so callers can override with calibrated values.
+    */
+  val defaultClassPriors: Map[StrategicClass, (Double, Double, Double)] = Map(
+    StrategicClass.Value     -> (0.05, 0.75, 0.20),
+    StrategicClass.Bluff     -> (0.10, 0.25, 0.65),
+    StrategicClass.SemiBluff -> (0.05, 0.45, 0.50),
+    StrategicClass.Marginal  -> (0.15, 0.75, 0.10)
+  )
+
   /** Per-class action distribution for numActions actions.
     * Returns normalized array of length numActions.
     * Action 0 = fold, action 1 = check/call, actions 2+ = raises.
     */
-  private def classPriors(cls: StrategicClass, numActions: Int): Array[Double] =
+  private def classPriors(
+      cls: StrategicClass,
+      numActions: Int,
+      priorTable: Map[StrategicClass, (Double, Double, Double)] = defaultClassPriors
+  ): Array[Double] =
     val raw = new Array[Double](numActions)
-    val (foldP, passiveP, raiseP) = cls match
-      case StrategicClass.Value     => (0.05, 0.75, 0.20)
-      case StrategicClass.Bluff     => (0.10, 0.25, 0.65)
-      case StrategicClass.SemiBluff => (0.05, 0.45, 0.50)
-      case StrategicClass.Marginal  => (0.15, 0.75, 0.10)
+    val (foldP, passiveP, raiseP) = priorTable.getOrElse(cls, (0.25, 0.50, 0.25))
     raw(0) = foldP
     if numActions > 1 then raw(1) = passiveP
     val raiseSlots = math.max(1, numActions - 2)
     for i <- 2 until numActions do raw(i) = raiseP / raiseSlots
-    // Normalize
     val sum = raw.sum
     if sum > 0 then for i <- raw.indices do raw(i) /= sum
     raw
@@ -113,11 +128,26 @@ object PokerPomcpFormulation:
       i += 1
     result
 
+  /** Default showdown equity table: linear heuristic.
+    * Replace with calibrated bucket-vs-bucket equity from HeadsUpEquityTable.
+    */
+  val defaultShowdownEquity: (Int, Int) => Array[Double] = buildLinearShowdownEquity
+
+  /** Linear equity heuristic: equity = 0.5 + (heroBucket - rivalBucket) * 0.4 / max(H, R).
+    * Named explicitly so callers know this is an approximation.
+    */
+  def buildLinearShowdownEquity(numHeroBuckets: Int, numRivalBuckets: Int): Array[Double] =
+    Array.tabulate(numHeroBuckets * numRivalBuckets) { idx =>
+      val hb = idx / numRivalBuckets
+      val rb = idx % numRivalBuckets
+      val diff = (hb - rb).toDouble / math.max(numHeroBuckets, numRivalBuckets).toDouble
+      0.5 + diff * 0.4
+    }
+
   /** Build showdown equity table: E[hero equity | heroBucket, rivalBucket].
     *
     * Indexed as: showdownEquity(heroBucket * numRivalBuckets + rivalBucket)
-    * Initial heuristic: linear equity based on bucket rank comparison,
-    * centered at 0.5 with +/-0.4 range across the bucket space.
+    * Delegates to buildLinearShowdownEquity by default.
     *
     * @param numHeroBuckets  number of hero hand-strength buckets
     * @param numRivalBuckets number of rival hand-strength buckets
@@ -127,12 +157,7 @@ object PokerPomcpFormulation:
       numHeroBuckets: Int,
       numRivalBuckets: Int
   ): Array[Double] =
-    Array.tabulate(numHeroBuckets * numRivalBuckets) { idx =>
-      val hb   = idx / numRivalBuckets
-      val rb   = idx % numRivalBuckets
-      val diff = (hb - rb).toDouble / math.max(numHeroBuckets, numRivalBuckets).toDouble
-      0.5 + diff * 0.4
-    }
+    buildLinearShowdownEquity(numHeroBuckets, numRivalBuckets)
 
   /** Build terminal flags: outcome code at each (pubState, action) pair.
     *

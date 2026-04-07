@@ -57,6 +57,11 @@ object HeadsUpGpuPocGate:
     def isPass: Boolean =
       checked > 0 && violations.toDouble / checked.toDouble <= 0.01
 
+  /** Entry point. Runs both CPU and GPU backends on the same workload, validates
+    * correctness (exact: 1e-9 tolerance; MC: 6-sigma + 0.05 absolute), and
+    * measures GPU-vs-CPU throughput speedup. Passes only if both correctness and
+    * speedup thresholds are met.
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     require(config.cpuParallelism > 0, "cpuParallelism must be positive")
@@ -162,6 +167,15 @@ object HeadsUpGpuPocGate:
       (values, elapsed)
     }
 
+  /** Validates GPU results against CPU baseline.
+    *
+    * Exact mode: requires win/tie/loss to match within 1e-9 (accounts for floating-point
+    * ordering differences but not genuine errors).
+    *
+    * MC mode: uses a 6-sigma tolerance on the larger stderr, with a floor of 0.05 absolute.
+    * The 6-sigma bound means a "violation" is statistically very unlikely (< 0.0002%)
+    * to be caused by random sampling alone.
+    */
   private def validate(
       mode: HeadsUpEquityTable.Mode,
       cpu: Array[EquityResultWithError],

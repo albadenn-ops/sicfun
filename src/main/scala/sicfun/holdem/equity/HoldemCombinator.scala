@@ -3,7 +3,19 @@ import sicfun.holdem.types.*
 
 import sicfun.core.Card
 
-/** Combinatorial utilities for enumerating card subsets used by the equity engine. */
+/**
+  * Combinatorial utilities for enumerating card subsets used by the equity engine.
+  *
+  * Provides two core operations:
+  *   - '''Generic k-subset enumeration''': Lazily generates all C(n,k) combinations of
+  *     an indexed sequence, used for board run-out enumeration in exact equity calculations.
+  *   - '''Hole-card generation''': Enumerates all canonical two-card hands from a set of
+  *     remaining deck cards, used to build the 1326-hand index and to generate villain ranges.
+  *
+  * The lazy iterator approach is critical for memory efficiency: on a flop with 45 remaining
+  * cards, there are C(45,2) = 990 possible turn+river run-outs, but on preflop there are
+  * C(48,5) = 1,712,304 possible boards. Materializing all of these at once would be wasteful.
+  */
 object HoldemCombinator:
   /** Lazily generates all k-element subsets of `items` in lexicographic order.
     *

@@ -2,6 +2,18 @@ package sicfun.holdem.types
 
 import munit.FunSuite
 
+/**
+  * Tests for [[PokerFormatting]] shared display utilities.
+  *
+  * Validates:
+  *   - '''renderAction''': Correct string output for each [[PokerAction]] variant,
+  *     including raise amounts formatted to 2 decimal places.
+  *   - '''fmtDouble''': Correct precision formatting and locale-independent decimal separator
+  *     (period, not comma, regardless of JVM locale).
+  *   - '''roundedChips''': Rounds to nearest 50 with a minimum of 50,
+  *     testing boundary values at 0, 25, 74, 75, 100, 125.
+  *   - '''heroModeLabel''': Returns lowercase "adaptive" or "gto" for each [[HeroMode]].
+  */
 class PokerFormattingTest extends FunSuite:
 
   test("renderAction formats Fold"):

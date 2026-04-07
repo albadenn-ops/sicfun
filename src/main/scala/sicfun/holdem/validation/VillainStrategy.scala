@@ -9,8 +9,25 @@ import sicfun.holdem.types.*
 import scala.collection.mutable
 import scala.util.Random
 
-/** Pluggable GTO baseline strategy for the simulated villain. */
+/** Pluggable GTO baseline strategy for the simulated villain.
+  *
+  * The villain strategy provides the "competent baseline" action before
+  * [[LeakInjectedVillain]] applies potential deviations. Two implementations exist:
+  *   - [[EquityBasedStrategy]]: fast heuristic using equity thresholds (no solver)
+  *   - [[CfrVillainStrategy]]: actual Nash equilibrium via CFR solver (slower, more accurate)
+  *
+  * @see [[HeadsUpSimulator]] which uses this to generate villain GTO actions
+  */
 trait VillainStrategy:
+  /** Choose an action given the villain's hand, game state, available actions, and equity.
+    *
+    * @param hand           villain's hole cards
+    * @param state          current game state snapshot
+    * @param candidates     available actions (Fold, Check, Call, Raise variants)
+    * @param equityVsRandom villain's equity against a uniform random range
+    * @param rng            random number generator for mixed strategy sampling
+    * @return the chosen poker action
+    */
   def decide(
       hand: HoleCards,
       state: GameState,
@@ -19,7 +36,19 @@ trait VillainStrategy:
       rng: Random
   ): PokerAction
 
-/** Equity-threshold heuristic — the original HeadsUpSimulator strategy. */
+/** Equity-threshold heuristic — the original HeadsUpSimulator strategy.
+  *
+  * Uses simple equity-vs-random thresholds to decide actions. Fast (no solver call)
+  * but not game-theoretically optimal. Produces "competent but imperfect" play that
+  * is adequate as a baseline for leak-injected opponents — the leaks are the signal
+  * being tested, not the baseline quality.
+  *
+  * Decision logic:
+  *   - Facing a bet: fold/call/raise based on equity vs pot odds with street-specific
+  *     adjustments (wider preflop defense, occasional floats postflop)
+  *   - Checked to: value bet strong hands (equity >= 0.60), bluff occasionally with
+  *     air (equity <= 0.30), check everything else
+  */
 final class EquityBasedStrategy extends VillainStrategy:
   def decide(
       hand: HoleCards,
@@ -338,6 +367,7 @@ object CfrVillainStrategy:
       viableHands: Vector[HoleCards]
   )
 
+  /** Maximum policy cache size before eviction (full clear). */
   private val MaxPolicyCacheEntries = 100000
 
   // Standard HU Button opening range (~85% of hands).

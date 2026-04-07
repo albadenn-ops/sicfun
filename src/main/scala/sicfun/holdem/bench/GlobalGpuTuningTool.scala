@@ -146,6 +146,14 @@ object GlobalGpuTuningTool:
   private val cudaBuildResultRef = new AtomicReference[Either[String, Unit]](null)
   private val SupportedWindowsCudaBuildArchitectures = Set("amd64", "x86_64", "x64")
 
+  /** Entry point. Parses CLI args, expands target groups (e.g. "runtime" -> 6 individual
+    * targets, "all" -> runtime + hybrid + research), then runs each target sequentially.
+    * Each target auto-discovers or auto-builds the required native DLL artifacts, then
+    * delegates to the appropriate auto-tuner (HeadsUpBackendAutoTuner, HeadsUpRangeGpuAutoTuner,
+    * HoldemPostflopGpuAutoTuner, or HeadsUpCanonicalExactTuner). Results are cached in
+    * properties files so subsequent runs skip already-tuned configurations unless --force=true.
+    * Throws if any target fails.
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     val targets = expandTargets(config.targets)
@@ -162,6 +170,13 @@ object GlobalGpuTuningTool:
     if failures.nonEmpty then
       throw new IllegalStateException("global gpu tuning failed for: " + failures.map(_.name).mkString(", "))
 
+  /** Dispatches a single named target to the appropriate tuning workflow.
+    * Backend targets (backend-*) run HeadsUpBackendAutoTuner for GPU kernel parameter selection.
+    * Hybrid targets (hybrid-*) run HeadsUpBackendAutoTuner in hybrid multi-device mode.
+    * "range" runs HeadsUpRangeGpuAutoTuner for CSR range evaluation parameters.
+    * "postflop" runs HoldemPostflopGpuAutoTuner for postflop MC parameters.
+    * Research targets run HeadsUpCanonicalExactTuner/HeadsUpCanonicalExactBoardMajorTuner.
+    */
   private def runTarget(target: String, force: Boolean): TargetResult =
     try
       target match
@@ -424,6 +439,10 @@ object GlobalGpuTuningTool:
       }
     }
 
+  /** Loads and validates a cached range auto-tune result. Returns None if the cache file
+    * is missing, version-mismatched, has a different native library identity, uses different
+    * tuning parameters, or was produced for a different CUDA device topology.
+    */
   private def loadRangeCacheSummary(file: File): Option[String] =
     if !file.isFile then None
     else
@@ -560,6 +579,10 @@ object GlobalGpuTuningTool:
         val lib = GpuRuntimeSupport.resolveNonEmpty(PostflopGpuLibProperty, PostflopGpuLibEnv).getOrElse(DefaultPostflopGpuLibrary)
         s"lib=$lib"
 
+  /** Builds a cache signature for research targets that includes OS, arch, Java version,
+    * CUDA device topology, native library identity, and the source file's last-modified
+    * timestamp. Any change to the tuner source invalidates the cached result.
+    */
   private def researchSignature(name: String, args: Array[String]): String =
     val os = System.getProperty("os.name", "unknown").trim.toLowerCase
     val arch = System.getProperty("os.arch", "unknown").trim.toLowerCase
@@ -662,6 +685,11 @@ object GlobalGpuTuningTool:
       )
     )(thunk)
 
+  /** Checks that all required native DLL files exist. If any are missing, attempts an
+    * automatic CUDA build via the PowerShell build script. The build is attempted at most
+    * once per JVM session (result cached in an AtomicReference). Throws if artifacts
+    * remain missing after the build attempt.
+    */
   private def ensureRequiredNativeArtifacts(required: Vector[RequiredNativeArtifact]): NativeArtifacts =
     val artifacts = resolvedNativeArtifacts()
     val missing = required.filterNot(artifact => artifact.file.isFile)

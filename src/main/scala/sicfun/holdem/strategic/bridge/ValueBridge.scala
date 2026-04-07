@@ -2,21 +2,11 @@ package sicfun.holdem.strategic.bridge
 
 import sicfun.holdem.strategic.*
 
-// MIGRATION CHECKLIST (Wave 0 — spec hygiene fence)
-// --------------------------------------------------
-// Symbol aliases introduced in v0.31.1; old names remain canonical during Waves 1-6:
-//   delta_adapt    -> epsilon_adapt  (§9A')
-//   delta_retreat  -> delta_cp_retreat  (§9B)
-//   omega must always be qualified as chain-omega or grid-omega.
-//
-// Compatibility policy:
-//   - Keep toFourWorld / toDeltaVocabulary signatures unchanged through Wave 6.
-//   - Mark old bridge methods @deprecated once Wave 6 bridge migration lands.
-//   - Remove old bridge paths in Wave 7 only.
-//
-// Pending work tracked here:
-//   V^{1,0}, V^{0,1}  — interpolated today; proper POMDP values due Phase 3 / Wave 3
-//   controlFrac param  — heuristic split; to be replaced by formal decomposition in Wave 4
+// STATUS (post-Wave 7 — v0.31.1 formal closure complete)
+// -------------------------------------------------------
+// toFourWorld       — legacy path; interpolates V^{1,0}/V^{0,1} via controlFrac heuristic
+// toGridWorldValues — v0.31.1 path; reports V^{1,0}/V^{0,1} as Absent (honest)
+// toDeltaVocabulary — wraps FourWorldDecomposition; always Approximate
 
 /** Bridge: engine EV calculations -> FourWorld, DeltaVocabulary.
   *
@@ -66,4 +56,30 @@ object ValueBridge:
     BridgeResult.Approximate(
       FourWorldDecomposition.buildDeltaVocabulary(fourWorld, perRivalDeltas, deltaSigAggregate, perRivalSubDecomps),
       "delta vocabulary built from approximate four-world values"
+    )
+
+  // ==== v0.31.1 keyed grid-world result (Wave 6) ====
+
+  /** Build keyed grid-world values from available engine data.
+    *
+    * v0.31.1 requires keyed `GridWorld -> Ev` mapping rather than positional
+    * V^{1,1} / V^{0,0} fields. Only V^{1,1} (from engine EV) and V^{0,0}
+    * (from static equity) are directly available. V^{1,0} and V^{0,1} are
+    * absent unless a POMDP solver provides them.
+    *
+    * Returns: map from each GridWorld to either an Approximate or Absent Ev.
+    */
+  def toGridWorldValues(
+      engineEv: Double,
+      staticEquity: Double
+  ): Map[GridWorld, BridgeResult[Ev]] =
+    Map(
+      GridWorld(LearningChannel.Attrib, PolicyScope.ClosedLoop) ->
+        BridgeResult.Approximate(Ev(engineEv), "engine EV (best available for V^{1,1})"),
+      GridWorld(LearningChannel.Blind, PolicyScope.OpenLoop) ->
+        BridgeResult.Approximate(Ev(staticEquity), "static equity approximation for V^{0,0}"),
+      GridWorld(LearningChannel.Attrib, PolicyScope.OpenLoop) ->
+        BridgeResult.Absent("V^{1,0} requires POMDP solver (Phase 3); not interpolated"),
+      GridWorld(LearningChannel.Blind, PolicyScope.ClosedLoop) ->
+        BridgeResult.Absent("V^{0,1} requires POMDP solver (Phase 3); not interpolated")
     )

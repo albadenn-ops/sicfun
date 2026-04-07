@@ -9,6 +9,24 @@ import sicfun.holdem.equity.HoldemEquity
 
 import java.nio.file.Paths
 
+/** Tests for [[HoldemBayesProvider]] -- the Bayesian posterior update dispatcher.
+  *
+  * Coverage includes:
+  *  - '''Forced native-CPU fallback''': when the native CPU library path points to a
+  *    non-existent file, the provider falls back to the Scala backend and still
+  *    produces a valid normalised posterior.
+  *  - '''Explicit Scala provider''': confirms that requesting `provider=scala` keeps
+  *    the Scala backend regardless of native library availability.
+  *  - '''Shadow config parsing''': verifies that shadow validation properties
+  *    (`posteriorMaxAbsDiff`, `logEvidenceMaxAbsDiff`, `failClosed`) are correctly
+  *    parsed from system properties.
+  *  - '''Posterior drift computation''': tests that `computePosteriorDrift` correctly
+  *    computes the max absolute difference between two posteriors and the absolute
+  *    difference in log-evidence.
+  *
+  * Each test uses `TestSystemPropertyScope` to inject property overrides and resets
+  * the native load cache and auto-provider selection before/after execution.
+  */
 class HoldemBayesProviderTest extends FunSuite:
   private val CpuProviderProperty = "sicfun.bayes.provider"
   private val CpuPathProperty = "sicfun.bayes.native.cpu.path"

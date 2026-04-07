@@ -14,12 +14,51 @@ import java.nio.file.{Files, Path, Paths}
 import java.util.Locale
 import scala.util.Random
 
-/** ACPC action-string parser/encoder with heads-up reverse-blinds state reconstruction. */
+/** ACPC action-string parser/encoder with heads-up reverse-blinds state reconstruction.
+  *
+  * This codec translates between the ACPC wire protocol's compact betting string format
+  * (`f`/`c`/`rNNN` with `/` street delimiters) and SICFUN's internal [[PokerAction]] / [[GameState]]
+  * types.  It maintains a full state machine that reconstructs chip contributions, pot sizes,
+  * bet histories, and street progression from a raw betting string.
+  *
+  * '''Key responsibilities:'''
+  *  - Parse `MATCHSTATE:pos:hand:betting:cards` lines into structured [[MatchState]] objects.
+  *  - Reconstruct the full [[ParsedActionState]] including per-player chip contributions,
+  *    action step history, and the next-to-act decision state.
+  *  - Encode [[PokerAction]] values back into ACPC wire format via [[wireActionFor]].
+  *  - Compute terminal hand values at showdown or fold via [[handValue]], including side-pot
+  *    resolution for all-in scenarios with unequal stacks.
+  *
+  * '''Wire protocol conventions (ACPC v2.0.0, heads-up reverse blinds):'''
+  *  - Position 0 = big blind, position 1 = button/small blind.
+  *  - Preflop: button (pos 1) acts first; postflop: big blind (pos 0) acts first.
+  *  - Blinds: 50/100 chips with 20,000-chip (200 BB) stacks.
+  *  - `rNNN` means "raise to NNN total chips committed this hand" (not an increment).
+  *  - An `rNNN` that only covers the call amount is an all-in call, not a raise.
+  *
+  * @see [[AcpcMatchRunner]] for the client-side runner that uses this codec.
+  * @see [[AcpcHeadsUpDealer]] for the server-side dealer that produces these wire strings.
+  */
 private[holdem] object AcpcActionCodec:
   val SmallBlindChips = 50
   val BigBlindChips = 100
   val StackSizeChips = 20000
 
+  /** A single parsed action from the betting string, capturing both the action taken and
+    * a snapshot of the game state immediately before the action was applied.
+    *
+    * Used to reconstruct villain observations for Bayesian range inference: each villain
+    * action step becomes a [[VillainObservation]] with the pre-action [[GameState]].
+    *
+    * @param actualActor                    Player index (0 or 1) who acted.
+    * @param relativeActor                  0 = hero, 1 = villain (relative to the observing hero).
+    * @param action                         The [[PokerAction]] taken (Fold, Check, Call, Raise).
+    * @param stateBefore                    Game state snapshot just before this action.
+    * @param streetContributionBeforeChips  Per-player street contributions in chips before the action.
+    * @param totalContributionBeforeChips   Per-player total contributions in chips before the action.
+    * @param streetLastBetToBeforeChips     Current bet level on this street before the action.
+    * @param lastBetSizeBeforeChips         Most recent raise increment before the action (for min-raise rules).
+    */
   final case class ActionStep(
       actualActor: Int,
       relativeActor: Int,
@@ -31,6 +70,13 @@ private[holdem] object AcpcActionCodec:
       lastBetSizeBeforeChips: Int
   )
 
+  /** Fully reconstructed game state after replaying an ACPC betting string.
+    *
+    * Contains everything needed to make a hero decision or value a terminal state:
+    * chip contributions, pot size, bet history, action step trace, and whether the
+    * hand has ended.  Also provides convenience methods to derive a [[GameState]]
+    * for the next decision point.
+    */
   final case class ParsedActionState(
       betting: String,
       heroActual: Int,
@@ -67,6 +113,18 @@ private[holdem] object AcpcActionCodec:
           )
         )
 
+  /** Parsed ACPC `MATCHSTATE:pos:hand:betting:cards` line with all derived fields.
+    *
+    * @param raw          The original wire string (preserved for echo-back responses).
+    * @param position     Hero's positional seat (0=BB, 1=BTN).
+    * @param handNumber   1-based hand index in the match.
+    * @param betting      Raw ACPC betting string (e.g., "cr300c/cc/cr600c/cr1200f").
+    * @param heroActual   Hero's actual player index (same as position for ACPC heads-up).
+    * @param heroHole     Hero's hole cards (always visible to hero).
+    * @param villainHole  Villain's hole cards (only visible at showdown).
+    * @param board        Community cards visible at the current street.
+    * @param parsed       Full reconstructed state from the betting string.
+    */
   final case class MatchState(
       raw: String,
       position: Int,
@@ -81,6 +139,15 @@ private[holdem] object AcpcActionCodec:
     def heroPosition: Position = positionForActual(heroActual)
     def villainPosition: Position = positionForActual(heroActual ^ 1)
 
+  /** Parse a raw ACPC `MATCHSTATE:pos:hand:betting:cards` line into a structured [[MatchState]].
+    *
+    * Splits the line on `:`, validates the `MATCHSTATE` prefix and position,
+    * parses hole/board cards, and replays the betting string through [[parseBetting]]
+    * to reconstruct the full game state.
+    *
+    * @param raw  The complete ACPC state line received from the dealer.
+    * @return     `Right(MatchState)` on success, `Left(errorMessage)` on parse failure.
+    */
   def parseMatchState(raw: String): Either[String, MatchState] =
     try
       val parts = raw.split(":", 5).toVector
@@ -117,6 +184,22 @@ private[holdem] object AcpcActionCodec:
     catch
       case error: IllegalArgumentException => Left(error.getMessage)
 
+  /** Replay an ACPC betting string character by character, reconstructing the full game state.
+    *
+    * This is the core state machine of the codec.  It iterates through the betting string,
+    * processing each action token (`f`, `c`, `rNNN`) and `/` street delimiters, maintaining:
+    *  - Per-player chip contributions (street-level and cumulative).
+    *  - Current bet level, last raise increment, and min-raise enforcement.
+    *  - Street progression with proper board card reveals.
+    *  - All-in detection: when a call or raise commits a player's full stack, the hand
+    *    fast-forwards to the river for showdown.
+    *  - Action step trace for villain observation reconstruction.
+    *
+    * @param betting     The ACPC betting string (e.g., "cr300c/cc/cr600f").
+    * @param heroActual  Hero's player index (0 or 1), used to assign relative actor IDs.
+    * @param fullBoard   The complete 5-card board (used for all-in fast-forward to River).
+    * @return            `Right(ParsedActionState)` on success, `Left(errorMessage)` on failure.
+    */
   def parseBetting(
       betting: String,
       heroActual: Int,
@@ -125,6 +208,7 @@ private[holdem] object AcpcActionCodec:
     try
       require(heroActual == 0 || heroActual == 1, s"heroActual must be 0 or 1, got $heroActual")
 
+      // Preflop: button (pos 1) acts first in heads-up.
       var streetIdx = 0
       var nextActor = 1
       var streetLastBetTo = BigBlindChips
@@ -382,6 +466,16 @@ private[holdem] object AcpcActionCodec:
     catch
       case error: IllegalArgumentException => Left(error.getMessage)
 
+  /** Encode a [[PokerAction]] into an ACPC wire action token.
+    *
+    * Fold and Check/Call map to `f` and `c` respectively.  For Raise, the increment
+    * (in BB) is converted to chips and added to the player's current total contribution
+    * plus the call amount, producing the `rNNN` total-bet-to format.
+    *
+    * @param parsed  Current parsed state (needed to compute the raise target).
+    * @param action  The action to encode.
+    * @return        ACPC wire token string (e.g., "f", "c", "r500").
+    */
   def wireActionFor(parsed: ParsedActionState, action: PokerAction): String =
     action match
       case PokerAction.Fold => "f"
@@ -394,6 +488,15 @@ private[holdem] object AcpcActionCodec:
         val target = parsed.totalContributionByActualChips(actor) + parsed.toCallChips + incrementChips
         s"r$target"
 
+  /** Compute the hero's signed chip result for a terminal hand state.
+    *
+    * If the last action was a fold, the non-folding player wins the opponent's contribution.
+    * Otherwise, both hands are evaluated via `HandEvaluator.evaluate7Cached` and the
+    * showdown value is computed with side-pot resolution for unequal all-in stacks.
+    *
+    * @param state  A terminal [[MatchState]] (handOver must be true).
+    * @return       `Right(signedChips)` where positive = hero won, negative = hero lost.
+    */
   def handValue(state: MatchState): Either[String, Double] =
     try
       require(state.parsed.handOver, "cannot value non-terminal ACPC match state")
@@ -511,6 +614,25 @@ private[holdem] object AcpcActionCodec:
   private def relativeActorId(actualActor: Int, heroActual: Int): Int =
     if actualActor == heroActual then 0 else 1
 
+  /** Compute the signed chip result for a player at showdown, with side-pot resolution.
+    *
+    * This iterative algorithm handles multiway all-in scenarios with unequal stacks.
+    * It processes side pots from smallest to largest:
+    *
+    * 1. Find the minimum remaining contribution (the "pot layer" size).
+    * 2. Find the best hand rank among participants in this layer.
+    * 3. If our player has the winning rank, they gain their share of the losers' chips.
+    *    Otherwise, they lose their contribution to this layer.
+    * 4. Remove players whose contribution is fully consumed, then repeat.
+    *
+    * The loop terminates when our player's contribution is fully consumed (they exit
+    * the pot structure) or all layers are processed.
+    *
+    * @param playerSpent  Total chips committed by each player.
+    * @param playerRank   Hand evaluation rank for each player (higher is better).
+    * @param playerIdx    Which player to compute the result for.
+    * @return             Signed chip result (positive = won, negative = lost).
+    */
   private def showdownValue(
       playerSpent: Vector[Int],
       playerRank: Vector[Int],
@@ -519,6 +641,7 @@ private[holdem] object AcpcActionCodec:
     require(playerSpent.length == playerRank.length, "spent/rank vector size mismatch")
     require(playerIdx >= 0 && playerIdx < playerSpent.length, s"invalid player index $playerIdx")
 
+    // Build (spent, rank) pairs, filtering out players who contributed nothing.
     var spent = playerSpent
       .zip(playerRank)
       .filter(_._1 > 0)
@@ -527,29 +650,75 @@ private[holdem] object AcpcActionCodec:
     require(idx >= 0, "hero is not participating in the terminal pot")
     var value = 0.0
 
+    // Process side pots iteratively from smallest contribution layer upward.
     while true do
-      val size = spent.map(_._1).min
-      val winRank = spent.map(_._2).max
+      val size = spent.map(_._1).min        // Smallest remaining contribution = pot layer size.
+      val winRank = spent.map(_._2).max      // Best hand among participants in this layer.
       val numWinners = spent.count(_._2 == winRank)
 
       if spent(idx)._2 == winRank then
+        // Hero wins: gain proportional share of losers' contributions to this layer.
         value += size.toDouble * (spent.length - numWinners).toDouble / numWinners.toDouble
       else
+        // Hero loses: forfeit their contribution to this layer.
         value -= size.toDouble
 
+      // Subtract this layer's size from all participants and remove exhausted players.
       val oldHero = spent(idx)
       val reduced = spent.map { case (amount, rank) => (amount - size, rank) }.filter(_._1 > 0)
-      if oldHero._1 - size <= 0 then return value
+      if oldHero._1 - size <= 0 then return value  // Hero exhausted — done.
       spent = reduced
       idx = spent.indexWhere(_._2 == oldHero._2)
       require(idx >= 0, "hero disappeared from reduced side-pot state")
 
     value
 
-/** Match runner that connects SICFUN hero to an ACPC dealer socket. */
+/** Client-side match runner that connects SICFUN's hero engine to an external ACPC dealer socket.
+  *
+  * Connects via TCP to a running ACPC dealer, receives MATCHSTATE lines, feeds villain
+  * observations into the [[RealTimeAdaptiveEngine]] for Bayesian range inference, invokes
+  * [[HeroDecisionPipeline]] to select hero actions, and sends wire-format responses back
+  * to the dealer.
+  *
+  * '''Workflow per hand:'''
+  *  1. Read MATCHSTATE lines from the dealer (multiple per hand as actions occur).
+  *  2. For each new line, replay incremental action steps to track villain observations.
+  *  3. When it's hero's turn, build the decision context and invoke the hero pipeline.
+  *  4. Encode the chosen action via [[AcpcActionCodec.wireActionFor]] and send it back.
+  *  5. On terminal state, compute the hand value and log results.
+  *
+  * '''Output artifacts:'''
+  *  - `hands.tsv` — per-hand log with hero position, cards, betting, and net chips.
+  *  - `decisions.tsv` — per-decision log with street, pot, candidates, and chosen action.
+  *  - `summary.txt` — aggregate statistics (uses [[MatchRunnerSupport]]).
+  *
+  * '''Hero modes:'''
+  *  - `Adaptive` — uses Bayesian range inference + action model for exploitative play.
+  *  - `Gto` — uses CFR equilibrium solver for game-theoretically optimal play.
+  *
+  * @see [[AcpcActionCodec]] for the wire protocol codec used by this runner.
+  * @see [[AcpcHeadsUpDealer]] for the complementary server-side dealer.
+  */
 object AcpcMatchRunner:
   private val ProtocolVersion = "VERSION:2.0.0"
 
+  /** CLI configuration for connecting to an ACPC dealer.
+    *
+    * @param server              Dealer hostname or IP address.
+    * @param port                TCP port the dealer is listening on for this seat.
+    * @param reportEvery         Print progress every N completed hands (0 disables).
+    * @param outDir              Directory for output artifacts.
+    * @param modelArtifactDir    Optional path to a saved action model artifact; bootstraps uniform if absent.
+    * @param heroMode            Adaptive (exploitative) or Gto (equilibrium) decision mode.
+    * @param bunchingTrials      Monte Carlo trials for posterior bunching effect estimation.
+    * @param equityTrials        Monte Carlo trials for equity calculations.
+    * @param cfrIterations       CFR solver iterations (used in Gto mode).
+    * @param cfrVillainHands     Max villain hands retained for CFR abstraction.
+    * @param cfrEquityTrials     Equity trials used inside CFR terminal evaluation.
+    * @param seed                RNG seed for reproducible decisions.
+    * @param timeoutMillis       Socket read timeout per action.
+    * @param connectTimeoutMillis Socket connect timeout.
+    */
   private final case class Config(
       server: String,
       port: Int,
@@ -579,6 +748,13 @@ object AcpcMatchRunner:
       villainObservationCount: Int
   )
 
+  /** Mutable accumulator tracking state for a hand in progress.
+    *
+    * A new LiveHand is created each time a MATCHSTATE arrives with a new hand number.
+    * It tracks how many action steps have been processed (to avoid re-processing on
+    * subsequent MATCHSTATE updates), villain observations for range inference, and
+    * whether a hero raise response is pending (for villain-response-to-raise tracking).
+    */
   private final class LiveHand(
       val handNumber: Int,
       val heroPosition: Position,
@@ -586,9 +762,13 @@ object AcpcMatchRunner:
       val heroHole: HoleCards
   ):
     var villainHole: Option[HoleCards] = None
+    /** Number of action steps already processed from the betting string (avoids re-processing). */
     var processedSteps = 0
+    /** Number of hero decisions made this hand (for decision log indexing). */
     var decisionCount = 0
+    /** True when hero's last action was a raise and we haven't yet seen villain's response. */
     var pendingHeroRaise = false
+    /** Accumulated villain actions with their pre-action game states (for Bayesian inference). */
     var villainObservations = Vector.empty[VillainObservation]
     var completed = false
 
@@ -678,6 +858,12 @@ object AcpcMatchRunner:
         if writer != null then closeQuietly(writer)
         if socket != null then closeQuietly(socket)
 
+    /** Main event loop: read MATCHSTATE lines from the dealer until the connection closes.
+      *
+      * For each line: parse it, create/continue a LiveHand, process incremental villain
+      * observations, and either finalize the hand (terminal state) or make a hero decision
+      * (hero's turn to act) and send the response back to the dealer.
+      */
     private def loop(reader: BufferedReader, writer: BufferedWriter): Unit =
       var liveHandOpt = Option.empty[LiveHand]
       var line = reader.readLine()
@@ -742,6 +928,15 @@ object AcpcMatchRunner:
 
         line = reader.readLine()
 
+    /** Process new action steps that appeared since the last MATCHSTATE update.
+      *
+      * For villain actions: records them as [[VillainObservation]]s for range inference,
+      * and notifies the engine of villain's response to a prior hero raise (for the
+      * villain-response model).
+      *
+      * For hero actions: tracks whether the hero raised (setting `pendingHeroRaise`),
+      * so the next villain action can be fed to [[engine.observeVillainResponseToRaise]].
+      */
     private def processSteps(matchState: AcpcActionCodec.MatchState, liveHand: LiveHand): Unit =
       val newSteps = matchState.parsed.steps.drop(liveHand.processedSteps)
       liveHand.processedSteps = matchState.parsed.steps.length
@@ -760,6 +955,12 @@ object AcpcMatchRunner:
             case _ => ()
       }
 
+    /** Invoke the hero decision pipeline (Adaptive or Gto) to select an action.
+      *
+      * Delegates to [[HeroDecisionPipeline.decideHero]] with the full decision context
+      * including hero's cards, the current game state, villain observations for range
+      * inference, legal action candidates, and engine/model configuration.
+      */
     private def decideHero(
         hero: HoleCards,
         state: GameState,
@@ -787,6 +988,9 @@ object AcpcMatchRunner:
         )
       )
 
+    /** Build the legal action candidate list from the current parsed state.
+      * Combines fold/check/call with legal raise sizes computed from stack and pot geometry.
+      */
     private def heroCandidates(parsed: AcpcActionCodec.ParsedActionState): Vector[PokerAction] =
       val raises = legalRaiseCandidates(parsed)
       HeroDecisionPipeline.heroCandidates(toCallChips = parsed.toCallChips, raises = raises)
@@ -860,6 +1064,13 @@ object AcpcMatchRunner:
     private def decisionsWriter: BufferedWriter =
       decisionsWriterOpt.getOrElse(throw new IllegalStateException("decisions writer not initialized"))
 
+  /** Load or bootstrap the action model artifact.
+    *
+    * If a model directory is provided, loads the trained artifact from disk.
+    * Otherwise, creates a uniform (untrained) bootstrap model that assigns equal
+    * probability to all actions — useful for baseline testing or when no trained
+    * model is available.
+    */
   private def loadArtifact(config: Config): (TrainedPokerActionModel, String) =
     config.modelArtifactDir match
       case Some(dir) =>

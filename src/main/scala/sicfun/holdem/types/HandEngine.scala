@@ -1,5 +1,30 @@
 package sicfun.holdem.types
 
+/**
+  * Event-sourced hand state management for Texas Hold'em.
+  *
+  * This file implements the core event-sourcing infrastructure for tracking in-progress
+  * poker hands. It contains two main types:
+  *
+  *   - [[HandState]]: An immutable snapshot of all events applied to a hand so far,
+  *     with O(1) idempotency checking via an `appliedSequences` set.
+  *
+  *   - [[HandEngine]]: A stateless object that provides pure functions for creating,
+  *     updating, and querying hand states. All mutations return new `HandState` instances.
+  *
+  * The design handles real-world event delivery challenges:
+  *   - '''Out-of-order delivery''': Events may arrive in any sequence order. The engine
+  *     inserts them into the correct sorted position so the event vector is always
+  *     ordered by `sequenceInHand`.
+  *   - '''Duplicate delivery''': Exact re-delivery of an event is silently absorbed
+  *     (idempotent no-op). Conflicting payloads for the same sequence number are
+  *     rejected with an error, catching data corruption early.
+  *   - '''Player-level views''': [[HandEngine.toGameState]] derives a [[GameState]]
+  *     from a specific player's most recent event, enabling per-player decision analysis.
+  *
+  * This module is used by the live hand simulator, playing hall, and snapshot I/O layer.
+  */
+
 /** Immutable snapshot of an in-progress hand's event log.
   *
   * Events are maintained in sorted order by `sequenceInHand`, regardless of the

@@ -1,3 +1,38 @@
+/*
+ * CfrBatchCudaKernel.cuh -- CUDA kernel for batched CFR (Counterfactual Regret
+ * Minimization) game-tree solving on the GPU.
+ *
+ * This header implements a batched CFR solver where multiple game trees with
+ * shared topology but different terminal utilities and chance weights are solved
+ * in parallel — one CUDA thread per tree. Each thread runs the full iterative
+ * CFR algorithm (regret matching, tree traversal, regret/strategy accumulation)
+ * independently using an iterative DFS with an explicit stack (no recursion on GPU).
+ *
+ * Design decisions:
+ *   - One thread per tree (not one thread per node) because the game trees are
+ *     small (HoldemDecisionGame trees have max depth 4) but the batch size can
+ *     be large (hundreds of different card configurations).
+ *   - Iterative DFS with explicit stack frames replaces the recursive approach
+ *     used in CfrNativeSolverCore.hpp, since CUDA does not support deep recursion.
+ *   - Float32 arithmetic (not double) for GPU throughput — Maxwell sm_50 has
+ *     1/32 double throughput vs float.
+ *   - __ldg() intrinsic used for read-only topology data to leverage the texture
+ *     cache / read-only data cache on Maxwell+.
+ *   - 64 threads per block (not 128/256) because each thread uses significant
+ *     register space for the DFS stack frames and strategy/action_values arrays.
+ *
+ * Node type encoding:
+ *   0 = terminal (leaf), 1 = chance, 2 = player 0, 3 = player 1.
+ *
+ * Memory layout for per-tree arrays:
+ *   all_terminal_utilities[tree_id * node_count + node_id]
+ *   all_chance_weights[tree_id * edge_count + edge_idx]
+ *   all_cumulative_regret[tree_id * strategy_size + infoset_offset + action_idx]
+ *
+ * The host-side launch_batch_solve() function handles all cudaMalloc/cudaMemcpy
+ * and provides a clean C++ interface for the JNI binding.
+ */
+
 #pragma once
 
 #include <cstdint>
@@ -5,10 +40,19 @@
 
 namespace cfrbatch {
 
+/* Maximum number of actions per infoset that can be stored inline in stack frames.
+ * Trees with more actions per decision point would require heap allocation (not
+ * supported on GPU), so this must be >= max actions in any HoldemDecisionGame tree. */
 constexpr int kMaxInlineActions = 8;
 
-// ---- device helpers ----
+/* ---- device helpers ---- */
 
+/*
+ * Regret matching in float32 on the GPU. Converts cumulative regret into a
+ * probability distribution: positive regrets are normalized to probabilities,
+ * zero/negative regrets get uniform probability. Uses branchless arithmetic
+ * to avoid warp divergence.
+ */
 __device__ __forceinline__ void regret_matching_f(
     const float* cumulative_regret,
     int start, uint8_t count,
@@ -28,17 +72,48 @@ __device__ __forceinline__ void regret_matching_f(
   }
 }
 
+/*
+ * Computes the strategy averaging weight for a given CFR iteration.
+ * Returns 0 during the delay period (no averaging), 1 for uniform averaging,
+ * or (iteration - delay) for linear averaging. Branchless implementation.
+ */
 __device__ inline int averaging_weight(
     int iteration, int averaging_delay, bool linear_averaging)
 {
   return (iteration > averaging_delay) * (linear_averaging ? (iteration - averaging_delay) : 1);
 }
 
-// ---- batch kernel ----
-
-// One thread per tree. Trees share topology, differ in terminal utilities and chance weights.
+/* ---- batch kernel ----
+ *
+ * Main GPU kernel: one thread per game tree in the batch. All trees share the
+ * same topology (node_types, node_starts, node_counts, edge_child_ids, etc.)
+ * but each has its own terminal utilities, chance weights, cumulative regret,
+ * and cumulative strategy arrays. Each thread independently runs 'iterations'
+ * passes of the CFR algorithm using iterative DFS, then extracts the average
+ * strategy from the cumulative strategy sums.
+ *
+ * Parameters — Shared topology (constant across the batch, accessed via __ldg):
+ *   node_types           — per-node type: 0=terminal, 1=chance, 2=player0, 3=player1
+ *   node_starts          — per-node index into edge_child_ids where children begin
+ *   node_counts          — per-node number of children (actions)
+ *   node_infosets        — per-node infoset ID (only meaningful for player nodes)
+ *   edge_child_ids       — flat array of child node IDs for all edges
+ *   infoset_action_counts — per-infoset number of actions
+ *   infoset_offsets      — per-infoset offset into the flat strategy arrays
+ *
+ * Parameters — Per-tree data (indexed by tree_id * dimension + element):
+ *   all_terminal_utilities — terminal payoffs for player 0 (player 1 = negated)
+ *   all_chance_weights     — edge weights for chance nodes
+ *
+ * Parameters — Working memory (pre-zeroed by host):
+ *   all_cumulative_regret   — running sum of counterfactual regrets per action
+ *   all_cumulative_strategy — running sum of reach-weighted strategies per action
+ *
+ * Parameters — Output:
+ *   all_out_strategies — final average strategy per infoset per tree
+ *   all_out_ev         — root expected value per tree (from the last iteration)
+ */
 __global__ void cfr_batch_kernel(
-    // Shared topology (read-only, same for all trees)
     const int* __restrict__ node_types,
     const int* __restrict__ node_starts,
     const int* __restrict__ node_counts,
@@ -46,17 +121,13 @@ __global__ void cfr_batch_kernel(
     const int* __restrict__ edge_child_ids,
     const int* __restrict__ infoset_action_counts,
     const int* __restrict__ infoset_offsets,
-    // Per-tree varying data (read-only, indexed by [tree_id * size + element])
     const float* __restrict__ all_terminal_utilities,
     const float* __restrict__ all_chance_weights,
-    // Dimensions
     int root_node_id, int node_count, int edge_count,
     int strategy_size, int iterations, int averaging_delay,
     bool cfr_plus, bool linear_averaging,
-    // Per-tree working memory (pre-zeroed, indexed by [tree_id * strategy_size + offset])
     float* all_cumulative_regret,
     float* all_cumulative_strategy,
-    // Output (indexed by [tree_id * strategy_size + offset] and [tree_id])
     float* all_out_strategies,
     float* all_out_ev,
     int infoset_count,
@@ -71,14 +142,29 @@ __global__ void cfr_batch_kernel(
   float* cum_regret = all_cumulative_regret + tree_id * strategy_size;
   float* cum_strategy = all_cumulative_strategy + tree_id * strategy_size;
 
-  // Iterative DFS stack (max depth 4 for HoldemDecisionGame trees, +1 headroom)
+  /*
+   * Iterative DFS stack. HoldemDecisionGame trees have max depth 4, so
+   * kMaxDepth = 5 provides headroom. Each Frame holds the DFS state for one
+   * node being explored:
+   *   node_id      — which node this frame represents
+   *   reach_p0/p1  — factored reach probabilities for player 0 and player 1
+   *                   (used to weight regret and strategy contributions)
+   *   action_idx   — index of the next child to push (0..ncount-1); when
+   *                   action_idx == ncount, all children are done and we pop
+   *   node_value   — running weighted sum of child values (EV at this node)
+   *   strategy[]   — current regret-matched strategy for this infoset
+   *   action_values[] — child EV per action, filled as children return
+   */
   constexpr int kMaxDepth = 5;
   struct Frame {
     int node_id;
+    int ntype;    /* cached node type — avoids re-reading from global memory */
+    int nstart;   /* cached edge start index */
+    int ncount;   /* cached child count */
     float reach_p0;
     float reach_p1;
-    int action_idx;  // next child to process
-    float node_value; // accumulated so far
+    int action_idx;
+    float node_value;
     float strategy[kMaxInlineActions];
     float action_values[kMaxInlineActions];
   };
@@ -89,41 +175,43 @@ __global__ void cfr_batch_kernel(
   for (int iter = 1; iter <= iterations; ++iter) {
     const int avg_weight = averaging_weight(iter, averaging_delay, linear_averaging);
 
-    // Push root
+    // Push root — cache node metadata to avoid redundant __ldg in the DFS loop.
     depth = 0;
     stack[0].node_id = root_node_id;
+    stack[0].ntype = __ldg(&node_types[root_node_id]);
+    stack[0].nstart = __ldg(&node_starts[root_node_id]);
+    stack[0].ncount = __ldg(&node_counts[root_node_id]);
     stack[0].reach_p0 = 1.0f;
     stack[0].reach_p1 = 1.0f;
     stack[0].action_idx = 0;
     stack[0].node_value = 0.0f;
 
-    int node_type = __ldg(&node_types[root_node_id]);
-    int count = __ldg(&node_counts[root_node_id]);
-
     // Pre-compute strategy for root if player node
-    if (node_type == 2 || node_type == 3) {
+    if (stack[0].ntype == 2 || stack[0].ntype == 3) {
       int infoset = __ldg(&node_infosets[root_node_id]);
       int is_start = __ldg(&infoset_offsets[infoset]);
-      regret_matching_f(cum_regret, is_start, static_cast<uint8_t>(count), stack[0].strategy);
+      regret_matching_f(cum_regret, is_start, static_cast<uint8_t>(stack[0].ncount), stack[0].strategy);
     }
 
     while (depth >= 0) {
       Frame& f = stack[depth];
-      int ntype = __ldg(&node_types[f.node_id]);
-      int nstart = __ldg(&node_starts[f.node_id]);
-      int ncount = __ldg(&node_counts[f.node_id]);
+      const int ntype = f.ntype;
+      const int nstart = f.nstart;
+      const int ncount = f.ncount;
 
       if (ntype == 0) {
-        // Terminal node
+        /* Terminal node: read the payoff (from player 0's perspective) and
+         * propagate it up to the parent frame's action_values. For chance
+         * parents, weight by the chance edge probability; for player parents,
+         * weight by the strategy probability for that action. */
         float value = __ldg(&terminal_utilities[f.node_id]);
         depth--;
         if (depth >= 0) {
           Frame& parent = stack[depth];
           int pidx = parent.action_idx - 1;
           parent.action_values[pidx] = value;
-          int ptype = __ldg(&node_types[parent.node_id]);
-          if (ptype == 1) { // chance
-            parent.node_value += chance_weights[__ldg(&node_starts[parent.node_id]) + pidx] * value;
+          if (parent.ntype == 1) { // chance
+            parent.node_value += chance_weights[parent.nstart + pidx] * value;
           } else {
             parent.node_value += parent.strategy[pidx] * value;
           }
@@ -135,7 +223,10 @@ __global__ void cfr_batch_kernel(
       }
 
       if (f.action_idx < ncount) {
-        // Push next child
+        /* Push the next unvisited child onto the DFS stack. Update the
+         * child's reach probabilities: chance nodes multiply both players'
+         * reach by the edge weight, player nodes multiply only the acting
+         * player's reach by the strategy probability for the chosen action. */
         int edge = nstart + f.action_idx;
         int child_id = __ldg(&edge_child_ids[edge]);
         f.action_idx++;
@@ -155,22 +246,30 @@ __global__ void cfr_batch_kernel(
         depth++;
         Frame& child = stack[depth];
         child.node_id = child_id;
+        child.ntype = __ldg(&node_types[child_id]);
+        child.nstart = __ldg(&node_starts[child_id]);
+        child.ncount = __ldg(&node_counts[child_id]);
         child.reach_p0 = child_reach_p0;
         child.reach_p1 = child_reach_p1;
         child.action_idx = 0;
         child.node_value = 0.0f;
 
-        int ctype = __ldg(&node_types[child_id]);
-        if (ctype == 2 || ctype == 3) {
+        if (child.ntype == 2 || child.ntype == 3) {
           int cinfoset = __ldg(&node_infosets[child_id]);
           int cis_start = __ldg(&infoset_offsets[cinfoset]);
-          int ccount = __ldg(&node_counts[child_id]);
-          regret_matching_f(cum_regret, cis_start, static_cast<uint8_t>(ccount), child.strategy);
+          regret_matching_f(cum_regret, cis_start, static_cast<uint8_t>(child.ncount), child.strategy);
         }
         continue;
       }
 
-      // All children processed. Update regrets/strategy, then pop.
+      /* All children have been processed for this node. For player nodes,
+       * update cumulative regrets and cumulative strategy:
+       *   - Regret for action a = opponent_reach * (action_value[a] - node_value).
+       *     For player 0, opponent_reach = reach_p1. For player 1, the sign is
+       *     flipped because utilities are stored from player 0's perspective.
+       *   - CFR+ variant: clamp regrets to non-negative after each update.
+       *   - Cumulative strategy += avg_weight * acting_player_reach * strategy[a].
+       * Then pop this frame and propagate node_value to the parent. */
       float node_value = f.node_value;
 
       if (ntype == 2 || ntype == 3) {
@@ -201,9 +300,8 @@ __global__ void cfr_batch_kernel(
         Frame& parent = stack[depth];
         int pidx = parent.action_idx - 1;
         parent.action_values[pidx] = node_value;
-        int ptype = __ldg(&node_types[parent.node_id]);
-        if (ptype == 1) {
-          parent.node_value += chance_weights[__ldg(&node_starts[parent.node_id]) + pidx] * node_value;
+        if (parent.ntype == 1) {
+          parent.node_value += chance_weights[parent.nstart + pidx] * node_value;
         } else {
           parent.node_value += parent.strategy[pidx] * node_value;
         }
@@ -212,7 +310,10 @@ __global__ void cfr_batch_kernel(
     // End of one CFR iteration
   }
 
-  // Extract average strategies from cumulative_strategy
+  /* After all CFR iterations, extract the average strategy from the cumulative
+   * strategy sums. For each infoset, normalize cum_strategy to sum to 1.
+   * If the total is zero (infoset was never reached), fall back to regret
+   * matching on the final cumulative regrets as a best-effort approximation. */
   float* out_strat = all_out_strategies + tree_id * strategy_size;
 
   for (int is = 0; is < infoset_count; ++is) {
@@ -230,24 +331,40 @@ __global__ void cfr_batch_kernel(
   }
 }
 
-// ---- host launcher ----
+/* ---- host launcher ----
+ *
+ * BatchSpec bundles all scalar parameters needed to configure the kernel launch:
+ * tree topology dimensions, iteration control, and batch size.
+ */
 
 struct BatchSpec {
-  int root_node_id;
-  int node_count;
-  int edge_count;
-  int infoset_count;
-  int strategy_size;
-  int iterations;
-  int averaging_delay;
-  bool cfr_plus;
-  bool linear_averaging;
-  int batch_size;
+  int root_node_id;      /* root of the shared game tree */
+  int node_count;        /* total nodes in the tree */
+  int edge_count;        /* total edges (sum of all node action counts) */
+  int infoset_count;     /* number of distinct information sets */
+  int strategy_size;     /* total strategy entries = sum of actions across infosets */
+  int iterations;        /* CFR iterations to run per tree */
+  int averaging_delay;   /* skip strategy accumulation for this many early iterations */
+  bool cfr_plus;         /* if true, clamp regrets to non-negative (CFR+) */
+  bool linear_averaging; /* if true, weight later iterations more heavily */
+  int batch_size;        /* number of trees in this batch */
 };
 
+/*
+ * Host-side launcher for the batched CFR kernel. Allocates device memory,
+ * copies topology and per-tree data to the GPU, launches cfr_batch_kernel,
+ * synchronizes, copies results back, and frees all device memory.
+ *
+ * Returns 0 on success, -1 on any CUDA error. All cudaMalloc/cudaMemcpy
+ * failures are caught by the CHECK_CUDA macro and trigger early return.
+ *
+ * Memory allocation strategy:
+ *   - Topology arrays: allocated once at [node_count] or [edge_count] size
+ *   - Per-tree arrays: allocated at [batch_size * dim] size
+ *   - Working arrays (cum_regret, cum_strategy): zeroed via cudaMemset
+ */
 inline int launch_batch_solve(
     const BatchSpec& spec,
-    // Host arrays: shared topology
     const int* h_node_types,
     const int* h_node_starts,
     const int* h_node_counts,

@@ -1,21 +1,15 @@
 package sicfun.holdem.strategic
 
-// MIGRATION CHECKLIST (Wave 0 — spec hygiene fence)
-// --------------------------------------------------
-// Symbol aliases introduced in v0.31.1; old names remain canonical during Waves 1-6:
+// STATUS (post-Wave 7 — v0.31.1 formal closure complete)
+// -------------------------------------------------------
+// v0.31.1 symbol aliases are canonical:
 //   delta_adapt    -> epsilon_adapt  (§9A')
 //   delta_retreat  -> delta_cp_retreat  (§9B)
 //   omega must always be qualified as chain-omega or grid-omega.
 //
-// Compatibility policy:
-//   - Keep all current constructors/accessors unchanged through Wave 6.
-//   - Mark old names @deprecated once Wave 4 (Defs 57/57A-C) replacements exist.
-//   - Remove old names in Wave 7 only.
-//
-// Pending renames tracked here (do NOT rename until Wave 4 lands):
-//   FourWorld       — no rename; but Def 44 will be superseded by Wave 1 WorldAlgebra types
-//   DeltaVocabulary — Def 50 reference stays valid; delta field names unchanged
-//   PerRivalDelta   — Defs 40-42; no rename planned
+// FourWorld coexists with GridWorld (keyed accessor via apply(gw: GridWorld)).
+// DeltaVocabulary — Def 50 reference valid; delta field names unchanged.
+// PerRivalDelta   — Defs 40-42; no rename planned.
 
 final case class FourWorld(
     v11: Ev,
@@ -26,6 +20,21 @@ final case class FourWorld(
   inline def deltaControl: Ev = v01 - v00
   inline def deltaSigStar: Ev = v10 - v00
   inline def deltaInteraction: Ev = v11 - v10 - v01 + v00
+
+  /** Keyed accessor: map GridWorld coordinates to the matching positional field.
+    *
+    * Grid mapping (Def 44):
+    *   (Attrib, ClosedLoop) -> V^{1,1}
+    *   (Attrib, OpenLoop)   -> V^{1,0}
+    *   (Blind,  ClosedLoop) -> V^{0,1}
+    *   (Blind,  OpenLoop)   -> V^{0,0}
+    */
+  def apply(gw: GridWorld): Ev = (gw.learning, gw.scope) match
+    case (LearningChannel.Attrib, PolicyScope.ClosedLoop) => v11
+    case (LearningChannel.Attrib, PolicyScope.OpenLoop)   => v10
+    case (LearningChannel.Blind, PolicyScope.ClosedLoop)  => v01
+    case (LearningChannel.Blind, PolicyScope.OpenLoop)    => v00
+    case _ => throw IllegalArgumentException(s"Unexpected GridWorld: $gw")
 
 final case class PerRivalDelta(
     deltaSig: Ev,
@@ -47,3 +56,9 @@ final case class DeltaVocabulary(
     deltaSigAggregate: Ev,
     perRivalSubDecompositions: Map[PlayerId, PerRivalSignalSubDecomposition] = Map.empty
 )
+
+/** Value delta along a chain edge (Def 29). */
+final case class ChainEdgeDelta(from: ChainWorld, to: ChainWorld, delta: Ev)
+
+/** Risk delta along a chain edge (Def 56). */
+final case class ChainRiskDelta(from: ChainWorld, to: ChainWorld, riskDelta: Ev)

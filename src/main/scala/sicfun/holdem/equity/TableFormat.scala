@@ -3,14 +3,20 @@ import sicfun.holdem.types.*
 
 import sicfun.core.DiscreteDistribution
 
-/** Table formats supported by the bunching engine.
+/**
+  * Table formats (sizes) supported by the bunching engine and range configuration.
   *
-  * Each format defines the preflop action order: the sequence in which
-  * positions act before the flop. This determines which positions could
-  * have folded before a given opener, which is the basis for bunching
-  * effect computation.
+  * Each format defines the preflop action order: the sequence in which positions act
+  * before the flop. This ordering is critical for two reasons:
+  *   1. '''Bunching analysis''': Determines which positions could have folded before a
+  *      given opener, forming the basis for dead-card conditioning.
+  *   2. '''Default ranges''': Each format ships with default RFI (Raise First In) ranges
+  *      that tighten from late position (Button) to early position (UTG).
   *
-  * NineMax uses the full 9-position ordering from [[Position]].
+  * The three formats cover the most common live and online poker configurations:
+  *   - '''HeadsUp''': 2 players (Button, BigBlind)
+  *   - '''SixMax''': 6 players (the standard online format)
+  *   - '''NineMax''': 9 players (the standard live format, full ring)
   */
 enum TableFormat(val preflopOrder: Vector[Position]):
   case HeadsUp extends TableFormat(Vector(Position.Button, Position.BigBlind))
@@ -35,6 +41,9 @@ enum TableFormat(val preflopOrder: Vector[Position]):
     preflopOrder.take(idx)
 
 object TableFormat:
+  /** Returns the appropriate table format for the given number of players.
+    * 2 players -> HeadsUp, 3-6 -> SixMax, 7+ -> NineMax.
+    */
   def forPlayerCount(playerCount: Int): TableFormat =
     require(playerCount >= 2, s"playerCount must be at least 2, got $playerCount")
     if playerCount <= 2 then TableFormat.HeadsUp
@@ -76,6 +85,7 @@ final case class TableRanges(
     1.0 - openProbability(pos, hand)
 
 object TableRanges:
+  /** Lazily parsed default ranges for each table format. Parsed once and cached. */
   private lazy val defaultHeadsUpRanges = parseDefaults(TableFormat.HeadsUp, defaultRangeStringsHeadsUp)
   private lazy val defaultSixMaxRanges = parseDefaults(TableFormat.SixMax, defaultRangeStrings6Max)
   private lazy val defaultNineMaxRanges = parseDefaults(TableFormat.NineMax, defaultRangeStrings9Max)
@@ -110,6 +120,9 @@ object TableRanges:
             Right((accRanges.updated(pos, result.distribution), accFreqs.updated(pos, freqs)))
     }.map { case (ranges, freqs) => TableRanges(format, ranges, freqs) }
 
+  /** Parses a map of position -> range-string into a TableRanges, treating all hands in each
+    * range as having open probability 1.0. Fails fast if any default range fails to parse.
+    */
   private def parseDefaults(
       format: TableFormat,
       strings: Map[Position, String]
@@ -127,7 +140,11 @@ object TableRanges:
     TableRanges(format, ranges.toMap, freqs.toMap)
 
   // -- Default RFI (Raise First In) range strings --
+  // These represent typical tight-aggressive opening ranges for each position.
+  // UTG is tightest (strongest hands only), Button is widest (exploiting position).
+  // BigBlind defends the widest because it has money already invested.
 
+  /** 9-max default ranges: tightest at UTG, widest at BB. */
   private val defaultRangeStrings9Max: Map[Position, String] = Map(
     Position.UTG       -> "22+, A2s+, KTs+, QTs+, JTs, T9s, ATo+, KJo+",
     Position.UTG1      -> "22+, A2s+, K9s+, Q9s+, JTs, T9s, 98s, ATo+, KJo+, QJo",

@@ -4,6 +4,14 @@ import munit.FunSuite
 import sicfun.core.Card
 import sicfun.holdem.types.*
 
+/** Tests for [[ArchetypeVillainResponder]].
+  *
+  * Validates:
+  *   - Style profile mapping: each archetype has correctly bounded looseness/aggression.
+  *   - Decision logic: check-to-act without raise permission always returns Check.
+  *   - Behavioral differentiation: Maniac raises significantly more than Nit over many
+  *     trials, confirming the aggression parameter influences bet frequency.
+  */
 class ArchetypeVillainResponderTest extends FunSuite:
 
   test("styleProfile: Nit is tight and passive"):

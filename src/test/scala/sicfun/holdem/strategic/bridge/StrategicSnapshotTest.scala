@@ -127,3 +127,63 @@ class StrategicSnapshotTest extends munit.FunSuite:
       hasDrawPotential = false
     )
     assertEquals(snap.opponentClassPosterior, None)
+
+  // ---- v0.31.1 optional diagnostics (Wave 6) ----
+
+  test("StrategicSnapshot: optional v0.31.1 fields default to None/empty"):
+    val gs = makeGS()
+    val snap = StrategicSnapshot.build(
+      gameState = gs,
+      heroAction = PokerAction.Call,
+      heroEquity = 0.50,
+      engineEv = 0.50,
+      staticEquity = 0.50,
+      hasDrawPotential = false
+    )
+    assertEquals(snap.gridWorldValues, None)
+    assertEquals(snap.chainRiskProfile, None)
+    assertEquals(snap.securityValue, None)
+    assertEquals(snap.safetyCertificateSummary, None)
+    assert(snap.bridgeFidelityNotes.isEmpty)
+
+  test("StrategicSnapshot: can carry grid world values without breaking old consumers"):
+    val gs = makeGS()
+    val base = StrategicSnapshot.build(
+      gameState = gs,
+      heroAction = PokerAction.Call,
+      heroEquity = 0.50,
+      engineEv = 0.60,
+      staticEquity = 0.50,
+      hasDrawPotential = false
+    )
+    val gridValues = ValueBridge.toGridWorldValues(0.60, 0.50)
+    val enriched = base.copy(gridWorldValues = Some(gridValues))
+
+    // Old fields unchanged
+    assertEqualsDouble(enriched.fourWorld.v11.value, 0.60, 1e-12)
+    assertEqualsDouble(enriched.baseline.value, 0.50, 1e-12)
+    assertEquals(enriched.street, Street.Flop)
+
+    // New field present
+    assert(enriched.gridWorldValues.isDefined)
+    assertEquals(enriched.gridWorldValues.get.size, 4)
+
+  test("StrategicSnapshot: can carry security value and safety certificate"):
+    val gs = makeGS()
+    val base = StrategicSnapshot.build(
+      gameState = gs,
+      heroAction = PokerAction.Call,
+      heroEquity = 0.50,
+      engineEv = 0.50,
+      staticEquity = 0.50,
+      hasDrawPotential = false
+    )
+    val enriched = base.copy(
+      securityValue = Some(Ev(3.5)),
+      safetyCertificateSummary = Some((0.05, true)),
+      bridgeFidelityNotes = Vector("B* computed with tolerance 1e-10")
+    )
+
+    assertEqualsDouble(enriched.securityValue.get.value, 3.5, 1e-12)
+    assertEquals(enriched.safetyCertificateSummary.get._2, true)
+    assertEquals(enriched.bridgeFidelityNotes.size, 1)

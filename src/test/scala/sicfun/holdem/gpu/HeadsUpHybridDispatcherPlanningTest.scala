@@ -4,6 +4,24 @@ import sicfun.holdem.*
 import munit.FunSuite
 import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 
+/** Tests for [[HeadsUpHybridDispatcher]] work-splitting, failover, and adaptive calibration.
+  *
+  * This suite exercises the dispatcher's planning logic without requiring real GPU hardware
+  * by using `FunctionalComputeDevice` -- mock devices with configurable compute functions.
+  *
+  * Coverage includes:
+  *  - '''Device selection''': verifying that small batches trim to the top-weighted devices
+  *    and that the `minSliceMatchups` threshold is respected.
+  *  - '''Proportional splitting''': testing that work is divided according to device weights,
+  *    with exact total preservation and graceful handling of zero/negative/NaN weights.
+  *  - '''Failover/rescue''': confirming that when a device fails (non-zero status or exception),
+  *    the dispatcher tries rescue candidates in priority order (CPU > OpenCL > CUDA).
+  *  - '''Sole-device failure''': verifying that a failed single-device batch returns Left.
+  *  - '''Calibrated weight filtering''': testing that low relative-weight devices are dropped
+  *    after calibration when `sicfun.hybrid.minRelativeWeight` is set.
+  *  - '''Payload checksums''': ensuring deterministic CRC32 computation over batch inputs.
+  *  - '''Adaptive weight concurrency''': stress-testing concurrent calibration updates.
+  */
 class HeadsUpHybridDispatcherPlanningTest extends FunSuite:
   override def beforeEach(context: BeforeEach): Unit =
     HeadsUpHybridDispatcher.setCalibratedWeights(Map.empty)

@@ -205,6 +205,59 @@ class DynamicsTest extends munit.FunSuite:
     assert(polFull > polHalf, s"full pot ($polFull) should be more polarizing than half pot ($polHalf)")
     assert(polMin > polHalf, s"min bet ($polMin) should be more polarizing than half pot ($polHalf)")
 
+  test("Def 25: PosteriorDivergencePolarization with real KL divergence"):
+    // Likelihood that shifts posterior toward Value for large sizings
+    val klLikelihood: TemperedLikelihoodFn = (signal, _, _) =>
+      val sizingFrac = signal.sizing.map(_.fractionOfPot.value).getOrElse(0.5)
+      if sizingFrac > 0.7 then
+        // Large sizing → strong signal toward Value
+        DiscreteDistribution(Map(
+          StrategicClass.Value -> 0.7, StrategicClass.Bluff -> 0.1,
+          StrategicClass.Marginal -> 0.1, StrategicClass.SemiBluff -> 0.1
+        ))
+      else
+        // Small sizing → stays near uniform (low divergence)
+        DiscreteDistribution(Map(
+          StrategicClass.Value -> 0.28, StrategicClass.Bluff -> 0.24,
+          StrategicClass.Marginal -> 0.24, StrategicClass.SemiBluff -> 0.24
+        ))
+
+    val pol = PosteriorDivergencePolarization(uniformPrior, Some(klLikelihood))
+    assertEquals(pol.fidelity, Fidelity.Exact)
+    val rivalState = TestRivalState(uniformPrior)
+    val smallSizing = Sizing(Chips(30.0), PotFraction(0.3))
+    val largeSizing = Sizing(Chips(100.0), PotFraction(1.0))
+
+    val polSmall = pol.polarization(smallSizing, dummyPublicState, rivalState)
+    val polLarge = pol.polarization(largeSizing, dummyPublicState, rivalState)
+
+    // Large sizing should have higher polarization (more KL divergence)
+    assert(polLarge > polSmall, s"large ($polLarge) should be more polarizing than small ($polSmall)")
+    // Both should be in [0, 1]
+    assert(polSmall >= 0.0 && polSmall <= 1.0)
+    assert(polLarge >= 0.0 && polLarge <= 1.0)
+
+  test("Def 25: KL divergence is zero for identical distributions"):
+    val kl = PosteriorDivergencePolarization.klDivergence(uniformPrior, uniformPrior)
+    assertEqualsDouble(kl, 0.0, 1e-12)
+
+  test("Def 25: KL divergence is positive for different distributions"):
+    val skewed = DiscreteDistribution(Map(
+      StrategicClass.Value -> 0.7, StrategicClass.Bluff -> 0.1,
+      StrategicClass.Marginal -> 0.1, StrategicClass.SemiBluff -> 0.1
+    ))
+    val kl = PosteriorDivergencePolarization.klDivergence(skewed, uniformPrior)
+    assert(kl > 0.0, s"KL divergence should be positive, got $kl")
+
+  test("Def 25: proxy fallback when no likelihood provided"):
+    val pol = PosteriorDivergencePolarization(uniformPrior, None)
+    assertEquals(pol.fidelity, Fidelity.Approximate)
+    // Should still compute via proxy without error
+    val rivalState = TestRivalState(uniformPrior)
+    val sizing = Sizing(Chips(50.0), PotFraction(0.5))
+    val result = pol.polarization(sizing, dummyPublicState, rivalState)
+    assert(result >= 0.0 && result <= 1.0)
+
   test("Def 25: polarization profile computes for all candidates"):
     val pol = UniformPolarization
     val rivalState = TestRivalState(uniformPrior)
@@ -297,6 +350,80 @@ class DynamicsTest extends munit.FunSuite:
       epsilonNE = 0.0
     )
     assertEqualsDouble(step.updatedExploitation(PlayerId("v1")).beta, 0.6, Tol) // retreated from 1.0
+
+  // ---- Chain-world aware dynamics ----
+
+  test("same signal under (Attrib,Off) and (Attrib,On) yields different results only via showdown"):
+    val v1State = TestRivalState(uniformPrior, 0, "v1")
+
+    val actionKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 1, "action")
+
+    val designKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 50, "design")
+
+    val sdKernel = new ShowdownKernel[TestRivalState]:
+      def apply(state: TestRivalState, showdown: ShowdownSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 100, state.label + "+sd")
+
+    val attribOff = ChainWorld(LearningChannel.Attrib, ShowdownMode.Off)
+    val attribOn = ChainWorld(LearningChannel.Attrib, ShowdownMode.On)
+
+    val offKernel = KernelConstructor.composeFullKernelForWorld(attribOff, actionKernel, designKernel, sdKernel)
+    val onKernel = KernelConstructor.composeFullKernelForWorld(attribOn, actionKernel, designKernel, sdKernel)
+
+    val worldProfile = WorldIndexedKernelProfile(Map(
+      (PlayerId("v1"), attribOff) -> offKernel,
+      (PlayerId("v1"), attribOn) -> onKernel
+    ))
+
+    val states = Map(PlayerId("v1") -> v1State)
+
+    val showdownSig = ShowdownSignal(Vector(RevealedHand(PlayerId("v1"), Vector.empty)))
+    val signalWithSd = TotalSignal(raiseSignal, Some(showdownSig))
+
+    val resultOff = Dynamics.fullRivalUpdate(states, signalWithSd, dummyPublicState, worldProfile, attribOff)
+    val resultOn = Dynamics.fullRivalUpdate(states, signalWithSd, dummyPublicState, worldProfile, attribOn)
+
+    // Off: action only (1), On: action + showdown (1 + 100 = 101)
+    assertEquals(resultOff(PlayerId("v1")).updateCount, 1)
+    assertEquals(resultOn(PlayerId("v1")).updateCount, 101)
+
+  test("counterfactualReferenceWorld with explicit ChainWorld(Ref, Off) produces expected result"):
+    val v1State = TestRivalState(uniformPrior, 0, "v1")
+
+    val actionKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 1, "ref-action")
+
+    val designKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 50, "design")
+
+    val sdKernel = new ShowdownKernel[TestRivalState]:
+      def apply(state: TestRivalState, showdown: ShowdownSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 100, state.label + "+sd")
+
+    val refOff = ChainWorld(LearningChannel.Ref, ShowdownMode.Off)
+    val refKernel = KernelConstructor.composeFullKernelForWorld(refOff, actionKernel, designKernel, sdKernel)
+
+    val worldProfile = WorldIndexedKernelProfile(Map(
+      (PlayerId("v1"), refOff) -> refKernel
+    ))
+
+    val states = Map(PlayerId("v1") -> v1State)
+    val showdownSig = ShowdownSignal(Vector(RevealedHand(PlayerId("v1"), Vector.empty)))
+    val signalWithSd = TotalSignal(raiseSignal, Some(showdownSig))
+
+    val cfResult = Dynamics.counterfactualReferenceWorld(
+      states, signalWithSd, dummyPublicState, worldProfile, refOff
+    )
+
+    // Ref + Off: action only, showdown gated off
+    assertEquals(cfResult(PlayerId("v1")).updateCount, 1)
+    assertEquals(cfResult(PlayerId("v1")).label, "ref-action")
 
   // ---- Backward compatibility (v0.30.2 §12.2) ----
 

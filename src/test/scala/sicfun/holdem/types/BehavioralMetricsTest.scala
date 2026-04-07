@@ -5,11 +5,36 @@ import sicfun.holdem.analysis.*
 import munit.FunSuite
 import sicfun.core.{Card, DiscreteDistribution}
 
+/**
+  * Tests for behavioral analytics components: [[EvAnalysis]] and [[PlayerSignature]].
+  *
+  * This test suite validates two key analysis modules from `sicfun.holdem.analysis`:
+  *
+  * '''EvAnalysis tests''' verify the expected-value variance computation over villain
+  * posteriors (Bayesian range distributions). Key properties checked:
+  *   - A single-hand posterior (point mass) yields zero variance.
+  *   - A diverse posterior with different outcomes yields positive variance.
+  *   - Standard error is always non-negative.
+  *
+  * '''PlayerSignature tests''' verify the behavioral fingerprinting system that reduces
+  * a player's observed action history into a fixed-length feature vector for clustering.
+  * Key properties checked:
+  *   - Pure fold/raise/call/check histories produce correct rate values (0.0 or 1.0).
+  *   - Self-distance is zero (identity property of the distance metric).
+  *   - Different profiles produce positive distance.
+  *   - Feature vector dimension matches `featureNames` (consistency check).
+  *   - `avgPotOddsWhenCalling` computes the correct arithmetic mean.
+  *   - Entropy of a uniform 4-action distribution is `log2(4) = 2.0` bits.
+  *   - Entropy of a single-action distribution is `0.0` bits.
+  *   - Regression test: boards containing As or Ks no longer cause duplicate-card crashes.
+  */
 class BehavioralMetricsTest extends FunSuite:
 
+  /** Parses a 2-character card token (e.g. "Ah") or fails the test. */
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
+  /** Creates canonical hole cards from two card tokens. */
   private def hole(a: String, b: String): HoleCards =
     HoleCards.from(Vector(card(a), card(b)))
 

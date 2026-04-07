@@ -951,7 +951,15 @@ private:
       }
     }
 
-    /* Phase 7: Advance public state */
+    /* Phase 7: Advance public state.
+     *
+     * Per-round abstraction: each simulate_v2 depth step represents one
+     * full betting round — hero acts, all rivals respond, then the street
+     * advances. Any non-fold hero action triggers a street transition
+     * (capped at River=3). This is intentional: the tabular model's
+     * terminal_flags already encode showdown vs continue at each
+     * (pubState, action) pair, and the PubStateEncoder discretizes by
+     * street so transitions are captured in the tree structure. */
     PublicState next_pub = pub_state;
     next_pub.pot += model.action_effects[hero_action].pot_delta_frac * pub_state.pot;
     for (int r = 0; r < static_cast<int>(belief.rival_beliefs.size()); ++r) {

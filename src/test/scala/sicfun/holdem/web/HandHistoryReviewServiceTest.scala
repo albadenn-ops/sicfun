@@ -10,6 +10,29 @@ import munit.FunSuite
 
 import java.nio.file.Files
 
+/** Tests for [[HandHistoryReviewService]], the core analysis engine that
+  * processes uploaded hand history text and produces structured review
+  * results with decision analysis, opponent summaries, and diagnostic traces.
+  *
+  * Each test seeds a temporary model artifact directory with a small
+  * trained [[PokerActionModel]] (66 training samples, 180 iterations)
+  * and creates a [[HandHistoryReviewService]] configured with low
+  * trial counts for fast execution.
+  *
+  * Coverage:
+  *   - '''Full analysis''': a reviewable PokerStars hand (Hero has AcKh,
+  *     folds to a flop check-raise) produces a complete response with
+  *     site, hero name, hand counts, decision analysis, opponent hints
+  *     with structured metrics, and a full diagnostic trace (request,
+  *     import stage, per-hand details, summary)
+  *   - '''Missing hero hole cards''': a hand where Hero's cards are not
+  *     dealt (won preflop without showdown) is honestly skipped with a
+  *     "hero hole cards" warning and correct trace metadata
+  *   - '''Forum hero alias normalization''': a PokerStars hand pasted
+  *     from a forum with a "(HERO)" suffix on the hero name is normalized
+  *     to the canonical name, and the trace reflects both raw and
+  *     normalized hero names
+  */
 class HandHistoryReviewServiceTest extends FunSuite:
 
   private val reviewableHand =

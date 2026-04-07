@@ -4,6 +4,35 @@ import sicfun.holdem.model.*
 
 import sicfun.core.Metrics
 
+/**
+  * Multi-shard batch training pipeline for poker action prediction models.
+  *
+  * This file implements the [[BatchTrainer]] pipeline, which trains [[PokerActionModel]]
+  * instances from multiple TSV shard files containing labeled poker decision data.
+  * It supports two training modes:
+  *
+  *   - '''PerShard''': Trains an independent model on each shard file and reports per-shard
+  *     calibration metrics. No aggregate model is produced. Useful for diagnosing data quality
+  *     differences across shards (e.g., different player pools or time periods).
+  *
+  *   - '''Concatenated''': Concatenates all non-empty shards into a single dataset, trains
+  *     one model, then evaluates that model against each shard individually. This is the
+  *     standard production training mode that maximizes training data volume.
+  *
+  * The pipeline produces a [[BatchTrainingReport]] containing:
+  *   - Per-shard [[ShardReport]] metrics (sample counts, Brier scores, gate pass/fail)
+  *   - An aggregate weighted-mean Brier score across all shards
+  *   - The trained model artifact (in Concatenated mode only)
+  *
+  * Calibration gating is controlled by [[BatchTrainerConfig.maxMeanBrierScore]]: if a
+  * model's Brier score exceeds this threshold, the shard is marked as failing the gate.
+  * When `failOnGate` is true, the pipeline throws immediately on gate failure.
+  *
+  * The aggregate Brier score is computed as a weighted mean, where each shard's weight
+  * is its evaluation sample count. This ensures that larger shards dominate the aggregate
+  * metric proportionally.
+  */
+
 /** Strategy for combining multiple training data shards.
   *
   *   - [[PerShard]]: trains an independent model on each shard and reports per-shard metrics
@@ -102,7 +131,11 @@ final case class BatchTrainingReport(
   * and produces a [[BatchTrainingReport]] with per-shard and aggregate metrics.
   */
 object BatchTrainer:
-  /** A shard loaded into memory with its source path. */
+  /** A shard loaded into memory with its source path.
+    *
+    * Each sample is a tuple of (game state, hero's hole cards, action taken),
+    * matching the input format expected by [[PokerActionModel.trainVersioned]].
+    */
   private final case class LoadedShard(path: String, samples: Vector[(GameState, HoleCards, PokerAction)]):
     def isEmpty: Boolean = samples.isEmpty
 
@@ -125,6 +158,11 @@ object BatchTrainer:
       case BatchMode.PerShard     => runPerShard(loaded, config)
       case BatchMode.Concatenated => runConcatenated(loaded, config)
 
+  /** Trains an independent model on each shard, producing per-shard metrics but no aggregate model.
+    *
+    * Each non-empty shard gets its own train/validation split, training run, and calibration check.
+    * Empty shards produce a report with NaN Brier score and zero sample counts.
+    */
   private def runPerShard(
       loaded: Vector[LoadedShard],
       config: BatchTrainerConfig
@@ -168,6 +206,12 @@ object BatchTrainer:
       aggregateModel = None
     )
 
+  /** Concatenates all non-empty shards, trains a single model, and evaluates it per-shard.
+    *
+    * The single trained model is stored in the report's `aggregateModel` field.
+    * Per-shard evaluation uses the full shard as the evaluation set (not a split),
+    * because the train/validation split was already applied to the concatenated data.
+    */
   private def runConcatenated(
       loaded: Vector[LoadedShard],
       config: BatchTrainerConfig
@@ -213,6 +257,7 @@ object BatchTrainer:
       aggregateModel = Some(artifact)
     )
 
+  /** Creates a placeholder report for an empty shard (zero samples, NaN score, gate failed). */
   private def emptyShardReport(path: String): ShardReport =
     ShardReport(
       shardPath = path,
@@ -223,6 +268,14 @@ object BatchTrainer:
       gatePassed = false
     )
 
+  /** Computes the evaluation-count-weighted mean Brier score across all valid shard reports.
+    *
+    * Shards with zero evaluation samples or NaN Brier scores are excluded from the average.
+    * Requires at least one valid shard, otherwise throws.
+    *
+    * @param reports all shard reports (including empty/invalid ones)
+    * @return the weighted mean Brier score
+    */
   private def aggregateWeightedMeanBrier(reports: Vector[ShardReport]): Double =
     val valid = reports.filter(report =>
       report.evaluationSampleCount > 0 && !report.meanBrierScore.isNaN

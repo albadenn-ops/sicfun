@@ -9,11 +9,33 @@ import sicfun.holdem.cli.*
 import java.nio.file.{Files, Path, Paths}
 import scala.util.Random
 
-/** Batch hand history analyzer.
+/** Batch hand history analyzer that replays recorded hands and evaluates hero decisions.
   *
-  * Loads a DecisionLoopEventFeedIO TSV file, replays each hand through a
-  * [[RealTimeAdaptiveEngine]], and annotates each hero decision with the
-  * recommended action and EV comparison.
+  * '''Purpose:'''
+  * Loads a [[DecisionLoopEventFeedIO]] TSV file (produced by [[AlwaysOnDecisionLoop]] or
+  * manual conversion), replays each hand through a fresh [[RealTimeAdaptiveEngine]], and
+  * annotates each hero decision point with the engine's recommended action and EV comparison.
+  * This identifies "mistakes" — spots where the hero's actual action had lower EV than the
+  * engine's recommendation — and quantifies total EV lost.
+  *
+  * '''Analysis pipeline:'''
+  *  1. Group events by hand ID and sort by timestamp.
+  *  2. For each hand containing hero events, create a fresh engine with the appropriate
+  *     table format (based on the number of distinct positions observed).
+  *  3. Replay villain observations up to each hero decision point for range inference.
+  *  4. Run the engine's `decide` method to get the recommended action and EV for all candidates.
+  *  5. Compare the hero's actual action EV to the recommended action EV.
+  *  6. Aggregate into an [[AnalysisSummary]] with mistake count, total EV lost, and
+  *     per-decision breakdown.
+  *
+  * '''Villain resolution:'''
+  * In multiway hands, the analyzer picks the "active villain" — the player with the most
+  * recent non-fold action — for range inference.  In heads-up, this is always the single opponent.
+  *
+  * '''EV matching:'''
+  * When the hero's actual action doesn't exactly match a candidate (e.g., a raise to a
+  * slightly different amount), [[expectedValueForObservedAction]] falls back to the
+  * nearest-amount raise candidate, then to category matching.
   *
   * Usage:
   *   runMain sicfun.holdem.runtime.HandHistoryAnalyzer <feedFile> [--key=value ...]
@@ -30,6 +52,11 @@ import scala.util.Random
   */
 object HandHistoryAnalyzer:
 
+  /** A single analyzed hero decision, comparing the actual action to the engine's recommendation.
+    *
+    * @param evDifference  `actualEv - recommendedEv`: negative means the hero's action was worse.
+    * @param heroEquityMean  Hero's estimated equity (0..1) at this decision point.
+    */
   final case class AnalyzedDecision(
       handId: String,
       street: Street,
@@ -51,6 +78,12 @@ object HandHistoryAnalyzer:
       decisions: Vector[AnalyzedDecision]
   )
 
+  /** Look up the EV for the hero's actual action from the engine's candidate evaluations.
+    *
+    * First tries exact match.  If not found (e.g., raise to a different amount), falls
+    * back to the nearest-amount raise candidate, then to action-category matching
+    * (e.g., any Raise if the exact amount isn't a candidate).  Returns 0.0 if no match.
+    */
   def expectedValueForObservedAction(
       actionEvaluations: Vector[ActionEvaluation],
       action: PokerAction
@@ -75,6 +108,9 @@ object HandHistoryAnalyzer:
       }
       .getOrElse(0.0)
 
+  /** A decision counts as a mistake if the EV difference is negative after rounding
+    * to 2 decimal places (to avoid flagging trivially small differences as errors).
+    */
   def countsAsMistake(decision: AnalyzedDecision): Boolean =
     roundDecisionEv(decision.evDifference) < 0.0
 
@@ -189,7 +225,22 @@ object HandHistoryAnalyzer:
         decisions = decisions.sortBy(d => (d.handId, d.street.toString))
       )
 
-  /** Analyze events with known hero hole cards (for programmatic use). */
+  /** Analyze a single hand's events with known hero hole cards (for programmatic / test use).
+    *
+    * Creates a [[HeroDecisionAnalyzer]], replays all villain observations, and evaluates
+    * each hero action against the engine's recommendation.  This is the main entry point
+    * for tests and external callers who already have parsed events.
+    *
+    * @param events              Poker events for one hand, sorted by sequence.
+    * @param heroPlayerId        Player ID string identifying the hero in the events.
+    * @param heroCards           Hero's known hole cards.
+    * @param engine              A fresh [[RealTimeAdaptiveEngine]] for this hand.
+    * @param tableRanges         Table ranges appropriate for the table size.
+    * @param availablePositions  Positions present in the hand (for preflop fold inference).
+    * @param budgetMs            Decision time budget in milliseconds.
+    * @param rng                 RNG for equity sampling.
+    * @return                    Vector of analyzed decisions, one per hero action.
+    */
   def analyzeWithHeroCards(
       events: Vector[PokerEvent],
       heroPlayerId: String,
@@ -211,6 +262,16 @@ object HandHistoryAnalyzer:
       rng = rng
     ).analyze()
 
+  /** Inner worker that analyzes all hero decisions within a single hand.
+    *
+    * Separates hero events from villain events, identifies the active villain player
+    * (most significant opponent), and for each hero decision point:
+    * 1. Collects all prior villain observations for range inference.
+    * 2. Infers preflop folds from non-hero/non-villain players.
+    * 3. Builds candidate actions (including the hero's actual action if not in the default set).
+    * 4. Runs the engine's `decide` to get EV for each candidate.
+    * 5. Builds an [[AnalyzedDecision]] comparing actual vs. recommended.
+    */
   private final class HeroDecisionAnalyzer(
       events: Vector[PokerEvent],
       heroPlayerId: String,
@@ -262,6 +323,10 @@ object HandHistoryAnalyzer:
       catch
         case _: Exception => None
 
+    /** Pick the most "active" villain by sorting on: most recent non-fold action,
+      * then most recent any-action, then most total actions.  In heads-up this is trivial;
+      * in multiway it picks the primary opponent for range inference.
+      */
     private def resolveActiveVillainPlayerId(): Option[String] =
       villainEventsByPlayer.toVector.sortBy { case (_, playerEvents) =>
         val latestNonFold =

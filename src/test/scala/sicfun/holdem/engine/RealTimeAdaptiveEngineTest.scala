@@ -9,6 +9,21 @@ import sicfun.core.{Card, DiscreteDistribution}
 import java.util.concurrent.CountDownLatch
 import scala.util.Random
 
+/** Tests for [[RealTimeAdaptiveEngine]].
+  *
+  * Validates the real-time adaptive decision engine:
+  *   - '''Archetype learning''': repeated folds -> Nit MAP; repeated raises -> Maniac MAP.
+  *   - '''Response-aware EV''': fold-trained engine produces higher raise EV than
+  *     raise-trained engine (villain expected to fold more often).
+  *   - '''Inference caching''': second call with identical context is a cache hit.
+  *   - '''Latency budget''': 0ms budget clamps equity trials to minimum.
+  *   - '''Equilibrium baseline''': CFR solution is attached when enabled; blend weight
+  *     is applied correctly.
+  *   - '''Baseline guardrail''': adaptive action overridden when action regret exceeds threshold.
+  *   - '''Trust gate''': baseline disabled when local exploitability exceeds threshold.
+  *   - '''Concurrency''': archetype posterior stays normalized under concurrent updates.
+  *   - '''Revealed cards''': delta posterior with single-hand support.
+  */
 class RealTimeAdaptiveEngineTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))

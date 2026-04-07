@@ -6,14 +6,60 @@ import sicfun.core.{FixedVal, Prob}
 
 import java.util.concurrent.atomic.AtomicReference
 
-/** Runtime wrapper for native CFR providers (CPU and CUDA-compiled provider). */
+/** Runtime wrapper for native CFR providers (CPU and CUDA-compiled C/C++ libraries).
+  *
+  * This module manages the lifecycle of native CFR solver libraries loaded via JNI.
+  * It provides a unified Scala API that delegates to either CPU (sicfun_cfr_native)
+  * or GPU/CUDA (sicfun_cfr_cuda) compiled solvers, abstracting away the JNI binding
+  * details and native library discovery.
+  *
+  * The native solvers implement the same CFR algorithm as [[CfrSolver]] but in
+  * optimized C/CUDA code for 35-50x speedups. Three solve modes are supported:
+  *  - '''Full tree solve''' (`solveTree`): returns average strategies for all infosets.
+  *  - '''Root-only solve''' (`solveTreeRoot`): returns only the root infoset's strategy.
+  *  - '''Fixed-point solve''' (`solveTreeFixed`): uses integer arithmetic matching
+  *    the Scala fixed-point path for bit-exact cross-platform parity.
+  *  - '''Batch solve''' (`solveTreeBatch`): GPU-only, solves multiple trees with
+  *    identical topology but different terminal utilities/chance weights in one kernel launch.
+  *
+  * Library loading is lazy and cached via AtomicReference for thread safety. The
+  * library path can be configured via system properties or environment variables:
+  *  - CPU: `sicfun.cfr.native.cpu.path` / `sicfun_CFR_NATIVE_CPU_PATH`
+  *  - GPU: `sicfun.cfr.native.gpu.path` / `sicfun_CFR_NATIVE_GPU_PATH`
+  *
+  * The `NativeTreeSpec` and `BatchTreeSpec` structures flatten the game tree into
+  * parallel arrays suitable for efficient JNI transfer and cache-friendly native traversal.
+  */
 private[holdem] object HoldemCfrNativeRuntime:
+  /** Which native backend to use for CFR solving. */
   enum Backend:
     case Cpu
     case Gpu
 
+  /** Result of checking whether a native backend is loadable and ready. */
   final case class Availability(available: Boolean, backend: Backend, detail: String)
 
+  /** Flattened game tree representation for double-precision native solvers.
+    *
+    * The game tree is encoded as parallel arrays indexed by node ID. Each node has a
+    * type (terminal=0, chance=1, player=2/3), an edge range (start+count into the
+    * edge arrays), and an infoset index (for player nodes). This flat layout enables
+    * efficient JNI array transfer and cache-friendly traversal in native code.
+    *
+    * @param rootNodeId          index of the root node in the node arrays
+    * @param rootInfoSetIndex    infoset index of the root decision point
+    * @param nodeTypes           node type per node (0=terminal, 1=chance, 2=player0, 3=player1)
+    * @param nodeStarts          start index into edge arrays for each node's children
+    * @param nodeCounts          number of child edges for each node
+    * @param nodeInfosets        infoset index for each node (-1 for non-player nodes)
+    * @param edgeChildIds        child node ID for each edge
+    * @param edgeProbabilities   chance probability for each edge (0.0 for player edges)
+    * @param terminalUtilities   player 0 utility at each terminal node (0.0 for non-terminal)
+    * @param infosetKeys         string key for each information set
+    * @param infosetPlayers      acting player (0 or 1) for each information set
+    * @param infosetActions      ordered legal actions for each information set
+    * @param infosetActionCounts number of actions per information set
+    */
   final case class NativeTreeSpec(
       rootNodeId: Int,
       rootInfoSetIndex: Int,
@@ -41,6 +87,9 @@ private[holdem] object HoldemCfrNativeRuntime:
     require(infosetKeys.length == infosetActionCounts.length, "infosetKeys/infosetActionCounts length mismatch")
     require(rootInfoSetIndex < infosetActionCounts.length, "rootInfoSetIndex must reference an infoset")
 
+  /** Fixed-point variant of [[NativeTreeSpec]].
+    * Edge probabilities use Q0.30 Prob raw ints, terminal utilities use Q1.30 FixedVal raw ints.
+    */
   final case class NativeTreeSpecFixed(
       rootNodeId: Int,
       rootInfoSetIndex: Int,
@@ -68,17 +117,32 @@ private[holdem] object HoldemCfrNativeRuntime:
     require(infosetKeys.length == infosetActionCounts.length, "infosetKeys/infosetActionCounts length mismatch")
     require(rootInfoSetIndex < infosetActionCounts.length, "rootInfoSetIndex must reference an infoset")
 
+  /** Result from a native full-tree or fixed-point solve.
+    * @param averageStrategiesFlattened flattened average strategies for all infosets, concatenated in infoset order
+    * @param expectedValuePlayer0      game value for player 0 under the computed strategies
+    * @param lastEngineCode            native engine diagnostic code (0 = normal)
+    */
   final case class NativeSolveResult(
       averageStrategiesFlattened: Array[Double],
       expectedValuePlayer0: Double,
       lastEngineCode: Int
   )
 
+  /** Result from a native root-only solve. Only the root infoset's strategy is returned. */
   final case class NativeRootSolveResult(
       rootStrategy: Array[Double],
       lastEngineCode: Int
   )
 
+  /** Batched game tree specification for GPU kernel launch.
+    *
+    * All trees in the batch must share identical topology (same node types, edges,
+    * infoset structure) but may differ in terminal utilities and chance weights.
+    * The per-tree data is packed into flat arrays of size batchSize * nodeCount
+    * (or batchSize * edgeCount) for efficient GPU memory transfer.
+    *
+    * @param batchSize number of trees in the batch
+    */
   final case class BatchTreeSpec(
       rootNodeId: Int,
       nodeTypes: Array[Int],
@@ -134,6 +198,7 @@ private[holdem] object HoldemCfrNativeRuntime:
     cpuLoadResultRef.set(null)
     gpuLoadResultRef.set(null)
 
+  /** Checks whether the specified native backend is available (library loaded successfully). */
   def availability(backend: Backend): Availability =
     val loadResult =
       backend match
@@ -153,6 +218,12 @@ private[holdem] object HoldemCfrNativeRuntime:
           detail = reason
         )
 
+  /** Solves a full game tree via the native backend, returning average strategies for all infosets.
+    *
+    * Allocates output arrays, calls the JNI binding, and wraps the result.
+    * Returns Left with a diagnostic message if the native library is unavailable or
+    * the solver returns a non-zero status code.
+    */
   def solveTree(
       backend: Backend,
       spec: NativeTreeSpec,
@@ -234,6 +305,9 @@ private[holdem] object HoldemCfrNativeRuntime:
                 .getOrElse(ex.getClass.getSimpleName)
             )
 
+  /** Solves a game tree and returns only the root infoset's average strategy.
+    * More efficient than [[solveTree]] when only the decision-point policy is needed.
+    */
   def solveTreeRoot(
       backend: Backend,
       spec: NativeTreeSpec,
@@ -312,6 +386,9 @@ private[holdem] object HoldemCfrNativeRuntime:
                 .getOrElse(ex.getClass.getSimpleName)
             )
 
+  /** Fixed-point variant of [[solveTree]]. Uses integer arrays for probabilities and utilities.
+    * Converts the fixed-point output back to doubles for the public API.
+    */
   def solveTreeFixed(
       backend: Backend,
       spec: NativeTreeSpecFixed,
@@ -392,6 +469,9 @@ private[holdem] object HoldemCfrNativeRuntime:
                 .getOrElse(ex.getClass.getSimpleName)
             )
 
+  /** GPU-only batched solve: solves multiple trees with identical topology in one kernel launch.
+    * Each tree may have different terminal utilities and chance weights (e.g., different hero hands).
+    */
   def solveTreeBatch(
       spec: BatchTreeSpec,
       config: CfrSolver.Config
@@ -479,6 +559,9 @@ private[holdem] object HoldemCfrNativeRuntime:
       case Backend.Cpu => "CPU"
       case Backend.Gpu => "GPU"
 
+  /** Translates a native CFR status code into a human-readable diagnostic message.
+    * Status codes 100-153 are defined by the C/CUDA solver implementation.
+    */
   def describeStatus(status: Int): String =
     val detail =
       status match

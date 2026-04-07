@@ -2,7 +2,18 @@ package sicfun.holdem.history
 
 import sicfun.holdem.cli.CliHelpers
 
-/** Prints the canonical remembered-player population. */
+/** CLI tool to print the canonical remembered-player population in TSV format.
+  *
+  * Loads the opponent profile store, optionally filters by site, and outputs
+  * a tab-separated table with columns: playerUid, profileUid, site, name,
+  * modelUid, behaviorUid. Sorted by (site, name, playerUid).
+  *
+  * Usage:
+  * {{{
+  * runMain sicfun.holdem.history.ListRememberedPlayers \
+  *   --store=data/opponents.json [--site=pokerstars]
+  * }}}
+  */
 object ListRememberedPlayers:
   private final case class CliConfig(
       store: OpponentMemoryTarget,
@@ -17,6 +28,7 @@ object ListRememberedPlayers:
       case Right(lines) =>
         lines.foreach(println)
 
+  /** Load the store, filter by site if requested, and return TSV rows (header + data). */
   def run(args: Array[String]): Either[String, Vector[String]] =
     for
       config <- parseArgs(args)

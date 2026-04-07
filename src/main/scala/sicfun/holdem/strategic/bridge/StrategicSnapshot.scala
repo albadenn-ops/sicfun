@@ -29,7 +29,18 @@ final case class StrategicSnapshot(
     // Baseline (from BaselineBridge)
     baseline: Ev,
     // Opponent model (from OpponentModelBridge, optional)
-    opponentClassPosterior: Option[DiscreteDistribution[StrategicClass]]
+    opponentClassPosterior: Option[DiscreteDistribution[StrategicClass]],
+    // ==== v0.31.1 optional diagnostics (Wave 6) ====
+    /** Keyed grid-world values; absent entries mean the world is not computable. */
+    gridWorldValues: Option[Map[GridWorld, BridgeResult[Ev]]] = None,
+    /** Chain-indexed risk profile from RiskDecomposition. */
+    chainRiskProfile: Option[RiskDecomposition.ChainRiskProfile] = None,
+    /** Security value at this decision point (Def 55). */
+    securityValue: Option[Ev] = None,
+    /** Safety certificate summary: (required budget, is valid). */
+    safetyCertificateSummary: Option[(Double, Boolean)] = None,
+    /** Fidelity notes for v0.31.1-only objects. */
+    bridgeFidelityNotes: Vector[String] = Vector.empty
 ):
   /** Human-readable fidelity summary from BridgeManifest. */
   def fidelitySummary: String = BridgeManifest.summary

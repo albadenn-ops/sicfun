@@ -1,0 +1,9 @@
+hand	decisionIndex	street	heroPosition	potBeforeBb	toCallBb	stackBb	candidates	chosenAction	apiAction
+2	1	Preflop	Button	1.500	0.500	199.500	Fold,Call,Raise:1.50,Raise:2.00	Raise:2.00	b300
+3	1	Preflop	BigBlind	3.000	1.000	199.000	Fold,Call,Raise:1.00,Raise:2.50	Raise:1.00	b300
+3	2	Flop	BigBlind	6.000	0.000	197.000	Check,Raise:3.00,Raise:4.50	Raise:4.50	b450
+4	1	Preflop	Button	1.500	0.500	199.500	Fold,Call,Raise:1.50,Raise:2.00	Raise:2.00	b300
+5	1	Preflop	BigBlind	3.000	1.000	199.000	Fold,Call,Raise:1.00,Raise:2.50	Raise:1.00	b300
+5	2	Flop	BigBlind	6.000	0.000	197.000	Check,Raise:3.00,Raise:4.50	Raise:3.00	b300
+5	3	Turn	BigBlind	12.000	0.000	194.000	Check,Raise:6.00,Raise:9.00	Raise:6.00	b600
+5	4	River	BigBlind	24.000	0.000	188.000	Check,Raise:12.00,Raise:18.00	Raise:12.00	b1200

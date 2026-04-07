@@ -10,6 +10,23 @@ import java.nio.file.{Files, Path}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
+/** End-to-end simulation proof test for the hand history review pipeline.
+  *
+  * Runs a reproducible 6-max [[TexasHoldemPlayingHall]] session with an
+  * exact-GTO hero against a mixed villain pool (TAG, LAG, maniac), exports
+  * the resulting hands in PokerStars review-upload format, then feeds them
+  * back through [[HandHistoryReviewService]] to verify the full roundtrip:
+  *
+  *   1. Hall simulation produces a valid `review-upload-pokerstars.txt`
+  *   2. The review service successfully parses all 12 exported hands
+  *   3. All hands are analyzed (none skipped) with decisions extracted
+  *   4. Multiple simulated opponents are profiled
+  *   5. No warnings are generated for well-formed simulated data
+  *   6. The diagnostic trace matches the top-level response fields
+  *
+  * This test uses a 180-second timeout due to the combined cost of the
+  * hall simulation and the review analysis pass.
+  */
 class HandHistoryReviewSimulationProofTest extends FunSuite:
   override val munitTimeout: Duration = 180.seconds
 

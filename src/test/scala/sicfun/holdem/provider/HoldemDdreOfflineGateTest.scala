@@ -14,6 +14,22 @@ import java.nio.file.{Files, Path, Paths, StandardCopyOption}
 import scala.jdk.CollectionConverters.*
 import scala.util.Random
 
+/** Tests for [[HoldemDdreOfflineGate]] -- the offline validation pipeline for DDRE artifacts.
+  *
+  * This suite tests the end-to-end gate workflow:
+  *
+  *  - '''Metadata upgrade''': creates an experimental smoke artifact and a single-sample
+  *    dataset, runs the gate with relaxed thresholds, and verifies that the artifact
+  *    metadata is upgraded to `validationStatus=validated` and `decisionDrivingAllowed=true`.
+  *    Then confirms that the validated artifact actually drives a non-Bayesian posterior
+  *    in blend-primary mode.
+  *  - '''CLI validation''': tests that malformed command-line arguments (invalid tokens,
+  *    non-boolean values for boolean flags) produce the expected error messages.
+  *
+  * The test dataset is minimal (single sample) and uses a smoke ONNX model to keep
+  * test execution fast. Thresholds are intentionally relaxed to ensure the gate passes
+  * for the smoke model's output.
+  */
 class HoldemDdreOfflineGateTest extends FunSuite:
   private val DdreModeProperty = "sicfun.ddre.mode"
   private val DdreProviderProperty = "sicfun.ddre.provider"
@@ -32,6 +48,9 @@ class HoldemDdreOfflineGateTest extends FunSuite:
       case Some(url) => Paths.get(url.toURI).toString
       case None => fail("missing test resource: sicfun/ddre/ddre-smoke-sqrt.onnx")
 
+  /** Creates a temporary artifact directory with an experimental smoke ONNX model
+    * and metadata. This artifact starts as unvalidated (decisionDrivingAllowed=false).
+    */
   private def createExperimentalArtifactDir(): Path =
     val dir = Files.createTempDirectory("sicfun-ddre-offline-gate-artifact-")
     val modelTarget = dir.resolve("ddre-smoke-sqrt.onnx")
@@ -70,6 +89,11 @@ class HoldemDdreOfflineGateTest extends FunSuite:
     )
     dir
 
+  /** Writes a minimal single-sample DDRE evaluation dataset in TSV format.
+    * The sample has a known hero (Ac Kd), a strong villain (Ah Ad), and a medium
+    * villain (Qs Qh) in the prior. The Bayesian reference posterior favours the
+    * strong villain (80% vs 20%).
+    */
   private def writeDataset(path: Path): Unit =
     val hero = hole("Ac", "Kd")
     val strong = hole("Ah", "Ad")

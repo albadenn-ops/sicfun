@@ -13,6 +13,29 @@ import scala.jdk.CollectionConverters.*
 import scala.concurrent.duration.*
 import scala.util.Random
 
+/** Tests for [[TexasHoldemPlayingHall]] — the large-volume self-play simulation hall.
+  *
+  * '''Unit tests''' for internal helper functions:
+  *  - `contributionGap` — correct blind-posting arithmetic after SB raises.
+  *  - `normalizeAction` — capping unaffordable raises into all-in calls or smaller raises.
+  *  - `raiseReopensAction` — verifying that only full-increment raises reopen action.
+  *  - `sidePotPayouts` — side-pot distribution with unequal all-in stacks in 3-way pots.
+  *  - `mergedInferenceFolds` — combining static (inactive seat) and live (preflop fold) positions.
+  *  - `estimateRaiseResponseFromRange` — renormalizing fold/continue mass and shifting
+  *    the continuation range toward stronger hands under a non-uniform action model.
+  *  - `estimateEquityAgainstOpponentRanges` — exact multiway equity when river ranges are tiny.
+  *  - `recommendActionAgainstOpponentRanges` — folding dead bluff-catchers against two
+  *    stronger opponent ranges.
+  *
+  * '''Integration tests''' for the full self-play loop:
+  *  - Heads-up 120-hand run with periodic retraining, verifying output artifacts (hands.tsv,
+  *    learning.tsv, training-selfplay.tsv, ddre-training-selfplay.tsv) and postflop coverage.
+  *  - Six-max and nine-max table sizes with multiway seat accounting.
+  *  - GTO villain mode, GTO hero mode, and GTO-vs-GTO mode with exact cache telemetry.
+  *  - Hero big blind seat assignment.
+  *  - PokerStars review hand history export (reproducible across identical seeds).
+  *  - CLI argument validation (invalid hands, tableCount, hero position for table size).
+  */
 class TexasHoldemPlayingHallTest extends FunSuite:
   override val munitTimeout: Duration = 180.seconds
 

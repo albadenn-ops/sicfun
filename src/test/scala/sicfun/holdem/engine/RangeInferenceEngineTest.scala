@@ -9,6 +9,20 @@ import sicfun.core.{Card, DiscreteDistribution}
 
 import scala.util.Random
 
+/** Tests for [[RangeInferenceEngine]], [[VillainResponseModel]], and [[ActionValueModel]].
+  *
+  * Validates the core Bayesian range inference and action recommendation pipeline:
+  *   - '''Posterior collapse''': after an informative villain action (trained model),
+  *     the posterior premium/trash ratio increases and collapse diagnostics are positive.
+  *   - '''Lazy collapse diagnostics''': PosteriorInferenceResult defers collapse computation.
+  *   - '''Showdown bias''': historical showdowns shift cached priors for premium combos.
+  *   - '''Action recommendation''': chip-EV model correctly prefers call over fold when +EV;
+  *     high fold-equity favors raise over check.
+  *   - '''Response-aware raise EV''': weak vs. strong villain posteriors produce different
+  *     raise EVs via the SB-vs-BB binary response model.
+  *   - '''Revealed cards''': produces a delta distribution with single-hand support.
+  *   - '''Validation''': rejects invalid trial counts and empty candidate sets.
+  */
 class RangeInferenceEngineTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))

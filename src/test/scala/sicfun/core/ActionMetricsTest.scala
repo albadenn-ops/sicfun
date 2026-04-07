@@ -4,6 +4,18 @@ import munit.FunSuite
 import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 
+/** Tests for [[ActionMetrics]] information-theoretic analysis of poker actions.
+  *
+  * Validates the core information theory properties:
+  *  - A uniform action model (equal probability for every action) should yield maximum
+  *    entropy and zero mutual information (no information leakage).
+  *  - A trained model on separable data (strong hands always raise, weak hands always fold)
+  *    should show high mutual information and low conditional entropy, demonstrating that
+  *    the action reveals the hidden hand.
+  *
+  * Uses a synthetic flop scenario (T-9-8 board) where QJ is a made straight, giving
+  * a clear separation signal for the trained model.
+  */
 class ActionMetricsTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))

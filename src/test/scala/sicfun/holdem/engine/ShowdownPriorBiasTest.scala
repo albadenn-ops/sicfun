@@ -5,6 +5,15 @@ import sicfun.core.{Card, DiscreteDistribution}
 import sicfun.holdem.history.ShowdownRecord
 import sicfun.holdem.types.*
 
+/** Tests for [[ShowdownPriorBias]] and [[ShowdownHandClass]].
+  *
+  * Validates the conservative showdown-informed prior biasing:
+  *   - '''Bias direction''': premium showdown history increases premium hand density
+  *     and decreases trash hand density, while maintaining normalization.
+  *   - '''Minimum sample gate''': fewer than 3 showdowns returns the original prior unchanged.
+  *   - '''Dead-card filtering''': hands containing dead cards are removed before biasing.
+  *   - '''Blend weight curve''': linear ramp to 15% cap at 50 showdowns.
+  */
 class ShowdownPriorBiasTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))

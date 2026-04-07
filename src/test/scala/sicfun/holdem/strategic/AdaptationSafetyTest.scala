@@ -92,3 +92,67 @@ class AdaptationSafetyTest extends munit.FunSuite:
       betaBar = 0.6
     )
     assertEqualsDouble(clamped, 0.3, Tol)
+
+  // -- Def 57: AS-strong predicate --
+
+  test("isStrongSafe: holds when policy dominates baseline minus epsilon"):
+    val policy   = IndexedSeq(Ev(5.0), Ev(3.0), Ev(7.0))
+    val baseline = IndexedSeq(Ev(5.5), Ev(3.2), Ev(7.1))
+    assert(AdaptationSafety.isStrongSafe(policy, baseline, Ev(0.5)))
+
+  test("isStrongSafe: holds at exact boundary"):
+    val policy   = IndexedSeq(Ev(5.0), Ev(3.0))
+    val baseline = IndexedSeq(Ev(5.1), Ev(3.1))
+    assert(AdaptationSafety.isStrongSafe(policy, baseline, Ev(0.1)))
+
+  test("isStrongSafe: fails when gap exceeds epsilon at any belief"):
+    val policy   = IndexedSeq(Ev(5.0), Ev(1.0))
+    val baseline = IndexedSeq(Ev(5.1), Ev(3.0))
+    // gap at belief 1: 3.0 - 1.0 = 2.0 > 0.5
+    assert(!AdaptationSafety.isStrongSafe(policy, baseline, Ev(0.5)))
+
+  test("isStrongSafe: policy strictly better than baseline is safe"):
+    val policy   = IndexedSeq(Ev(10.0), Ev(8.0))
+    val baseline = IndexedSeq(Ev(5.0), Ev(4.0))
+    assert(AdaptationSafety.isStrongSafe(policy, baseline, Ev(0.0)))
+
+  // -- Def 57A: Robust regret --
+
+  test("robustRegret: positive when baseline exceeds policy"):
+    val rr = AdaptationSafety.robustRegret(Ev(10.0), Ev(8.0))
+    assertEqualsDouble(rr.value, 2.0, Tol)
+
+  test("robustRegret: zero when equal"):
+    val rr = AdaptationSafety.robustRegret(Ev(5.0), Ev(5.0))
+    assertEqualsDouble(rr.value, 0.0, Tol)
+
+  test("robustRegret: negative when policy exceeds baseline"):
+    val rr = AdaptationSafety.robustRegret(Ev(3.0), Ev(7.0))
+    assertEqualsDouble(rr.value, -4.0, Tol)
+
+  test("maxRobustRegret: picks worst belief point"):
+    val policy   = IndexedSeq(Ev(8.0), Ev(2.0), Ev(6.0))
+    val baseline = IndexedSeq(Ev(9.0), Ev(5.0), Ev(6.5))
+    // regrets: 1.0, 3.0, 0.5 → max = 3.0
+    val mrr = AdaptationSafety.maxRobustRegret(policy, baseline)
+    assertEqualsDouble(mrr.value, 3.0, Tol)
+
+  // -- Def 57B: Adaptation-safe policy class --
+
+  test("inAdaptationSafeClass: true when maxRobustRegret <= epsilon"):
+    val policy   = IndexedSeq(Ev(9.0), Ev(4.5))
+    val baseline = IndexedSeq(Ev(9.5), Ev(5.0))
+    // regrets: 0.5, 0.5 → max = 0.5 <= 0.5
+    assert(AdaptationSafety.inAdaptationSafeClass(policy, baseline, Ev(0.5)))
+
+  test("inAdaptationSafeClass: false when maxRobustRegret > epsilon"):
+    val policy   = IndexedSeq(Ev(9.0), Ev(2.0))
+    val baseline = IndexedSeq(Ev(9.5), Ev(5.0))
+    // regrets: 0.5, 3.0 → max = 3.0 > 0.5
+    assert(!AdaptationSafety.inAdaptationSafeClass(policy, baseline, Ev(0.5)))
+
+  // -- SafetyConfig v0.31.1 alias --
+
+  test("SafetyConfig.epsilonAdapt aliases deltaAdapt"):
+    val cfg = SafetyConfig(epsilonNE = 0.02, deltaAdapt = 0.05, betaDet = 0.1)
+    assertEqualsDouble(cfg.epsilonAdapt, 0.05, Tol)

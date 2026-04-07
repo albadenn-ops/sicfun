@@ -5,6 +5,18 @@ import sicfun.core.{Card, DiscreteDistribution, Prob}
 import Prob.*
 import sicfun.holdem.types.*
 
+/**
+  * Tests that equity calculations using CompactPosterior (flat-array, fixed-point) match
+  * those using DiscreteDistribution (Map-based, floating-point).
+  *
+  * CompactPosterior is the optimized representation used in the Bayes-to-equity hot path.
+  * These tests verify that the optimization does not introduce meaningful numerical drift
+  * by comparing results against the reference Map-based implementation across various
+  * board states (river, turn, flop) and range configurations.
+  *
+  * Also tests dead-card filtering (hero overlap, board overlap) and canonical deduplication
+  * for non-canonical hand ordering in the compact representation.
+  */
 class CompactPosteriorEquityTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
@@ -15,9 +27,14 @@ class CompactPosteriorEquityTest extends FunSuite:
   private def board(tokens: String*): Board =
     Board.from(tokens.map(card))
 
+  /** Tolerance for comparing fixed-point (Prob Int32) vs floating-point equity results.
+    * The ~1e-3 tolerance accounts for truncation in Int32 Prob representation (2^30 scale).
+    */
   private val tolerance = 1e-3
 
-  // Helper: build compact from a DiscreteDistribution (simulating Bayes output)
+  /** Builds a CompactPosterior from a DiscreteDistribution, simulating the output
+    * of a Bayesian update that would normally produce flat arrays directly.
+    */
   private def compactFrom(dist: DiscreteDistribution[HoleCards]): HoldemEquity.CompactPosterior =
     val hypotheses = dist.weights.keysIterator.toVector
     val posterior = hypotheses.map(dist.probabilityOf).toArray

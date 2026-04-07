@@ -72,6 +72,11 @@ object HeadsUpEquityCanonicalTable:
 
   private val DefaultParallelism = math.max(1, Runtime.getRuntime.availableProcessors())
 
+  /** Lazily computed list of all unique canonical matchup representatives.
+    * Iterates all non-overlapping hand pairs, computes the canonical key for each,
+    * and keeps only the first occurrence of each unique key. This produces ~170K
+    * canonical representatives from ~800K total non-overlapping pairs.
+    */
   private lazy val canonicalRepresentatives: Vector[(Key, HoleCards, HoleCards)] =
     val seen = scala.collection.mutable.HashSet.empty[Int]
     val reps = Vector.newBuilder[(Key, HoleCards, HoleCards)]
@@ -171,9 +176,13 @@ object HeadsUpEquityCanonicalTable:
       )
     table
 
+  /** Creates a new thread-safe lazy cache backed by this canonical key scheme.
+    * Equity is computed on first access per canonical matchup and cached thereafter.
+    */
   def cache(mode: HeadsUpEquityTable.Mode, rng: Random = new Random()): HeadsUpEquityCanonicalCache =
     new HeadsUpEquityCanonicalCache(mode, rng.nextLong())
 
+  /** Returns the total number of unique suit-isomorphic canonical matchups (~170K for Hold'em). */
   def totalCanonicalKeys: Int =
     canonicalRepresentatives.length
 
@@ -251,6 +260,9 @@ object HeadsUpEquityCanonicalTable:
       i += 1
     key
 
+  /** Swaps win and loss fields when the query's hero maps to the canonical villain.
+    * Tie and stderr are symmetric and remain unchanged.
+    */
   private[holdem] def flipIfNeeded(result: EquityResultWithError, flipped: Boolean): EquityResultWithError =
     if flipped then EquityResultWithError(result.loss, result.tie, result.win, result.stderr) else result
 

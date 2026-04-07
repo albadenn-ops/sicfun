@@ -7,9 +7,29 @@ import java.nio.file.{Files, Path}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
+/** Cross-backend parity tests: verifies that native CPU and GPU CFR solvers produce
+  * strategies matching the Scala reference within tight tolerances.
+  *
+  * The test workflow for each native backend is:
+  *  1. Run the full approximation report suite with provider="scala" (reference)
+  *  2. Run the same suite with provider="native-cpu" or "native-gpu"
+  *  3. Use [[HoldemCfrExternalComparison.compareFiles]] to verify that policies,
+  *     best actions, and EVs match within tight thresholds:
+  *     - TV distance <= 1e-3 mean, 2e-3 per spot
+  *     - 100% best-action agreement
+  *     - EV RMSE <= 1e-3
+  *
+  * These thresholds are tight enough to catch algorithmic bugs but allow for
+  * the small floating-point differences between JVM and native IEEE 754 evaluation.
+  * Tests gracefully skip when the native backend is unavailable (no GPU, no DLL).
+  *
+  * The 180-second timeout accommodates the full suite solve on both backends.
+  */
 class HoldemCfrExternalValidationParityTest extends FunSuite:
   override val munitTimeout: Duration = 180.seconds
 
+  // Reduced iteration count (600) with postflop lookahead — sufficient for parity
+  // testing since we're comparing Scala vs native, not measuring absolute convergence.
   private val ExternalParityConfig = HoldemCfrConfig(
     iterations = 600,
     averagingDelay = 100,
@@ -21,6 +41,8 @@ class HoldemCfrExternalValidationParityTest extends FunSuite:
     rngSeed = 37L
   )
 
+  // Tight thresholds that catch algorithmic differences while allowing for
+  // IEEE 754 float-order-of-operations differences between JVM and native code.
   private val ExternalParityThresholds = HoldemCfrExternalComparison.Thresholds(
     maxMeanTvDistance = Some(1e-3),
     maxSpotTvDistance = Some(2e-3),
@@ -54,6 +76,11 @@ class HoldemCfrExternalValidationParityTest extends FunSuite:
     )
   }
 
+  /** Core parity assertion: runs the approximation suite on both Scala and the target
+    * native backend, then compares the two exports via external comparison with strict
+    * thresholds. Skips gracefully if the native backend is unavailable. Preserves
+    * artifacts on failure for debugging.
+    */
   private def assertProviderPassesExternalValidation(
       availability: HoldemCfrNativeRuntime.Availability,
       providerProperty: String,

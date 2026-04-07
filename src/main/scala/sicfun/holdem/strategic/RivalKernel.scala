@@ -2,22 +2,10 @@ package sicfun.holdem.strategic
 
 import sicfun.core.DiscreteDistribution
 
-// MIGRATION CHECKLIST (Wave 0 — spec hygiene fence)
-// --------------------------------------------------
-// Symbol aliases introduced in v0.31.1; old names remain canonical during Waves 1-6:
-//   delta_adapt    -> epsilon_adapt  (§9A')
-//   delta_retreat  -> delta_cp_retreat  (§9B)
-//   omega must always be qualified as chain-omega or grid-omega.
-//
-// Compatibility policy:
-//   - Keep all current kernel trait signatures and KernelVariant members unchanged
-//     through Wave 6.
-//   - Mark old names @deprecated once Wave 2 (kernel closure) replacements exist.
-//   - Remove old names in Wave 7 only.
-//
-// Pending work tracked here:
-//   PosteriorDivergencePolarization — proxy implementation; real KL due Wave 2
-//   KernelVariant.Design            — placeholder; concrete design kernel due Wave 2
+// STATUS (post-Wave 7 — v0.31.1 formal closure complete)
+// -------------------------------------------------------
+// PosteriorDivergencePolarization — real KL divergence implemented; proxy fallback preserved
+// KernelVariant.Design            — concrete design kernel via KernelConstructor.buildDesignKernel
 
 /** Type alias for a function that updates a model state M given a posterior
   * distribution over strategic classes. Used to embed classification posteriors
@@ -39,6 +27,14 @@ trait ShowdownKernel[M]:
 
 /** Full kernel combining action and showdown signals with public state context.
   * Corresponds to Def 19: the combined update operator used in the main belief loop.
+  *
+  * A FullKernel operates under a specific [[ChainWorld]] (learning channel x showdown mode).
+  * The chain world determines:
+  *   - Which action kernel variant is applied (Blind/Ref/Attrib/Design)
+  *   - Whether showdown evidence is incorporated (ShowdownMode.On) or gated off (ShowdownMode.Off)
+  *
+  * Use [[KernelConstructor.composeFullKernelForWorld]] to obtain a FullKernel
+  * correctly configured for a given ChainWorld.
   */
 trait FullKernel[M]:
   def apply(state: M, signal: TotalSignal, publicState: PublicState): M
@@ -53,6 +49,17 @@ trait FullKernel[M]:
   */
 enum KernelVariant:
   case Ref, Attrib, Blind, Design
+
+  /** Map this kernel variant to its corresponding [[LearningChannel]].
+    *
+    * This provides the bridge between the Phase 1 KernelVariant enum
+    * and the Wave 1 world-algebra LearningChannel axis.
+    */
+  def toLearningChannel: LearningChannel = this match
+    case Ref     => LearningChannel.Ref
+    case Attrib  => LearningChannel.Attrib
+    case Blind   => LearningChannel.Blind
+    case Design  => LearningChannel.Design
 
 /** A no-op [[ActionKernel]] that always returns the state unchanged.
   * Used as a baseline and in unit tests. Corresponds to Def 21.
