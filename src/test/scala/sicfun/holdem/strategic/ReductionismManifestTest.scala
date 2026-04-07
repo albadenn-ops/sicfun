@@ -61,7 +61,7 @@ class ReductionismManifestTest extends FunSuite:
       Severity.Proxy, "Wave 2", resolved = true),
     Reductionism("EI-001", "strategic/ExploitationInterpolation.scala:92",
       "sentinelHero + fabricated PublicState duplicated from KernelConstructor",
-      Severity.Proxy, "Wave 2"),
+      Severity.Proxy, "Wave 2", resolved = true),
 
     // ── Tier 3: Hardcoded heuristic tables ──
     Reductionism("SE-006", "engine/StrategicEngine.scala:185",
