@@ -34,6 +34,32 @@ No code in the approximate layer may reference Def 61, 62, 63, 65, or 66
 in comments, names, or documentation. Those definitions apply only to
 the tabular certification path.
 
+### Prerequisite: SafetyBellman Operator Correction
+
+The current `SafetyBellman.tSafe` (SafetyBellman.scala:60-81) uses
+`max_a` to compute the updated bound per state. Def 60 in the spec
+specifies `inf_u` — the operator should find the action that minimizes
+the required degradation budget, not the one that maximizes it.
+
+Current (wrong):
+```
+(T_safe B)(s) = max_a [ L_robust(s, a) + gamma * max_{s'} B(s') ]
+```
+
+Correct (Def 60):
+```
+(T_safe B)(s) = inf_u [ L_robust(s, u) + gamma * sup_{sigma} E[B(s') | s, u, sigma] ]
+```
+
+With deterministic transitions in the tabular model, `sup E[B(s')]`
+collapses to `max_{s'} B(s')` (already correct). But the outer operator
+must be `min_a`, not `max_a`. This affects `tSafe`, `computeBStar`,
+`safeActionSet`, and all `ForWorld` wrappers.
+
+This correction is a hard prerequisite for the formal path. Until it
+lands, no code may claim Defs 60-66. The fix is step 0 in the
+implementation sequence.
+
 ## Section 1: DecisionEvaluationBundle
 
 New case class — the single authoritative runtime artifact for all
@@ -130,21 +156,33 @@ different policy table.
 ### Profile Family
 
 A `JointRivalProfile` specifies a complete joint rival behavior — all
-rivals simultaneously. For tractability, the profile class consists of:
-
-- 4 pure-type profiles (all rivals assigned the same StrategicClass)
-- 1 mixed-belief profile (current posterior mixture — the standard solve)
-
-Total: 5 profiles. The baseline solve (reference-regime policy, beta=0)
-is a 6th solve with the reference rivalPolicy table.
+rivals simultaneously. For tractability, the profile class consists of
+4 pure-type profiles (all rivals assigned the same StrategicClass).
 
 Each profile gets its own type (`JointRivalProfileId`) distinct from
 `StrategicClass`. `Map[StrategicClass, Array[Double]]` is not used.
 
+### Solve Convention
+
+All sections use this convention:
+
+| Solve | Purpose | rivalPolicy |
+|-------|---------|-------------|
+| Mixed | Action selection (standard) | Current posterior mixture |
+| Baseline | pi-bar evaluation | Reference-regime (beta=0) |
+| Pure-Value | Profile class member | All rivals = Value |
+| Pure-Bluff | Profile class member | All rivals = Bluff |
+| Pure-SemiBluff | Profile class member | All rivals = SemiBluff |
+| Pure-Marginal | Profile class member | All rivals = Marginal |
+
+Total: 6 WPomcp solves per decision. The mixed solve is NOT in the
+profile class — it is the standard action-selection solve. The 4
+pure-type solves constitute the profile class for SecurityValue.
+
 ### Cost
 
-6 WPomcp solves per decision at 500 simulations each. On native runtime,
-this is ~6x current cost. Acceptable for correctness; configurable via
+6 WPomcp solves at 500 simulations each. On native runtime, this is
+~6x current cost. Acceptable for correctness; configurable via
 `numProfileSolves` if profiling shows issues.
 
 ## Section 3: WPomcp Approximate Certification (LocalRobustScreening)
@@ -169,10 +207,11 @@ All names avoid Def 61-66 language.
 
 ```
 1. Solve with mixed-belief rivalPolicy -> mixedResult (action selection)
-2. Solve with reference rivalPolicy (beta=0) -> baselineResult
-3. For each JointRivalProfile in profile class:
+2. Solve with reference rivalPolicy (beta=0) -> baselineResult (pi-bar)
+3. For each of 4 pure-type profiles in profile class:
      Solve with profile's rivalPolicy -> profileResult
 4. Compute robustActionLowerBounds, adversarialRootGap, rootLosses
+   (6 solves total: 1 mixed + 1 baseline + 4 pure-type)
 5. budgetEstimate = max(rootLosses) / (1 - gamma)
 6. If withinTolerance:
      action = mixedResult.bestAction
@@ -206,23 +245,33 @@ All names avoid Def 61-66 language.
 
 ### Per-State Loss Derivation
 
-The `TabularGenerativeModel` contains:
-- `rewardTable: Array[Double]` — `R(s, a)` for all (state, action) pairs
-- `transitionTable: Array[Int]` — `T(s, a) = s'` (deterministic transitions)
+A joint rival profile sigma^{-S} can change reward, transition, and
+observation structure — not just rewards. For each profile, a distinct
+`TabularGenerativeModel` is constructed:
+- `R_sigma(s, a)` — reward under profile sigma
+- `T_sigma(s, a)` — transition under profile sigma
+- `O_sigma(o | s', a)` — observation likelihood under profile sigma
 
 Robust one-step loss at state s, action a (Def 59 over the tabular model):
 
 ```
-L_robust(s, a) = max(0, V_baseline(s) - R(s, a) - gamma * V_baseline(T(s, a)))
+L_robust(s, a) = sup_sigma max(0,
+    V^{barpi}_sigma(s) - R_sigma(s, a) - gamma * V^{barpi}_sigma(T_sigma(s, a)))
 ```
 
-where `V_baseline(s)` is the baseline value at state s under pi-bar.
-For profile-robustness: compute losses under each profile's reward table,
-take the sup. This uses the tabular model's structure directly — no
-solver re-runs at every state.
+where `V^{barpi}_sigma(s)` is the baseline value at state s under pi-bar
+evaluated against profile sigma. The sup is over the finite profile class.
 
-`V_baseline(s)` is computed by value iteration over the tabular model
-under the reference policy, which is a standard MDP evaluation (not MCTS).
+For each profile sigma in the class:
+1. Build `TabularGenerativeModel` with sigma's policy parameters
+2. Evaluate `V^{barpi}_sigma` by value iteration under the reference
+   policy on sigma's model
+3. Compute per-state per-action losses from sigma's (R, T, V) triple
+
+Then `robustLosses[s][a] = max over profiles of per-profile losses`.
+
+This uses the tabular model's structure directly — profile-conditioned
+model construction, not solver re-runs at every state.
 
 ### Decision Flow
 
@@ -230,15 +279,21 @@ under the reference policy, which is a standard MDP evaluation (not MCTS).
 1. PokerPftFormulation.buildTabularModel(gameState, ...) -> model
 2. PokerPftFormulation.buildParticleBelief(rivalBeliefs, ...) -> belief
 3. PftDpwRuntime.solve(model, belief, config) -> PftDpwResult
-4. Value iteration under reference policy -> V_baseline per state
-5. For each profile: compute per-state rewards under profile's policy
-6. robustLosses[s][a] = sup over profiles of [V_baseline(s) - R_profile(s,a) - gamma * V_baseline(T(s,a))]+
-7. SafetyBellman.computeBStar(robustLosses, bellmanGamma) -> bStar
-8. rootState = belief-weighted state index
-9. safeActions = SafetyBellman.safeActionSet(rootState, bStar, robustLosses, gamma)
-10. action = SafetyBellman.safeFeasibleAction(qValues, safeActions)
-11. Certificate validation (Def 65/66)
-12. Bundle with TabularCertification
+4. For each profile sigma in profile class:
+     a. Build TabularGenerativeModel with sigma's policy parameters
+     b. V^{barpi}_sigma = value iteration of reference policy on sigma's model
+5. robustLosses[s][a] = max over profiles sigma of
+     max(0, V^{barpi}_sigma(s) - R_sigma(s,a) - gamma * V^{barpi}_sigma(T_sigma(s,a)))
+6. SafetyBellman.computeBStar(robustLosses, bellmanGamma) -> bStar
+   (uses corrected min_a operator from step 0)
+7. Belief-level safe action set:
+   B_belief(a) = sum_s belief(s) * [L_robust(s,a) + gamma * max_{s'} bStar(s')]
+   safeActions = { a : B_belief(a) <= sum_s belief(s) * bStar(s) }
+   This is Def 62 instantiated at the particle belief (Def 54), not a
+   collapsed state index. The belief weights come from ParticleBelief.
+8. action = SafetyBellman.safeFeasibleAction(qValues, safeActions)
+9. Certificate validation (Def 65/66)
+10. Bundle with TabularCertification
 ```
 
 ### PokerPftFormulation
@@ -267,11 +322,14 @@ Uses existing `heroBucket` granularity from `HandStrengthEstimator`,
 
 ### Definition
 
-pi-bar is the induced policy under the reference-solver regime across
-decisions. This is the policy the engine would follow if beta = 0 for
-all rivals permanently — no exploitation, pure reference kernel. It
-corresponds to the reference side of the exploitation interpolation
-framework and matches the existing betaBar logic in AdaptationSafety.
+pi-bar is the policy induced by solving under the reference regime at
+every decision point — the engine's behavior when beta = 0 for all
+rivals permanently. V_baseline in the formal path (Section 4) is the
+evaluation of this extracted policy on the tabular model, computed by
+value iteration, not by re-running the MCTS solver.
+
+`epsilonBase` is an offline/configured bound for the exploitability of
+this induced policy. It is not a runtime computation.
 
 ### Operational Objects
 
@@ -283,9 +341,8 @@ final case class OperationalBaseline(
 )
 ```
 
-`epsilonBase` is an offline/configured bound for the exploitability of
-the induced reference policy. It is NOT computed at runtime. It may be
-derived from offline CFR analysis or set conservatively.
+`epsilonBase` may be derived from offline CFR analysis or set
+conservatively.
 
 ```scala
 final case class EmpiricalDeploymentSet(
@@ -495,7 +552,7 @@ verified by a behavioral test. Not "acknowledged" or "injectable".
 
 | Test | What It Verifies |
 |------|-----------------|
-| **ProfileConditionalSolveTest** | 5 profile solves produce distinct Q-vectors. Baseline solve Q-values differ from mixed solve. |
+| **ProfileConditionalSolveTest** | 4 pure-type profile solves produce distinct Q-vectors. Baseline solve Q-values differ from mixed solve. 6 solves total. |
 | **LocalRobustScreeningTest** | WPomcp path produces `LocalRobustScreening` with real root losses and budget estimate. Budget exceeding tolerance triggers beta clamp. |
 | **TabularCertificationTest** | PftDpw path produces `TabularCertification` with multi-state B\*, safe action set. Actions outside U\*\_safe are excluded from selection. |
 | **BaselineFallbackTest** | Solver error -> `BaselineFallback`. Empty safe action set -> `BaselineFallback`. |
@@ -536,6 +593,10 @@ final case class Config(
 
 ## Implementation Sequencing
 
+0. **SafetyBellman operator correction** — fix `tSafe` from `max_a` to
+   `min_a` per Def 60. Update `computeBStar`, `safeActionSet`, and all
+   `ForWorld` wrappers. Add belief-level safe action evaluation method.
+   Existing SafetyBellman unit tests updated to match corrected semantics.
 1. **DecisionEvaluationBundle + CertificationResult types** — pure data,
    no behavioral change.
 2. **Profile-conditional evaluation in PokerPomcpFormulation** — new
@@ -543,12 +604,13 @@ final case class Config(
 3. **OperationalBaseline + EmpiricalDeploymentSet** — types and buffer.
 4. **WPomcp approximate path in decide()** — 6 solves, bundle
    construction, LocalRobustScreening, beta clamping. Behavioral tests.
-5. **PokerPftFormulation** — tabular model builder. Unit tested.
-6. **Per-state loss evaluator** — value iteration + profile-robust
-   losses from tabular model.
-7. **PftDpw formal path in decide()** — TabularCertification, safe
-   action filtering. Behavioral tests.
-8. **composeFullKernelForWorldFull** — world-aware production kernel.
+5. **composeFullKernelForWorldFull** — world-aware production kernel.
+   Hard prerequisite for steps 6-8.
+6. **PokerPftFormulation** — tabular model builder. Unit tested.
+7. **Per-state loss evaluator** — profile-conditioned model construction,
+   value iteration, profile-robust losses from tabular models.
+8. **PftDpw formal path in decide()** — TabularCertification,
+   belief-level safe action filtering. Behavioral tests.
 9. **Chain-world value evaluation** — populate chainWorldValues.
 10. **DecisionDiagnostics expansion + StrategicSnapshot.fromDiagnostics**.
 11. **observeAction() advisory clamp** — cached budget, remove
@@ -558,14 +620,14 @@ final case class Config(
     lands.
 14. **Behavioral test suite**.
 
-Steps 1-4 are the minimum viable integration (WPomcp approximate path).
-Steps 5-7 enable the formal certification path.
-Steps 8-14 are completion and cleanup.
+Steps 0-4 are the minimum viable integration (WPomcp approximate path).
+Steps 5-8 enable the formal certification path.
+Steps 9-14 are completion and cleanup.
 
 ### Note on FourWorldDecomposition (OR-005)
 
-FourWorldDecomposition is covered implicitly by the chain-world value
-evaluation (step 9) and StrategicSnapshot derivation (step 10). The
-decomposition uses chain-world values to produce the delta vocabulary.
-It becomes operational when chainWorldValues is populated, at which
-point OR-005 can be flipped to resolved.
+FourWorldDecomposition operates on grid-world values (V^{1,0}, V^{0,1},
+etc.), which require policy-scope-constrained evaluation — a separate
+dimension from chain-world values (Section 9). OR-005 cannot be flipped
+to resolved until policy-scope-constrained solver evaluation exists.
+Chain-world value population (step 9) does NOT resolve OR-005.
