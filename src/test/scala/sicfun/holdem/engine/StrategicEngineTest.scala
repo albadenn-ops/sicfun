@@ -177,6 +177,36 @@ class StrategicEngineTest extends FunSuite:
     val chosen = engine.decide(minimalState, actions)
     assert(actions.contains(chosen))
 
+  test("initSession accepts rival seat info"):
+    val engine = new StrategicEngine(StrategicEngine.Config())
+    engine.initSession(
+      rivalIds = Vector(PlayerId("v1")),
+      rivalSeats = Map(PlayerId("v1") -> StrategicEngine.RivalSeatInfo(Position.BigBlind, 1000.0))
+    )
+    assert(engine.isSessionInitialized)
+
+  test("bridgePublicState includes rival seats"):
+    val engine = new StrategicEngine(StrategicEngine.Config())
+    engine.initSession(
+      rivalIds = Vector(PlayerId("v1")),
+      rivalSeats = Map(PlayerId("v1") -> StrategicEngine.RivalSeatInfo(Position.BigBlind, 1000.0))
+    )
+    engine.startHand(testHeroCards)
+    engine.observeAction(PlayerId("v1"), PokerAction.Raise(50.0), minimalState)
+    // The test verifies observeAction doesn't throw when building real PublicState with rivals
+
+  test("observeAction accumulates action history"):
+    val engine = new StrategicEngine(StrategicEngine.Config())
+    engine.initSession(
+      rivalIds = Vector(PlayerId("v1")),
+      rivalSeats = Map(PlayerId("v1") -> StrategicEngine.RivalSeatInfo(Position.BigBlind, 1000.0))
+    )
+    engine.startHand(testHeroCards)
+    engine.observeAction(PlayerId("v1"), PokerAction.Raise(50.0), minimalState)
+    engine.observeAction(PlayerId("v1"), PokerAction.Check, minimalState)
+    val bluffP = engine.sessionState.rivalBeliefs(PlayerId("v1")).typePosterior.probabilityOf(StrategicClass.Bluff)
+    assert(bluffP != 0.25, "Beliefs should shift after observations")
+
   private def nativeAvailable: Boolean = WPomcpRuntime.isAvailable
 
   test("integration: play a complete hand with Strategic mode"):

@@ -428,8 +428,9 @@ class BridgeTest extends munit.FunSuite:
     val absent = BridgeManifest.absentObjects
     assert(absent.forall(_.fidelity == Fidelity.Absent))
 
-  test("BridgeManifest.absentObjects includes TableMap"):
-    assert(BridgeManifest.absentObjects.exists(_.formalObject == "TableMap"))
+  test("BridgeManifest TableMap is Approximate (rival seats from initSession)"):
+    val entry = BridgeManifest.entries.find(_.formalObject == "TableMap").get
+    assertEquals(entry.fidelity, Fidelity.Approximate)
 
   test("BridgeManifest.absentObjects includes ActionSignal.timing"):
     assert(BridgeManifest.absentObjects.exists(_.formalObject == "ActionSignal.timing"))
@@ -453,3 +454,61 @@ class BridgeTest extends munit.FunSuite:
 
   test("BridgeManifest every entry has non-empty specDef"):
     assert(BridgeManifest.entries.forall(_.specDef.nonEmpty))
+
+  // ---------------------------------------------------------------------------
+  // v0.31.1 Bridge updates (Wave 6)
+  // ---------------------------------------------------------------------------
+
+  test("ValueBridge.toGridWorldValues: V^{1,1} and V^{0,0} are Approximate"):
+    val gv = ValueBridge.toGridWorldValues(0.65, 0.50)
+    val v11 = gv(GridWorld(LearningChannel.Attrib, PolicyScope.ClosedLoop))
+    val v00 = gv(GridWorld(LearningChannel.Blind, PolicyScope.OpenLoop))
+    assertEquals(v11.fidelity, Fidelity.Approximate)
+    assertEquals(v00.fidelity, Fidelity.Approximate)
+    v11 match
+      case BridgeResult.Approximate(ev, _) => assertEqualsDouble(ev.value, 0.65, Tol)
+      case other => fail(s"expected Approximate, got $other")
+    v00 match
+      case BridgeResult.Approximate(ev, _) => assertEqualsDouble(ev.value, 0.50, Tol)
+      case other => fail(s"expected Approximate, got $other")
+
+  test("ValueBridge.toGridWorldValues: V^{1,0} and V^{0,1} are Absent"):
+    val gv = ValueBridge.toGridWorldValues(0.65, 0.50)
+    val v10 = gv(GridWorld(LearningChannel.Attrib, PolicyScope.OpenLoop))
+    val v01 = gv(GridWorld(LearningChannel.Blind, PolicyScope.ClosedLoop))
+    assertEquals(v10.fidelity, Fidelity.Absent)
+    assertEquals(v01.fidelity, Fidelity.Absent)
+
+  test("ValueBridge.toGridWorldValues: covers all 4 grid worlds"):
+    val gv = ValueBridge.toGridWorldValues(0.65, 0.50)
+    assertEquals(gv.size, 4)
+    for gw <- GridWorld.all do
+      assert(gv.contains(gw), s"missing grid world $gw")
+
+  test("ValueBridge.toGridWorldValues: no fabricated exact values"):
+    val gv = ValueBridge.toGridWorldValues(0.65, 0.50)
+    for (_, result) <- gv do
+      assert(result.fidelity != Fidelity.Exact,
+        s"no grid world value should claim Exact fidelity")
+
+  test("BridgeManifest includes v0.31.1 objects"):
+    val names = BridgeManifest.entries.map(_.formalObject).toSet
+    assert(names.contains("SecurityValue"), "missing SecurityValue")
+    assert(names.contains("SafetyBellman.T_safe"), "missing T_safe")
+    assert(names.contains("SafetyBellman.B*"), "missing B*")
+    assert(names.contains("TotalVulnerability"), "missing TotalVulnerability")
+    assert(names.contains("ChainWorld"), "missing ChainWorld")
+    assert(names.contains("RiskDecomposition"), "missing RiskDecomposition")
+    assert(names.contains("GridWorldValues"), "missing GridWorldValues")
+
+  test("BridgeManifest: every v0.31.1 object exposed has a manifest entry"):
+    // Constitutive v0.31.1 objects that must have manifest entries
+    val required = Set(
+      "SecurityValue", "PointwiseExploitability", "DeploymentExploitability",
+      "DeploymentBaseline", "SafetyBellman.T_safe", "SafetyBellman.B*",
+      "SafetyBellman.Certificate", "TotalVulnerability",
+      "ChainWorld", "GridWorld", "RiskDecomposition", "GridWorldValues"
+    )
+    val present = BridgeManifest.entries.map(_.formalObject).toSet
+    for obj <- required do
+      assert(present.contains(obj), s"missing manifest entry for $obj")

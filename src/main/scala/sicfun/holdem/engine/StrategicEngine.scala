@@ -22,6 +22,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
   private var _sessionState: StrategicEngine.SessionState | Null = null
   private var _handActive: Boolean = false
   private var _heroCards: Option[HoleCards] = None
+  private var _actionHistory: Vector[PublicAction] = Vector.empty
 
   def sessionState: StrategicEngine.SessionState =
     require(_sessionState != null, "Session not initialized — call initSession first")
@@ -33,6 +34,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
   /** Initialize session with rival IDs. Uses uniform priors unless existing beliefs provided. */
   def initSession(
       rivalIds: Vector[PlayerId],
+      rivalSeats: Map[PlayerId, StrategicEngine.RivalSeatInfo] = Map.empty,
       existingBeliefs: Map[PlayerId, StrategicRivalBelief] = Map.empty
   ): Unit =
     val beliefs = rivalIds.map { id =>
@@ -43,7 +45,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
     }.toMap
     _sessionState = StrategicEngine.SessionState(
       rivalBeliefs = beliefs,
-      exploitationStates = exploitStates
+      exploitationStates = exploitStates,
+      rivalSeats = rivalSeats
     )
 
   /** Start a new hand. Resets hand-local state, preserves session beliefs.
@@ -54,12 +57,14 @@ class StrategicEngine(val config: StrategicEngine.Config):
     require(_sessionState != null, "Session not initialized — call initSession first")
     _handActive = true
     _heroCards = Some(heroCards)
+    _actionHistory = Vector.empty
 
   /** Start a new hand without hero cards (fallback — uses neutral middle bucket). */
   def startHand(): Unit =
     require(_sessionState != null, "Session not initialized — call initSession first")
     _handActive = true
     _heroCards = None
+    _actionHistory = Vector.empty
 
   /** Observe a rival's action.
     *
@@ -72,9 +77,12 @@ class StrategicEngine(val config: StrategicEngine.Config):
     val session = _sessionState.nn
     if !session.rivalBeliefs.contains(actor) then return
 
+    val actionSignal = bridgeActionSignal(action, gameState)
+    _actionHistory = _actionHistory :+ PublicAction(actor, actionSignal)
+
     // REDUCTIONISM: showdown signals never flow through observeAction
     val signal = TotalSignal(
-      actionSignal = bridgeActionSignal(action, gameState),
+      actionSignal = actionSignal,
       showdown = None
     )
     val pubState = bridgePublicState(gameState)
@@ -96,7 +104,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
 
     _sessionState = StrategicEngine.SessionState(
       rivalBeliefs = result.updatedRivals,
-      exploitationStates = result.updatedExploitation
+      exploitationStates = result.updatedExploitation,
+      rivalSeats = session.rivalSeats
     )
 
   /** Choose an action using the WPomcp V2 solver.
@@ -149,19 +158,22 @@ class StrategicEngine(val config: StrategicEngine.Config):
 
   /** Bridge GameState -> strategic PublicState for the kernel pipeline. */
   private def bridgePublicState(gameState: GameState): PublicState =
-    // REDUCTIONISM: PublicState is hero-only, actionHistory=empty — rival seats and history missing
     val heroId = PlayerId("hero")
+    val heroSeat = Seat(heroId, gameState.position, SeatStatus.Active, Chips(gameState.stackSize))
+    val rivalSeats = _sessionState.nn.rivalSeats.map { case (id, info) =>
+      Seat(id, info.position, SeatStatus.Active, Chips(info.stack))
+    }.toVector
+    val allSeats = if rivalSeats.nonEmpty then heroSeat +: rivalSeats
+      else Vector(heroSeat)
     PublicState(
       street = gameState.street,
       board = gameState.board,
       pot = Chips(gameState.pot),
       stacks = TableMap(
         hero = heroId,
-        seats = Vector(
-          Seat(heroId, gameState.position, SeatStatus.Active, Chips(gameState.stackSize))
-        )
+        seats = allSeats
       ),
-      actionHistory = Vector.empty
+      actionHistory = _actionHistory
     )
 
   /** Bridge PokerAction -> ActionSignal for the kernel pipeline. */
@@ -251,8 +263,12 @@ object StrategicEngine:
       actionPriors: Map[(StrategicClass, sicfun.holdem.types.PokerAction.Category), Double] = defaultActionPriors
   )
 
+  /** Rival seat information provided at session init. */
+  final case class RivalSeatInfo(position: Position, stack: Double)
+
   /** Per-session state: rival beliefs and exploitation states that survive across hands. */
   final case class SessionState(
       rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
-      exploitationStates: Map[PlayerId, ExploitationState]
+      exploitationStates: Map[PlayerId, ExploitationState],
+      rivalSeats: Map[PlayerId, RivalSeatInfo] = Map.empty
   )

@@ -35,7 +35,7 @@ object BridgeManifest:
     // -- Public state bridge --
     BridgeEntry("Street",                   "--",     Fidelity.Exact,       Severity.Cosmetic,    "direct mapping"),
     BridgeEntry("Pot",                      "--",     Fidelity.Exact,       Severity.Cosmetic,    "direct mapping"),
-    BridgeEntry("TableMap",                 "--",     Fidelity.Absent,      Severity.Structural,  "GameState is hero-only; no player list for TableMap"),
+    BridgeEntry("TableMap",                 "--",     Fidelity.Approximate, Severity.Behavioral,  "rival seats from initSession; hero-only fallback when no rival info"),
 
     // -- Opponent model bridge --
     BridgeEntry("ClassPosterior",           "Def 14", Fidelity.Approximate, Severity.Structural,  "heuristic from VPIP/PFR/AF, not Bayesian update"),
@@ -55,8 +55,22 @@ object BridgeManifest:
     BridgeEntry("PerRivalDelta",            "Defs 40-42", Fidelity.Exact,   Severity.Cosmetic,   "pure computation over Q-function values"),
     BridgeEntry("PerRivalSignalSubDecomp",  "Defs 48-49", Fidelity.Exact,   Severity.Cosmetic,   "pure computation over Q-function values"),
     BridgeEntry("BluffFramework",           "Defs 35-39", Fidelity.Exact,   Severity.Cosmetic,   "pure predicates over formal types"),
-    BridgeEntry("AdaptationSafety",         "Defs 52-53 (v0.30.2); upgrade to Defs 57/57A-C pending Wave 4", Fidelity.Exact,   Severity.Cosmetic,   "pure computation; def numbering will change in Wave 4"),
-    BridgeEntry("RevealSchedule",           "Def 51",     Fidelity.Exact,   Severity.Cosmetic,   "pure computation")
+    BridgeEntry("AdaptationSafety",         "Defs 52-53, 57/57A-C (v0.31.1)", Fidelity.Exact, Severity.Cosmetic, "pure computation; v0.31.1 AS-strong and legacy scalar both available"),
+    BridgeEntry("RevealSchedule",           "Def 51",     Fidelity.Exact,   Severity.Cosmetic,   "pure computation"),
+
+    // -- v0.31.1 formal objects (Wave 3-5) --
+    BridgeEntry("SecurityValue",            "Def 55",     Fidelity.Exact,       Severity.Cosmetic,   "pure min over rival profiles; computation is exact"),
+    BridgeEntry("PointwiseExploitability",  "Def 55A",    Fidelity.Exact,       Severity.Cosmetic,   "pure clamped subtraction; exact given inputs"),
+    BridgeEntry("DeploymentExploitability", "Def 55B",    Fidelity.Exact,       Severity.Cosmetic,   "max over finite belief set; exact given inputs"),
+    BridgeEntry("DeploymentBaseline",       "A10",        Fidelity.Approximate, Severity.Behavioral, "baseline exploitability from CFR; conservative estimate"),
+    BridgeEntry("SafetyBellman.T_safe",     "Def 60",     Fidelity.Exact,       Severity.Cosmetic,   "pure Bellman operator; exact computation"),
+    BridgeEntry("SafetyBellman.B*",         "Def 61",     Fidelity.Approximate, Severity.Behavioral, "iterative fixed point; convergence tolerance 1e-10"),
+    BridgeEntry("SafetyBellman.Certificate","Def 65",     Fidelity.Exact,       Severity.Cosmetic,   "structural validity checks are exact"),
+    BridgeEntry("TotalVulnerability",       "Corollary 9.3", Fidelity.Approximate, Severity.Behavioral, "sum of two conservative estimates"),
+    BridgeEntry("ChainWorld",               "Def 28",     Fidelity.Exact,       Severity.Cosmetic,   "enumerated world algebra; exact"),
+    BridgeEntry("GridWorld",                "Def 44",     Fidelity.Exact,       Severity.Cosmetic,   "keyed grid coordinates; exact"),
+    BridgeEntry("RiskDecomposition",        "Defs 56A-C", Fidelity.Exact,       Severity.Cosmetic,   "pure telescopic computation; exact given inputs"),
+    BridgeEntry("GridWorldValues",          "Def 44 (v0.31.1)", Fidelity.Approximate, Severity.Structural, "V^{1,0} and V^{0,1} absent without POMDP solver")
   )
 
   /** All objects with Structural severity -- these degrade the formal model's coherence. */
