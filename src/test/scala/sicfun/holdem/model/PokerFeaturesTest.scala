@@ -57,11 +57,18 @@ class PokerFeaturesTest extends FunSuite:
 
   // ---- extract: preflop ----
 
-  test("extract: preflop hand strength is always 0.5") {
+  test("extract: preflop hand strength uses preflopStrength, not constant 0.5") {
     val state = GameState(Street.Preflop, Board.empty, pot = 3.0, toCall = 2.0,
       position = Position.Button, stackSize = 100.0, betHistory = Vector.empty)
-    val features = PokerFeatures.extract(state, hole("As", "Ks"))
-    assertEquals(features.values.last, 0.5)
+    val aces = PokerFeatures.extract(state, hole("As", "Ah"))
+    val trash = PokerFeatures.extract(state, hole("2c", "7h"))
+    // Aces should be strong, 72o should be weak — no longer both 0.5
+    assert(aces.values.last > 0.55,
+      s"expected AA preflop strength > 0.55, got ${aces.values.last}")
+    assert(trash.values.last < 0.45,
+      s"expected 72o preflop strength < 0.45, got ${trash.values.last}")
+    assert(aces.values.last > trash.values.last,
+      s"expected AA (${aces.values.last}) > 72o (${trash.values.last})")
   }
 
   test("extract: preflop produces correct dimension") {
@@ -185,9 +192,14 @@ class PokerFeaturesTest extends FunSuite:
 
   // ---- handStrengthProxy ----
 
-  test("handStrengthProxy: preflop returns 0.5") {
+  test("handStrengthProxy: preflop aces are strong") {
     val strength = PokerFeatures.handStrengthProxy(Board.empty, hole("As", "Ad"))
-    assertEquals(strength, 0.5)
+    assert(strength > 0.55, s"expected AA preflop strength > 0.55, got $strength")
+  }
+
+  test("handStrengthProxy: preflop 72o is weak") {
+    val strength = PokerFeatures.handStrengthProxy(Board.empty, hole("2c", "7h"))
+    assert(strength < 0.45, s"expected 72o preflop strength < 0.45, got $strength")
   }
 
   test("handStrengthProxy: postflop returns value in [0, 1]") {

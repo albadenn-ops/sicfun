@@ -1,6 +1,7 @@
 package sicfun.holdem.model
 import sicfun.holdem.types.*
 import sicfun.holdem.equity.*
+import sicfun.holdem.engine.HandStrengthEstimator
 import sicfun.holdem.gpu.*
 
 import sicfun.core.{Card, Deck, HandEvaluator, HandRank}
@@ -99,12 +100,12 @@ object PokerFeatures:
 
   /** Returns the hand's equity against the full opponent range for the given board.
     *
-    * Pre-flop (board size < 3) returns a neutral 0.5 since exhaustive enumeration
-    * would be prohibitively expensive and board texture is unknown.
+    * Pre-flop (board size < 3) delegates to [[HandStrengthEstimator.preflopStrength]]
+    * which uses rank-based heuristics to estimate preflop hand strength.
     * Results are memoized in [[strengthCache]].
     */
   private[holdem] def handStrengthProxy(board: Board, hand: HoleCards): Double =
-    if board.size < 3 then 0.5  // pre-flop: return neutral equity
+    if board.size < 3 then HandStrengthEstimator.preflopStrength(hand)
     else
       val key = (board, hand)
       val cached = strengthCache.get(key)
