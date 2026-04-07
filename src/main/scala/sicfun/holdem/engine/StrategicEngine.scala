@@ -108,11 +108,25 @@ class StrategicEngine(val config: StrategicEngine.Config):
       epsilonNE = 0.01
     )
 
-    _sessionState = StrategicEngine.SessionState(
-      rivalBeliefs = result.updatedRivals,
-      exploitationStates = result.updatedExploitation,
-      rivalSeats = session.rivalSeats
-    )
+    // Optional: Bellman-safe certificate clamp (Def 64)
+    if config.useBellmanSafety then
+      val updatedExploit = result.updatedExploitation.map { case (rivalId, exploitState) =>
+        val budget = SafetyBellman.requiredAdaptationBudget(Array(exploitState.beta))
+        val clamped = ExploitationInterpolation.clampForCertificate(
+          exploitState.beta, budget, config.exploitConfig.adaptationTolerance)
+        rivalId -> ExploitationState(beta = clamped)
+      }
+      _sessionState = StrategicEngine.SessionState(
+        rivalBeliefs = result.updatedRivals,
+        exploitationStates = updatedExploit,
+        rivalSeats = session.rivalSeats
+      )
+    else
+      _sessionState = StrategicEngine.SessionState(
+        rivalBeliefs = result.updatedRivals,
+        exploitationStates = result.updatedExploitation,
+        rivalSeats = session.rivalSeats
+      )
 
   /** Choose an action using the WPomcp V2 solver.
     *
@@ -345,7 +359,15 @@ object StrategicEngine:
       ),
       temperedConfig: TemperedLikelihood.TemperedConfig = TemperedLikelihood.TemperedConfig.twoLayer(0.7, 0.01),
       actionPriors: Map[(StrategicClass, sicfun.holdem.types.PokerAction.Category), Double] = defaultActionPriors,
-      detector: DetectionPredicate = FrequencyAnomalyDetection(window = 20, threshold = 0.6)
+      detector: DetectionPredicate = FrequencyAnomalyDetection(window = 20, threshold = 0.6),
+      /** Enable Bellman-safe certificate clamp on exploitation beta (Def 64). */
+      useBellmanSafety: Boolean = false,
+      /** Discount factor for Bellman safety operator (Def 60). */
+      bellmanGamma: Double = 0.95,
+      /** Enable robust Q-value evaluation via WassersteinDroRuntime (Def 34). */
+      useRobustQValues: Boolean = false,
+      /** Wasserstein ambiguity radius rho for robust Q-values (Def 33). */
+      ambiguityRadius: Double = 0.1
   )
 
   /** Rival seat information provided at session init. */

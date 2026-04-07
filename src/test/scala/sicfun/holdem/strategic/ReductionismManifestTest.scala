@@ -132,7 +132,7 @@ class ReductionismManifestTest extends FunSuite:
     // ── Tier 6: Orphaned formal objects ──
     Reductionism("OR-001", "strategic/SafetyBellman.scala",
       "SafetyBellman (Defs 58-66) — implemented but never called from engine",
-      Severity.Orphan, "Wave 4"),
+      Severity.Orphan, "Wave 4", resolved = true),
     Reductionism("OR-002", "strategic/RiskDecomposition.scala",
       "RiskDecomposition (Defs 56A-C) — implemented but never called from engine",
       Severity.Orphan, "Wave 5"),
@@ -141,7 +141,7 @@ class ReductionismManifestTest extends FunSuite:
       Severity.Orphan, "Wave 4", resolved = true),
     Reductionism("OR-004", "strategic/Exploitability.scala",
       "RobustValueOracle / WassersteinRobustOracle — never invoked from engine",
-      Severity.Orphan, "Wave 4"),
+      Severity.Orphan, "Wave 4", resolved = true),
     Reductionism("OR-005", "strategic/FourWorldDecomposition.scala",
       "FourWorldDecomposition (Theorem 4) — not in decision path",
       Severity.Orphan, "Wave 5"),
@@ -150,7 +150,7 @@ class ReductionismManifestTest extends FunSuite:
       Severity.Orphan, "Wave 5"),
     Reductionism("OR-007", "strategic/solver/WassersteinDroRuntime.scala",
       "WassersteinDroRuntime — EMD + simplex LP, never invoked from engine",
-      Severity.Orphan, "Wave 4"),
+      Severity.Orphan, "Wave 4", resolved = true),
   )
 
   // ── ENFORCEMENT TESTS ────────────────────────────────────────────────────
