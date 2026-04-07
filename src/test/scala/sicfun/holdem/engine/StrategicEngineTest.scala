@@ -252,6 +252,14 @@ class StrategicEngineTest extends FunSuite:
     val action = HeroDecisionPipeline.decideHeroStrategic(ctx)
     assert(candidates.contains(action), s"Action $action not in candidates")
 
+  test("exploitability function returns non-trivial values"):
+    val engine = new StrategicEngine(StrategicEngine.Config())
+    engine.initSession(rivalIds = Vector(PlayerId("v1")))
+    engine.startHand(testHeroCards)
+    engine.observeAction(PlayerId("v1"), PokerAction.Raise(50.0), minimalState)
+    val exploit = engine.computeExploitabilityEstimate(0.5)
+    assert(exploit >= 0.0, s"Exploitability must be non-negative: $exploit")
+
   test("endHand with showdown data updates rival beliefs"):
     val engine = new StrategicEngine(StrategicEngine.Config())
     engine.initSession(rivalIds = Vector(PlayerId("v1")))

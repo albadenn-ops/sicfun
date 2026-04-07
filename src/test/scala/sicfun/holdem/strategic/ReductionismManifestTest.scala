@@ -38,7 +38,7 @@ class ReductionismManifestTest extends FunSuite:
     // ── Tier 1: Silent nullifications in StrategicEngine ──
     Reductionism("SE-001", "engine/StrategicEngine.scala:91",
       "exploitabilityFn = _ => 0.0 — entire safety apparatus inert",
-      Severity.Silent, "Wave 4"),
+      Severity.Silent, "Wave 4", resolved = true),
     Reductionism("SE-002", "engine/StrategicEngine.scala:90",
       "detector = NeverDetect — opponent detection permanently disabled",
       Severity.Silent, "Wave 4"),
@@ -138,7 +138,7 @@ class ReductionismManifestTest extends FunSuite:
       Severity.Orphan, "Wave 5"),
     Reductionism("OR-003", "strategic/Exploitability.scala",
       "SecurityValue, PointwiseExploitability, DeploymentExploitability — orphaned",
-      Severity.Orphan, "Wave 4"),
+      Severity.Orphan, "Wave 4", resolved = true),
     Reductionism("OR-004", "strategic/Exploitability.scala",
       "RobustValueOracle / WassersteinRobustOracle — never invoked from engine",
       Severity.Orphan, "Wave 4"),

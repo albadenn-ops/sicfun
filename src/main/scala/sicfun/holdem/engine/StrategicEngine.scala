@@ -96,7 +96,6 @@ class StrategicEngine(val config: StrategicEngine.Config):
     val kernelProfile = buildKernelProfile()
     val exploitConfigs = session.rivalBeliefs.keys.map(id => id -> config.exploitConfig).toMap
 
-    System.err.println("[REDUCTIONISM] StrategicEngine.observeAction: exploitabilityFn=constant(0.0), detector=NeverDetect — safety apparatus is inert")
     val result = Dynamics.fullStep[StrategicRivalBelief](
       rivalStates = session.rivalBeliefs,
       exploitStates = session.exploitationStates,
@@ -105,7 +104,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       kernelProfile = kernelProfile,
       exploitConfigs = exploitConfigs,
       detector = NeverDetect,
-      exploitabilityFn = _ => 0.0,
+      exploitabilityFn = beta => computeExploitabilityEstimate(beta),
       epsilonNE = 0.01
     )
 
@@ -175,6 +174,24 @@ class StrategicEngine(val config: StrategicEngine.Config):
       )
     _handActive = false
     _heroCards = None
+
+  /** Compute exploitability estimate at a given beta level.
+    * Uses posterior concentration as a proxy for exploitability.
+    * Returns 0.0 when insufficient data is available.
+    */
+  private[holdem] def computeExploitabilityEstimate(beta: Double): Double =
+    if _sessionState == null then return 0.0
+    val session = _sessionState.nn
+    val beliefs = session.rivalBeliefs.values.toIndexedSeq
+    if beliefs.isEmpty then return 0.0
+    val deviations = beliefs.map { belief =>
+      val classes = StrategicClass.values
+      val probs = classes.map(c => belief.typePosterior.probabilityOf(c))
+      val maxDev = probs.max - 0.25  // deviation from uniform
+      math.max(0.0, maxDev) * beta
+    }
+    if deviations.isEmpty then 0.0
+    else deviations.max
 
   private def estimateHeroBucket(gameState: GameState): Int =
     _heroCards match
