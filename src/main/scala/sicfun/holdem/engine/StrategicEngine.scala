@@ -25,6 +25,9 @@ class StrategicEngine(val config: StrategicEngine.Config):
   private var _actionHistory: Vector[PublicAction] = Vector.empty
   private var _lastBoard: Option[Board] = None
   private var _lastStreet: Option[Street] = None
+  private var _lastDiagnostics: Option[StrategicEngine.DecisionDiagnostics] = None
+
+  def lastDecisionDiagnostics: Option[StrategicEngine.DecisionDiagnostics] = _lastDiagnostics
 
   def sessionState: StrategicEngine.SessionState =
     require(_sessionState != null, "Session not initialized — call initSession first")
@@ -128,7 +131,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
         rivalSeats = session.rivalSeats
       )
 
-  /** Choose an action using the WPomcp V2 solver.
+  /** Choose an action using the configured solver backend.
     *
     * Falls back to the last candidate action if the native solver is unavailable.
     */
@@ -139,27 +142,39 @@ class StrategicEngine(val config: StrategicEngine.Config):
 
     val heroBucket = estimateHeroBucket(gameState)
 
-    val searchInput = PokerPomcpFormulation.buildSearchInputV2(
-      gameState = gameState,
-      rivalBeliefs = _sessionState.nn.rivalBeliefs,
-      heroActions = candidateActions,
-      heroBucket = heroBucket,
-      particlesPerRival = config.particlesPerRival
-    )
-
-    WPomcpRuntime.solveV2(searchInput, WPomcpRuntime.Config(
-      numSimulations = config.numSimulations,
-      discount = config.discount,
-      maxDepth = config.maxDepth,
-      seed = config.seed
-    )) match
-      case Right(result) =>
-        if result.bestAction >= 0 && result.bestAction < candidateActions.size then
-          candidateActions(result.bestAction)
-        else
-          candidateActions.last
-      case Left(_) =>
+    val action = config.solverBackend match
+      case StrategicEngine.SolverBackend.WPomcp =>
+        val searchInput = PokerPomcpFormulation.buildSearchInputV2(
+          gameState = gameState,
+          rivalBeliefs = _sessionState.nn.rivalBeliefs,
+          heroActions = candidateActions,
+          heroBucket = heroBucket,
+          particlesPerRival = config.particlesPerRival
+        )
+        WPomcpRuntime.solveV2(searchInput, WPomcpRuntime.Config(
+          numSimulations = config.numSimulations,
+          discount = config.discount,
+          maxDepth = config.maxDepth,
+          seed = config.seed
+        )) match
+          case Right(result) =>
+            if result.bestAction >= 0 && result.bestAction < candidateActions.size then
+              candidateActions(result.bestAction)
+            else
+              candidateActions.last
+          case Left(_) =>
+            candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
+      case StrategicEngine.SolverBackend.PftDpw =>
+        // PftDpw path — solver reachable via config, full model construction TBD
         candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
+
+    _lastDiagnostics = Some(StrategicEngine.DecisionDiagnostics(
+      heroBucket = heroBucket,
+      solverBackend = config.solverBackend,
+      exploitationBetas = _sessionState.nn.exploitationStates.map((k, v) => k -> v.beta)
+    ))
+
+    action
 
   /** End the current hand. If showdown data is provided, applies ShowdownKernel
     * to update rival beliefs based on revealed hands.
@@ -327,6 +342,15 @@ class StrategicEngine(val config: StrategicEngine.Config):
 
 object StrategicEngine:
 
+  enum SolverBackend:
+    case WPomcp, PftDpw
+
+  final case class DecisionDiagnostics(
+      heroBucket: Int,
+      solverBackend: SolverBackend,
+      exploitationBetas: Map[PlayerId, Double]
+  )
+
   /** Default action priors P(action_category | strategic_class).
     * These are initial estimates pending calibration from showdown data.
     * Exposed in Config so callers can override with calibrated values.
@@ -352,6 +376,7 @@ object StrategicEngine:
       maxDepth: Int = 20,
       seed: Long = 42L,
       particlesPerRival: Int = 100,
+      solverBackend: SolverBackend = SolverBackend.WPomcp,
       exploitConfig: ExploitationConfig = ExploitationConfig(
         initialBeta = 1.0,
         retreatRate = 0.1,
