@@ -100,7 +100,8 @@ object PokerPomcpFormulation:
   def buildActionEffects(
       actions: Vector[PokerAction],
       potChips: Double,
-      stackChips: Double
+      stackChips: Double,
+      toCallChips: Double = 0.0
   ): Array[Double] =
     val result = new Array[Double](actions.size * 3)
     var i = 0
@@ -116,8 +117,8 @@ object PokerPomcpFormulation:
           result(base + 1) = 0.0
           result(base + 2) = 0.0
         case PokerAction.Call =>
-          val frac = if potChips > 0.0 then 0.5 else 0.0
-          result(base)     = frac
+          val frac = if potChips > 0.0 then toCallChips / potChips else 0.0
+          result(base)     = math.min(frac, 10.0)
           result(base + 1) = 0.0
           result(base + 2) = 0.0
         case PokerAction.Raise(amount) =>
@@ -192,13 +193,18 @@ object PokerPomcpFormulation:
           flags(idx) = 0  // Continue — non-terminal mid-hand action
     flags
 
-  /** Build complete SearchInputV2 from poker game state and strategic beliefs. */
+  /** Build complete SearchInputV2 from poker game state and strategic beliefs.
+    *
+    * @param showdownEquityFn equity table builder; defaults to [[defaultShowdownEquity]]
+    *        (linear heuristic). Callers may inject calibrated bucket-vs-bucket equity.
+    */
   def buildSearchInputV2(
       gameState: GameState,
       rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
       heroActions: Vector[PokerAction],
       heroBucket: Int,
-      particlesPerRival: Int = 100
+      particlesPerRival: Int = 100,
+      showdownEquityFn: (Int, Int) => Array[Double] = defaultShowdownEquity
   ): WPomcpRuntime.SearchInputV2 =
     val numActions = heroActions.size
 
@@ -219,8 +225,8 @@ object PokerPomcpFormulation:
       rivalPolicy = buildRivalPolicy(NumRivalTypes, NumPubStates, numActions),
       numRivalTypes = NumRivalTypes,
       numPubStates = NumPubStates,
-      actionEffects = buildActionEffects(heroActions, gameState.pot, gameState.stackSize),
-      showdownEquity = buildShowdownEquity(NumHandBuckets, NumHandBuckets),
+      actionEffects = buildActionEffects(heroActions, gameState.pot, gameState.stackSize, gameState.toCall),
+      showdownEquity = showdownEquityFn(NumHandBuckets, NumHandBuckets),
       numHeroBuckets = NumHandBuckets,
       numRivalBuckets = NumHandBuckets,
       terminalFlags = buildTerminalFlags(NumPubStates, numActions),
