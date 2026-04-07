@@ -23,6 +23,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
   private var _handActive: Boolean = false
   private var _heroCards: Option[HoleCards] = None
   private var _actionHistory: Vector[PublicAction] = Vector.empty
+  private var _lastBoard: Option[Board] = None
+  private var _lastStreet: Option[Street] = None
 
   def sessionState: StrategicEngine.SessionState =
     require(_sessionState != null, "Session not initialized — call initSession first")
@@ -58,6 +60,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
     _handActive = true
     _heroCards = Some(heroCards)
     _actionHistory = Vector.empty
+    _lastBoard = None
+    _lastStreet = None
 
   /** Start a new hand without hero cards (fallback — uses neutral middle bucket). */
   def startHand(): Unit =
@@ -65,6 +69,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
     _handActive = true
     _heroCards = None
     _actionHistory = Vector.empty
+    _lastBoard = None
+    _lastStreet = None
 
   /** Observe a rival's action.
     *
@@ -79,8 +85,9 @@ class StrategicEngine(val config: StrategicEngine.Config):
 
     val actionSignal = bridgeActionSignal(action, gameState)
     _actionHistory = _actionHistory :+ PublicAction(actor, actionSignal)
+    _lastBoard = Some(gameState.board)
+    _lastStreet = Some(gameState.street)
 
-    // REDUCTIONISM: showdown signals never flow through observeAction
     val signal = TotalSignal(
       actionSignal = actionSignal,
       showdown = None
@@ -141,10 +148,31 @@ class StrategicEngine(val config: StrategicEngine.Config):
       case Left(_) =>
         candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
 
-  /** End the current hand. Preserves session beliefs for carry-over across hands. */
+  /** End the current hand. If showdown data is provided, applies ShowdownKernel
+    * to update rival beliefs based on revealed hands.
+    */
   def endHand(showdownResult: Option[Map[PlayerId, HoleCards]] = None): Unit =
-    if showdownResult.exists(_.nonEmpty) then
-      System.err.println("[REDUCTIONISM] StrategicEngine.endHand: showdown data discarded — wire ShowdownKernel update")
+    if _sessionState != null && showdownResult.exists(_.nonEmpty) then
+      val session = _sessionState.nn
+      val board = _lastBoard.getOrElse(Board.empty)
+      val street = _lastStreet.getOrElse(Street.River)
+      val updatedBeliefs = session.rivalBeliefs.map { case (rivalId, belief) =>
+        showdownResult.flatMap(_.get(rivalId)) match
+          case Some(revealedCards) =>
+            val lastAct = _actionHistory.filter(_.actor == rivalId).lastOption.map(_.signal.action)
+            val sdKernel = makeShowdownKernel(board, street, lastAct)
+            val signal = ShowdownSignal(Vector(
+              RevealedHand(rivalId, revealedCards.toVector)
+            ))
+            rivalId -> sdKernel.apply(belief, signal)
+          case None =>
+            rivalId -> belief
+      }
+      _sessionState = StrategicEngine.SessionState(
+        rivalBeliefs = updatedBeliefs,
+        exploitationStates = session.exploitationStates,
+        rivalSeats = session.rivalSeats
+      )
     _handActive = false
     _heroCards = None
 
@@ -218,14 +246,53 @@ class StrategicEngine(val config: StrategicEngine.Config):
       StrategicRivalBelief.updater,
       likelihood
     )
-    val blindShowdown = new ShowdownKernel[StrategicRivalBelief]:
-      def apply(state: StrategicRivalBelief, showdown: ShowdownSignal): StrategicRivalBelief =
-        System.err.println("[REDUCTIONISM] ShowdownKernel is no-op — Def 18 showdown evidence discarded")
-        state
-    val fullKernel = KernelConstructor.composeFullKernelFromFull(actionKernel, blindShowdown)
+    val showdownKernel = makeShowdownKernel(
+      _lastBoard.getOrElse(Board.empty),
+      _lastStreet.getOrElse(Street.Preflop),
+      _actionHistory.lastOption.map(_.signal.action)
+    )
+    val fullKernel = KernelConstructor.composeFullKernelFromFull(actionKernel, showdownKernel)
     JointKernelProfile(
       _sessionState.nn.rivalBeliefs.keys.map(id => id -> fullKernel).toMap
     )
+
+  /** Real showdown kernel: classifies revealed hand and hard-shifts posterior. */
+  private def makeShowdownKernel(
+      board: Board, street: Street, lastAction: Option[PokerAction.Category]
+  ): ShowdownKernel[StrategicRivalBelief] =
+    new ShowdownKernel[StrategicRivalBelief]:
+      def apply(state: StrategicRivalBelief, showdown: ShowdownSignal): StrategicRivalBelief =
+        if showdown.revealedHands.isEmpty then return state
+        val revealed = showdown.revealedHands.head
+        val observedClass = classifyRevealedHand(revealed.cards, board, street, lastAction)
+        val smoothing = 0.10
+        val classes = StrategicClass.values
+        val shifted = classes.map { cls =>
+          val prior = state.typePosterior.probabilityOf(cls)
+          val target = if cls == observedClass then 1.0 else 0.0
+          cls -> ((1.0 - smoothing) * target + smoothing * prior)
+        }.toMap
+        StrategicRivalBelief(DiscreteDistribution(shifted))
+
+  /** Classify a revealed hand into StrategicClass based on hand strength and action. */
+  private def classifyRevealedHand(
+      cards: Vector[sicfun.core.Card],
+      board: Board,
+      street: Street,
+      lastAction: Option[PokerAction.Category]
+  ): StrategicClass =
+    if cards.size < 2 then return StrategicClass.Marginal
+    val holeCards = HoleCards.from(cards.take(2))
+    val strength = HandStrengthEstimator.fastGtoStrength(holeCards, board, street)
+    val wasAggressive = lastAction.exists(_ == PokerAction.Category.Raise)
+    if strength >= 0.65 then
+      StrategicClass.Value
+    else if strength < 0.35 && wasAggressive then
+      StrategicClass.Bluff
+    else if strength >= 0.35 && strength < 0.55 && wasAggressive then
+      StrategicClass.SemiBluff
+    else
+      StrategicClass.Marginal
 
 object StrategicEngine:
 

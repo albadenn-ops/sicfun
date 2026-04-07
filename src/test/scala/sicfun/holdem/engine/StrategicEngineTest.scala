@@ -251,3 +251,33 @@ class StrategicEngineTest extends FunSuite:
     )
     val action = HeroDecisionPipeline.decideHeroStrategic(ctx)
     assert(candidates.contains(action), s"Action $action not in candidates")
+
+  test("endHand with showdown data updates rival beliefs"):
+    val engine = new StrategicEngine(StrategicEngine.Config())
+    engine.initSession(rivalIds = Vector(PlayerId("v1")))
+    engine.startHand(testHeroCards)
+    engine.observeAction(PlayerId("v1"), PokerAction.Raise(50.0), minimalState)
+    val beforeShowdown = engine.sessionState.rivalBeliefs(PlayerId("v1")).typePosterior
+    // End hand with showdown revealing villain had strong hand (pocket Aces)
+    engine.endHand(showdownResult = Some(Map(
+      PlayerId("v1") -> HoleCards.from(Vector(card("As"), card("Ah")))
+    )))
+    val afterShowdown = engine.sessionState.rivalBeliefs(PlayerId("v1")).typePosterior
+    val valueAfter = afterShowdown.probabilityOf(StrategicClass.Value)
+    val valueBefore = beforeShowdown.probabilityOf(StrategicClass.Value)
+    assert(valueAfter > valueBefore,
+      s"Showdown with strong hand should increase Value posterior: before=$valueBefore, after=$valueAfter")
+
+  test("endHand without showdown data preserves beliefs"):
+    val engine = new StrategicEngine(StrategicEngine.Config())
+    engine.initSession(rivalIds = Vector(PlayerId("v1")))
+    engine.startHand(testHeroCards)
+    engine.observeAction(PlayerId("v1"), PokerAction.Raise(50.0), minimalState)
+    val before = engine.sessionState.rivalBeliefs(PlayerId("v1")).typePosterior
+    engine.endHand()
+    val after = engine.sessionState.rivalBeliefs(PlayerId("v1")).typePosterior
+    assertEqualsDouble(
+      before.probabilityOf(StrategicClass.Value),
+      after.probabilityOf(StrategicClass.Value),
+      1e-10
+    )
