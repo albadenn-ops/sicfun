@@ -3,6 +3,8 @@ package sicfun.holdem.strategic
 class SafetyBellmanTest extends munit.FunSuite:
 
   private inline val Tol = 1e-10
+  private val selfLoop: (Int, Int, Int) => Int = (s, _, _) => s
+  private val numProfilesOne = 1
 
   // ---- Def 58: Baseline loss ------------------------------------------------
 
@@ -31,8 +33,8 @@ class SafetyBellmanTest extends munit.FunSuite:
   test("T_safe is monotone: larger bound in → larger bound out"):
     val robustLosses = Array(Array(1.0, 2.0), Array(0.5, 1.5))
     val gamma = 0.9
-    val small = SafetyBellman.tSafe(Array(0.0, 0.0), robustLosses, gamma)
-    val large = SafetyBellman.tSafe(Array(5.0, 5.0), robustLosses, gamma)
+    val small = SafetyBellman.tSafe(Array(0.0, 0.0), robustLosses, gamma, selfLoop, numProfilesOne)
+    val large = SafetyBellman.tSafe(Array(5.0, 5.0), robustLosses, gamma, selfLoop, numProfilesOne)
     // Each element of large should be >= corresponding element of small
     for s <- small.indices do
       assert(large(s) >= small(s) - Tol, s"large($s)=${large(s)} < small($s)=${small(s)}")
@@ -45,9 +47,39 @@ class SafetyBellmanTest extends munit.FunSuite:
     val lossMax = rMax // worst-case one-step loss
     val robustLosses = Array(Array(lossMax, lossMax / 2))
     val bound = Array(0.0)
-    val result = SafetyBellman.tSafe(bound, robustLosses, gamma)
-    // T_safe(0) = max_a [L(s,a) + gamma*0] = L_max = rMax
-    assertEqualsDouble(result(0), rMax, Tol)
+    val result = SafetyBellman.tSafe(bound, robustLosses, gamma, selfLoop, numProfilesOne)
+    // T_safe(0) = min_a [L(s,a) + gamma*0] = rMax / 2
+    assertEqualsDouble(result(0), rMax / 2, Tol)
+
+  test("tSafe uses min_a with transition-aware futures"):
+    // 2 states, 2 actions, 2 profiles
+    val transitions: (Int, Int, Int) => Int = (s, a, p) => (s, a, p) match
+      case (0, 0, 0) => 0
+      case (0, 1, 0) => 1
+      case (1, 0, 0) => 1
+      case (1, 1, 0) => 0
+      case (0, 0, 1) => 1
+      case (0, 1, 1) => 0
+      case (1, 0, 1) => 0
+      case (1, 1, 1) => 1
+      case _ => 0
+    val numProfiles = 2
+    val currentBound = Array(2.0, 5.0)
+    val robustLosses = Array(Array(1.0, 3.0), Array(0.5, 2.0))
+    val gamma = 0.9
+
+    val result = SafetyBellman.tSafe(currentBound, robustLosses, gamma, transitions, numProfiles)
+
+    // For state 0:
+    //   action 0: L(0,0) + gamma * max_p B(T(0,0,p)) = 1.0 + 0.9 * max(B(0), B(1)) = 1.0 + 0.9*5 = 5.5
+    //   action 1: L(0,1) + gamma * max_p B(T(0,1,p)) = 3.0 + 0.9 * max(B(1), B(0)) = 3.0 + 0.9*5 = 7.5
+    //   min_a = min(5.5, 7.5) = 5.5
+    // For state 1:
+    //   action 0: L(1,0) + gamma * max_p B(T(1,0,p)) = 0.5 + 0.9 * max(B(1), B(0)) = 0.5 + 0.9*5 = 5.0
+    //   action 1: L(1,1) + gamma * max_p B(T(1,1,p)) = 2.0 + 0.9 * max(B(0), B(1)) = 2.0 + 0.9*5 = 6.5
+    //   min_a = min(5.0, 6.5) = 5.0
+    assertEqualsDouble(result(0), 5.5, Tol)
+    assertEqualsDouble(result(1), 5.0, Tol)
 
   // ---- Def 61: B* convergence -----------------------------------------------
 
@@ -56,21 +88,27 @@ class SafetyBellmanTest extends munit.FunSuite:
     // Losses: state 0 -> [1.0, 2.0], state 1 -> [0.5, 1.0]
     val robustLosses = Array(Array(1.0, 2.0), Array(0.5, 1.0))
     val gamma = 0.5
-    val bStar = SafetyBellman.computeBStar(robustLosses, gamma)
+    val bStar = SafetyBellman.computeBStar(robustLosses, gamma, selfLoop, numProfilesOne)
 
     // B* should be non-negative and finite
     for s <- bStar.indices do
       assert(bStar(s) >= -Tol, s"B*($s) = ${bStar(s)} should be non-negative")
       assert(bStar(s) < 1e10, s"B*($s) = ${bStar(s)} should be finite")
 
+    // With min_a and self-loop:
+    // State 0: min(1.0 + 0.5*B(0), 2.0 + 0.5*B(0)) = 1.0 + 0.5*B(0) → B(0) = 2.0
+    // State 1: min(0.5 + 0.5*B(1), 1.0 + 0.5*B(1)) = 0.5 + 0.5*B(1) → B(1) = 1.0
+    assertEqualsDouble(bStar(0), 2.0, 1e-8)
+    assertEqualsDouble(bStar(1), 1.0, 1e-8)
+
     // B* should satisfy the fixed-point: T_safe(B*) ≈ B*
-    val tResult = SafetyBellman.tSafe(bStar, robustLosses, gamma)
+    val tResult = SafetyBellman.tSafe(bStar, robustLosses, gamma, selfLoop, numProfilesOne)
     for s <- bStar.indices do
       assertEqualsDouble(tResult(s), bStar(s), 1e-8)
 
   test("B* is zero when all losses are zero"):
     val robustLosses = Array(Array(0.0, 0.0), Array(0.0, 0.0))
-    val bStar = SafetyBellman.computeBStar(robustLosses, 0.9)
+    val bStar = SafetyBellman.computeBStar(robustLosses, 0.9, selfLoop, numProfilesOne)
     for s <- bStar.indices do
       assertEqualsDouble(bStar(s), 0.0, Tol)
 
@@ -78,7 +116,7 @@ class SafetyBellmanTest extends munit.FunSuite:
     // L = 3.0, gamma = 0.5
     // B* = L / (1 - gamma) = 3.0 / 0.5 = 6.0
     val robustLosses = Array(Array(3.0))
-    val bStar = SafetyBellman.computeBStar(robustLosses, 0.5)
+    val bStar = SafetyBellman.computeBStar(robustLosses, 0.5, selfLoop, numProfilesOne)
     assertEqualsDouble(bStar(0), 6.0, 1e-6)
 
   // ---- Def 62: Safe action sets ---------------------------------------------
@@ -88,7 +126,7 @@ class SafetyBellmanTest extends munit.FunSuite:
     // losses: state 0 -> [1.0, 10.0] (action 1 is unsafe)
     val robustLosses = Array(Array(1.0, 10.0), Array(0.5, 0.5))
     val gamma = 0.5
-    val safe = SafetyBellman.safeActionSet(0, bound, robustLosses, gamma)
+    val safe = SafetyBellman.safeActionSet(0, bound, robustLosses, gamma, selfLoop, numProfilesOne)
     assert(safe.contains(0), "action 0 should be safe")
     assert(!safe.contains(1), "action 1 should be unsafe")
 
@@ -96,7 +134,7 @@ class SafetyBellmanTest extends munit.FunSuite:
     val bound = Array(100.0)
     val robustLosses = Array(Array(1.0, 2.0, 3.0))
     val gamma = 0.5
-    val safe = SafetyBellman.safeActionSet(0, bound, robustLosses, gamma)
+    val safe = SafetyBellman.safeActionSet(0, bound, robustLosses, gamma, selfLoop, numProfilesOne)
     assertEquals(safe.size, 3)
 
   // ---- Def 63: Safe-feasible policy selector --------------------------------
@@ -162,12 +200,12 @@ class SafetyBellmanTest extends munit.FunSuite:
     // Use tight tolerance to ensure residual gap < 1e-12 monotonicity check
     val robustLosses = Array(Array(1.0), Array(0.5))
     val gamma = 0.5
-    val bStar = SafetyBellman.computeBStar(robustLosses, gamma, tolerance = 1e-14)
+    val bStar = SafetyBellman.computeBStar(robustLosses, gamma, selfLoop, numProfilesOne, tolerance = 1e-14)
     val cert = SafetyBellman.Certificate(
       values = bStar.clone(),
       terminalStates = Set.empty
     )
-    assert(cert.satisfiesMonotonicity(robustLosses, gamma))
+    assert(cert.satisfiesMonotonicity(robustLosses, gamma, selfLoop, numProfilesOne))
 
   // ---- Def 65: Full certificate validation ----------------------------------
 
@@ -175,12 +213,12 @@ class SafetyBellmanTest extends munit.FunSuite:
     // B* is a valid certificate: non-negative, bounded, and T_safe(B*) = B*
     val robustLosses = Array(Array(1.0), Array(0.5))
     val gamma = 0.5
-    val bStar = SafetyBellman.computeBStar(robustLosses, gamma, tolerance = 1e-14)
+    val bStar = SafetyBellman.computeBStar(robustLosses, gamma, selfLoop, numProfilesOne, tolerance = 1e-14)
     val cert = SafetyBellman.Certificate(
       values = bStar.clone(),
       terminalStates = Set.empty
     )
-    assert(cert.isValid(robustLosses, gamma, maxBound = 100.0))
+    assert(cert.isValid(robustLosses, gamma, maxBound = 100.0, selfLoop, numProfilesOne))
 
   // ---- Def 66: Certificate dominance ----------------------------------------
 

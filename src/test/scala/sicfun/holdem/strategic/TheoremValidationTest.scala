@@ -3,6 +3,8 @@ package sicfun.holdem.strategic
 class TheoremValidationTest extends munit.FunSuite:
 
   private inline val Tol = 1e-12
+  private val selfLoop: (Int, Int, Int) => Int = (s, _, _) => s
+  private val numProfilesOne = 1
 
   // ========================================================================
   // Theorem 1: Unconditional totality of two-layer tempered update
@@ -414,10 +416,10 @@ class TheoremValidationTest extends munit.FunSuite:
     // 2-state toy: losses [2.0, 1.0] and [0.0] (terminal)
     val robustLosses = Array(Array(2.0, 1.0), Array(0.0))
     val gamma = 0.5
-    val bStar = SafetyBellman.computeBStar(robustLosses, gamma)
+    val bStar = SafetyBellman.computeBStar(robustLosses, gamma, selfLoop, numProfilesOne)
 
     // B* is a fixed point: T_safe(B*) ≈ B*
-    val tResult = SafetyBellman.tSafe(bStar, robustLosses, gamma)
+    val tResult = SafetyBellman.tSafe(bStar, robustLosses, gamma, selfLoop, numProfilesOne)
     for s <- bStar.indices do
       assertEqualsDouble(tResult(s), bStar(s), 1e-8)
 
@@ -432,10 +434,12 @@ class TheoremValidationTest extends munit.FunSuite:
   test("Theorem 9: certificate-safe action set restricts unsafe actions"):
     val robustLosses = Array(Array(1.0, 10.0), Array(0.5, 0.5))
     val gamma = 0.5
-    val bStar = SafetyBellman.computeBStar(robustLosses, gamma)
+    // Use tight tolerance so B* is close enough to the exact fixed point
+    // for the safe-action-set 1e-12 margin to cover any residual gap.
+    val bStar = SafetyBellman.computeBStar(robustLosses, gamma, selfLoop, numProfilesOne, tolerance = 1e-14)
 
     // At state 0, action 1 has loss=10.0 which exceeds B*(0)
-    val safeActions = SafetyBellman.safeActionSet(0, bStar, robustLosses, gamma)
+    val safeActions = SafetyBellman.safeActionSet(0, bStar, robustLosses, gamma, selfLoop, numProfilesOne)
     assert(safeActions.contains(0), "low-loss action should be safe")
     assert(!safeActions.contains(1), "high-loss action should be unsafe")
 
@@ -443,16 +447,16 @@ class TheoremValidationTest extends munit.FunSuite:
     // 3 states, terminal at state 2
     val robustLosses = Array(Array(1.0, 3.0), Array(0.5, 2.0), Array(0.0))
     val gamma = 0.5
-    val bStar = SafetyBellman.computeBStar(robustLosses, gamma, tolerance = 1e-14)
+    val bStar = SafetyBellman.computeBStar(robustLosses, gamma, selfLoop, numProfilesOne, tolerance = 1e-14)
 
     // B* is a valid certificate: exact fixed point → T_safe(B*) = B*
     val cert = SafetyBellman.Certificate(bStar.clone(), terminalStates = Set.empty)
-    assert(cert.isValid(robustLosses, gamma, maxBound = 100.0),
+    assert(cert.isValid(robustLosses, gamma, maxBound = 100.0, selfLoop, numProfilesOne),
       "Certificate from B* should be structurally valid")
 
     // Safe-feasible action at each state should have loss <= B*(s)
     val qValues0 = Array(5.0, 8.0) // action 1 has higher Q but may be unsafe
-    val safe0 = SafetyBellman.safeActionSet(0, bStar, robustLosses, gamma)
+    val safe0 = SafetyBellman.safeActionSet(0, bStar, robustLosses, gamma, selfLoop, numProfilesOne)
     val chosen0 = SafetyBellman.safeFeasibleAction(qValues0, safe0)
     // The chosen action's loss + gamma*maxB <= B*(s)
     val maxB = bStar.max
@@ -463,7 +467,7 @@ class TheoremValidationTest extends munit.FunSuite:
 
   test("Theorem 9: TotalVulnerability bounds deployment + adaptation"):
     val baseline = DeploymentBaseline(Ev(0.03), 50, "Theorem 9 test")
-    val bStar = SafetyBellman.computeBStar(Array(Array(1.0), Array(0.0)), 0.5)
+    val bStar = SafetyBellman.computeBStar(Array(Array(1.0), Array(0.0)), 0.5, selfLoop, numProfilesOne)
     val epsilonAdapt = Ev(SafetyBellman.requiredAdaptationBudget(bStar))
     val (total, fidelity) = TotalVulnerability.compute(baseline, epsilonAdapt)
 
