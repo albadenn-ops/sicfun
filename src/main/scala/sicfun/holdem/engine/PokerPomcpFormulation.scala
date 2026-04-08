@@ -207,8 +207,55 @@ object PokerPomcpFormulation:
       showdownEquityFn: (Int, Int) => Array[Double] = defaultShowdownEquity
   ): WPomcpRuntime.SearchInputV2 =
     val numActions = heroActions.size
+    val rivalParticles = buildRivalParticles(rivalBeliefs, particlesPerRival, heroBucket)
+    val model = buildFactoredModel(numActions, heroActions, gameState, showdownEquityFn)
+    WPomcpRuntime.SearchInputV2(
+      publicState = WPomcpRuntime.PublicState(gameState.street.ordinal, gameState.pot.toDouble),
+      rivalParticles = rivalParticles,
+      model = model,
+      heroBucket = heroBucket
+    )
 
-    val rivalParticles = rivalBeliefs.values.toIndexedSeq.map { belief =>
+  /** Build SearchInputV2 for profile-conditional evaluation.
+    *
+    * Solves the game assuming ALL rivals play according to a single StrategicClass
+    * (the one corresponding to profileId). This enables the 6-solve flow where we
+    * evaluate each pure-type rival profile separately.
+    *
+    * Implementation: rival particles are overridden so every particle has its type
+    * set to the profile's ordinal. The full rival policy table is retained (the solver
+    * only exercises the profile type's slice since all particles index into it).
+    *
+    * @param profileId which pure rival profile to assume for all rivals
+    */
+  def buildSearchInputForProfile(
+      gameState: GameState,
+      rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
+      heroActions: Vector[PokerAction],
+      heroBucket: Int,
+      particlesPerRival: Int = 100,
+      profileId: JointRivalProfileId
+  ): WPomcpRuntime.SearchInputV2 =
+    val numActions = heroActions.size
+    val profileTypeOrdinal = StrategicClass.fromOrdinal(profileId.ordinal).ordinal
+    val rivalParticles = buildProfileParticles(
+      rivalBeliefs, particlesPerRival, profileTypeOrdinal
+    )
+    val model = buildFactoredModel(numActions, heroActions, gameState, defaultShowdownEquity)
+    WPomcpRuntime.SearchInputV2(
+      publicState = WPomcpRuntime.PublicState(gameState.street.ordinal, gameState.pot.toDouble),
+      rivalParticles = rivalParticles,
+      model = model,
+      heroBucket = heroBucket
+    )
+
+  /** Build rival particles from belief posteriors (used by buildSearchInputV2). */
+  private def buildRivalParticles(
+      rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
+      particlesPerRival: Int,
+      heroBucket: Int
+  ): IndexedSeq[WPomcpRuntime.RivalParticles] =
+    rivalBeliefs.values.toIndexedSeq.map { belief =>
       val (types, weights) = belief.toParticles(particlesPerRival, heroBucket)
       /* Distribute rival private states (hand buckets) uniformly across [0, NumHandBuckets).
        * Each particle gets a bucket proportional to its index so that the showdown equity
@@ -221,7 +268,34 @@ object PokerPomcpFormulation:
       )
     }
 
-    val model = WPomcpRuntime.FactoredModel(
+  /** Build rival particles where all types are overridden to a single profile ordinal.
+    * Used by buildSearchInputForProfile for profile-conditional evaluation.
+    */
+  private def buildProfileParticles(
+      rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
+      particlesPerRival: Int,
+      profileTypeOrdinal: Int
+  ): IndexedSeq[WPomcpRuntime.RivalParticles] =
+    rivalBeliefs.values.toIndexedSeq.map { _ =>
+      val types = Array.fill(particlesPerRival)(profileTypeOrdinal)
+      val privStates = Array.tabulate(particlesPerRival)(i => i % NumHandBuckets)
+      val uniformWeight = 1.0 / particlesPerRival.toDouble
+      val weights = Array.fill(particlesPerRival)(uniformWeight)
+      WPomcpRuntime.RivalParticles(
+        rivalTypes = types,
+        privStates = privStates,
+        weights = weights
+      )
+    }
+
+  /** Build the FactoredModel shared by both buildSearchInputV2 and buildSearchInputForProfile. */
+  private def buildFactoredModel(
+      numActions: Int,
+      heroActions: Vector[PokerAction],
+      gameState: GameState,
+      showdownEquityFn: (Int, Int) => Array[Double]
+  ): WPomcpRuntime.FactoredModel =
+    WPomcpRuntime.FactoredModel(
       rivalPolicy = buildRivalPolicy(NumRivalTypes, NumPubStates, numActions),
       numRivalTypes = NumRivalTypes,
       numPubStates = NumPubStates,
@@ -231,11 +305,4 @@ object PokerPomcpFormulation:
       numRivalBuckets = NumHandBuckets,
       terminalFlags = buildTerminalFlags(NumPubStates, numActions),
       potBucketSize = DefaultPotBucketSize
-    )
-
-    WPomcpRuntime.SearchInputV2(
-      publicState = WPomcpRuntime.PublicState(gameState.street.ordinal, gameState.pot.toDouble),
-      rivalParticles = rivalParticles,
-      model = model,
-      heroBucket = heroBucket
     )

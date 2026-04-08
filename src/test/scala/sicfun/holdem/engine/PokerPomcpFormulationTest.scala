@@ -2,6 +2,9 @@ package sicfun.holdem.engine
 
 import munit.FunSuite
 import sicfun.holdem.types.*
+import sicfun.holdem.strategic.*
+import sicfun.holdem.strategic.solver.WPomcpRuntime
+
 class PokerPomcpFormulationTest extends FunSuite:
 
   test("buildRivalPolicy produces correct dimensions"):
@@ -64,3 +67,92 @@ class PokerPomcpFormulationTest extends FunSuite:
     val riverStart = 144
     // Non-fold action at river should be showdown (3)
     assertEquals(flags(riverStart * nAct + 1), 3) // call at river = showdown
+
+  // --- Profile-conditional evaluation tests ---
+
+  private def mkGameState: GameState = GameState(
+    street = Street.Flop,
+    board = Board.empty,
+    pot = 200.0,
+    toCall = 50.0,
+    position = Position.Button,
+    stackSize = 500.0,
+    betHistory = Vector.empty
+  )
+
+  private val testActions: Vector[PokerAction] =
+    Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(100.0))
+
+  private def mkRivalBeliefs: Map[PlayerId, StrategicRivalBelief] =
+    Map(
+      PlayerId("rival1") -> StrategicRivalBelief.uniform,
+      PlayerId("rival2") -> StrategicRivalBelief.uniform
+    )
+
+  test("buildSearchInputForProfile produces valid SearchInputV2 for each profile"):
+    val gs = mkGameState
+    val beliefs = mkRivalBeliefs
+    val heroBucket = 5
+    val particles = 50
+    val numActions = testActions.size
+
+    for cls <- StrategicClass.values do
+      val profileId = JointRivalProfileId(cls.ordinal)
+      val input = PokerPomcpFormulation.buildSearchInputForProfile(
+        gameState = gs,
+        rivalBeliefs = beliefs,
+        heroActions = testActions,
+        heroBucket = heroBucket,
+        particlesPerRival = particles,
+        profileId = profileId
+      )
+      // Correct number of rivals
+      assertEquals(input.rivalParticles.size, 2,
+        s"profile ${cls}: expected 2 rival particle sets")
+      // Correct heroBucket
+      assertEquals(input.heroBucket, heroBucket)
+      // Each rival's particles should all have the profile type
+      for (rp, ri) <- input.rivalParticles.zipWithIndex do
+        assertEquals(rp.particleCount, particles,
+          s"profile ${cls}, rival $ri: wrong particle count")
+        assert(rp.rivalTypes.forall(_ == cls.ordinal),
+          s"profile ${cls}, rival $ri: not all particles have type ${cls.ordinal}")
+        assert(rp.weights.forall(_ > 0.0),
+          s"profile ${cls}, rival $ri: all weights must be positive")
+        val weightSum = rp.weights.sum
+        assertEqualsDouble(weightSum, 1.0, 1e-10,
+          s"profile ${cls}, rival $ri: weights should sum to 1.0")
+      // Model dimensions
+      val m = input.model
+      assertEquals(m.numRivalTypes, PokerPomcpFormulation.NumRivalTypes)
+      assertEquals(m.numPubStates, PokerPomcpFormulation.NumPubStates)
+      assertEquals(m.rivalPolicy.length,
+        m.numRivalTypes * m.numPubStates * numActions)
+      assertEquals(m.terminalFlags.length,
+        m.numPubStates * numActions)
+      assertEquals(m.actionEffects.length, numActions * 3)
+      assertEquals(m.showdownEquity.length,
+        m.numHeroBuckets * m.numRivalBuckets)
+
+  test("buildSearchInputForProfile particles differ from buildSearchInputV2 for non-uniform beliefs"):
+    val gs = mkGameState
+    val beliefs = mkRivalBeliefs
+    val heroBucket = 5
+    val particles = 50
+
+    val baselineInput = PokerPomcpFormulation.buildSearchInputV2(
+      gs, beliefs, testActions, heroBucket, particles
+    )
+    // Under uniform beliefs, buildSearchInputV2 distributes particles across all 4 types.
+    // buildSearchInputForProfile forces all to one type.
+    val profileInput = PokerPomcpFormulation.buildSearchInputForProfile(
+      gs, beliefs, testActions, heroBucket, particles,
+      profileId = JointRivalProfileId(StrategicClass.Bluff.ordinal)
+    )
+    // Profile particles must be all-Bluff
+    for rp <- profileInput.rivalParticles do
+      assert(rp.rivalTypes.forall(_ == StrategicClass.Bluff.ordinal))
+    // Baseline under uniform prior should have mixed types (not all Bluff)
+    val baselineTypes = baselineInput.rivalParticles.head.rivalTypes
+    val allBluff = baselineTypes.forall(_ == StrategicClass.Bluff.ordinal)
+    assert(!allBluff, "baseline (uniform belief) should NOT have all particles as Bluff")
