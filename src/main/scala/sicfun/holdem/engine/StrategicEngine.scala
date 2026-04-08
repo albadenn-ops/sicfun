@@ -321,13 +321,18 @@ class StrategicEngine(val config: StrategicEngine.Config):
 
   /** PftDpw formal certification path.
     *
-    * 1. Build tabular model and particle belief from engine state.
+    * 1. Build mixed-belief model and particle belief from engine state.
     * 2. Solve with PftDpw native solver.
-    * 3. Build profile-conditioned models and compute robust losses.
-    * 4. Compute B* via SafetyBellman, belief-level safe action filtering.
-    * 5. Build TabularCertification bundle.
+    * 3. Build profile-conditioned models (one per StrategicClass) with
+    *    differentiated reward/obs tables.
+    * 4. Evaluate per-profile values, compute robust losses, B*, and
+    *    belief-level safe action filtering.
+    * 5. Build TabularCertification bundle with properly separated
+    *    baseline and robust fields.
+    * 6. Fail-closed: if certification invalid or budget out of tolerance,
+    *    fall back to baseline-only action.
     *
-    * Fail-closed: if the native solver is unavailable, returns BaselineFallback.
+    * Fail-closed on native error: Unavailable certification + baseline action.
     */
   private def decidePftDpw(
       gameState: GameState,
@@ -339,44 +344,94 @@ class StrategicEngine(val config: StrategicEngine.Config):
     val numProfiles = StrategicClass.values.length
 
     try
-      // 1. Build tabular model and belief
-      val model = PokerPftFormulation.buildTabularModel(
+      // 1. Build mixed-belief (baseline) model and belief
+      val baselineModel = PokerPftFormulation.buildTabularModel(
         gameState, session.rivalBeliefs, candidateActions,
-        heroBucket, config.actionPriors
+        heroBucket, config.actionPriors, profileClass = None
       )
       val belief = PokerPftFormulation.buildParticleBelief(
         session.rivalBeliefs, config.particlesPerRival
       )
 
-      // 2. Solve with PftDpw
+      // 2. Solve with PftDpw on the mixed model
       val pftConfig = PftDpwConfig(
         numSimulations = config.numSimulations,
         gamma = config.discount,
         maxDepth = config.maxDepth,
         seed = config.seed
       )
-      val pftResult = PftDpwRuntime.solve(model, belief, pftConfig)
+      val pftResult = PftDpwRuntime.solve(baselineModel, belief, pftConfig)
       if !pftResult.isSuccess then
         _lastBundle = Some(makeFallbackBundle(numActions, s"PftDpw solver status: ${pftResult.status}"))
         return candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
 
-      // 3. Build profile-conditioned models (same structure, varying reward semantics)
-      val profileModels = (0 until numProfiles).map { _ =>
+      // 3. Build profile-conditioned models (genuinely different per profile)
+      val profileModels = (0 until numProfiles).map { p =>
+        val cls = StrategicClass.fromOrdinal(p)
         PokerPftFormulation.buildTabularModel(
           gameState, session.rivalBeliefs, candidateActions,
-          heroBucket, config.actionPriors
+          heroBucket, config.actionPriors, profileClass = Some(cls)
         )
       }
+
+      // 4. Evaluate per-profile values under the reference policy
       val refPolicy: Int => Int = _ => pftResult.bestAction
+      val baselineValues = PerStateLossEvaluator.valueIteration(baselineModel, refPolicy, config.bellmanGamma)
+      val profileValueArrays = profileModels.map(m =>
+        PerStateLossEvaluator.valueIteration(m, refPolicy, config.bellmanGamma)
+      )
+
+      // Baseline action values: Q^π(s_root, a) under mixed model
+      val baselineActionValues = new Array[Double](numActions)
+      var a = 0
+      while a < numActions do
+        val reward = baselineModel.rewardTable(0 * baselineModel.numActions + a)
+        val successor = baselineModel.transitionTable(0 * baselineModel.numActions + a)
+        baselineActionValues(a) = reward + config.bellmanGamma * baselineValues(successor)
+        a += 1
+      val baselineValue = if baselineValues.nonEmpty then baselineValues(0) else 0.0
+
+      // Robust action lower bounds: min over profiles of Q^π_σ(s_root, a)
+      val robustActionLowerBounds = new Array[Double](numActions)
+      a = 0
+      while a < numActions do
+        var minQ = Double.PositiveInfinity
+        var p = 0
+        while p < numProfiles do
+          val model = profileModels(p)
+          val reward = model.rewardTable(0 * model.numActions + a)
+          val successor = model.transitionTable(0 * model.numActions + a)
+          val qsa = reward + config.bellmanGamma * profileValueArrays(p)(successor)
+          if qsa < minQ then minQ = qsa
+          p += 1
+        robustActionLowerBounds(a) = minQ
+        a += 1
+
+      // Per-profile results map with actual per-profile Q-values
+      val profileResultMap: Map[JointRivalProfileId, SolverResult] =
+        (0 until numProfiles).map { p =>
+          val model = profileModels(p)
+          val profileQ = new Array[Double](numActions)
+          var ai = 0
+          while ai < numActions do
+            val reward = model.rewardTable(0 * model.numActions + ai)
+            val successor = model.transitionTable(0 * model.numActions + ai)
+            profileQ(ai) = reward + config.bellmanGamma * profileValueArrays(p)(successor)
+            ai += 1
+          val bestA = profileQ.indices.maxBy(profileQ(_))
+          JointRivalProfileId(p) -> SolverResult(bestAction = bestA, actionValues = profileQ)
+        }.toMap
+
+      // 5. Compute robust losses from profile models
       val robustLosses = PerStateLossEvaluator.computeRobustLosses(
         profileModels, refPolicy, config.bellmanGamma
       )
 
-      // 4. Build transitions function from profile models
+      // Build transitions function from profile models
       val transitions: (Int, Int, Int) => Int = (s, a, p) =>
-        profileModels(p).transitionTable(s * model.numActions + a)
+        profileModels(p).transitionTable(s * baselineModel.numActions + a)
 
-      // 5. Compute B*
+      // Compute B*
       val bStar = SafetyBellman.computeBStar(
         robustLosses, config.bellmanGamma, transitions, numProfiles
       )
@@ -388,15 +443,16 @@ class StrategicEngine(val config: StrategicEngine.Config):
         transitions, numProfiles
       )
 
-      // 7. Select action: highest Q among safe, or best overall if safe is empty
-      val actionIdx = SafetyBellman.safeFeasibleAction(pftResult.qValues, safeActions)
-
-      // 8. Certificate validation
+      // 7. Certificate validation
       val requiredBudget = SafetyBellman.requiredAdaptationBudget(bStar)
       val totalTolerance = config.epsilonBase + config.exploitConfig.epsilonAdapt
       val withinTolerance = requiredBudget <= totalTolerance
-      val cert = SafetyBellman.Certificate(values = bStar.clone(), terminalStates = Set(model.numStates - 1))
-      val certificateValid = cert.isValid(robustLosses, config.bellmanGamma, requiredBudget + 1.0, transitions, numProfiles)
+      val cert = SafetyBellman.Certificate(
+        values = bStar.clone(), terminalStates = Set(baselineModel.numStates - 1)
+      )
+      val certificateValid = cert.isValid(
+        robustLosses, config.bellmanGamma, requiredBudget + 1.0, transitions, numProfiles
+      )
 
       val certification = CertificationResult.TabularCertification(
         bStar = bStar,
@@ -406,33 +462,44 @@ class StrategicEngine(val config: StrategicEngine.Config):
         withinTolerance = withinTolerance
       )
 
-      // 9. Build profileResults map from PftDpw Q-values
-      val profileResultMap: Map[JointRivalProfileId, SolverResult] =
-        (0 until numProfiles).map { p =>
-          JointRivalProfileId(p) -> SolverResult(
-            bestAction = pftResult.bestAction,
-            actionValues = pftResult.qValues.clone()
-          )
-        }.toMap
+      // Adversarial root gap: baseline value minus worst-case profile best value
+      var minProfileBestValue = Double.PositiveInfinity
+      var p = 0
+      while p < numProfiles do
+        val profBest = profileValueArrays(p)(0)
+        if profBest < minProfileBestValue then minProfileBestValue = profBest
+        p += 1
+      val adversarialRootGap = baselineValue - minProfileBestValue
 
+      // 8. Fail-closed action selection
+      val chosenActionIdx = if certificateValid && withinTolerance then
+        // Certified: use safe-feasible action (highest Q among safe set)
+        SafetyBellman.safeFeasibleAction(pftResult.qValues, safeActions)
+      else
+        // Fail-closed: fall back to baseline-only action (best under mixed model)
+        baselineActionValues.indices.maxBy(baselineActionValues(_))
+
+      // 9. Build bundle
       val bundle = DecisionEvaluationBundle(
         profileResults = profileResultMap,
-        robustActionLowerBounds = pftResult.qValues.clone(),
-        baselineActionValues = pftResult.qValues.clone(),
-        baselineValue = if pftResult.qValues.nonEmpty then pftResult.qValues.max else 0.0,
-        adversarialRootGap = None,
+        robustActionLowerBounds = robustActionLowerBounds,
+        baselineActionValues = baselineActionValues,
+        baselineValue = baselineValue,
+        adversarialRootGap = Some(Ev(adversarialRootGap)),
         pointwiseExploitability = None,
         deploymentExploitability = None,
         certification = certification,
         chainWorldValues = Map.empty,
         notes = Vector(
-          s"PftDpw formal path: B*_max=${requiredBudget}, safeActions=${safeActions.mkString(",")}"
-        ) ++ (if withinTolerance then Vector.empty else Vector("Budget exceeds tolerance"))
+          s"PftDpw formal path: B*_max=$requiredBudget, safeActions=${safeActions.mkString(",")}"
+        ) ++ (if !certificateValid then Vector("Certificate invalid — fail-closed to baseline")
+              else if !withinTolerance then Vector("Budget exceeds tolerance — fail-closed to baseline")
+              else Vector.empty)
       )
       _lastBundle = Some(bundle)
 
-      if actionIdx >= 0 && actionIdx < candidateActions.size then
-        candidateActions(actionIdx)
+      if chosenActionIdx >= 0 && chosenActionIdx < candidateActions.size then
+        candidateActions(chosenActionIdx)
       else
         candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
 
