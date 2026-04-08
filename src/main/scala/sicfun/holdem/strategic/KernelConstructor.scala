@@ -209,6 +209,48 @@ object KernelConstructor:
             // Action + showdown
             composeFullKernel(actionKernel, showdownKernel)
 
+  /** Compose a full kernel for a specific [[ChainWorld]] using [[ActionKernelFull]] kernels.
+    *
+    * Production form of [[composeFullKernelForWorld]] that threads [[PublicState]] through
+    * the action kernels. Same dispatch logic:
+    *   - (Blind, Off/On)             -> blind full kernel (identity)
+    *   - (Ref/Attrib, Off)           -> action kernel only (showdown gated off)
+    *   - (Ref/Attrib, On)            -> action + showdown
+    *   - (Design, Off)               -> design kernel only (showdown gated off)
+    *   - (Design, On)                -> design kernel + showdown
+    *
+    * @param actionKernelFull the full-form action kernel for Ref/Attrib channels
+    * @param designKernelFull the full-form design action kernel (strips sizing/timing)
+    * @param showdownKernel the showdown kernel for On worlds
+    * @param world the chain world determining kernel variant and showdown gating
+    */
+  def composeFullKernelForWorldFull[M <: RivalBeliefState](
+      actionKernelFull: ActionKernelFull[M],
+      designKernelFull: ActionKernelFull[M],
+      showdownKernel: ShowdownKernel[M]
+  )(world: ChainWorld): FullKernel[M] =
+    world.channel match
+      case LearningChannel.Blind =>
+        composeBlindFullKernel[M]()
+
+      case LearningChannel.Design =>
+        world.showdown match
+          case ShowdownMode.Off =>
+            new FullKernel[M]:
+              def apply(state: M, signal: TotalSignal, publicState: PublicState): M =
+                designKernelFull.apply(state, signal.actionSignal, publicState)
+          case ShowdownMode.On =>
+            composeFullKernelFromFull(designKernelFull, showdownKernel)
+
+      case LearningChannel.Ref | LearningChannel.Attrib =>
+        world.showdown match
+          case ShowdownMode.Off =>
+            new FullKernel[M]:
+              def apply(state: M, signal: TotalSignal, publicState: PublicState): M =
+                actionKernelFull.apply(state, signal.actionSignal, publicState)
+          case ShowdownMode.On =>
+            composeFullKernelFromFull(actionKernelFull, showdownKernel)
+
 /** Action kernel with explicit public state (production form of Def 17). */
 trait ActionKernelFull[M]:
   def apply(state: M, signal: ActionSignal, publicState: PublicState): M
