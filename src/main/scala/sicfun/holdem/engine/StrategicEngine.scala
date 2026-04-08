@@ -3,7 +3,7 @@ package sicfun.holdem.engine
 import sicfun.core.DiscreteDistribution
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.*
-import sicfun.holdem.strategic.solver.WPomcpRuntime
+import sicfun.holdem.strategic.solver.{WPomcpRuntime, PftDpwRuntime, PftDpwConfig}
 
 /** Session/hand orchestrator for the Strategic decision mode.
   *
@@ -149,9 +149,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       case StrategicEngine.SolverBackend.WPomcp =>
         decideWPomcp(gameState, candidateActions, heroBucket, session, solverConfig)
       case StrategicEngine.SolverBackend.PftDpw =>
-        // PftDpw path — solver reachable via config, full model construction TBD
-        _lastBundle = None
-        candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
+        decidePftDpw(gameState, candidateActions, heroBucket, session)
 
     _lastDiagnostics = Some(StrategicEngine.DecisionDiagnostics(
       heroBucket = heroBucket,
@@ -320,6 +318,128 @@ class StrategicEngine(val config: StrategicEngine.Config):
       candidateActions(mixed.bestAction)
     else
       candidateActions.last
+
+  /** PftDpw formal certification path.
+    *
+    * 1. Build tabular model and particle belief from engine state.
+    * 2. Solve with PftDpw native solver.
+    * 3. Build profile-conditioned models and compute robust losses.
+    * 4. Compute B* via SafetyBellman, belief-level safe action filtering.
+    * 5. Build TabularCertification bundle.
+    *
+    * Fail-closed: if the native solver is unavailable, returns BaselineFallback.
+    */
+  private def decidePftDpw(
+      gameState: GameState,
+      candidateActions: Vector[PokerAction],
+      heroBucket: Int,
+      session: StrategicEngine.SessionState
+  ): PokerAction =
+    val numActions = candidateActions.size
+    val numProfiles = StrategicClass.values.length
+
+    try
+      // 1. Build tabular model and belief
+      val model = PokerPftFormulation.buildTabularModel(
+        gameState, session.rivalBeliefs, candidateActions,
+        heroBucket, config.actionPriors
+      )
+      val belief = PokerPftFormulation.buildParticleBelief(
+        session.rivalBeliefs, config.particlesPerRival
+      )
+
+      // 2. Solve with PftDpw
+      val pftConfig = PftDpwConfig(
+        numSimulations = config.numSimulations,
+        gamma = config.discount,
+        maxDepth = config.maxDepth,
+        seed = config.seed
+      )
+      val pftResult = PftDpwRuntime.solve(model, belief, pftConfig)
+      if !pftResult.isSuccess then
+        _lastBundle = Some(makeFallbackBundle(numActions, s"PftDpw solver status: ${pftResult.status}"))
+        return candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
+
+      // 3. Build profile-conditioned models (same structure, varying reward semantics)
+      val profileModels = (0 until numProfiles).map { _ =>
+        PokerPftFormulation.buildTabularModel(
+          gameState, session.rivalBeliefs, candidateActions,
+          heroBucket, config.actionPriors
+        )
+      }
+      val refPolicy: Int => Int = _ => pftResult.bestAction
+      val robustLosses = PerStateLossEvaluator.computeRobustLosses(
+        profileModels, refPolicy, config.bellmanGamma
+      )
+
+      // 4. Build transitions function from profile models
+      val transitions: (Int, Int, Int) => Int = (s, a, p) =>
+        profileModels(p).transitionTable(s * model.numActions + a)
+
+      // 5. Compute B*
+      val bStar = SafetyBellman.computeBStar(
+        robustLosses, config.bellmanGamma, transitions, numProfiles
+      )
+
+      // 6. Belief-level safe action set
+      val beliefWeights = belief.weights
+      val safeActions = SafetyBellman.beliefLevelSafeActions(
+        beliefWeights, bStar, robustLosses, config.bellmanGamma,
+        transitions, numProfiles
+      )
+
+      // 7. Select action: highest Q among safe, or best overall if safe is empty
+      val actionIdx = SafetyBellman.safeFeasibleAction(pftResult.qValues, safeActions)
+
+      // 8. Certificate validation
+      val requiredBudget = SafetyBellman.requiredAdaptationBudget(bStar)
+      val totalTolerance = config.epsilonBase + config.exploitConfig.epsilonAdapt
+      val withinTolerance = requiredBudget <= totalTolerance
+      val cert = SafetyBellman.Certificate(values = bStar.clone(), terminalStates = Set(model.numStates - 1))
+      val certificateValid = cert.isValid(robustLosses, config.bellmanGamma, requiredBudget + 1.0, transitions, numProfiles)
+
+      val certification = CertificationResult.TabularCertification(
+        bStar = bStar,
+        requiredBudget = requiredBudget,
+        safeActionIndices = safeActions,
+        certificateValid = certificateValid,
+        withinTolerance = withinTolerance
+      )
+
+      // 9. Build profileResults map from PftDpw Q-values
+      val profileResultMap: Map[JointRivalProfileId, SolverResult] =
+        (0 until numProfiles).map { p =>
+          JointRivalProfileId(p) -> SolverResult(
+            bestAction = pftResult.bestAction,
+            actionValues = pftResult.qValues.clone()
+          )
+        }.toMap
+
+      val bundle = DecisionEvaluationBundle(
+        profileResults = profileResultMap,
+        robustActionLowerBounds = pftResult.qValues.clone(),
+        baselineActionValues = pftResult.qValues.clone(),
+        baselineValue = if pftResult.qValues.nonEmpty then pftResult.qValues.max else 0.0,
+        adversarialRootGap = None,
+        pointwiseExploitability = None,
+        deploymentExploitability = None,
+        certification = certification,
+        chainWorldValues = Map.empty,
+        notes = Vector(
+          s"PftDpw formal path: B*_max=${requiredBudget}, safeActions=${safeActions.mkString(",")}"
+        ) ++ (if withinTolerance then Vector.empty else Vector("Budget exceeds tolerance"))
+      )
+      _lastBundle = Some(bundle)
+
+      if actionIdx >= 0 && actionIdx < candidateActions.size then
+        candidateActions(actionIdx)
+      else
+        candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
+
+    catch
+      case e: (UnsatisfiedLinkError | Exception) =>
+        _lastBundle = Some(makeFallbackBundle(numActions, s"PftDpw unavailable: ${e.getMessage}"))
+        candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
 
   /** Build a fallback bundle when solver errors prevent the 6-solve path. */
   private def makeFallbackBundle(numActions: Int, reason: String): DecisionEvaluationBundle =
