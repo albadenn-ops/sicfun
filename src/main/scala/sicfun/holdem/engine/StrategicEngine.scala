@@ -26,8 +26,10 @@ class StrategicEngine(val config: StrategicEngine.Config):
   private var _lastBoard: Option[Board] = None
   private var _lastStreet: Option[Street] = None
   private var _lastDiagnostics: Option[StrategicEngine.DecisionDiagnostics] = None
+  private var _lastBundle: Option[DecisionEvaluationBundle] = None
 
   def lastDecisionDiagnostics: Option[StrategicEngine.DecisionDiagnostics] = _lastDiagnostics
+  def lastDecisionBundle: Option[DecisionEvaluationBundle] = _lastBundle
 
   def sessionState: StrategicEngine.SessionState =
     require(_sessionState != null, "Session not initialized — call initSession first")
@@ -111,29 +113,23 @@ class StrategicEngine(val config: StrategicEngine.Config):
       epsilonNE = 0.01
     )
 
-    // Optional: Bellman-safe certificate clamp (Def 64)
-    if config.useBellmanSafety then
-      val updatedExploit = result.updatedExploitation.map { case (rivalId, exploitState) =>
-        val budget = SafetyBellman.requiredAdaptationBudget(Array(exploitState.beta))
-        val clamped = ExploitationInterpolation.clampForCertificate(
-          exploitState.beta, budget, config.exploitConfig.adaptationTolerance)
-        rivalId -> ExploitationState(beta = clamped)
-      }
-      _sessionState = StrategicEngine.SessionState(
-        rivalBeliefs = result.updatedRivals,
-        exploitationStates = updatedExploit,
-        rivalSeats = session.rivalSeats
-      )
-    else
-      _sessionState = StrategicEngine.SessionState(
-        rivalBeliefs = result.updatedRivals,
-        exploitationStates = result.updatedExploitation,
-        rivalSeats = session.rivalSeats
-      )
+    _sessionState = StrategicEngine.SessionState(
+      rivalBeliefs = result.updatedRivals,
+      exploitationStates = result.updatedExploitation,
+      rivalSeats = session.rivalSeats
+    )
 
   /** Choose an action using the configured solver backend.
     *
-    * Falls back to the last candidate action if the native solver is unavailable.
+    * WPomcp path performs 6 solves:
+    *   1. Mixed-belief solve (action selection)
+    *   2. Baseline solve (beta=0 reference, profile 0)
+    *   3-6. Four pure-type profile solves (profiles 0-3)
+    *
+    * Builds a DecisionEvaluationBundle with LocalRobustScreening certification.
+    * If the budget exceeds tolerance, clamps beta via AdaptationSafety.betaBar.
+    *
+    * Falls back to BaselineFallback if any solve returns Left.
     */
   def decide(gameState: GameState, candidateActions: Vector[PokerAction]): PokerAction =
     require(_sessionState != null, "Session not initialized")
@@ -141,40 +137,204 @@ class StrategicEngine(val config: StrategicEngine.Config):
     require(candidateActions.nonEmpty, "No candidate actions")
 
     val heroBucket = estimateHeroBucket(gameState)
+    val session = _sessionState.nn
+    val solverConfig = WPomcpRuntime.Config(
+      numSimulations = config.numSimulations,
+      discount = config.discount,
+      maxDepth = config.maxDepth,
+      seed = config.seed
+    )
 
     val action = config.solverBackend match
       case StrategicEngine.SolverBackend.WPomcp =>
-        val searchInput = PokerPomcpFormulation.buildSearchInputV2(
-          gameState = gameState,
-          rivalBeliefs = _sessionState.nn.rivalBeliefs,
-          heroActions = candidateActions,
-          heroBucket = heroBucket,
-          particlesPerRival = config.particlesPerRival
-        )
-        WPomcpRuntime.solveV2(searchInput, WPomcpRuntime.Config(
-          numSimulations = config.numSimulations,
-          discount = config.discount,
-          maxDepth = config.maxDepth,
-          seed = config.seed
-        )) match
-          case Right(result) =>
-            if result.bestAction >= 0 && result.bestAction < candidateActions.size then
-              candidateActions(result.bestAction)
-            else
-              candidateActions.last
-          case Left(_) =>
-            candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
+        decideWPomcp(gameState, candidateActions, heroBucket, session, solverConfig)
       case StrategicEngine.SolverBackend.PftDpw =>
         // PftDpw path — solver reachable via config, full model construction TBD
+        _lastBundle = None
         candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
 
     _lastDiagnostics = Some(StrategicEngine.DecisionDiagnostics(
       heroBucket = heroBucket,
       solverBackend = config.solverBackend,
-      exploitationBetas = _sessionState.nn.exploitationStates.map((k, v) => k -> v.beta)
+      exploitationBetas = session.exploitationStates.map((k, v) => k -> v.beta)
     ))
 
     action
+
+  /** WPomcp 6-solve decision path.
+    *
+    * Returns the chosen action and populates _lastBundle with the
+    * DecisionEvaluationBundle including LocalRobustScreening certification.
+    */
+  private def decideWPomcp(
+      gameState: GameState,
+      candidateActions: Vector[PokerAction],
+      heroBucket: Int,
+      session: StrategicEngine.SessionState,
+      solverConfig: WPomcpRuntime.Config
+  ): PokerAction =
+    val numActions = candidateActions.size
+    val numProfiles = StrategicClass.values.length  // 4
+
+    // --- Solve 1: Mixed-belief solve (action selection) ---
+    val mixedInput = PokerPomcpFormulation.buildSearchInputV2(
+      gameState = gameState,
+      rivalBeliefs = session.rivalBeliefs,
+      heroActions = candidateActions,
+      heroBucket = heroBucket,
+      particlesPerRival = config.particlesPerRival
+    )
+    val mixedResult = WPomcpRuntime.solveV2(mixedInput, solverConfig)
+
+    // --- Solve 2: Baseline solve (profile 0, beta=0 reference) ---
+    val baselineInput = PokerPomcpFormulation.buildSearchInputForProfile(
+      gameState = gameState,
+      rivalBeliefs = session.rivalBeliefs,
+      heroActions = candidateActions,
+      heroBucket = heroBucket,
+      particlesPerRival = config.particlesPerRival,
+      profileId = JointRivalProfileId(0)
+    )
+    val baselineResult = WPomcpRuntime.solveV2(baselineInput, solverConfig)
+
+    // --- Solves 3-6: Four pure-type profile solves (profiles 0-3) ---
+    val profileResults: Array[Either[String, WPomcpRuntime.SearchResult]] =
+      Array.tabulate(numProfiles) { p =>
+        val profileInput = PokerPomcpFormulation.buildSearchInputForProfile(
+          gameState = gameState,
+          rivalBeliefs = session.rivalBeliefs,
+          heroActions = candidateActions,
+          heroBucket = heroBucket,
+          particlesPerRival = config.particlesPerRival,
+          profileId = JointRivalProfileId(p)
+        )
+        WPomcpRuntime.solveV2(profileInput, solverConfig)
+      }
+
+    // --- Handle errors: if any solve returns Left, fall back ---
+    val allSolves = mixedResult +: baselineResult +: profileResults.toSeq
+    val anyFailed = allSolves.exists(_.isLeft)
+    if anyFailed then
+      val reason = allSolves.collectFirst { case Left(msg) => msg }.getOrElse("unknown")
+      _lastBundle = Some(makeFallbackBundle(numActions, reason))
+      return candidateActions.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
+
+    // All solves succeeded -- extract results
+    val mixed = mixedResult.toOption.get
+    val baseline = baselineResult.toOption.get
+    val profiles = profileResults.map(_.toOption.get)
+
+    // --- Build profileResults map ---
+    val profileResultMap: Map[JointRivalProfileId, SolverResult] =
+      (0 until numProfiles).map { p =>
+        JointRivalProfileId(p) -> SolverResult(
+          bestAction = profiles(p).bestAction,
+          actionValues = profiles(p).actionValues.clone()
+        )
+      }.toMap
+
+    // --- Compute robustActionLowerBounds[a] = min over profiles of profileQ[a] ---
+    val robustActionLowerBounds = new Array[Double](numActions)
+    var a = 0
+    while a < numActions do
+      var minQ = Double.PositiveInfinity
+      var p = 0
+      while p < numProfiles do
+        val q = profiles(p).actionValues(a)
+        if q < minQ then minQ = q
+        p += 1
+      robustActionLowerBounds(a) = minQ
+      a += 1
+
+    // --- baselineActionValues and baselineValue ---
+    val baselineActionValues = baseline.actionValues.clone()
+    val baselineValue = baseline.rootValue
+
+    // --- adversarialRootGap = baselineValue - min_profile(max_a profileQ[a]) ---
+    var minProfileBestValue = Double.PositiveInfinity
+    var p = 0
+    while p < numProfiles do
+      val profileBestValue = profiles(p).rootValue
+      if profileBestValue < minProfileBestValue then minProfileBestValue = profileBestValue
+      p += 1
+    val adversarialRootGap = baselineValue - minProfileBestValue
+
+    // --- rootLosses[a] = baselineValue - robustActionLowerBounds[a] ---
+    val rootLosses = new Array[Double](numActions)
+    a = 0
+    while a < numActions do
+      rootLosses(a) = math.max(0.0, baselineValue - robustActionLowerBounds(a))
+      a += 1
+
+    // --- budgetEstimate = max(rootLosses) / (1 - gamma) ---
+    val maxRootLoss = if rootLosses.isEmpty then 0.0 else rootLosses.max
+    val budgetEstimate = if config.bellmanGamma < 1.0 then
+      maxRootLoss / (1.0 - config.bellmanGamma)
+    else
+      maxRootLoss * 100.0  // degenerate gamma=1 guard
+
+    // --- withinTolerance = budgetEstimate <= epsilonBase + epsilonAdapt ---
+    val totalTolerance = config.epsilonBase + config.exploitConfig.epsilonAdapt
+    val withinTolerance = budgetEstimate <= totalTolerance
+
+    // --- Build certification and bundle ---
+    val certification = CertificationResult.LocalRobustScreening(
+      rootLosses = rootLosses,
+      budgetEstimate = budgetEstimate,
+      withinTolerance = withinTolerance
+    )
+
+    val bundle = DecisionEvaluationBundle(
+      profileResults = profileResultMap,
+      robustActionLowerBounds = robustActionLowerBounds,
+      baselineActionValues = baselineActionValues,
+      baselineValue = baselineValue,
+      adversarialRootGap = Some(Ev(adversarialRootGap)),
+      pointwiseExploitability = None,
+      deploymentExploitability = None,
+      certification = certification,
+      chainWorldValues = Map.empty,
+      notes = if withinTolerance then Vector("LocalRobustScreening: within tolerance")
+              else Vector("LocalRobustScreening: budget exceeds tolerance, beta clamped")
+    )
+    _lastBundle = Some(bundle)
+
+    // --- If !withinTolerance: clamp beta via AdaptationSafety.betaBar ---
+    if !withinTolerance then
+      val updatedExploit = session.exploitationStates.map { case (rivalId, exploitState) =>
+        val clampedBeta = AdaptationSafety.betaBar(
+          epsilonAdapt = config.exploitConfig.epsilonAdapt,
+          epsilonNE = config.epsilonBase,
+          exploitabilityAtBeta = beta => computeExploitabilityEstimate(beta)
+        )
+        rivalId -> ExploitationState(beta = AdaptationSafety.clampBeta(exploitState.beta, clampedBeta))
+      }
+      _sessionState = StrategicEngine.SessionState(
+        rivalBeliefs = session.rivalBeliefs,
+        exploitationStates = updatedExploit,
+        rivalSeats = session.rivalSeats
+      )
+
+    // --- Action selection from mixed-belief solve ---
+    if mixed.bestAction >= 0 && mixed.bestAction < candidateActions.size then
+      candidateActions(mixed.bestAction)
+    else
+      candidateActions.last
+
+  /** Build a fallback bundle when solver errors prevent the 6-solve path. */
+  private def makeFallbackBundle(numActions: Int, reason: String): DecisionEvaluationBundle =
+    DecisionEvaluationBundle(
+      profileResults = Map.empty,
+      robustActionLowerBounds = Array.fill(numActions)(0.0),
+      baselineActionValues = Array.fill(numActions)(0.0),
+      baselineValue = 0.0,
+      adversarialRootGap = None,
+      pointwiseExploitability = None,
+      deploymentExploitability = None,
+      certification = CertificationResult.Unavailable(reason),
+      chainWorldValues = Map.empty,
+      notes = Vector(s"BaselineFallback: $reason")
+    )
 
   /** End the current hand. If showdown data is provided, applies ShowdownKernel
     * to update rival beliefs based on revealed hands.
@@ -228,7 +388,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
         val strength = HandStrengthEstimator.fastGtoStrength(cards, gameState.board, gameState.street)
         math.min(9, math.max(0, (strength * 10.0).toInt))
       case None =>
-        5 // Neutral middle bucket — no card info available
+        config.defaultHeroBucket // Neutral middle bucket — no card info available
 
   /** Bridge GameState -> strategic PublicState for the kernel pipeline. */
   private def bridgePublicState(gameState: GameState): PublicState =
@@ -379,20 +539,24 @@ object StrategicEngine:
       solverBackend: SolverBackend = SolverBackend.WPomcp,
       exploitConfig: ExploitationConfig = ExploitationConfig(
         initialBeta = 1.0,
-        retreatRate = 0.1,
-        adaptationTolerance = 0.05
+        cpRetreatRate = 0.1,
+        epsilonAdapt = 0.05
       ),
       temperedConfig: TemperedLikelihood.TemperedConfig = TemperedLikelihood.TemperedConfig.twoLayer(0.7, 0.01),
       actionPriors: Map[(StrategicClass, sicfun.holdem.types.PokerAction.Category), Double] = defaultActionPriors,
       detector: DetectionPredicate = FrequencyAnomalyDetection(window = 20, threshold = 0.6),
-      /** Enable Bellman-safe certificate clamp on exploitation beta (Def 64). */
-      useBellmanSafety: Boolean = false,
       /** Discount factor for Bellman safety operator (Def 60). */
       bellmanGamma: Double = 0.95,
-      /** Enable robust Q-value evaluation via WassersteinDroRuntime (Def 34). */
-      useRobustQValues: Boolean = false,
       /** Wasserstein ambiguity radius rho for robust Q-values (Def 33). */
-      ambiguityRadius: Double = 0.1
+      ambiguityRadius: Double = 0.1,
+      /** Deployment baseline exploitability epsilon_base (A10). */
+      epsilonBase: Double = 0.05,
+      /** Deployment belief set size |B_dep| for baseline evaluation. */
+      deploymentSetSize: Int = 50,
+      /** Default hero hand-strength bucket when no hole cards are available.
+        * 5 = neutral middle bucket in [0, 9] range. Pending calibration.
+        */
+      defaultHeroBucket: Int = 5
   )
 
   /** Rival seat information provided at session init. */
