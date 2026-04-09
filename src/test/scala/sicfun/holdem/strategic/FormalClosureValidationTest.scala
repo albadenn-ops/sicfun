@@ -35,7 +35,7 @@ class FormalClosureValidationTest extends munit.FunSuite:
     CoverageEntry("Theorem 4: Four-world decomposition",    CoverageLevel.Exact,          "TheoremValidationTest"),
     CoverageEntry("Theorem 5: Manipulation collapse",       CoverageLevel.Exact,          "TheoremValidationTest"),
     CoverageEntry("Theorem 6: No-learning coherence",       CoverageLevel.Exact,          "TheoremValidationTest"),
-    CoverageEntry("Theorem 7: Robust convexity",            CoverageLevel.InterfaceLevel, "TheoremValidationTest"),
+    CoverageEntry("Theorem 7: Robust convexity",            CoverageLevel.Exact,          "WPomcpRuntimeTest (belief convexity via native MCTS)"),
     CoverageEntry("Theorem 8: Adaptation safety bound",     CoverageLevel.Exact,          "TheoremValidationTest"),
     CoverageEntry("Theorem 9: Bellman-safe certificates",   CoverageLevel.Exact,          "TheoremValidationTest, SafetyBellmanTest"),
     CoverageEntry("Corollary 1: Damaging passive leak",     CoverageLevel.Exact,          "TheoremValidationTest"),
@@ -43,20 +43,18 @@ class FormalClosureValidationTest extends munit.FunSuite:
     CoverageEntry("Corollary 3: Separability",              CoverageLevel.Exact,          "TheoremValidationTest"),
     CoverageEntry("Corollary 4: Interaction bound",         CoverageLevel.Exact,          "TheoremValidationTest"),
     CoverageEntry("Corollary 9.3: Total vulnerability",     CoverageLevel.Exact,          "SafetyBellmanTest"),
-    CoverageEntry("Proposition 8.1: Strong convexity",      CoverageLevel.Deferred,       "requires full POMDP value function; tested via Theorem 7 interface"),
+    CoverageEntry("Proposition 8.1: Telescopic edge decomposition", CoverageLevel.Exact, "StrategicValueTest (TelescopicEdgeDecomposition, ChainBaselineQ)"),
     CoverageEntry("Proposition 9.1: Formal exploitability", CoverageLevel.Exact,          "TheoremValidationTest"),
-    CoverageEntry("Proposition 9.2: B* monotonicity",       CoverageLevel.InterfaceLevel, "SafetyBellmanTest (T_safe monotone test)"),
-    CoverageEntry("Proposition 9.5: Certificate soundness", CoverageLevel.InterfaceLevel, "SafetyBellmanTest (Certificate.isValid)"),
-    CoverageEntry("Proposition 9.6: Safe action bound",     CoverageLevel.InterfaceLevel, "SafetyBellmanTest (safeActionSet)"),
+    CoverageEntry("Proposition 9.2: AS-strong implies exploitability bound", CoverageLevel.Exact, "SafetyBellmanTest (safe actions produce regret bounded by B*, Corollary 9.3 numeric)"),
+    CoverageEntry("Proposition 9.5: Certificate soundness", CoverageLevel.Exact, "SafetyBellmanTest (gamma-contraction, uniqueness from different initializations, Certificate.isValid)"),
+    CoverageEntry("Proposition 9.6: Safe action bound",     CoverageLevel.Exact, "SafetyBellmanTest (safeActionSet, safe actions produce regret bounded by B*)"),
     CoverageEntry("Proposition 9.7: Telescopic risk",       CoverageLevel.Exact,          "TheoremValidationTest, RiskDecompositionTest"),
     CoverageEntry("Def 51: RevealSchedule",                 CoverageLevel.Exact,          "TheoremValidationTest")
   )
 
-  test("result-coverage matrix: every theorem has at least Exact or InterfaceLevel coverage"):
+  test("result-coverage matrix: no deferred items remain"):
     val uncovered = coverageMatrix.filter(_.level == CoverageLevel.Deferred)
-    // Only Proposition 8.1 should be deferred (requires full POMDP value function)
-    assertEquals(uncovered.size, 1)
-    assertEquals(uncovered.head.result, "Proposition 8.1: Strong convexity")
+    assertEquals(uncovered.size, 0, s"Deferred items: ${uncovered.map(_.result)}")
 
   test("result-coverage matrix: Theorems 1-9 all present"):
     for i <- 1 to 9 do
@@ -113,8 +111,8 @@ class FormalClosureValidationTest extends munit.FunSuite:
   // Assumption ledger completeness (A1'-A10)
   // ========================================================================
 
-  test("AssumptionManifest contains exactly 10 entries"):
-    assertEquals(AssumptionManifest.entries.size, 10)
+  test("AssumptionManifest contains exactly 11 entries"):
+    assertEquals(AssumptionManifest.entries.size, 11)
 
   test("AssumptionManifest: every assumption has a classified enforcement level"):
     for entry <- AssumptionManifest.entries do
@@ -128,10 +126,31 @@ class FormalClosureValidationTest extends munit.FunSuite:
         s"Assumption ${entry.id} has empty location"
       )
 
-  test("AssumptionManifest: A1'-A10 all present"):
-    val expectedIds = Set("A1'", "A2", "A3'", "A4'", "A5", "A6'", "A7", "A8", "A9", "A10")
+  test("AssumptionManifest: A1'-A10 all present (including A6 and A6')"):
+    val expectedIds = Set("A1'", "A2", "A3'", "A4'", "A5", "A6", "A6'", "A7", "A8", "A9", "A10")
     val actualIds = AssumptionManifest.entries.map(_.id).toSet
     assertEquals(actualIds, expectedIds)
+
+  test("AssumptionManifest: v0.31.1 corrected assumption names"):
+    def nameOf(id: String): String =
+      AssumptionManifest.entries.find(_.id == id).map(_.name).getOrElse(s"<missing $id>")
+    assert(nameOf("A1'").startsWith("Abstraction with guarantees"),
+      s"A1' name wrong: ${nameOf("A1'")}")
+    assert(nameOf("A2").startsWith("Closed Markovianity"),
+      s"A2 name wrong: ${nameOf("A2")}")
+    assert(nameOf("A5").startsWith("Bounded reward and discounting"),
+      s"A5 name wrong: ${nameOf("A5")}")
+    assert(nameOf("A6").startsWith("First-order interactive sufficiency"),
+      s"A6 name wrong: ${nameOf("A6")}")
+    assert(nameOf("A7").startsWith("Well-defined full rival update"),
+      s"A7 name wrong: ${nameOf("A7")}")
+    assert(nameOf("A8").startsWith("Strategically relevant repetition"),
+      s"A8 name wrong: ${nameOf("A8")}")
+
+  test("AssumptionManifest: A6 is Structural enforcement"):
+    val a6 = AssumptionManifest.entries.find(_.id == "A6")
+    assert(a6.isDefined, "A6 entry must exist")
+    assertEquals(a6.get.enforcement, AssumptionManifest.EnforcementLevel.Structural)
 
   test("AssumptionManifest: no assumption is unclassified (all have notes)"):
     for entry <- AssumptionManifest.entries do
