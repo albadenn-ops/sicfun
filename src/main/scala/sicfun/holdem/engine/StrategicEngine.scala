@@ -119,6 +119,28 @@ class StrategicEngine(val config: StrategicEngine.Config):
       rivalSeats = session.rivalSeats
     )
 
+    // Advisory Bellman clamp from last evaluation bundle (design doc §6).
+    // Uses cached budget estimate as an advisory bound — NOT formal B*.
+    _lastBundle match
+      case Some(bundle) =>
+        val budget = bundle.certification match
+          case lrs: CertificationResult.LocalRobustScreening => lrs.budgetEstimate
+          case tc: CertificationResult.TabularCertification => tc.requiredBudget
+          case _: CertificationResult.Unavailable => Double.MaxValue
+        val totalTolerance = config.epsilonBase + config.exploitConfig.epsilonAdapt
+        if budget < Double.MaxValue && budget > totalTolerance then
+          val updatedSession = _sessionState.nn
+          val clampedExploit = updatedSession.exploitationStates.map { case (rivalId, exploitState) =>
+            val retreated = math.max(0.0, exploitState.beta - config.exploitConfig.cpRetreatRate)
+            rivalId -> ExploitationState(beta = retreated)
+          }
+          _sessionState = StrategicEngine.SessionState(
+            rivalBeliefs = updatedSession.rivalBeliefs,
+            exploitationStates = clampedExploit,
+            rivalSeats = updatedSession.rivalSeats
+          )
+      case None => () // No bundle yet — skip clamp
+
   /** Choose an action using the configured solver backend.
     *
     * WPomcp path performs 6 solves:
