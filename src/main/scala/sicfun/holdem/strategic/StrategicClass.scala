@@ -12,8 +12,8 @@ import sicfun.holdem.types.PokerAction
 enum StrategicClass:
   case Value     // C^V: hands played for value
   case Bluff     // C^B: hands played as bluffs
-  case Marginal  // C^M: hands with marginal equity
-  case SemiBluff // C^SB: draws played aggressively
+  case Mixed     // C^M: mixed classes — combine value-holding and bluffing in a single strategic posture
+  case StructuralBluff // C^SB: structural-bluff classes (position-based aggression)
 
 object StrategicClass:
 

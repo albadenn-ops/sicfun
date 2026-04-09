@@ -20,8 +20,8 @@ class KernelConstructorTest extends munit.FunSuite:
   private val uniformPrior = DiscreteDistribution(Map(
     StrategicClass.Value     -> 0.25,
     StrategicClass.Bluff     -> 0.25,
-    StrategicClass.Marginal  -> 0.25,
-    StrategicClass.SemiBluff -> 0.25
+    StrategicClass.Mixed  -> 0.25,
+    StrategicClass.StructuralBluff -> 0.25
   ))
 
   private val dummyPublicState = PublicState(
@@ -61,8 +61,8 @@ class KernelConstructorTest extends munit.FunSuite:
     val shiftedPosterior = DiscreteDistribution(Map(
       StrategicClass.Value     -> 0.7,
       StrategicClass.Bluff     -> 0.1,
-      StrategicClass.Marginal  -> 0.1,
-      StrategicClass.SemiBluff -> 0.1
+      StrategicClass.Mixed  -> 0.1,
+      StrategicClass.StructuralBluff -> 0.1
     ))
     val result = updater(initial, shiftedPosterior)
     assertEqualsDouble(result.posterior.probabilityOf(StrategicClass.Value), 0.7, Tol)
@@ -91,8 +91,8 @@ class KernelConstructorTest extends munit.FunSuite:
       DiscreteDistribution(Map(
         StrategicClass.Value     -> 0.6,
         StrategicClass.Bluff     -> 0.1,
-        StrategicClass.Marginal  -> 0.2,
-        StrategicClass.SemiBluff -> 0.1
+        StrategicClass.Mixed  -> 0.2,
+        StrategicClass.StructuralBluff -> 0.1
       ))
 
     val kernel = KernelConstructor.buildActionKernelFull(updater, refLikelihood)
@@ -200,7 +200,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Blind, ShowdownMode.Off)
-    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, designKernel, sdKernel)
+    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, actionKernel, designKernel, sdKernel)
     val initial = TestRivalState(uniformPrior)
 
     val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
@@ -221,7 +221,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Blind, ShowdownMode.On)
-    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, designKernel, sdKernel)
+    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, actionKernel, designKernel, sdKernel)
     val initial = TestRivalState(uniformPrior)
 
     val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
@@ -242,7 +242,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Attrib, ShowdownMode.Off)
-    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, designKernel, sdKernel)
+    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, actionKernel, designKernel, sdKernel)
     val initial = TestRivalState(uniformPrior)
 
     // Even with showdown present in signal, Off world must not apply it
@@ -264,7 +264,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Attrib, ShowdownMode.On)
-    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, designKernel, sdKernel)
+    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, actionKernel, designKernel, sdKernel)
     val initial = TestRivalState(uniformPrior)
 
     val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
@@ -286,7 +286,7 @@ class KernelConstructorTest extends munit.FunSuite:
 
     // Design + On: should use design kernel AND apply showdown
     val world = ChainWorld(LearningChannel.Design, ShowdownMode.On)
-    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, designKernel, sdKernel)
+    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, actionKernel, designKernel, sdKernel)
     val initial = TestRivalState(uniformPrior)
 
     val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
@@ -307,7 +307,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Ref, ShowdownMode.Off)
-    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, designKernel, sdKernel)
+    val full = KernelConstructor.composeFullKernelForWorld(world, actionKernel, actionKernel, designKernel, sdKernel)
     val initial = TestRivalState(uniformPrior)
 
     val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
@@ -330,7 +330,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Blind, ShowdownMode.Off)
-    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, designKernelFull, sdKernel)(world)
+    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, actionKernelFull, designKernelFull, sdKernel)(world)
     val initial = TestRivalState(uniformPrior)
 
     val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
@@ -351,7 +351,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Blind, ShowdownMode.On)
-    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, designKernelFull, sdKernel)(world)
+    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, actionKernelFull, designKernelFull, sdKernel)(world)
     val initial = TestRivalState(uniformPrior)
 
     val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
@@ -374,7 +374,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Ref, ShowdownMode.Off)
-    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, designKernelFull, sdKernel)(world)
+    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, actionKernelFull, designKernelFull, sdKernel)(world)
     val initial = TestRivalState(uniformPrior)
 
     val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
@@ -398,7 +398,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Attrib, ShowdownMode.On)
-    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, designKernelFull, sdKernel)(world)
+    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, actionKernelFull, designKernelFull, sdKernel)(world)
     val initial = TestRivalState(uniformPrior)
 
     val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
@@ -420,7 +420,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Attrib, ShowdownMode.Off)
-    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, designKernelFull, sdKernel)(world)
+    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, actionKernelFull, designKernelFull, sdKernel)(world)
     val initial = TestRivalState(uniformPrior)
 
     // Even with showdown in signal, Off world must skip it
@@ -444,7 +444,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Design, ShowdownMode.On)
-    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, designKernelFull, sdKernel)(world)
+    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, actionKernelFull, designKernelFull, sdKernel)(world)
     val initial = TestRivalState(uniformPrior)
 
     val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
@@ -466,7 +466,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     val world = ChainWorld(LearningChannel.Design, ShowdownMode.Off)
-    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, designKernelFull, sdKernel)(world)
+    val full = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, actionKernelFull, designKernelFull, sdKernel)(world)
     val initial = TestRivalState(uniformPrior)
 
     val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
@@ -487,7 +487,7 @@ class KernelConstructorTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100)
 
     // Partial application: fix kernels, vary world
-    val composer = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, designKernelFull, sdKernel)
+    val composer = KernelConstructor.composeFullKernelForWorldFull(actionKernelFull, actionKernelFull, designKernelFull, sdKernel)
     val initial = TestRivalState(uniformPrior)
     val signal = TotalSignal(raiseSignal, None)
 
@@ -546,8 +546,8 @@ class KernelConstructorTest extends munit.FunSuite:
       DiscreteDistribution(Map(
         StrategicClass.Value     -> 0.8,
         StrategicClass.Bluff     -> 0.05,
-        StrategicClass.Marginal  -> 0.1,
-        StrategicClass.SemiBluff -> 0.05
+        StrategicClass.Mixed  -> 0.1,
+        StrategicClass.StructuralBluff -> 0.05
       ))
     val updater: StateEmbeddingUpdater[TestRivalState] =
       (state, posterior) => TestRivalState(posterior, state.updateCount + 1)
@@ -557,3 +557,159 @@ class KernelConstructorTest extends munit.FunSuite:
     val result = attribKernel.apply(initial, raiseSignal, dummyPublicState).asInstanceOf[TestRivalState]
     // beta=1 means full attributed: posterior should be the attributed one
     assertEqualsDouble(result.posterior.probabilityOf(StrategicClass.Value), 0.8, Tol)
+
+  // ---- Def 18: composeFullKernelForWorld with distinct Ref/Attrib kernels ----
+
+  test("composeFullKernelForWorld: Ref world uses refActionKernel, not attribActionKernel"):
+    val refKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 7) // ref marker
+
+    val attribKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 13) // attrib marker
+
+    val designKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 50)
+
+    val sdKernel = new ShowdownKernel[TestRivalState]:
+      def apply(state: TestRivalState, showdown: ShowdownSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 100)
+
+    val world = ChainWorld(LearningChannel.Ref, ShowdownMode.Off)
+    val full = KernelConstructor.composeFullKernelForWorld(world, refKernel, attribKernel, designKernel, sdKernel)
+    val initial = TestRivalState(uniformPrior)
+    val signal = TotalSignal(raiseSignal, None)
+    val result = full.apply(initial, signal, dummyPublicState).asInstanceOf[TestRivalState]
+    assertEquals(result.updateCount, 7) // must be ref marker, not attrib
+
+  test("composeFullKernelForWorld: Attrib world uses attribActionKernel, not refActionKernel"):
+    val refKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 7) // ref marker
+
+    val attribKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 13) // attrib marker
+
+    val designKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 50)
+
+    val sdKernel = new ShowdownKernel[TestRivalState]:
+      def apply(state: TestRivalState, showdown: ShowdownSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 100)
+
+    val world = ChainWorld(LearningChannel.Attrib, ShowdownMode.Off)
+    val full = KernelConstructor.composeFullKernelForWorld(world, refKernel, attribKernel, designKernel, sdKernel)
+    val initial = TestRivalState(uniformPrior)
+    val signal = TotalSignal(raiseSignal, None)
+    val result = full.apply(initial, signal, dummyPublicState).asInstanceOf[TestRivalState]
+    assertEquals(result.updateCount, 13) // must be attrib marker, not ref
+
+  test("composeFullKernelForWorld: Ref and Attrib can differ (distinct kernels produce distinct results)"):
+    val refKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 7)
+
+    val attribKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 13)
+
+    val designKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 50)
+
+    val sdKernel = new ShowdownKernel[TestRivalState]:
+      def apply(state: TestRivalState, showdown: ShowdownSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 100)
+
+    val initial = TestRivalState(uniformPrior)
+    val signal = TotalSignal(raiseSignal, None)
+
+    val refWorld = ChainWorld(LearningChannel.Ref, ShowdownMode.Off)
+    val attribWorld = ChainWorld(LearningChannel.Attrib, ShowdownMode.Off)
+
+    val refFull = KernelConstructor.composeFullKernelForWorld(refWorld, refKernel, attribKernel, designKernel, sdKernel)
+    val attribFull = KernelConstructor.composeFullKernelForWorld(attribWorld, refKernel, attribKernel, designKernel, sdKernel)
+
+    val refResult = refFull.apply(initial, signal, dummyPublicState).asInstanceOf[TestRivalState]
+    val attribResult = attribFull.apply(initial, signal, dummyPublicState).asInstanceOf[TestRivalState]
+
+    assert(refResult.updateCount != attribResult.updateCount,
+      s"Ref (${refResult.updateCount}) and Attrib (${attribResult.updateCount}) must use distinct kernels")
+    assertEquals(refResult.updateCount, 7)
+    assertEquals(attribResult.updateCount, 13)
+
+  test("composeFullKernelForWorld: Ref+On composes refActionKernel with showdown"):
+    val refKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 7)
+
+    val attribKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 13)
+
+    val designKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 50)
+
+    val sdKernel = new ShowdownKernel[TestRivalState]:
+      def apply(state: TestRivalState, showdown: ShowdownSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 100)
+
+    val world = ChainWorld(LearningChannel.Ref, ShowdownMode.On)
+    val full = KernelConstructor.composeFullKernelForWorld(world, refKernel, attribKernel, designKernel, sdKernel)
+    val initial = TestRivalState(uniformPrior)
+    val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
+    val result = full.apply(initial, withSd, dummyPublicState).asInstanceOf[TestRivalState]
+    assertEquals(result.updateCount, 107) // ref (7) + showdown (100)
+
+  test("composeFullKernelForWorld: Attrib+On composes attribActionKernel with showdown"):
+    val refKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 7)
+
+    val attribKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 13)
+
+    val designKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 50)
+
+    val sdKernel = new ShowdownKernel[TestRivalState]:
+      def apply(state: TestRivalState, showdown: ShowdownSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 100)
+
+    val world = ChainWorld(LearningChannel.Attrib, ShowdownMode.On)
+    val full = KernelConstructor.composeFullKernelForWorld(world, refKernel, attribKernel, designKernel, sdKernel)
+    val initial = TestRivalState(uniformPrior)
+    val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
+    val result = full.apply(initial, withSd, dummyPublicState).asInstanceOf[TestRivalState]
+    assertEquals(result.updateCount, 113) // attrib (13) + showdown (100)
+
+  test("composeFullKernelForWorld: Blind world ignores both ref and attrib kernels"):
+    val refKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 7)
+
+    val attribKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 13)
+
+    val designKernel = new ActionKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 50)
+
+    val sdKernel = new ShowdownKernel[TestRivalState]:
+      def apply(state: TestRivalState, showdown: ShowdownSignal): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 100)
+
+    val world = ChainWorld(LearningChannel.Blind, ShowdownMode.On)
+    val full = KernelConstructor.composeFullKernelForWorld(world, refKernel, attribKernel, designKernel, sdKernel)
+    val initial = TestRivalState(uniformPrior)
+    val withSd = TotalSignal(raiseSignal, Some(showdownSignal))
+    val result = full.apply(initial, withSd, dummyPublicState)
+    assert(result eq initial, "Blind world must return identity regardless of ref/attrib kernels")

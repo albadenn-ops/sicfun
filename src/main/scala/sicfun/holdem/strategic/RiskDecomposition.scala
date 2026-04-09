@@ -3,21 +3,22 @@ package sicfun.holdem.strategic
 /** World-aware risk decomposition (Wave 5 — v0.31.1 formal closure).
   *
   * Implements:
-  *   - Chain-indexed robust one-step loss (Def 56A)
-  *   - Risk increment between adjacent chain worlds (Def 56B)
+  *   - Chain-indexed robust one-step loss (Def 67)
+  *   - Risk increment between adjacent chain worlds (Def 68)
   *   - Telescopic risk decomposition along canonical chain (Proposition 9.7)
-  *   - Marginal layer efficiency metric rho_{k→k+1} (Def 56C)
+  *   - Marginal layer efficiency metric rho_{k→k+1} (Def 69)
   *
   * Uses the same chain-world ordering as `ChainWorld.canonicalChain` (Wave 1)
   * and `KernelConstructor.composeFullKernelForWorld` (Wave 2).
   */
 object RiskDecomposition:
 
-  /** Robust one-step loss at a specific chain world (Def 56A).
+  /** Robust one-step loss at a specific chain world (Def 67).
     *
-    * L_robust(omega_k) = max_b [ V_bar(b) - Q(omega_k, b) ]
+    * L_robust^{(omega)}(b, u) = sup_{sigma in Sigma^{-S}} [V_bar(b; sigma) - Q(omega, b, u; sigma)]_+
     *
-    * Each entry in the arrays corresponds to one belief point.
+    * Each entry in the arrays corresponds to one rival profile sigma^{-S}.
+    * The [.]_+ (positive part) ensures the loss is non-negative per the spec.
     */
   def chainRobustLoss(
       baselineValues: IndexedSeq[Ev],
@@ -25,11 +26,12 @@ object RiskDecomposition:
   ): Ev =
     require(baselineValues.size == qValuesAtWorld.size && baselineValues.nonEmpty,
       "arrays must be non-empty and same length")
-    baselineValues.zip(qValuesAtWorld)
+    val maxDiff = baselineValues.zip(qValuesAtWorld)
       .map((vBase, q) => vBase - q)
       .reduce((a, b) => if a >= b then a else b)
+    if maxDiff >= Ev.Zero then maxDiff else Ev.Zero // [.]_+ clamp (Def 67)
 
-  /** Risk increment between adjacent chain worlds (Def 56B).
+  /** Risk increment between adjacent chain worlds (Def 68).
     *
     * Delta_risk(omega_k, omega_{k+1}) = L_robust(omega_{k+1}) - L_robust(omega_k)
     *
@@ -70,18 +72,20 @@ object RiskDecomposition:
       else Ev.Zero
       (totalGap, increments)
 
-  /** Marginal layer efficiency (Def 56C).
+  /** Marginal layer efficiency (Def 69).
     *
-    * rho_{k->k+1} = Delta_value(k, k+1) / Delta_risk(k, k+1)
+    * rho_{k->k+1} = Delta_edge_{k->k+1} / [Delta_risk_{k->k+1}]_+
     *
     * Measures how much value the layer adds per unit of risk.
-    * Undefined when the risk increment is zero (returns None).
+    * Only defined when the positive part of the risk increment is positive,
+    * i.e. the layer introduces risk. When the layer reduces risk or adds none,
+    * the metric is undefined (returns None).
     *
     * @param valueDelta value increment at this chain edge (from ChainEdgeDelta)
     * @param riskDelta risk increment at this chain edge (from ChainRiskDelta)
     */
   def marginalEfficiency(valueDelta: Ev, riskDelta: Ev): Option[Double] =
-    if riskDelta.abs <= Ev(1e-15) then None
+    if riskDelta <= Ev(1e-15) then None // [.]_+ guard: only defined when risk > 0 (Def 69)
     else Some(valueDelta.value / riskDelta.value)
 
   /** Compute chain risk profile from baseline and per-world Q-values. */

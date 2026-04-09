@@ -32,13 +32,13 @@ object OpponentModelBridge:
     // Heuristic: high AF => more bluffs, high VPIP+low PFR => marginal
     val bluffWeight = math.min(af * 0.1, 0.4)
     val valueWeight = math.min(pfr * 0.02, 0.4)
-    val semiBluffWeight = math.min((vpip - pfr).abs * 0.01, 0.2)
-    val marginalWeight = 1.0 - bluffWeight - valueWeight - semiBluffWeight
+    val structuralBluffWeight = math.min((vpip - pfr).abs * 0.01, 0.2)
+    val marginalWeight = 1.0 - bluffWeight - valueWeight - structuralBluffWeight
     val weights = Map(
       StrategicClass.Value     -> math.max(valueWeight, 0.01),
       StrategicClass.Bluff     -> math.max(bluffWeight, 0.01),
-      StrategicClass.Marginal  -> math.max(marginalWeight, 0.01),
-      StrategicClass.SemiBluff -> math.max(semiBluffWeight, 0.01)
+      StrategicClass.Mixed  -> math.max(marginalWeight, 0.01),
+      StrategicClass.StructuralBluff -> math.max(structuralBluffWeight, 0.01)
     )
     val total = weights.values.sum
     val normalized = weights.map((k, v) => k -> v / total)

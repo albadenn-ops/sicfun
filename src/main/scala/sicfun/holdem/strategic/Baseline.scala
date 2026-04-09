@@ -16,15 +16,18 @@ trait RealBaseline:
       street: Street
   ): Double
 
-/** Trait for attributed baselines that support human-interpretable reasoning chains.
+/** Attributed baseline: per-rival, state-conditioned policy (Def 10).
   *
-  * In addition to predicting action probabilities, an attributed baseline can explain
-  * why a strategic class would select that action in a given context.
+  * hat{pi}^{0,S,i}(a, lambda | c, x^pub, m^{R,i})
+  *
+  * The attributed baseline conditions on the rival's belief state m^{R,i},
+  * allowing different baselines per rival based on what we believe about them.
   */
 trait AttributedBaseline:
   def probability(
       cls: StrategicClass,
       action: PokerAction.Category,
       sizing: Option[Sizing],
-      street: Street
+      street: Street,
+      rivalState: RivalBeliefState
   ): Double

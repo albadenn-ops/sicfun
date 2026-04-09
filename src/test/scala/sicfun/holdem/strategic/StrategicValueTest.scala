@@ -141,3 +141,136 @@ class StrategicValueTest extends munit.FunSuite:
     assertEquals(risk.from, from)
     assertEquals(risk.to, to)
     assertEqualsDouble(risk.riskDelta.value, -1.2, Tol)
+
+  // ---- Proposition 8.1: TelescopicEdgeDecomposition -------------------------
+
+  test("TelescopicEdgeDecomposition: single edge chain"):
+    val chain = IndexedSeq(
+      ChainWorld(LearningChannel.Blind, ShowdownMode.Off),
+      ChainWorld(LearningChannel.Ref, ShowdownMode.Off)
+    )
+    val qValues = IndexedSeq(Ev(3.0), Ev(7.0))
+    val edges = TelescopicEdgeDecomposition.computeEdgeDeltas(chain, qValues)
+    assertEquals(edges.size, 1)
+    assertEquals(edges(0).from, chain(0))
+    assertEquals(edges(0).to, chain(1))
+    assertEqualsDouble(edges(0).delta.value, 4.0, Tol)
+
+  test("TelescopicEdgeDecomposition: multi-edge canonical chain"):
+    val chain = ChainWorld.canonicalChain
+    val qValues = IndexedSeq(Ev(1.0), Ev(3.0), Ev(5.5), Ev(8.0))
+    val edges = TelescopicEdgeDecomposition.computeEdgeDeltas(chain, qValues)
+    assertEquals(edges.size, 3)
+    assertEqualsDouble(edges(0).delta.value, 2.0, Tol)  // 3.0 - 1.0
+    assertEqualsDouble(edges(1).delta.value, 2.5, Tol)  // 5.5 - 3.0
+    assertEqualsDouble(edges(2).delta.value, 2.5, Tol)  // 8.0 - 5.5
+
+  test("TelescopicEdgeDecomposition: telescopic identity sum(edgeDeltas) == totalGap"):
+    val chain = ChainWorld.canonicalChain
+    val qValues = IndexedSeq(Ev(1.0), Ev(3.0), Ev(5.5), Ev(8.0))
+    val (totalGap, edges) = TelescopicEdgeDecomposition.decompose(chain, qValues)
+    val edgeSum = edges.foldLeft(Ev.Zero)((acc, e) => acc + e.delta)
+    assertEqualsDouble(totalGap.value, 7.0, Tol)  // 8.0 - 1.0
+    assertEqualsDouble(edgeSum.value, totalGap.value, Tol)
+
+  test("TelescopicEdgeDecomposition: telescopic identity holds with negative deltas"):
+    val chain = ChainWorld.canonicalChain
+    val qValues = IndexedSeq(Ev(10.0), Ev(8.0), Ev(5.0), Ev(2.0))
+    val (totalGap, edges) = TelescopicEdgeDecomposition.decompose(chain, qValues)
+    val edgeSum = edges.foldLeft(Ev.Zero)((acc, e) => acc + e.delta)
+    assertEqualsDouble(totalGap.value, -8.0, Tol)  // 2.0 - 10.0
+    assertEqualsDouble(edgeSum.value, totalGap.value, Tol)
+
+  test("TelescopicEdgeDecomposition: single-element chain returns zero gap and no edges"):
+    val chain = IndexedSeq(ChainWorld(LearningChannel.Blind, ShowdownMode.Off))
+    val qValues = IndexedSeq(Ev(5.0))
+    val (totalGap, edges) = TelescopicEdgeDecomposition.decompose(chain, qValues)
+    assertEquals(edges.size, 0)
+    assertEqualsDouble(totalGap.value, 0.0, Tol)
+
+  test("TelescopicEdgeDecomposition: empty chain returns zero gap and no edges"):
+    val chain = IndexedSeq.empty[ChainWorld]
+    val qValues = IndexedSeq.empty[Ev]
+    val (totalGap, edges) = TelescopicEdgeDecomposition.decompose(chain, qValues)
+    assertEquals(edges.size, 0)
+    assertEqualsDouble(totalGap.value, 0.0, Tol)
+
+  test("TelescopicEdgeDecomposition: requires chain and qValues same length"):
+    val chain = IndexedSeq(
+      ChainWorld(LearningChannel.Blind, ShowdownMode.Off),
+      ChainWorld(LearningChannel.Ref, ShowdownMode.Off)
+    )
+    val qValues = IndexedSeq(Ev(1.0)) // mismatched length
+    intercept[IllegalArgumentException]:
+      TelescopicEdgeDecomposition.computeEdgeDeltas(chain, qValues)
+
+  test("TelescopicEdgeDecomposition: equal Q-values yield zero deltas"):
+    val chain = ChainWorld.canonicalChain
+    val qValues = IndexedSeq(Ev(5.0), Ev(5.0), Ev(5.0), Ev(5.0))
+    val (totalGap, edges) = TelescopicEdgeDecomposition.decompose(chain, qValues)
+    assertEqualsDouble(totalGap.value, 0.0, Tol)
+    edges.foreach(e => assertEqualsDouble(e.delta.value, 0.0, Tol))
+
+  test("TelescopicEdgeDecomposition: edge from/to matches chain ordering"):
+    val chain = ChainWorld.canonicalChain
+    val qValues = IndexedSeq(Ev(1.0), Ev(2.0), Ev(4.0), Ev(7.0))
+    val edges = TelescopicEdgeDecomposition.computeEdgeDeltas(chain, qValues)
+    for k <- edges.indices do
+      assertEquals(edges(k).from, chain(k))
+      assertEquals(edges(k).to, chain(k + 1))
+
+  // ---- Def 47A: ChainBaselineQ ------------------------------------------------
+
+  test("ChainBaselineQ: keyed access by ChainWorld"):
+    val qMap = Map(
+      ChainWorld(LearningChannel.Blind, ShowdownMode.Off) -> Ev(1.0),
+      ChainWorld(LearningChannel.Ref, ShowdownMode.Off) -> Ev(3.0),
+      ChainWorld(LearningChannel.Attrib, ShowdownMode.Off) -> Ev(5.5),
+      ChainWorld(LearningChannel.Attrib, ShowdownMode.On) -> Ev(8.0)
+    )
+    val cbq = ChainBaselineQ(qMap)
+    assertEqualsDouble(cbq(ChainWorld(LearningChannel.Blind, ShowdownMode.Off)).value, 1.0, Tol)
+    assertEqualsDouble(cbq(ChainWorld(LearningChannel.Attrib, ShowdownMode.On)).value, 8.0, Tol)
+
+  test("ChainBaselineQ: alongChain extracts in order"):
+    val qMap = Map(
+      ChainWorld(LearningChannel.Blind, ShowdownMode.Off) -> Ev(1.0),
+      ChainWorld(LearningChannel.Ref, ShowdownMode.Off) -> Ev(3.0),
+      ChainWorld(LearningChannel.Attrib, ShowdownMode.Off) -> Ev(5.5),
+      ChainWorld(LearningChannel.Attrib, ShowdownMode.On) -> Ev(8.0)
+    )
+    val cbq = ChainBaselineQ(qMap)
+    val values = cbq.alongChain(ChainWorld.canonicalChain)
+    assertEquals(values.size, 4)
+    assertEqualsDouble(values(0).value, 1.0, Tol)
+    assertEqualsDouble(values(1).value, 3.0, Tol)
+    assertEqualsDouble(values(2).value, 5.5, Tol)
+    assertEqualsDouble(values(3).value, 8.0, Tol)
+
+  test("ChainBaselineQ: canonicalEdgeDeltas matches TelescopicEdgeDecomposition"):
+    val qMap = Map(
+      ChainWorld(LearningChannel.Blind, ShowdownMode.Off) -> Ev(1.0),
+      ChainWorld(LearningChannel.Ref, ShowdownMode.Off) -> Ev(3.0),
+      ChainWorld(LearningChannel.Attrib, ShowdownMode.Off) -> Ev(5.5),
+      ChainWorld(LearningChannel.Attrib, ShowdownMode.On) -> Ev(8.0)
+    )
+    val cbq = ChainBaselineQ(qMap)
+    val edges = cbq.canonicalEdgeDeltas
+    assertEquals(edges.size, 3)
+    assertEqualsDouble(edges(0).delta.value, 2.0, Tol)
+    assertEqualsDouble(edges(1).delta.value, 2.5, Tol)
+    assertEqualsDouble(edges(2).delta.value, 2.5, Tol)
+    // Telescopic identity: sum of edges == total gap
+    val edgeSum = edges.foldLeft(Ev.Zero)((acc, e) => acc + e.delta)
+    assertEqualsDouble(edgeSum.value, 7.0, Tol)
+
+  test("ChainBaselineQ: rejects empty map"):
+    intercept[IllegalArgumentException]:
+      ChainBaselineQ(Map.empty)
+
+  test("ChainBaselineQ: missing world throws on access"):
+    val cbq = ChainBaselineQ(Map(
+      ChainWorld(LearningChannel.Blind, ShowdownMode.Off) -> Ev(1.0)
+    ))
+    intercept[IllegalArgumentException]:
+      cbq(ChainWorld(LearningChannel.Ref, ShowdownMode.Off))

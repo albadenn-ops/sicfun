@@ -40,11 +40,26 @@ object BluffFramework:
     if candidates.isEmpty then legalActions
     else candidates
 
-  /** Def 37: Feasible non-bluff actions for the same hand.
+  /** Def 37: Feasible non-bluff actions (identity feasibility, Def 36 simple form).
     * U_nf(b~) = {u in A(b~) | StructuralBluff(c, u) = 0}.
+    * Uses the identity action correspondence (all legal actions are feasible).
     */
   def feasibleNonBluffActions(cls: StrategicClass, legalActions: Vector[PokerAction]): Vector[PokerAction] =
     legalActions.filterNot(a => isStructuralBluff(cls, a))
+
+  /** Def 37: Feasible non-bluff actions (belief-conditioned feasibility, Def 36 full form).
+    * U_nf(b~) = {u in A(b~) | StructuralBluff(c, u) = 0}
+    * where A(b~) is the belief-conditioned feasible set from Def 36.
+    */
+  def feasibleNonBluffActions(
+      cls: StrategicClass,
+      legalActions: Vector[PokerAction],
+      belief: StrategicRivalBelief,
+      qRefLookup: PokerAction => Option[Ev],
+      dominanceThreshold: Ev = Ev(-0.5)
+  ): Vector[PokerAction] =
+    feasibleActions(legalActions, belief, qRefLookup, dominanceThreshold)
+      .filterNot(a => isStructuralBluff(cls, a))
 
   /** Def 38: Bluff gain (aggregate multiway form).
     * Gain_bluff(b~, u; u_cf) = Q^{*,attrib}(b~, u) - Q^{*,ref}(b~, u_cf).

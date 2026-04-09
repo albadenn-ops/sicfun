@@ -20,13 +20,13 @@ trait ActionKernel[M]:
   def apply(state: M, signal: ActionSignal): M
 
 /** Kernel that updates a rival belief state M given a showdown revelation.
-  * Corresponds to Def 18: the hard-evidence update when hole cards are revealed.
+  * Corresponds to Def 19: the revelatory update on certified terminal disclosures.
   */
 trait ShowdownKernel[M]:
   def apply(state: M, showdown: ShowdownSignal): M
 
 /** Full kernel combining action and showdown signals with public state context.
-  * Corresponds to Def 19: the combined update operator used in the main belief loop.
+  * Corresponds to Def 20: the full per-rival kernel parameterized by (omega^act, omega^sd).
   *
   * A FullKernel operates under a specific [[ChainWorld]] (learning channel x showdown mode).
   * The chain world determines:
@@ -40,7 +40,7 @@ trait FullKernel[M]:
   def apply(state: M, signal: TotalSignal, publicState: PublicState): M
 
 /** Enumeration of kernel implementation variants available in the system.
-  * Corresponds to Def 20.
+  * Corresponds to Def 18 (inferential action kernel variants).
   *
   *   - Ref: reference (analytically correct) kernel
   *   - Attrib: attributed kernel with interpretable reasoning chains
@@ -62,7 +62,7 @@ enum KernelVariant:
     case Design  => LearningChannel.Design
 
 /** A no-op [[ActionKernel]] that always returns the state unchanged.
-  * Used as a baseline and in unit tests. Corresponds to Def 21.
+  * Used as a baseline and in unit tests. Corresponds to Def 18 (Gamma^{act,blind,i} := m).
   */
 final class BlindActionKernel[M] extends ActionKernel[M]:
   def apply(state: M, signal: ActionSignal): M = state

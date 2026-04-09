@@ -22,11 +22,11 @@ class RiskDecompositionTest extends munit.FunSuite:
     val loss = RiskDecomposition.chainRobustLoss(vals, vals)
     assertEqualsDouble(loss.value, 0.0, Tol)
 
-  test("chainRobustLoss: negative when Q exceeds baseline everywhere"):
+  test("chainRobustLoss: clamped to zero when Q exceeds baseline everywhere ([.]_+ per Def 67)"):
     val baseline = IndexedSeq(Ev(3.0), Ev(2.0))
     val qValues  = IndexedSeq(Ev(5.0), Ev(4.0))
     val loss = RiskDecomposition.chainRobustLoss(baseline, qValues)
-    assertEqualsDouble(loss.value, -2.0, Tol)
+    assertEqualsDouble(loss.value, 0.0, Tol)
 
   // ---- Def 56B: Risk increment ----
 
@@ -110,10 +110,9 @@ class RiskDecompositionTest extends munit.FunSuite:
     assert(eff.isDefined)
     assertEqualsDouble(eff.get, -0.5, Tol)
 
-  test("marginalEfficiency: handles negative risk increment"):
+  test("marginalEfficiency: undefined when risk increment is negative ([.]_+ guard per Def 69)"):
     val eff = RiskDecomposition.marginalEfficiency(Ev(3.0), Ev(-1.5))
-    assert(eff.isDefined)
-    assertEqualsDouble(eff.get, -2.0, Tol)
+    assert(eff.isEmpty)
 
   // ---- computeProfile ----
 

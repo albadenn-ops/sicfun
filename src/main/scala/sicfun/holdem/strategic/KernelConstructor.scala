@@ -171,61 +171,67 @@ object KernelConstructor:
     *   - (Design, Off)                -> design kernel only (showdown gated off)
     *   - (Design, On)                 -> design kernel + showdown
     *
+    * Per Def 18, Ref and Attrib channels use DISTINCT kernels:
+    *   Ref uses BuildRivalKernel(pi^{0,S}); Attrib uses BuildRivalKernel(hat{pi}^{0,S,i}).
+    *
     * @param world the chain world determining kernel variant and showdown gating
-    * @param actionKernel the action kernel for Ref/Attrib channels
+    * @param refActionKernel the action kernel for the Ref channel (built from pi^{0,S})
+    * @param attribActionKernel the action kernel for the Attrib channel (built from hat{pi}^{0,S,i})
     * @param designActionKernel the design action kernel (strips sizing/timing)
     * @param showdownKernel the showdown kernel for On worlds
     */
   def composeFullKernelForWorld[M <: RivalBeliefState](
       world: ChainWorld,
-      actionKernel: ActionKernel[M],
+      refActionKernel: ActionKernel[M],
+      attribActionKernel: ActionKernel[M],
       designActionKernel: ActionKernel[M],
       showdownKernel: ShowdownKernel[M]
   ): FullKernel[M] =
     world.channel match
       case LearningChannel.Blind =>
-        // Blind channel is always identity regardless of showdown mode
         composeBlindFullKernel[M]()
 
       case LearningChannel.Design =>
         world.showdown match
           case ShowdownMode.Off =>
-            // Design kernel only, no showdown
             new FullKernel[M]:
               def apply(state: M, signal: TotalSignal, publicState: PublicState): M =
                 designActionKernel.apply(state, signal.actionSignal)
           case ShowdownMode.On =>
-            // Design kernel + showdown
             composeDesignFullKernel(designActionKernel, showdownKernel)
 
-      case LearningChannel.Ref | LearningChannel.Attrib =>
+      case LearningChannel.Ref =>
         world.showdown match
           case ShowdownMode.Off =>
-            // Action kernel only, showdown gated off
             new FullKernel[M]:
               def apply(state: M, signal: TotalSignal, publicState: PublicState): M =
-                actionKernel.apply(state, signal.actionSignal)
+                refActionKernel.apply(state, signal.actionSignal)
           case ShowdownMode.On =>
-            // Action + showdown
-            composeFullKernel(actionKernel, showdownKernel)
+            composeFullKernel(refActionKernel, showdownKernel)
+
+      case LearningChannel.Attrib =>
+        world.showdown match
+          case ShowdownMode.Off =>
+            new FullKernel[M]:
+              def apply(state: M, signal: TotalSignal, publicState: PublicState): M =
+                attribActionKernel.apply(state, signal.actionSignal)
+          case ShowdownMode.On =>
+            composeFullKernel(attribActionKernel, showdownKernel)
 
   /** Compose a full kernel for a specific [[ChainWorld]] using [[ActionKernelFull]] kernels.
     *
     * Production form of [[composeFullKernelForWorld]] that threads [[PublicState]] through
-    * the action kernels. Same dispatch logic:
-    *   - (Blind, Off/On)             -> blind full kernel (identity)
-    *   - (Ref/Attrib, Off)           -> action kernel only (showdown gated off)
-    *   - (Ref/Attrib, On)            -> action + showdown
-    *   - (Design, Off)               -> design kernel only (showdown gated off)
-    *   - (Design, On)                -> design kernel + showdown
+    * the action kernels. Per Def 18, Ref and Attrib use distinct kernels.
     *
-    * @param actionKernelFull the full-form action kernel for Ref/Attrib channels
+    * @param refActionKernelFull the full-form action kernel for Ref channel (built from pi^{0,S})
+    * @param attribActionKernelFull the full-form action kernel for Attrib channel (built from hat{pi}^{0,S,i})
     * @param designKernelFull the full-form design action kernel (strips sizing/timing)
     * @param showdownKernel the showdown kernel for On worlds
     * @param world the chain world determining kernel variant and showdown gating
     */
   def composeFullKernelForWorldFull[M <: RivalBeliefState](
-      actionKernelFull: ActionKernelFull[M],
+      refActionKernelFull: ActionKernelFull[M],
+      attribActionKernelFull: ActionKernelFull[M],
       designKernelFull: ActionKernelFull[M],
       showdownKernel: ShowdownKernel[M]
   )(world: ChainWorld): FullKernel[M] =
@@ -242,14 +248,23 @@ object KernelConstructor:
           case ShowdownMode.On =>
             composeFullKernelFromFull(designKernelFull, showdownKernel)
 
-      case LearningChannel.Ref | LearningChannel.Attrib =>
+      case LearningChannel.Ref =>
         world.showdown match
           case ShowdownMode.Off =>
             new FullKernel[M]:
               def apply(state: M, signal: TotalSignal, publicState: PublicState): M =
-                actionKernelFull.apply(state, signal.actionSignal, publicState)
+                refActionKernelFull.apply(state, signal.actionSignal, publicState)
           case ShowdownMode.On =>
-            composeFullKernelFromFull(actionKernelFull, showdownKernel)
+            composeFullKernelFromFull(refActionKernelFull, showdownKernel)
+
+      case LearningChannel.Attrib =>
+        world.showdown match
+          case ShowdownMode.Off =>
+            new FullKernel[M]:
+              def apply(state: M, signal: TotalSignal, publicState: PublicState): M =
+                attribActionKernelFull.apply(state, signal.actionSignal, publicState)
+          case ShowdownMode.On =>
+            composeFullKernelFromFull(attribActionKernelFull, showdownKernel)
 
 /** Action kernel with explicit public state (production form of Def 17). */
 trait ActionKernelFull[M]:

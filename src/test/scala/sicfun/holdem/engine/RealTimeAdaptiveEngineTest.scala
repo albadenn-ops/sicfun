@@ -89,7 +89,7 @@ class RealTimeAdaptiveEngineTest extends FunSuite:
       stackSize = 99.5,
       betHistory = Vector.empty
     )
-    val posterior = DiscreteDistribution(Map(hole("Ah", "Ad") -> 1.0))
+    val posterior = DiscreteDistribution(Map(hole("Ks", "Qh") -> 0.5, hole("Ts", "9h") -> 0.5))
     val actions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(2.5))
 
     val foldTrained = new RealTimeAdaptiveEngine(
@@ -283,7 +283,7 @@ class RealTimeAdaptiveEngineTest extends FunSuite:
       stackSize = 99.5,
       betHistory = Vector.empty
     )
-    val posterior = DiscreteDistribution(Map(hole("Ah", "Ad") -> 1.0))
+    val posterior = DiscreteDistribution(Map(hole("Ks", "Qh") -> 0.5, hole("Ts", "9h") -> 0.5))
     val actions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(2.5))
 
     val adaptiveOnly = new RealTimeAdaptiveEngine(

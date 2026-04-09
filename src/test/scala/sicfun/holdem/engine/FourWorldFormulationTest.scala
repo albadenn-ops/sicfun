@@ -60,8 +60,8 @@ class FourWorldFormulationTest extends munit.FunSuite:
       DiscreteDistribution(Map(
         StrategicClass.Value -> 0.5,
         StrategicClass.Bluff -> 0.2,
-        StrategicClass.Marginal -> 0.2,
-        StrategicClass.SemiBluff -> 0.1
+        StrategicClass.Mixed -> 0.2,
+        StrategicClass.StructuralBluff -> 0.1
       ))
     )
     val model = PokerPftFormulation.buildBlindKernelModel(
@@ -100,3 +100,65 @@ class FourWorldFormulationTest extends munit.FunSuite:
     assertEquals(blind.numStates, baseline.numStates)
     assertEquals(blind.numActions, baseline.numActions)
     assertEquals(blind.numObs, baseline.numObs)
+
+  test("buildBlindOpenLoopModel: obs likelihoods are uniform"):
+    val model = PokerPftFormulation.buildBlindOpenLoopModel(
+      gameState, Map.empty, heroActions, heroBucket, actionPriors
+    )
+    val uniformP = 1.0 / numObs
+    for i <- 0 until model.numStates * model.numActions do
+      for o <- 0 until numObs do
+        assertEqualsDouble(
+          model.obsLikelihood(i * numObs + o), uniformP, 1e-12
+        )
+
+  test("buildBlindOpenLoopModel: rewards match blind model (baseline, no profile modulation)"):
+    val blindOpenLoop = PokerPftFormulation.buildBlindOpenLoopModel(
+      gameState, Map.empty, heroActions, heroBucket, actionPriors
+    )
+    val blind = PokerPftFormulation.buildBlindKernelModel(
+      gameState, Map.empty, heroActions, heroBucket, actionPriors
+    )
+    // Same rewards (both use profileClass=None)
+    blindOpenLoop.rewardTable.zip(blind.rewardTable).foreach { (bol, bl) =>
+      assertEqualsDouble(bol, bl, 1e-12)
+    }
+
+  test("buildBlindOpenLoopModel: same dimensions as other models"):
+    val baseline = PokerPftFormulation.buildTabularModel(
+      gameState, Map.empty, heroActions, heroBucket, actionPriors
+    )
+    val blindOl = PokerPftFormulation.buildBlindOpenLoopModel(
+      gameState, Map.empty, heroActions, heroBucket, actionPriors
+    )
+    assertEquals(blindOl.numStates, baseline.numStates)
+    assertEquals(blindOl.numActions, baseline.numActions)
+    assertEquals(blindOl.numObs, baseline.numObs)
+
+  test("four grid-world models are all distinct combinations"):
+    // Verify the 2x2 grid: {baseline, blind} x {obs, uniform}
+    val attribCl = PokerPftFormulation.buildTabularModel(
+      gameState, Map.empty, heroActions, heroBucket, actionPriors,
+      profileClass = Some(StrategicClass.Value)
+    )
+    val attribOl = PokerPftFormulation.buildOpenLoopModel(
+      gameState, Map.empty, heroActions, heroBucket, actionPriors,
+      profileClass = Some(StrategicClass.Value)
+    )
+    val blindCl = PokerPftFormulation.buildBlindKernelModel(
+      gameState, Map.empty, heroActions, heroBucket, actionPriors
+    )
+    val blindOl = PokerPftFormulation.buildBlindOpenLoopModel(
+      gameState, Map.empty, heroActions, heroBucket, actionPriors
+    )
+    // attribCl vs attribOl: same rewards, different obs
+    attribCl.rewardTable.zip(attribOl.rewardTable).foreach { (a, b) =>
+      assertEqualsDouble(a, b, 1e-12)
+    }
+    // blindCl vs blindOl: same rewards, different obs
+    blindCl.rewardTable.zip(blindOl.rewardTable).foreach { (a, b) =>
+      assertEqualsDouble(a, b, 1e-12)
+    }
+    // attribCl vs blindCl: different rewards (profile modulation), but may share obs structure
+    val rewardsDiffer = attribCl.rewardTable.zip(blindCl.rewardTable).exists((a, b) => math.abs(a - b) > 1e-12)
+    assert(rewardsDiffer, "attrib and blind should have different rewards")

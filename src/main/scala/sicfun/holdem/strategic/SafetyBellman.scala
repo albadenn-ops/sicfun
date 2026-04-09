@@ -27,10 +27,11 @@ object SafetyBellman:
 
   /** Robust one-step loss (Def 59).
     *
-    * L_robust(s, a) = sup_{b' in B(b, rho)} [V_bar(s, b') - Q(s, a, b')]
+    * L_robust(s, a) = sup_{sigma in Sigma^{-S}} [V_bar(s; sigma) - Q_bar(s, a; sigma)]_+
     *
-    * Over a finite belief set, the supremum is the maximum.
-    * Each entry in the arrays corresponds to one belief point.
+    * Over a finite rival profile class, the supremum is the maximum.
+    * Each entry in the arrays corresponds to one rival profile sigma^{-S}.
+    * The [.]_+ (positive part) ensures the loss is non-negative per the spec.
     */
   def robustOneStepLoss(
       baselineValues: Array[Double],
@@ -38,7 +39,7 @@ object SafetyBellman:
   ): Double =
     require(baselineValues.length == qValues.length && baselineValues.length > 0,
       "arrays must be non-empty and same length")
-    var maxLoss = Double.NegativeInfinity
+    var maxLoss = 0.0 // [.]_+ clamp: loss is non-negative (Def 59)
     var i = 0
     while i < baselineValues.length do
       val loss = baselineValues(i) - qValues(i)
@@ -67,7 +68,8 @@ object SafetyBellman:
       robustLosses: Array[Array[Double]],
       gamma: Double,
       transitions: (Int, Int, Int) => Int,
-      numProfiles: Int
+      numProfiles: Int,
+      terminalStates: Set[Int] = Set.empty
   ): Array[Double] =
     require(gamma >= 0.0 && gamma < 1.0, s"gamma must be in [0,1), got $gamma")
     require(numProfiles > 0, "must have at least one profile")
@@ -76,15 +78,18 @@ object SafetyBellman:
     val result = new Array[Double](numStates)
     var s = 0
     while s < numStates do
-      val losses = robustLosses(s)
-      var minOverActions = Double.PositiveInfinity
-      var a = 0
-      while a < losses.length do
-        val maxFuture = worstCaseFuture(currentBound, s, a, transitions, numProfiles)
-        val candidate = losses(a) + gamma * maxFuture
-        if candidate < minOverActions then minOverActions = candidate
-        a += 1
-      result(s) = if losses.isEmpty then 0.0 else minOverActions
+      if terminalStates.contains(s) then
+        result(s) = 0.0 // (T_safe B)(b) = 0 for b in B_term (Def 60)
+      else
+        val losses = robustLosses(s)
+        var minOverActions = Double.PositiveInfinity
+        var a = 0
+        while a < losses.length do
+          val maxFuture = worstCaseFuture(currentBound, s, a, transitions, numProfiles)
+          val candidate = losses(a) + gamma * maxFuture
+          if candidate < minOverActions then minOverActions = candidate
+          a += 1
+        result(s) = if losses.isEmpty then 0.0 else minOverActions
       s += 1
     result
 
@@ -104,14 +109,15 @@ object SafetyBellman:
       transitions: (Int, Int, Int) => Int,
       numProfiles: Int,
       maxIterations: Int = 200,
-      tolerance: Double = 1e-10
+      tolerance: Double = 1e-10,
+      terminalStates: Set[Int] = Set.empty
   ): Array[Double] =
     val numStates = robustLosses.length
     var bound = Array.fill(numStates)(0.0)
     var iter = 0
     var converged = false
     while iter < maxIterations && !converged do
-      val next = tSafe(bound, robustLosses, gamma, transitions, numProfiles)
+      val next = tSafe(bound, robustLosses, gamma, transitions, numProfiles, terminalStates)
       var maxDiff = 0.0
       var s = 0
       while s < numStates do
@@ -223,7 +229,7 @@ object SafetyBellman:
         transitions: (Int, Int, Int) => Int,
         numProfiles: Int
     ): Boolean =
-      val tSafeResult = SafetyBellman.tSafe(values, robustLosses, gamma, transitions, numProfiles)
+      val tSafeResult = SafetyBellman.tSafe(values, robustLosses, gamma, transitions, numProfiles, terminalStates)
       values.indices.forall(s => values(s) >= tSafeResult(s) - 1e-12)
 
     /** Validate all four structural constraints. */
@@ -269,9 +275,10 @@ object SafetyBellman:
       robustLosses: Array[Array[Double]],
       gamma: Double,
       transitions: (Int, Int, Int) => Int,
-      numProfiles: Int
+      numProfiles: Int,
+      terminalStates: Set[Int] = Set.empty
   ): Array[Double] =
-    tSafe(currentBound, robustLosses, gamma, transitions, numProfiles)
+    tSafe(currentBound, robustLosses, gamma, transitions, numProfiles, terminalStates)
 
   /** Chain-indexed fixed-point B*^{(omega^act, omega^sd)} (Def 61, chain-indexed form).
     *
@@ -284,9 +291,10 @@ object SafetyBellman:
       transitions: (Int, Int, Int) => Int,
       numProfiles: Int,
       maxIterations: Int = 200,
-      tolerance: Double = 1e-10
+      tolerance: Double = 1e-10,
+      terminalStates: Set[Int] = Set.empty
   ): Array[Double] =
-    computeBStar(robustLosses, gamma, transitions, numProfiles, maxIterations, tolerance)
+    computeBStar(robustLosses, gamma, transitions, numProfiles, maxIterations, tolerance, terminalStates)
 
   /** Chain-indexed safe action set U*^{(omega^act, omega^sd)}_safe (Def 62, chain-indexed form). */
   def safeActionSetForWorld(

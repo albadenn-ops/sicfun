@@ -60,3 +60,73 @@ class WorldTypesTest extends munit.FunSuite:
 
   test("PolicyScope has 2 values"):
     assertEquals(PolicyScope.values.length, 2)
+
+  // ---- Blind equivalence (Def 20 cardinality note) --------------------------
+
+  test("(Blind,Off) and (Blind,On) are blind-equivalent"):
+    val off = ChainWorld(LearningChannel.Blind, ShowdownMode.Off)
+    val on = ChainWorld(LearningChannel.Blind, ShowdownMode.On)
+    assert(off.isBlindEquivalent(on))
+    assert(on.isBlindEquivalent(off))
+
+  test("non-blind worlds are not blind-equivalent"):
+    val attribOff = ChainWorld(LearningChannel.Attrib, ShowdownMode.Off)
+    val attribOn = ChainWorld(LearningChannel.Attrib, ShowdownMode.On)
+    assert(!attribOff.isBlindEquivalent(attribOn))
+
+  test("effectivelyDistinct has 7 elements (8 - 1 blind pair collapsed)"):
+    // Spec says "6" in Def 20 cardinality note but the correct count is 7:
+    // 1 blind representative + 3 non-blind channels × 2 showdown modes = 7
+    assertEquals(ChainWorld.effectivelyDistinct.size, 7)
+
+  test("effectivelyDistinct collapses (Blind,On)"):
+    assert(ChainWorld.effectivelyDistinct.contains(
+      ChainWorld(LearningChannel.Blind, ShowdownMode.Off)
+    ))
+    assert(!ChainWorld.effectivelyDistinct.contains(
+      ChainWorld(LearningChannel.Blind, ShowdownMode.On)
+    ))
+
+  // ---- FullWorld (reserved notation, §0) ------------------------------------
+
+  test("FullWorld.all has 16 elements (4 x 2 x 2)"):
+    assertEquals(FullWorld.all.size, 16)
+
+  test("FullWorld.all contains no duplicates"):
+    assertEquals(FullWorld.all.distinct.size, FullWorld.all.size)
+
+  test("FullWorld.toChainWorld projects correctly"):
+    val fw = FullWorld(LearningChannel.Attrib, ShowdownMode.On, PolicyScope.ClosedLoop)
+    assertEquals(fw.toChainWorld, ChainWorld(LearningChannel.Attrib, ShowdownMode.On))
+
+  test("FullWorld.toGridWorld projects correctly for valid channels"):
+    val fw = FullWorld(LearningChannel.Blind, ShowdownMode.Off, PolicyScope.OpenLoop)
+    assertEquals(fw.toGridWorld, GridWorld(LearningChannel.Blind, PolicyScope.OpenLoop))
+
+  test("FullWorld.toGridWorld rejects invalid channels"):
+    val fw = FullWorld(LearningChannel.Ref, ShowdownMode.Off, PolicyScope.OpenLoop)
+    intercept[IllegalArgumentException]:
+      fw.toGridWorld
+
+  test("FullWorld.fromChain lifts correctly"):
+    val cw = ChainWorld(LearningChannel.Design, ShowdownMode.On)
+    val fw = FullWorld.fromChain(cw, PolicyScope.ClosedLoop)
+    assertEquals(fw.channel, LearningChannel.Design)
+    assertEquals(fw.showdown, ShowdownMode.On)
+    assertEquals(fw.scope, PolicyScope.ClosedLoop)
+
+  test("FullWorld.fromGrid lifts correctly"):
+    val gw = GridWorld(LearningChannel.Attrib, PolicyScope.OpenLoop)
+    val fw = FullWorld.fromGrid(gw, ShowdownMode.Off)
+    assertEquals(fw.channel, LearningChannel.Attrib)
+    assertEquals(fw.showdown, ShowdownMode.Off)
+    assertEquals(fw.scope, PolicyScope.OpenLoop)
+
+  test("chain/grid spaces are not subsets of each other"):
+    // Chain projects to (LearningChannel, ShowdownMode)
+    // Grid projects to ({Blind, Attrib}, PolicyScope)
+    // Chain has Ref and Design channels; Grid doesn't
+    // Grid has PolicyScope axis; Chain doesn't
+    val chainChannels = ChainWorld.all.map(_.channel).toSet
+    val gridChannels = GridWorld.all.map(_.learning).toSet
+    assert(chainChannels != gridChannels, "chain and grid channel sets should differ")

@@ -14,8 +14,8 @@ object ClassificationBridge:
 
   /** Default thresholds for equity-based classification.
     * Value: equity >= 0.65
-    * SemiBluff: 0.35 <= equity < 0.65 AND draw potential
-    * Marginal: 0.35 <= equity < 0.65 AND no draw potential
+    * StructuralBluff: 0.35 <= equity < 0.65 AND draw potential
+    * Mixed: 0.35 <= equity < 0.65 AND no draw potential
     * Bluff: equity < 0.35
     */
   final case class ClassificationThresholds(
@@ -33,6 +33,6 @@ object ClassificationBridge:
     val cls =
       if equity >= thresholds.valueFloor then StrategicClass.Value
       else if equity < thresholds.bluffCeiling then StrategicClass.Bluff
-      else if hasDrawPotential then StrategicClass.SemiBluff
-      else StrategicClass.Marginal
+      else if hasDrawPotential then StrategicClass.StructuralBluff
+      else StrategicClass.Mixed
     BridgeResult.Approximate(cls, "equity-based classification; Def 2 requires full spot context")

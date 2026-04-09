@@ -60,7 +60,7 @@ class StrategicSnapshotTest extends munit.FunSuite:
     assertEquals(snap.actionSignal.action, PokerAction.Category.Check)
     assertEquals(snap.actionSignal.sizing, None)
 
-  test("StrategicSnapshot.build low equity with draw -> SemiBluff"):
+  test("StrategicSnapshot.build low equity with draw -> StructuralBluff"):
     val gs = makeGS()
     val snap = StrategicSnapshot.build(
       gameState = gs,
@@ -70,7 +70,7 @@ class StrategicSnapshotTest extends munit.FunSuite:
       staticEquity = 0.30,
       hasDrawPotential = true
     )
-    assertEquals(snap.strategicClass, StrategicClass.SemiBluff)
+    assertEquals(snap.strategicClass, StrategicClass.StructuralBluff)
 
   test("StrategicSnapshot.build low equity no draw -> Bluff"):
     val gs = makeGS()

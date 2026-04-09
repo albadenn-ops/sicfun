@@ -12,8 +12,8 @@ class StrategicRivalBeliefTest extends FunSuite:
   private val uniformPrior = DiscreteDistribution(Map(
     StrategicClass.Value    -> 0.25,
     StrategicClass.Bluff    -> 0.25,
-    StrategicClass.SemiBluff -> 0.25,
-    StrategicClass.Marginal  -> 0.25
+    StrategicClass.StructuralBluff -> 0.25,
+    StrategicClass.Mixed  -> 0.25
   ))
 
   private def mkPublicState: PublicState =
@@ -35,8 +35,8 @@ class StrategicRivalBeliefTest extends FunSuite:
     val belief = StrategicRivalBelief(uniformPrior)
     assertEqualsDouble(belief.typePosterior.probabilityOf(StrategicClass.Value), 0.25, 1e-10)
     assertEqualsDouble(belief.typePosterior.probabilityOf(StrategicClass.Bluff), 0.25, 1e-10)
-    assertEqualsDouble(belief.typePosterior.probabilityOf(StrategicClass.SemiBluff), 0.25, 1e-10)
-    assertEqualsDouble(belief.typePosterior.probabilityOf(StrategicClass.Marginal), 0.25, 1e-10)
+    assertEqualsDouble(belief.typePosterior.probabilityOf(StrategicClass.StructuralBluff), 0.25, 1e-10)
+    assertEqualsDouble(belief.typePosterior.probabilityOf(StrategicClass.Mixed), 0.25, 1e-10)
 
   test("update returns same belief (identity update)"):
     val belief = StrategicRivalBelief(uniformPrior)

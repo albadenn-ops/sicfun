@@ -101,10 +101,10 @@ class RivalKernelLawTest extends munit.FunSuite:
           def update(signal: ActionSignal, publicState: PublicState): RivalBeliefState = this
 
     val blindOff = KernelConstructor.composeFullKernelForWorld(
-      ChainWorld(LearningChannel.Blind, ShowdownMode.Off), actionKernel, designKernel, sdKernel
+      ChainWorld(LearningChannel.Blind, ShowdownMode.Off), actionKernel, actionKernel, designKernel, sdKernel
     )
     val blindOn = KernelConstructor.composeFullKernelForWorld(
-      ChainWorld(LearningChannel.Blind, ShowdownMode.On), actionKernel, designKernel, sdKernel
+      ChainWorld(LearningChannel.Blind, ShowdownMode.On), actionKernel, actionKernel, designKernel, sdKernel
     )
 
     val sd = ShowdownSignal(Vector(RevealedHand(PlayerId("v1"), Vector.empty)))

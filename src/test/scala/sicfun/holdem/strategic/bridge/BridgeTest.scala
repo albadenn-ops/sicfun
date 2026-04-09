@@ -119,16 +119,16 @@ class BridgeTest extends munit.FunSuite:
       case BridgeResult.Approximate(cls, _) => assertEquals(cls, StrategicClass.Bluff)
       case other => fail(s"expected Approximate, got $other")
 
-  test("ClassificationBridge.classify mid equity with draw -> SemiBluff"):
+  test("ClassificationBridge.classify mid equity with draw -> StructuralBluff"):
     val result = ClassificationBridge.classify(0.50, hasDrawPotential = true)
     result match
-      case BridgeResult.Approximate(cls, _) => assertEquals(cls, StrategicClass.SemiBluff)
+      case BridgeResult.Approximate(cls, _) => assertEquals(cls, StrategicClass.StructuralBluff)
       case other => fail(s"expected Approximate, got $other")
 
-  test("ClassificationBridge.classify mid equity without draw -> Marginal"):
+  test("ClassificationBridge.classify mid equity without draw -> Mixed"):
     val result = ClassificationBridge.classify(0.50, hasDrawPotential = false)
     result match
-      case BridgeResult.Approximate(cls, _) => assertEquals(cls, StrategicClass.Marginal)
+      case BridgeResult.Approximate(cls, _) => assertEquals(cls, StrategicClass.Mixed)
       case other => fail(s"expected Approximate, got $other")
 
   test("ClassificationBridge.classify at exact valueFloor boundary -> Value"):
@@ -155,7 +155,7 @@ class BridgeTest extends munit.FunSuite:
     val thresholds = ClassificationBridge.ClassificationThresholds(valueFloor = 0.80, bluffCeiling = 0.20)
     val result = ClassificationBridge.classify(0.75, hasDrawPotential = false, thresholds = thresholds)
     result match
-      case BridgeResult.Approximate(cls, _) => assertEquals(cls, StrategicClass.Marginal)
+      case BridgeResult.Approximate(cls, _) => assertEquals(cls, StrategicClass.Mixed)
       case other => fail(s"expected Approximate, got $other")
 
   // ---------------------------------------------------------------------------
@@ -221,8 +221,8 @@ class BridgeTest extends munit.FunSuite:
         val weights = dist.weights
         assert(weights.contains(StrategicClass.Value))
         assert(weights.contains(StrategicClass.Bluff))
-        assert(weights.contains(StrategicClass.Marginal))
-        assert(weights.contains(StrategicClass.SemiBluff))
+        assert(weights.contains(StrategicClass.Mixed))
+        assert(weights.contains(StrategicClass.StructuralBluff))
       case other => fail(s"expected Approximate, got $other")
 
   test("OpponentModelBridge.statsToClassPosterior posterior sums to 1.0"):

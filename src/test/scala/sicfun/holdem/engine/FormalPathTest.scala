@@ -401,8 +401,8 @@ class FormalPathTest extends munit.FunSuite:
       sicfun.core.DiscreteDistribution(Map(
         StrategicClass.Value -> 0.7,
         StrategicClass.Bluff -> 0.1,
-        StrategicClass.SemiBluff -> 0.1,
-        StrategicClass.Marginal -> 0.1
+        StrategicClass.StructuralBluff -> 0.1,
+        StrategicClass.Mixed -> 0.1
       ))
     )
     val rivalBeliefs = Map(PlayerId("v1") -> belief)

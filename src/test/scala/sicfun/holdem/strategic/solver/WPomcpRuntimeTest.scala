@@ -345,6 +345,77 @@ class WPomcpRuntimeTest extends munit.FunSuite:
     )
     assertEquals(model.numRivalTypes, 4)
 
+  test("Theorem 7: V(b) is convex in belief — V(mix) <= lambda*V(b1)+(1-lambda)*V(b2)"):
+    assume(nativeAvailable, "Native library not available")
+    // Construct two beliefs over rival types and a 50/50 mixture.
+    // b1: rival is likely type 0 (passive). b2: rival is likely type 1 (aggressive).
+    // b_mix: uniform mixture.
+    val nParticles = 20
+    val nTypes = 2; val nPub = 4; val nAct = 3
+    val heroBucket = 5
+    val lambda = 0.5
+
+    // Type-conditioned rival policies: type 0 folds often, type 1 raises often
+    val policy = new Array[Double](nTypes * nPub * nAct)
+    for pub <- 0 until nPub do
+      // type 0: fold=0.7, call=0.2, raise=0.1
+      policy(0 * nPub * nAct + pub * nAct + 0) = 0.7
+      policy(0 * nPub * nAct + pub * nAct + 1) = 0.2
+      policy(0 * nPub * nAct + pub * nAct + 2) = 0.1
+      // type 1: fold=0.1, call=0.3, raise=0.6
+      policy(1 * nPub * nAct + pub * nAct + 0) = 0.1
+      policy(1 * nPub * nAct + pub * nAct + 1) = 0.3
+      policy(1 * nPub * nAct + pub * nAct + 2) = 0.6
+
+    val effects = Array(
+      0.0, 1.0, 0.0,   // fold: potDelta=0, isFold=1, isAllin=0
+      0.5, 0.0, 0.0,   // call: potDelta=0.5
+      1.0, 0.0, 0.0    // raise: potDelta=1.0
+    )
+    val equity = Array.tabulate(10 * 10) { idx =>
+      val hb = idx / 10; val rb = idx % 10
+      if hb > rb then 0.8 else if hb == rb then 0.5 else 0.2
+    }
+    val terminal = Array.fill(nPub * nAct)(0)
+    for a <- 0 until nAct do terminal(3 * nAct + a) = 3 // last pub state is showdown
+
+    val model = WPomcpRuntime.FactoredModel(
+      rivalPolicy = policy, numRivalTypes = nTypes, numPubStates = nPub,
+      actionEffects = effects, showdownEquity = equity,
+      numHeroBuckets = 10, numRivalBuckets = 10,
+      terminalFlags = terminal, potBucketSize = 50.0
+    )
+
+    def solveAtBelief(typeWeights: Array[Double], seed: Long): Double =
+      val nType0 = math.max(1, (nParticles * typeWeights(0)).round.toInt)
+      val nType1 = nParticles - nType0
+      val types = Array.fill(nType0)(0) ++ Array.fill(nType1)(1)
+      val privStates = Array.tabulate(nParticles)(i => i % 10) // within rivalBuckets range
+      val weights = types.map(t => typeWeights(t) / types.count(_ == t).toDouble)
+      val rp = WPomcpRuntime.RivalParticles(types, privStates, weights)
+      val input = WPomcpRuntime.SearchInputV2(
+        publicState = WPomcpRuntime.PublicState(0, 100.0),
+        rivalParticles = IndexedSeq(rp),
+        model = model,
+        heroBucket = heroBucket
+      )
+      val config = WPomcpRuntime.Config(numSimulations = 2000, seed = seed)
+      val result = WPomcpRuntime.solveV2(input, config)
+      assert(result.isRight, s"Solve failed: $result")
+      result.toOption.get.rootValue
+
+    // Average over multiple seeds to reduce Monte Carlo noise
+    val seeds = (100L to 109L)
+    val v1Avg = seeds.map(s => solveAtBelief(Array(0.9, 0.1), s)).sum / seeds.size
+    val v2Avg = seeds.map(s => solveAtBelief(Array(0.1, 0.9), s)).sum / seeds.size
+    val vMixAvg = seeds.map(s => solveAtBelief(Array(0.5, 0.5), s)).sum / seeds.size
+
+    val convexBound = lambda * v1Avg + (1.0 - lambda) * v2Avg
+    // Allow small tolerance for MC approximation noise
+    val mcTolerance = 0.15 * math.max(math.abs(v1Avg), math.abs(v2Avg)).max(1.0)
+    assert(vMixAvg <= convexBound + mcTolerance,
+      s"Convexity violated: V(mix)=$vMixAvg > lambda*V(b1)+(1-lambda)*V(b2)=$convexBound + tolerance=$mcTolerance")
+
   test("native: solveV2 with dominant action returns correct best action"):
     assume(nativeAvailable, "Native library not available")
     val rp = WPomcpRuntime.RivalParticles(

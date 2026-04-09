@@ -67,6 +67,87 @@ class BluffFrameworkTest extends munit.FunSuite:
     val nonBluff = BluffFramework.feasibleNonBluffActions(StrategicClass.Value, actions)
     assertEquals(nonBluff, actions)
 
+  // -- Def 37: Belief-conditioned feasible non-bluff actions --
+
+  test("feasibleNonBluffActions with belief: filters structural bluffs AND dominated actions"):
+    val belief = StrategicRivalBelief.uniform
+    val qLookup: PokerAction => Option[Ev] = {
+      case PokerAction.Fold => Some(Ev(-1.0))  // dominated (below -0.5 threshold)
+      case PokerAction.Call => Some(Ev(0.2))    // above threshold
+      case _                => None             // no data => always feasible
+    }
+    val actions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(50.0))
+    val result = BluffFramework.feasibleNonBluffActions(
+      StrategicClass.Bluff, actions, belief, qLookup, dominanceThreshold = Ev(-0.5)
+    )
+    // Fold: dominated by Q threshold => filtered by feasibleActions
+    // Call: passes threshold, not structural bluff (Call is not aggressive) => kept
+    // Raise(50): no Q data => feasible, but isStructuralBluff(Bluff, Raise) => filtered
+    assert(!result.contains(PokerAction.Fold), "Dominated fold should be filtered")
+    assert(result.contains(PokerAction.Call), "Non-dominated, non-bluff Call should remain")
+    assert(!result.contains(PokerAction.Raise(50.0)), "Structural bluff Raise should be filtered")
+
+  test("feasibleNonBluffActions with belief: for Value class, only dominated actions removed"):
+    val belief = StrategicRivalBelief.uniform
+    val qLookup: PokerAction => Option[Ev] = {
+      case PokerAction.Fold => Some(Ev(-2.0))  // dominated
+      case PokerAction.Call => Some(Ev(0.5))    // above threshold
+      case _                => Some(Ev(1.0))    // above threshold
+    }
+    val actions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(75.0))
+    val result = BluffFramework.feasibleNonBluffActions(
+      StrategicClass.Value, actions, belief, qLookup, dominanceThreshold = Ev(-0.5)
+    )
+    // Value class: no actions are structural bluffs, only dominance filtering applies
+    assert(!result.contains(PokerAction.Fold), "Dominated fold should be filtered")
+    assert(result.contains(PokerAction.Call))
+    assert(result.contains(PokerAction.Raise(75.0)))
+
+  test("feasibleNonBluffActions with belief: never returns empty (falls back to all legal)"):
+    val belief = StrategicRivalBelief.uniform
+    // All actions dominated
+    val qLookup: PokerAction => Option[Ev] = _ => Some(Ev(-5.0))
+    val actions = Vector(PokerAction.Fold, PokerAction.Check, PokerAction.Raise(50.0))
+    val result = BluffFramework.feasibleNonBluffActions(
+      StrategicClass.Bluff, actions, belief, qLookup, dominanceThreshold = Ev(-0.5)
+    )
+    // feasibleActions falls back to all legal when all dominated,
+    // then non-bluff filter applies
+    assert(result.nonEmpty, "Should never produce empty result via feasibleActions fallback")
+    // After fallback, structural bluffs are still filtered
+    assert(!result.contains(PokerAction.Raise(50.0)), "Structural bluff still filtered after fallback")
+    assert(result.contains(PokerAction.Fold))
+    assert(result.contains(PokerAction.Check))
+
+  test("feasibleNonBluffActions with belief: default threshold matches Ev(-0.5)"):
+    val belief = StrategicRivalBelief.uniform
+    val qLookup: PokerAction => Option[Ev] = {
+      case PokerAction.Fold => Some(Ev(-0.4))  // above default -0.5 threshold
+      case PokerAction.Call => Some(Ev(-0.6))  // below default -0.5 threshold
+      case _                => None
+    }
+    val actions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(50.0))
+    // Use default threshold
+    val result = BluffFramework.feasibleNonBluffActions(
+      StrategicClass.Value, actions, belief, qLookup
+    )
+    assert(result.contains(PokerAction.Fold), "Fold at -0.4 is above default -0.5 threshold")
+    assert(!result.contains(PokerAction.Call), "Call at -0.6 is below default -0.5 threshold")
+    assert(result.contains(PokerAction.Raise(50.0)), "No Q data => always feasible, Value class => not bluff")
+
+  test("feasibleNonBluffActions with belief: StructuralBluff class also has aggressive actions filtered"):
+    val belief = StrategicRivalBelief.uniform
+    val qLookup: PokerAction => Option[Ev] = _ => Some(Ev(1.0)) // all above threshold
+    val actions = Vector(PokerAction.Fold, PokerAction.Check, PokerAction.Call, PokerAction.Raise(100.0))
+    val result = BluffFramework.feasibleNonBluffActions(
+      StrategicClass.Bluff, actions, belief, qLookup, dominanceThreshold = Ev(-0.5)
+    )
+    // Bluff class: Raise is structural bluff (aggressive wager by Bluff class)
+    assert(result.contains(PokerAction.Fold))
+    assert(result.contains(PokerAction.Check))
+    assert(result.contains(PokerAction.Call))
+    assert(!result.contains(PokerAction.Raise(100.0)), "Bluff+Raise = structural bluff => filtered")
+
   // -- Def 38: Bluff gain --
 
   test("bluffGain is Q_attrib(u) - Q_ref(u_cf)"):

@@ -110,7 +110,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       exploitConfigs = exploitConfigs,
       detector = config.detector,
       exploitabilityFn = beta => computeExploitabilityEstimate(beta),
-      epsilonNE = 0.01
+      epsilonNE = config.epsilonBase
     )
 
     _sessionState = StrategicEngine.SessionState(
@@ -360,20 +360,20 @@ class StrategicEngine(val config: StrategicEngine.Config):
         _lastBundle = Some(makeFallbackBundle(numActions, s"PftDpw solver status: ${pftResult.status}"))
         return failClosedAction(candidateActions)
 
-      // 3. Four-world grid solve (V^{1,0}, V^{0,1})
+      // 3. Four-world grid solve (V^{1,0}, V^{0,1}, V^{0,0}) — Theorem 4
       val fourWorldOpt: Option[FourWorld] = try
         val fwModels = StrategicEngine.buildFourWorldModels(
           gameState, session.rivalBeliefs, candidateActions, heroBucket, config.actionPriors
         )
         val olResult = PftDpwRuntime.solve(fwModels.openLoop, belief, pftConfig)
         val blindResult = PftDpwRuntime.solve(fwModels.blind, belief, pftConfig)
-        if olResult.isSuccess && blindResult.isSuccess then
-          val staticEquity = heroBucket / 9.0
+        val blindOlResult = PftDpwRuntime.solve(fwModels.blindOpenLoop, belief, pftConfig)
+        if olResult.isSuccess && blindResult.isSuccess && blindOlResult.isSuccess then
           Some(StrategicEngine.extractFourWorldValues(
             baselineQ = pftResult.qValues,
             openLoopQ = olResult.qValues,
             blindQ = blindResult.qValues,
-            staticEquity = staticEquity
+            blindOpenLoopQ = blindOlResult.qValues
           ))
         else None
       catch
@@ -674,8 +674,10 @@ class StrategicEngine(val config: StrategicEngine.Config):
   private def actionPrior(cls: StrategicClass, cat: PokerAction.Category): Double =
     config.actionPriors.getOrElse((cls, cat), 0.25)
 
-  /** Build the tempered likelihood function for kernel updates. */
-  private def buildLikelihoodFn(): TemperedLikelihoodFn =
+  /** Build the attrib tempered likelihood function (Def 18: hat{pi}^{0,S,i}).
+    * Conditions on rival belief state — uses rival's current posterior as Bayesian prior.
+    */
+  private def buildAttribLikelihoodFn(): TemperedLikelihoodFn =
     (signal: ActionSignal, pubState: PublicState, rivalState: RivalBeliefState) =>
       val classes = StrategicClass.values
       val eta = TemperedLikelihood.defaultEta(classes.length)
@@ -691,21 +693,50 @@ class StrategicEngine(val config: StrategicEngine.Config):
       val posterior = TemperedLikelihood.updatePosterior(prior, basePr, eta, config.temperedConfig)
       DiscreteDistribution(classes.zip(posterior).toMap)
 
-  /** Build the joint kernel profile for all rivals. */
+  /** Build the ref tempered likelihood function (Def 18: pi^{0,S}).
+    * Does NOT condition on rival state — uses uniform prior for all rivals.
+    */
+  private def buildRefLikelihoodFn(): TemperedLikelihoodFn =
+    (signal: ActionSignal, pubState: PublicState, rivalState: RivalBeliefState) =>
+      val classes = StrategicClass.values
+      val eta = TemperedLikelihood.defaultEta(classes.length)
+
+      val basePr = classes.map { cls =>
+        actionPrior(cls, signal.action)
+      }
+
+      // Ref kernel (Def 18): uniform prior, ignores rival-specific history
+      val uniformPrior = classes.map(_ => 1.0 / classes.length)
+
+      val posterior = TemperedLikelihood.updatePosterior(uniformPrior, basePr, eta, config.temperedConfig)
+      DiscreteDistribution(classes.zip(posterior).toMap)
+
+  /** Build the joint kernel profile for all rivals.
+    *
+    * Per Def 18, uses distinct Ref and Attrib likelihoods interpolated by
+    * per-rival beta (Def 15C) via ExploitationInterpolation.buildInterpolatedKernelFull.
+    */
   private def buildKernelProfile(): JointKernelProfile[StrategicRivalBelief] =
-    val likelihood = buildLikelihoodFn()
-    val actionKernel = KernelConstructor.buildActionKernelFull[StrategicRivalBelief](
-      StrategicRivalBelief.updater,
-      likelihood
-    )
+    val refLikelihood = buildRefLikelihoodFn()
+    val attribLikelihood = buildAttribLikelihoodFn()
     val showdownKernel = makeShowdownKernel(
       _lastBoard.getOrElse(Board.empty),
       _lastStreet.getOrElse(Street.Preflop),
       _actionHistory.lastOption.map(_.signal.action)
     )
-    val fullKernel = KernelConstructor.composeFullKernelFromFull(actionKernel, showdownKernel)
+    val session = _sessionState.nn
     JointKernelProfile(
-      _sessionState.nn.rivalBeliefs.keys.map(id => id -> fullKernel).toMap
+      session.rivalBeliefs.keys.map { id =>
+        val beta = session.exploitationStates.get(id).map(_.beta).getOrElse(1.0)
+        val interpolatedKernel = ExploitationInterpolation.buildInterpolatedKernelFull[StrategicRivalBelief](
+          StrategicRivalBelief.updater,
+          refLikelihood,
+          attribLikelihood,
+          beta
+        )
+        val fullKernel = KernelConstructor.composeFullKernelFromFull(interpolatedKernel, showdownKernel)
+        id -> fullKernel
+      }.toMap
     )
 
   /** Real showdown kernel: classifies revealed hand and hard-shifts posterior. */
@@ -733,7 +764,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       street: Street,
       lastAction: Option[PokerAction.Category]
   ): StrategicClass =
-    if cards.size < 2 then return StrategicClass.Marginal
+    if cards.size < 2 then return StrategicClass.Mixed
     val holeCards = HoleCards.from(cards.take(2))
     val strength = HandStrengthEstimator.fastGtoStrength(holeCards, board, street)
     val wasAggressive = lastAction.exists(_ == PokerAction.Category.Raise)
@@ -742,9 +773,9 @@ class StrategicEngine(val config: StrategicEngine.Config):
     else if strength < 0.35 && wasAggressive then
       StrategicClass.Bluff
     else if strength >= 0.35 && strength < 0.55 && wasAggressive then
-      StrategicClass.SemiBluff
+      StrategicClass.StructuralBluff
     else
-      StrategicClass.Marginal
+      StrategicClass.Mixed
 
 object StrategicEngine:
 
@@ -768,10 +799,10 @@ object StrategicEngine:
       (StrategicClass.Value, Call) -> 0.40, (StrategicClass.Value, Raise) -> 0.20,
       (StrategicClass.Bluff, Fold) -> 0.10, (StrategicClass.Bluff, Check) -> 0.10,
       (StrategicClass.Bluff, Call) -> 0.15, (StrategicClass.Bluff, Raise) -> 0.65,
-      (StrategicClass.SemiBluff, Fold) -> 0.05, (StrategicClass.SemiBluff, Check) -> 0.15,
-      (StrategicClass.SemiBluff, Call) -> 0.30, (StrategicClass.SemiBluff, Raise) -> 0.50,
-      (StrategicClass.Marginal, Fold) -> 0.15, (StrategicClass.Marginal, Check) -> 0.40,
-      (StrategicClass.Marginal, Call) -> 0.35, (StrategicClass.Marginal, Raise) -> 0.10
+      (StrategicClass.StructuralBluff, Fold) -> 0.05, (StrategicClass.StructuralBluff, Check) -> 0.15,
+      (StrategicClass.StructuralBluff, Call) -> 0.30, (StrategicClass.StructuralBluff, Raise) -> 0.50,
+      (StrategicClass.Mixed, Fold) -> 0.15, (StrategicClass.Mixed, Check) -> 0.40,
+      (StrategicClass.Mixed, Call) -> 0.35, (StrategicClass.Mixed, Raise) -> 0.10
     )
   }
 
@@ -815,17 +846,16 @@ object StrategicEngine:
       rivalSeats: Map[PlayerId, RivalSeatInfo] = Map.empty
   )
 
-  /** Three tabular models for the four-world grid solve.
-    * V^{0,0} uses static equity (no model needed).
-    */
+  /** Four tabular models for the four-world grid solve (Theorem 4). */
   final case class FourWorldModels(
-      baseline: TabularGenerativeModel,   // V^{1,1}: attrib kernel, closed-loop
-      openLoop: TabularGenerativeModel,   // V^{1,0}: attrib kernel, open-loop
-      blind: TabularGenerativeModel       // V^{0,1}: blind kernel, closed-loop
+      baseline: TabularGenerativeModel,      // V^{1,1}: attrib kernel, closed-loop
+      openLoop: TabularGenerativeModel,      // V^{1,0}: attrib kernel, open-loop
+      blind: TabularGenerativeModel,         // V^{0,1}: blind kernel, closed-loop
+      blindOpenLoop: TabularGenerativeModel  // V^{0,0}: blind kernel, open-loop
   ):
-    def size: Int = 3
+    def size: Int = 4
 
-  /** Build the three tabular models for the four-world grid. */
+  /** Build the four tabular models for the four-world grid (Theorem 4). */
   def buildFourWorldModels(
       gameState: GameState,
       rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
@@ -842,23 +872,28 @@ object StrategicEngine:
       ),
       blind = PokerPftFormulation.buildBlindKernelModel(
         gameState, rivalBeliefs, heroActions, heroBucket, actionPriors
+      ),
+      blindOpenLoop = PokerPftFormulation.buildBlindOpenLoopModel(
+        gameState, rivalBeliefs, heroActions, heroBucket, actionPriors
       )
     )
 
-  /** Extract FourWorld values from solver Q-value arrays.
+  /** Extract FourWorld values from solver Q-value arrays (Theorem 4).
     *
     * Each Q-value array is per-action at the root state.
     * The grid world value is the max Q-value (best action) for each model.
+    * All four values come from the same solver framework, so the
+    * algebraic identity V^{1,1} = V^{0,0} + Delta_cont + Delta_sig* + Delta_int holds.
     */
   def extractFourWorldValues(
       baselineQ: Array[Double],
       openLoopQ: Array[Double],
       blindQ: Array[Double],
-      staticEquity: Double
+      blindOpenLoopQ: Array[Double]
   ): FourWorld =
     FourWorld(
       v11 = Ev(baselineQ.max),
       v10 = Ev(openLoopQ.max),
       v01 = Ev(blindQ.max),
-      v00 = Ev(staticEquity)
+      v00 = Ev(blindOpenLoopQ.max)
     )

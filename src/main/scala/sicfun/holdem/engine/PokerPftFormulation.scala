@@ -17,7 +17,7 @@ object PokerPftFormulation:
     *   - Fold: forfeit pot equity proportional to hand strength and pot commitment
     *   - Call: EV proportional to (equity - breakeven) * call cost fraction
     *   - Check: zero immediate cost
-    *   - Raise: EV proportional to (equity - semi-bluff threshold) * sizing fraction
+    *   - Raise: EV proportional to (equity - structural-bluff threshold) * sizing fraction
     *
     * Profile-conditioned models adjust Call/Check by opponent aggression
     * and Raise by opponent fold tendency from `actionPriors`.
@@ -187,6 +187,31 @@ object PokerPftFormulation:
       gameState, rivalBeliefs, heroActions, heroBucket, actionPriors,
       profileClass = None
     )
+
+  /** Build a model for V^{0,0} (blind kernel, open-loop policy).
+    *
+    * Baseline rewards (rival does NOT adapt — no profile modulation) +
+    * uniform obs likelihoods (hero cannot condition on observations).
+    * The POMDP solver degenerates to a blind MDP: no learning, no signaling.
+    *
+    * Grid world: (Blind, OpenLoop) in Omega^grid.
+    */
+  def buildBlindOpenLoopModel(
+      gameState: GameState,
+      rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
+      heroActions: Vector[PokerAction],
+      heroBucket: Int,
+      actionPriors: Map[(StrategicClass, PokerAction.Category), Double]
+  ): TabularGenerativeModel =
+    // Build blind model (baseline rewards), then override obs to uniform
+    val blindModel = buildBlindKernelModel(
+      gameState, rivalBeliefs, heroActions, heroBucket, actionPriors
+    )
+    val numObs = blindModel.numObs
+    val uniformObs = Array.fill(
+      blindModel.numStates * blindModel.numActions * numObs
+    )(1.0 / numObs)
+    blindModel.copy(obsLikelihood = uniformObs)
 
   /** Build a ParticleBelief from rival beliefs.
     *

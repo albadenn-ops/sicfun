@@ -4,12 +4,16 @@ import sicfun.holdem.types.PokerAction
 
 class StrategicClassTest extends munit.FunSuite:
 
+  test("StrategicClass values match spec Def 1: Value, Bluff, Mixed, StructuralBluff"):
+    val names = StrategicClass.values.map(_.toString).toSet
+    assertEquals(names, Set("Value", "Bluff", "Mixed", "StructuralBluff"))
+
   test("StrategicClass has exactly four members"):
     assertEquals(StrategicClass.values.length, 4)
 
-  test("StrategicClass values are Value, Bluff, Marginal, SemiBluff"):
+  test("StrategicClass values are Value, Bluff, Mixed, StructuralBluff"):
     val names = StrategicClass.values.map(_.toString).toSet
-    assertEquals(names, Set("Value", "Bluff", "Marginal", "SemiBluff"))
+    assertEquals(names, Set("Value", "Bluff", "Mixed", "StructuralBluff"))
 
   test("isAggressiveWager true for Raise"):
     assert(StrategicClass.isAggressiveWager(PokerAction.Raise(50.0)))
@@ -24,8 +28,8 @@ class StrategicClassTest extends munit.FunSuite:
 
   test("structuralBluff false when class is not Bluff"):
     assert(!StrategicClass.isStructuralBluff(StrategicClass.Value, PokerAction.Raise(100.0)))
-    assert(!StrategicClass.isStructuralBluff(StrategicClass.Marginal, PokerAction.Raise(50.0)))
-    assert(!StrategicClass.isStructuralBluff(StrategicClass.SemiBluff, PokerAction.Raise(50.0)))
+    assert(!StrategicClass.isStructuralBluff(StrategicClass.Mixed, PokerAction.Raise(50.0)))
+    assert(!StrategicClass.isStructuralBluff(StrategicClass.StructuralBluff, PokerAction.Raise(50.0)))
 
   test("structuralBluff false when action is not aggressive"):
     assert(!StrategicClass.isStructuralBluff(StrategicClass.Bluff, PokerAction.Call))
@@ -33,7 +37,7 @@ class StrategicClassTest extends munit.FunSuite:
     assert(!StrategicClass.isStructuralBluff(StrategicClass.Bluff, PokerAction.Fold))
 
   test("structuralBluff exhaustive: false for all non-Bluff classes regardless of action"):
-    val nonBluff = Seq(StrategicClass.Value, StrategicClass.Marginal, StrategicClass.SemiBluff)
+    val nonBluff = Seq(StrategicClass.Value, StrategicClass.Mixed, StrategicClass.StructuralBluff)
     val actions = Seq(PokerAction.Fold, PokerAction.Check, PokerAction.Call, PokerAction.Raise(99.0))
     for
       cls <- nonBluff

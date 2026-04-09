@@ -20,8 +20,8 @@ class DynamicsTest extends munit.FunSuite:
   private val uniformPrior = DiscreteDistribution(Map(
     StrategicClass.Value     -> 0.25,
     StrategicClass.Bluff     -> 0.25,
-    StrategicClass.Marginal  -> 0.25,
-    StrategicClass.SemiBluff -> 0.25
+    StrategicClass.Mixed  -> 0.25,
+    StrategicClass.StructuralBluff -> 0.25
   ))
 
   private val dummyPublicState = PublicState(
@@ -213,13 +213,13 @@ class DynamicsTest extends munit.FunSuite:
         // Large sizing → strong signal toward Value
         DiscreteDistribution(Map(
           StrategicClass.Value -> 0.7, StrategicClass.Bluff -> 0.1,
-          StrategicClass.Marginal -> 0.1, StrategicClass.SemiBluff -> 0.1
+          StrategicClass.Mixed -> 0.1, StrategicClass.StructuralBluff -> 0.1
         ))
       else
         // Small sizing → stays near uniform (low divergence)
         DiscreteDistribution(Map(
           StrategicClass.Value -> 0.28, StrategicClass.Bluff -> 0.24,
-          StrategicClass.Marginal -> 0.24, StrategicClass.SemiBluff -> 0.24
+          StrategicClass.Mixed -> 0.24, StrategicClass.StructuralBluff -> 0.24
         ))
 
     val pol = PosteriorDivergencePolarization(uniformPrior, Some(klLikelihood))
@@ -244,7 +244,7 @@ class DynamicsTest extends munit.FunSuite:
   test("Def 25: KL divergence is positive for different distributions"):
     val skewed = DiscreteDistribution(Map(
       StrategicClass.Value -> 0.7, StrategicClass.Bluff -> 0.1,
-      StrategicClass.Marginal -> 0.1, StrategicClass.SemiBluff -> 0.1
+      StrategicClass.Mixed -> 0.1, StrategicClass.StructuralBluff -> 0.1
     ))
     val kl = PosteriorDivergencePolarization.klDivergence(skewed, uniformPrior)
     assert(kl > 0.0, s"KL divergence should be positive, got $kl")
@@ -303,7 +303,7 @@ class DynamicsTest extends munit.FunSuite:
 
   test("fullStep: combines rival update + exploitation retreat + belief update"):
     val v1State = TestRivalState(uniformPrior, 0, "v1")
-    val config = ExploitationConfig(initialBeta = 0.8, retreatRate = 0.2, adaptationTolerance = 0.1)
+    val config = ExploitationConfig(initialBeta = 0.8, cpRetreatRate = 0.2, epsilonAdapt = 0.1)
     val exploitState = ExploitationState.initial(config)
 
     val kernel = new FullKernel[TestRivalState]:
@@ -330,7 +330,7 @@ class DynamicsTest extends munit.FunSuite:
 
   test("fullStep with detection: retreat happens"):
     val v1State = TestRivalState(uniformPrior, 0, "v1")
-    val config = ExploitationConfig(initialBeta = 1.0, retreatRate = 0.4, adaptationTolerance = 0.1)
+    val config = ExploitationConfig(initialBeta = 1.0, cpRetreatRate = 0.4, epsilonAdapt = 0.1)
     val exploitState = ExploitationState.initial(config)
 
     val kernel = KernelConstructor.composeBlindFullKernel[TestRivalState]()
@@ -371,8 +371,8 @@ class DynamicsTest extends munit.FunSuite:
     val attribOff = ChainWorld(LearningChannel.Attrib, ShowdownMode.Off)
     val attribOn = ChainWorld(LearningChannel.Attrib, ShowdownMode.On)
 
-    val offKernel = KernelConstructor.composeFullKernelForWorld(attribOff, actionKernel, designKernel, sdKernel)
-    val onKernel = KernelConstructor.composeFullKernelForWorld(attribOn, actionKernel, designKernel, sdKernel)
+    val offKernel = KernelConstructor.composeFullKernelForWorld(attribOff, actionKernel, actionKernel, designKernel, sdKernel)
+    val onKernel = KernelConstructor.composeFullKernelForWorld(attribOn, actionKernel, actionKernel, designKernel, sdKernel)
 
     val worldProfile = WorldIndexedKernelProfile(Map(
       (PlayerId("v1"), attribOff) -> offKernel,
@@ -407,7 +407,7 @@ class DynamicsTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100, state.label + "+sd")
 
     val refOff = ChainWorld(LearningChannel.Ref, ShowdownMode.Off)
-    val refKernel = KernelConstructor.composeFullKernelForWorld(refOff, actionKernel, designKernel, sdKernel)
+    val refKernel = KernelConstructor.composeFullKernelForWorld(refOff, actionKernel, actionKernel, designKernel, sdKernel)
 
     val worldProfile = WorldIndexedKernelProfile(Map(
       (PlayerId("v1"), refOff) -> refKernel
@@ -429,7 +429,7 @@ class DynamicsTest extends munit.FunSuite:
 
   test("backward compat: beta=1, no detection, blind kernel = identity dynamics"):
     val v1State = TestRivalState(uniformPrior, 0, "v1")
-    val config = ExploitationConfig(initialBeta = 1.0, retreatRate = 0.0, adaptationTolerance = Double.MaxValue)
+    val config = ExploitationConfig(initialBeta = 1.0, cpRetreatRate = 0.0, epsilonAdapt = Double.MaxValue)
     val exploitState = ExploitationState.initial(config)
 
     val blindKernel = KernelConstructor.composeBlindFullKernel[TestRivalState]()
@@ -451,3 +451,135 @@ class DynamicsTest extends munit.FunSuite:
     // Blind kernel = identity, beta stays 1, no retreat
     assert(step.updatedRivals(PlayerId("v1")) eq v1State)
     assertEqualsDouble(step.updatedExploitation(PlayerId("v1")).beta, 1.0, Tol)
+
+  // ---- Defs 26-28: Changepoint detection integration ----
+
+  test("Def 27: changepointUpdate updates run-length posterior"):
+    val cpd = ChangepointDetector(hazardRate = 0.1, rMin = 2, kappaCP = 0.5, wReset = 1.0)
+    val state = cpd.initial
+    // Predictive prob: constant 0.5 for all run lengths
+    val (updated, _) = Dynamics.changepointUpdate(cpd, state, _ => 0.5)
+    // After one update, run-length posterior should have entries for ell=0 and ell=1
+    assert(updated.runLengthPosterior.contains(0))
+    assert(updated.runLengthPosterior.contains(1))
+    // Probabilities should sum to 1
+    val total = updated.runLengthPosterior.values.sum
+    assertEqualsDouble(total, 1.0, 1e-10)
+
+  test("Def 28: changepointReset blends posterior with meta-prior"):
+    val cpd = ChangepointDetector(hazardRate = 0.1, rMin = 2, kappaCP = 0.5, wReset = 0.5)
+    val skewedPosterior = DiscreteDistribution(Map(
+      StrategicClass.Value -> 0.9, StrategicClass.Bluff -> 0.1,
+      StrategicClass.Mixed -> 0.0, StrategicClass.StructuralBluff -> 0.0
+    ))
+    val v1State = TestRivalState(skewedPosterior, 0, "v1")
+    val updater: StateEmbeddingUpdater[TestRivalState] = (state, post) =>
+      TestRivalState(post, state.updateCount, "reset-" + state.label)
+
+    val resetState = Dynamics.changepointReset(
+      v1State, cpd, skewedPosterior, uniformPrior, updater
+    )
+
+    // With wReset=0.5: result = 0.5 * skewed + 0.5 * uniform
+    assertEqualsDouble(resetState.posterior.probabilityOf(StrategicClass.Value), 0.575, 1e-10)
+    assertEqualsDouble(resetState.posterior.probabilityOf(StrategicClass.Bluff), 0.175, 1e-10)
+    assertEquals(resetState.label, "reset-v1")
+
+  test("Def 28: full reset (wReset=1.0) recovers meta-prior"):
+    val cpd = ChangepointDetector(hazardRate = 0.1, rMin = 2, kappaCP = 0.5, wReset = 1.0)
+    val skewedPosterior = DiscreteDistribution(Map(
+      StrategicClass.Value -> 1.0, StrategicClass.Bluff -> 0.0,
+      StrategicClass.Mixed -> 0.0, StrategicClass.StructuralBluff -> 0.0
+    ))
+    val v1State = TestRivalState(skewedPosterior, 0, "v1")
+    val updater: StateEmbeddingUpdater[TestRivalState] = (state, post) =>
+      TestRivalState(post, state.updateCount, state.label)
+
+    val resetState = Dynamics.changepointReset(
+      v1State, cpd, skewedPosterior, uniformPrior, updater
+    )
+
+    // Full reset → exactly the meta-prior
+    assertEqualsDouble(resetState.posterior.probabilityOf(StrategicClass.Value), 0.25, 1e-10)
+    assertEqualsDouble(resetState.posterior.probabilityOf(StrategicClass.Bluff), 0.25, 1e-10)
+
+  test("fullStepWithCPD: no changepoint → same as fullStep"):
+    val v1State = TestRivalState(uniformPrior, 0, "v1")
+    val exploitConfig = ExploitationConfig(initialBeta = 0.8, cpRetreatRate = 0.2, epsilonAdapt = 0.1)
+    val exploitState = ExploitationState.initial(exploitConfig)
+
+    val kernel = new FullKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: TotalSignal, pub: PublicState): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 1, "stepped")
+
+    val profile = JointKernelProfile(Map(PlayerId("v1") -> kernel))
+    // CPD that will NOT trigger (high kappaCP, low hazard)
+    val cpd = ChangepointDetector(hazardRate = 0.01, rMin = 0, kappaCP = 0.99, wReset = 1.0)
+    val cpdConfig = RivalCPDConfig(cpd, uniformPrior)
+    val updater: StateEmbeddingUpdater[TestRivalState] = (state, post) =>
+      TestRivalState(post, state.updateCount, state.label)
+
+    val step = Dynamics.fullStepWithCPD(
+      rivalStates = Map(PlayerId("v1") -> v1State),
+      exploitStates = Map(PlayerId("v1") -> exploitState),
+      signal = totalSignalNoSd,
+      publicState = dummyPublicState,
+      kernelProfile = profile,
+      exploitConfigs = Map(PlayerId("v1") -> exploitConfig),
+      detector = NeverDetect,
+      exploitabilityFn = _ => 0.0,
+      epsilonNE = 0.0,
+      cpdConfigs = Map(PlayerId("v1") -> cpdConfig),
+      cpdStates = Map(PlayerId("v1") -> cpd.initial),
+      posteriorExtractor = (_, state) => state.posterior,
+      updaters = Map(PlayerId("v1") -> updater),
+      predictiveProbFn = (_, _) => _ => 0.5
+    )
+
+    assertEquals(step.updatedRivals(PlayerId("v1")).updateCount, 1)
+    assertEqualsDouble(step.updatedExploitation(PlayerId("v1")).beta, 0.8, Tol)
+    assert(step.changepointDetected.isEmpty)
+
+  test("fullStepWithCPD: changepoint detected → prior resets + beta retreats"):
+    val skewedPosterior = DiscreteDistribution(Map(
+      StrategicClass.Value -> 0.9, StrategicClass.Bluff -> 0.1,
+      StrategicClass.Mixed -> 0.0, StrategicClass.StructuralBluff -> 0.0
+    ))
+    val v1State = TestRivalState(skewedPosterior, 0, "v1")
+    val exploitConfig = ExploitationConfig(initialBeta = 1.0, cpRetreatRate = 0.3, epsilonAdapt = 0.5)
+    val exploitState = ExploitationState.initial(exploitConfig)
+
+    val kernel = new FullKernel[TestRivalState]:
+      def apply(state: TestRivalState, signal: TotalSignal, pub: PublicState): TestRivalState =
+        TestRivalState(state.posterior, state.updateCount + 1, "stepped")
+
+    val profile = JointKernelProfile(Map(PlayerId("v1") -> kernel))
+    // CPD that WILL trigger: high hazard, low kappaCP threshold
+    val cpd = ChangepointDetector(hazardRate = 0.9, rMin = 100, kappaCP = 0.01, wReset = 1.0)
+    val cpdConfig = RivalCPDConfig(cpd, uniformPrior)
+    val updater: StateEmbeddingUpdater[TestRivalState] = (state, post) =>
+      TestRivalState(post, state.updateCount, "reset")
+
+    val step = Dynamics.fullStepWithCPD(
+      rivalStates = Map(PlayerId("v1") -> v1State),
+      exploitStates = Map(PlayerId("v1") -> exploitState),
+      signal = totalSignalNoSd,
+      publicState = dummyPublicState,
+      kernelProfile = profile,
+      exploitConfigs = Map(PlayerId("v1") -> exploitConfig),
+      detector = NeverDetect,
+      exploitabilityFn = _ => 0.0,
+      epsilonNE = 0.0,
+      cpdConfigs = Map(PlayerId("v1") -> cpdConfig),
+      cpdStates = Map(PlayerId("v1") -> cpd.initial),
+      posteriorExtractor = (_, state) => state.posterior,
+      updaters = Map(PlayerId("v1") -> updater),
+      predictiveProbFn = (_, _) => _ => 0.5
+    )
+
+    assert(step.changepointDetected.contains(PlayerId("v1")))
+    // Beta should have retreated from 1.0 by 0.3 (CPD retreat) and possibly further
+    assert(step.updatedExploitation(PlayerId("v1")).beta < 1.0,
+      s"beta should retreat, got ${step.updatedExploitation(PlayerId("v1")).beta}")
+    // Kernel still applied (updateCount incremented)
+    assertEquals(step.updatedRivals(PlayerId("v1")).updateCount, 1)

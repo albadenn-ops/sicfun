@@ -188,6 +188,16 @@ private[holdem] object HandStrengthEstimator:
       // Equal 45/45 blend of preflop and postflop category, plus draw bonus and noise
       clamp(0.45 * pre + 0.45 * categoryScore + drawBonus + noise)
 
+  /** Street-dependent blend weights for made-hand category vs preflop strength.
+    * Higher weight = more emphasis on the made-hand category score.
+    * Initial estimates pending calibration from equity table regression.
+    */
+  val defaultBlendWeights: Map[Street, Double] = Map(
+    Street.Flop  -> 0.50,
+    Street.Turn  -> 0.56,
+    Street.River -> 0.62
+  )
+
   /** Deterministic hand strength for the fast GTO heuristic path. No RNG noise.
     *
     * Similar to [[streetStrength]] but fully deterministic for reproducible GTO decisions.
@@ -198,19 +208,18 @@ private[holdem] object HandStrengthEstimator:
     * @param hand the hole cards
     * @param board the community cards
     * @param street the current betting street
+    * @param blendWeights per-street made-hand category weight; defaults to [[defaultBlendWeights]]
     * @return a deterministic strength estimate in [0, 1]
     */
-  def fastGtoStrength(hand: HoleCards, board: Board, street: Street): Double =
+  def fastGtoStrength(
+      hand: HoleCards, board: Board, street: Street,
+      blendWeights: Map[Street, Double] = defaultBlendWeights
+  ): Double =
     val pre = preflopStrength(hand)
     if street == Street.Preflop || board.cards.isEmpty then pre
     else
       // Weight of made-hand category increases on later streets
-      val madeWeight =
-        street match
-          case Street.Flop  => 0.50
-          case Street.Turn  => 0.56
-          case Street.River => 0.62
-          case _            => 0.50
+      val madeWeight = blendWeights.getOrElse(street, 0.50)
       val categoryScore = bestCategoryStrength(hand, board)
       val drawBonus = drawPotential(hand, board)
       clamp(((1.0 - madeWeight) * pre) + (madeWeight * categoryScore) + drawBonus)

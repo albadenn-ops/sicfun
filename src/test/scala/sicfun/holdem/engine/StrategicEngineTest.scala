@@ -74,7 +74,7 @@ class StrategicEngineTest extends FunSuite:
     val after = engine.sessionState.rivalBeliefs(PlayerId("v1")).typePosterior
     // After observing a raise, Bluff posterior should increase relative to Marginal
     val bluffAfter = after.probabilityOf(StrategicClass.Bluff)
-    val marginalAfter = after.probabilityOf(StrategicClass.Marginal)
+    val marginalAfter = after.probabilityOf(StrategicClass.Mixed)
     assert(bluffAfter > marginalAfter, s"Bluff ($bluffAfter) should exceed Marginal ($marginalAfter) after raise")
 
   test("observeAction ignores unknown actor"):

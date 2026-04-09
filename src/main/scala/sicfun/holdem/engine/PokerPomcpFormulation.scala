@@ -59,8 +59,8 @@ object PokerPomcpFormulation:
   val defaultClassPriors: Map[StrategicClass, (Double, Double, Double)] = Map(
     StrategicClass.Value     -> (0.05, 0.75, 0.20),
     StrategicClass.Bluff     -> (0.10, 0.25, 0.65),
-    StrategicClass.SemiBluff -> (0.05, 0.45, 0.50),
-    StrategicClass.Marginal  -> (0.15, 0.75, 0.10)
+    StrategicClass.StructuralBluff -> (0.05, 0.45, 0.50),
+    StrategicClass.Mixed  -> (0.15, 0.75, 0.10)
   )
 
   /** Per-class action distribution for numActions actions.
