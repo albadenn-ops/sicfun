@@ -472,3 +472,28 @@ class FormalPathTest extends munit.FunSuite:
               case _: CertificationResult.TabularCertification => () // Also OK — solver loaded but four-world solve might have its own failure
               case other => fail(s"Unexpected cert: $other")
       case None => fail("Bundle should be set")
+
+  test("PftDpw path populates pointwiseExploitability in bundle when TabularCertification produced"):
+    val config = StrategicEngine.Config(
+      numSimulations = 100,
+      solverBackend = StrategicEngine.SolverBackend.PftDpw
+    )
+    val engine = new StrategicEngine(config)
+    engine.initSession(rivalIds = Vector(PlayerId("v1")))
+    engine.startHand(testHeroCards)
+    engine.decide(minimalState, defaultActions)
+
+    engine.lastDecisionBundle match
+      case Some(bundle) =>
+        bundle.certification match
+          case _: CertificationResult.TabularCertification =>
+            assert(bundle.pointwiseExploitability.isDefined,
+              "pointwiseExploitability must be Some(...) for TabularCertification")
+            assert(bundle.pointwiseExploitability.get >= Ev.Zero,
+              s"pointwiseExploitability must be >= Ev.Zero, got ${bundle.pointwiseExploitability.get}")
+          case _: CertificationResult.Unavailable =>
+            () // native solver not loaded — skip gracefully
+          case other =>
+            fail(s"Unexpected certification: $other")
+      case None =>
+        fail("Bundle should be set after PftDpw decide()")

@@ -530,6 +530,14 @@ class StrategicEngine(val config: StrategicEngine.Config):
       p += 1
     val adversarialRootGap = baselineValue - minProfileBestValue
 
+    // Pointwise exploitability (Def 52C):
+    // eps(b; pi) = V^sec_optimal(b) - V^sec_actual(b)
+    // V^sec_actual = min over profiles of root value under each profile
+    // V^sec_optimal approximated by baselineValue (conservative: baseline ≈ near-optimal)
+    val securityValueActual = Ev(minProfileBestValue)
+    val securityValueOptimal = Ev(baselineValue)
+    val pwExploit = PointwiseExploitability.compute(securityValueOptimal, securityValueActual)
+
     // Action selection: certified path vs fail-closed
     val chosenActionIdx = if certificateValid && withinTolerance && safeActions.nonEmpty then
       // Certified: highest Q among safe actions
@@ -547,7 +555,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       baselineActionValues = baselineActionValues,
       baselineValue = baselineValue,
       adversarialRootGap = Some(Ev(adversarialRootGap)),
-      pointwiseExploitability = None,
+      pointwiseExploitability = Some(pwExploit),
       deploymentExploitability = None,
       certification = certification,
       chainWorldValues = Map.empty,
