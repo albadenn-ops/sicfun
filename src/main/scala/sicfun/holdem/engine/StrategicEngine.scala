@@ -53,7 +53,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
     _sessionState = StrategicEngine.SessionState(
       rivalBeliefs = beliefs,
       exploitationStates = exploitStates,
-      rivalSeats = rivalSeats
+      rivalSeats = rivalSeats,
+      deploymentSet = EmpiricalDeploymentSet(Vector.empty, maxSize = config.deploymentSetSize)
     )
 
   /** Start a new hand. Resets hand-local state, preserves session beliefs.

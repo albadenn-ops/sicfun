@@ -72,10 +72,10 @@ class StrategicEngineTest extends FunSuite:
     engine.startHand(testHeroCards)
     engine.observeAction(PlayerId("v1"), PokerAction.Raise(50.0), minimalState)
     val after = engine.sessionState.rivalBeliefs(PlayerId("v1")).typePosterior
-    // After observing a raise, Bluff posterior should increase relative to Marginal
+    // After observing a raise, Bluff posterior should increase relative to Mixed
     val bluffAfter = after.probabilityOf(StrategicClass.Bluff)
-    val marginalAfter = after.probabilityOf(StrategicClass.Mixed)
-    assert(bluffAfter > marginalAfter, s"Bluff ($bluffAfter) should exceed Marginal ($marginalAfter) after raise")
+    val mixedAfter = after.probabilityOf(StrategicClass.Mixed)
+    assert(bluffAfter > mixedAfter, s"Bluff ($bluffAfter) should exceed Mixed ($mixedAfter) after raise")
 
   test("observeAction ignores unknown actor"):
     val engine = new StrategicEngine(StrategicEngine.Config())
