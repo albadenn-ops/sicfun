@@ -350,12 +350,21 @@ class WPomcpRuntimeTest extends munit.FunSuite:
     // Construct two beliefs over rival types and a 50/50 mixture.
     // b1: rival is likely type 0 (passive). b2: rival is likely type 1 (aggressive).
     // b_mix: uniform mixture.
-    val nParticles = 20
-    val nTypes = 2; val nPub = 4; val nAct = 3
+    //
+    // IMPORTANT: numPubStates must match the C++ PubStateEncoder layout:
+    //   pub_idx = street * NumPotBuckets * NumStackBuckets + potBucket * NumStackBuckets + stackBucket
+    // With defaults NumPotBuckets=8, NumStackBuckets=6 → 4 streets * 48 = 192 pub states.
+    // Using fewer causes out-of-bounds reads on terminal_flags/rivalPolicy.
+    val nParticles = 100  // enough for minority types to cover all rival buckets
+    val nTypes = 2
+    val NumPotBuckets = 8; val NumStackBuckets = 6
+    val nPub = 4 * NumPotBuckets * NumStackBuckets  // 192 — matches PubStateEncoder
+    val nAct = 3
     val heroBucket = 5
     val lambda = 0.5
 
     // Type-conditioned rival policies: type 0 folds often, type 1 raises often
+    // Uniform across all pub states (policy doesn't depend on pot/stack bucket)
     val policy = new Array[Double](nTypes * nPub * nAct)
     for pub <- 0 until nPub do
       // type 0: fold=0.7, call=0.2, raise=0.1
@@ -376,8 +385,20 @@ class WPomcpRuntimeTest extends munit.FunSuite:
       val hb = idx / 10; val rb = idx % 10
       if hb > rb then 0.8 else if hb == rb then 0.5 else 0.2
     }
-    val terminal = Array.fill(nPub * nAct)(0)
-    for a <- 0 until nAct do terminal(3 * nAct + a) = 3 // last pub state is showdown
+    // Terminal flags: street 3 (river) = showdown for all actions.
+    // street = pub / (NumPotBuckets * NumStackBuckets).
+    // Fold at any street is detected by isFold in action effects (Phase 2/4),
+    // but hero fold terminal type (kHeroFold=1) should be set for action 0
+    // at all non-showdown states for correct early termination.
+    val terminal = new Array[Int](nPub * nAct)
+    for pub <- 0 until nPub do
+      val street = pub / (NumPotBuckets * NumStackBuckets)
+      for a <- 0 until nAct do
+        val idx = pub * nAct + a
+        if street == 3 then
+          terminal(idx) = 3  // kShowdown
+        else if a == 0 then
+          terminal(idx) = 1  // kHeroFold — fold ends the hand at any street
 
     val model = WPomcpRuntime.FactoredModel(
       rivalPolicy = policy, numRivalTypes = nTypes, numPubStates = nPub,
@@ -389,8 +410,9 @@ class WPomcpRuntimeTest extends munit.FunSuite:
     def solveAtBelief(typeWeights: Array[Double], seed: Long): Double =
       val nType0 = math.max(1, (nParticles * typeWeights(0)).round.toInt)
       val nType1 = nParticles - nType0
+      // Allocate privStates per-type to ensure each type covers all rival buckets
       val types = Array.fill(nType0)(0) ++ Array.fill(nType1)(1)
-      val privStates = Array.tabulate(nParticles)(i => i % 10) // within rivalBuckets range
+      val privStates = (0 until nType0).map(_ % 10).toArray ++ (0 until nType1).map(_ % 10).toArray
       val weights = types.map(t => typeWeights(t) / types.count(_ == t).toDouble)
       val rp = WPomcpRuntime.RivalParticles(types, privStates, weights)
       val input = WPomcpRuntime.SearchInputV2(
@@ -413,6 +435,12 @@ class WPomcpRuntimeTest extends munit.FunSuite:
     val convexBound = lambda * v1Avg + (1.0 - lambda) * v2Avg
     // Allow small tolerance for MC approximation noise
     val mcTolerance = 0.15 * math.max(math.abs(v1Avg), math.abs(v2Avg)).max(1.0)
+    val gap = vMixAvg - convexBound
+    println(s"[Theorem7] V(b1)=$v1Avg  V(b2)=$v2Avg  V(mix)=$vMixAvg  bound=$convexBound  tol=$mcTolerance  gap=$gap")
+    // Sanity: values should be in plausible poker range, not 10^13+ (OOB read symptom)
+    assert(math.abs(v1Avg) < 1e6, s"V(b1) implausible: $v1Avg — likely OOB read in terminal_flags")
+    assert(math.abs(v2Avg) < 1e6, s"V(b2) implausible: $v2Avg — likely OOB read in terminal_flags")
+    assert(math.abs(vMixAvg) < 1e6, s"V(mix) implausible: $vMixAvg — likely OOB read in terminal_flags")
     assert(vMixAvg <= convexBound + mcTolerance,
       s"Convexity violated: V(mix)=$vMixAvg > lambda*V(b1)+(1-lambda)*V(b2)=$convexBound + tolerance=$mcTolerance")
 
