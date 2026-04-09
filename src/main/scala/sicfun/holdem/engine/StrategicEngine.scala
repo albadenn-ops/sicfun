@@ -360,7 +360,26 @@ class StrategicEngine(val config: StrategicEngine.Config):
         _lastBundle = Some(makeFallbackBundle(numActions, s"PftDpw solver status: ${pftResult.status}"))
         return failClosedAction(candidateActions)
 
-      // 3. Build profile models and certify
+      // 3. Four-world grid solve (V^{1,0}, V^{0,1})
+      val fourWorldOpt: Option[FourWorld] = try
+        val fwModels = StrategicEngine.buildFourWorldModels(
+          gameState, session.rivalBeliefs, candidateActions, heroBucket, config.actionPriors
+        )
+        val olResult = PftDpwRuntime.solve(fwModels.openLoop, belief, pftConfig)
+        val blindResult = PftDpwRuntime.solve(fwModels.blind, belief, pftConfig)
+        if olResult.isSuccess && blindResult.isSuccess then
+          val staticEquity = heroBucket / 9.0
+          Some(StrategicEngine.extractFourWorldValues(
+            baselineQ = pftResult.qValues,
+            openLoopQ = olResult.qValues,
+            blindQ = blindResult.qValues,
+            staticEquity = staticEquity
+          ))
+        else None
+      catch
+        case _: Exception => None
+
+      // 4. Build profile models and certify
       val profileModels = (0 until StrategicClass.values.length).map { p =>
         PokerPftFormulation.buildTabularModel(
           gameState, session.rivalBeliefs, candidateActions,
@@ -372,7 +391,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
         baselineModel, profileModels, belief, pftResult,
         candidateActions, config.bellmanGamma,
         config.epsilonBase, config.exploitConfig.epsilonAdapt,
-        rootState = gameState.street.ordinal
+        rootState = gameState.street.ordinal,
+        fourWorld = fourWorldOpt
       )
       _lastBundle = Some(bundle)
       action
@@ -410,7 +430,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
       gamma: Double,
       epsilonBase: Double,
       epsilonAdapt: Double,
-      rootState: Int = 0
+      rootState: Int = 0,
+      fourWorld: Option[FourWorld] = None
   ): (PokerAction, DecisionEvaluationBundle) =
     val numActions = candidateActions.size
     val numProfiles = profileModels.size
@@ -530,6 +551,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       deploymentExploitability = None,
       certification = certification,
       chainWorldValues = Map.empty,
+      fourWorld = fourWorld,
       notes = Vector(
         s"PftDpw formal path: B*_max=$requiredBudget, safeActions=${safeActions.mkString(",")}"
       ) ++ (if !certificateValid then Vector("Certificate invalid — fail-closed to reference policy")

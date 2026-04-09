@@ -54,5 +54,6 @@ final case class DecisionEvaluationBundle(
     deploymentExploitability: Option[Ev],
     certification: CertificationResult,
     chainWorldValues: Map[ChainWorld, Ev],
+    fourWorld: Option[FourWorld] = None,
     notes: Vector[String]
 )
