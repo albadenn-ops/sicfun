@@ -151,10 +151,22 @@ class StrategicEngine(val config: StrategicEngine.Config):
       case StrategicEngine.SolverBackend.PftDpw =>
         decidePftDpw(gameState, candidateActions, heroBucket, session)
 
+    val bundleOpt = _lastBundle
     _lastDiagnostics = Some(StrategicEngine.DecisionDiagnostics(
       heroBucket = heroBucket,
       solverBackend = config.solverBackend,
-      exploitationBetas = session.exploitationStates.map((k, v) => k -> v.beta)
+      exploitationBetas = session.exploitationStates.map((k, v) => k -> v.beta),
+      adversarialRootGap = bundleOpt.flatMap(_.adversarialRootGap),
+      safeActionCount = bundleOpt.flatMap(_.certification match
+        case t: CertificationResult.TabularCertification => Some(t.safeActionIndices.size)
+        case _ => None
+      ),
+      totalActionCount = candidateActions.size,
+      certificationKind = bundleOpt.map(_.certification match
+        case _: CertificationResult.LocalRobustScreening => "LocalRobustScreening"
+        case _: CertificationResult.TabularCertification => "TabularCertification"
+        case _: CertificationResult.Unavailable => "Unavailable"
+      ).getOrElse("none")
     ))
 
     action
@@ -793,7 +805,11 @@ object StrategicEngine:
   final case class DecisionDiagnostics(
       heroBucket: Int,
       solverBackend: SolverBackend,
-      exploitationBetas: Map[PlayerId, Double]
+      exploitationBetas: Map[PlayerId, Double],
+      adversarialRootGap: Option[Ev] = None,
+      safeActionCount: Option[Int] = None,
+      totalActionCount: Int = 0,
+      certificationKind: String = "none"
   )
 
   /** Default action priors P(action_category | strategic_class).
