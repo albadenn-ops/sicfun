@@ -58,3 +58,30 @@ class FourWorldSolveTest extends munit.FunSuite:
     )
     val reconstructed = fw.v00 + fw.deltaControl + fw.deltaSigStar + fw.deltaInteraction
     assertEqualsDouble(reconstructed.value, fw.v11.value, 1e-12)
+
+  test("end-to-end: four-world values satisfy ordering constraints"):
+    // V^{1,1} >= V^{1,0} (closed-loop >= open-loop under same kernel)
+    // V^{1,1} >= V^{0,1} (attrib >= blind under same policy scope)
+    // V^{0,0} is the minimum (blind + open-loop)
+    val fw = StrategicEngine.extractFourWorldValues(
+      baselineQ = Array(-1.0, 10.0, 8.0),
+      openLoopQ = Array(-1.0, 7.0, 5.0),
+      blindQ = Array(-1.0, 6.0, 4.0),
+      staticEquity = 4.0
+    )
+    assert(fw.v11 >= fw.v10, s"V11=${fw.v11} should >= V10=${fw.v10}")
+    assert(fw.v11 >= fw.v01, s"V11=${fw.v11} should >= V01=${fw.v01}")
+    assert(fw.v10 >= fw.v00, s"V10=${fw.v10} should >= V00=${fw.v00}")
+    assert(fw.v01 >= fw.v00, s"V01=${fw.v01} should >= V00=${fw.v00}")
+
+  test("end-to-end: decomposition components have expected signs"):
+    val fw = StrategicEngine.extractFourWorldValues(
+      baselineQ = Array(-1.0, 10.0, 8.0),
+      openLoopQ = Array(-1.0, 7.0, 5.0),
+      blindQ = Array(-1.0, 6.0, 4.0),
+      staticEquity = 4.0
+    )
+    // Delta_cont >= 0: control (closed-loop over open-loop) adds value
+    assert(fw.deltaControl >= Ev.Zero, s"deltaControl=${fw.deltaControl} should be >= 0")
+    // Delta_sig* >= 0: signaling (attrib over blind) adds value
+    assert(fw.deltaSigStar >= Ev.Zero, s"deltaSigStar=${fw.deltaSigStar} should be >= 0")
