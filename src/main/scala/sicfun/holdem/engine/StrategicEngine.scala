@@ -138,7 +138,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
           _sessionState = StrategicEngine.SessionState(
             rivalBeliefs = updatedSession.rivalBeliefs,
             exploitationStates = clampedExploit,
-            rivalSeats = updatedSession.rivalSeats
+            rivalSeats = updatedSession.rivalSeats,
+            deploymentSet = updatedSession.deploymentSet
           )
       case None => () // No bundle yet — skip clamp
 
@@ -195,8 +196,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
     // Record deployment snapshot for Def 52D tracking
     _lastBundle.foreach { bundle =>
       bundle.pointwiseExploitability.foreach { pwExploit =>
-        val session = _sessionState.nn
-        val beliefs = session.rivalBeliefs.values
+        val deploySession = _sessionState.nn
+        val beliefs = deploySession.rivalBeliefs.values
         val avgEntropy = if beliefs.isEmpty then 0.0
           else beliefs.map { b =>
             val probs = StrategicClass.values.map(c => b.typePosterior.probabilityOf(c))
@@ -207,8 +208,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
           exploitabilitySnapshot = pwExploit,
           timestamp = System.currentTimeMillis()
         )
-        val updatedDeploy = session.deploymentSet.add(summary)
-        _sessionState = session.copy(deploymentSet = updatedDeploy)
+        val updatedDeploy = deploySession.deploymentSet.add(summary)
+        _sessionState = deploySession.copy(deploymentSet = updatedDeploy)
       }
     }
 
