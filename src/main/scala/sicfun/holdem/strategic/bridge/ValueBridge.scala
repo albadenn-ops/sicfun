@@ -83,3 +83,46 @@ object ValueBridge:
       GridWorld(LearningChannel.Blind, PolicyScope.ClosedLoop) ->
         BridgeResult.Absent("V^{0,1} requires POMDP solver (Phase 3); not interpolated")
     )
+
+  // ==== Solver-backed four-world construction (Def 44 closure) ====
+
+  /** Build a FourWorld from solver-computed values for all four grid worlds.
+    *
+    * When the PftDpw solver provides V^{1,0} and V^{0,1} directly, the
+    * four-world decomposition (Theorem 4) is exact — not interpolated.
+    *
+    * @param v11 V^{1,1}: solver value under attrib kernel, closed-loop policy
+    * @param v10 V^{1,0}: solver value under attrib kernel, open-loop policy
+    * @param v01 V^{0,1}: solver value under blind kernel, closed-loop policy
+    * @param v00 V^{0,0}: solver value under blind kernel, open-loop policy (or static equity)
+    */
+  def toFourWorldFromSolver(
+      v11: Double,
+      v10: Double,
+      v01: Double,
+      v00: Double
+  ): BridgeResult[FourWorld] =
+    BridgeResult.Exact(
+      FourWorld(v11 = Ev(v11), v10 = Ev(v10), v01 = Ev(v01), v00 = Ev(v00))
+    )
+
+  /** Build keyed grid-world values from solver-computed values.
+    *
+    * All four worlds are Exact when the solver provides them.
+    */
+  def toGridWorldValuesFromSolver(
+      v11: Double,
+      v10: Double,
+      v01: Double,
+      v00: Double
+  ): Map[GridWorld, BridgeResult[Ev]] =
+    Map(
+      GridWorld(LearningChannel.Attrib, PolicyScope.ClosedLoop) ->
+        BridgeResult.Exact(Ev(v11)),
+      GridWorld(LearningChannel.Attrib, PolicyScope.OpenLoop) ->
+        BridgeResult.Exact(Ev(v10)),
+      GridWorld(LearningChannel.Blind, PolicyScope.ClosedLoop) ->
+        BridgeResult.Exact(Ev(v01)),
+      GridWorld(LearningChannel.Blind, PolicyScope.OpenLoop) ->
+        BridgeResult.Exact(Ev(v00))
+    )
