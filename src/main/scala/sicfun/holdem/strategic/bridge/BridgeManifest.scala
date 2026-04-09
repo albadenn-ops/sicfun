@@ -24,7 +24,7 @@ object BridgeManifest:
     // -- Signal bridge --
     BridgeEntry("ActionSignal.action",      "Def 5",  Fidelity.Exact,       Severity.Cosmetic,    "action category maps 1:1"),
     BridgeEntry("ActionSignal.sizing",      "Def 5",  Fidelity.Approximate, Severity.Behavioral,  "pot fraction requires pot context at action time"),
-    BridgeEntry("ActionSignal.timing",      "Def 5",  Fidelity.Absent,      Severity.Behavioral,  "no timing data in current engine"),
+    BridgeEntry("ActionSignal.timing",      "Def 5",  Fidelity.Absent,      Severity.Behavioral,  "no timing data in current engine; requires timing infrastructure (acknowledged limitation)"),
     BridgeEntry("ActionSignal.stage",       "Def 5",  Fidelity.Exact,       Severity.Cosmetic,    "street maps 1:1"),
     BridgeEntry("TotalSignal",              "Def 6",  Fidelity.Approximate, Severity.Behavioral,  "timing component absent"),
     BridgeEntry("ShowdownSignal",           "Def 7",  Fidelity.Exact,       Severity.Cosmetic,    "showdown data fully available"),
@@ -46,31 +46,31 @@ object BridgeManifest:
 
     // -- Value bridge --
     BridgeEntry("FourWorld.V11",            "Def 44", Fidelity.Approximate, Severity.Behavioral,  "engine EV is best available"),
-    BridgeEntry("FourWorld.V10",            "Def 44", Fidelity.Approximate, Severity.Structural,  "interpolated estimate"),
-    BridgeEntry("FourWorld.V01",            "Def 44", Fidelity.Approximate, Severity.Structural,  "interpolated estimate"),
+    BridgeEntry("FourWorld.V10",            "Def 44", Fidelity.Approximate, Severity.Behavioral,  "solver-computed via PftDpw open-loop model when available; interpolated fallback"),
+    BridgeEntry("FourWorld.V01",            "Def 44", Fidelity.Approximate, Severity.Behavioral,  "solver-computed via PftDpw blind-kernel model when available; interpolated fallback"),
     BridgeEntry("FourWorld.V00",            "Def 44", Fidelity.Approximate, Severity.Behavioral,  "static equity approximation"),
-    BridgeEntry("DeltaVocabulary",          "Def 50", Fidelity.Approximate, Severity.Structural,  "derived from approximate four-world"),
+    BridgeEntry("DeltaVocabulary",          "Def 50", Fidelity.Approximate, Severity.Behavioral,  "exact when solver-backed four-world available; approximate in fallback path"),
 
     // -- Decomposition (not bridged, computed in formal layer) --
     BridgeEntry("PerRivalDelta",            "Defs 40-42", Fidelity.Exact,   Severity.Cosmetic,   "pure computation over Q-function values"),
     BridgeEntry("PerRivalSignalSubDecomp",  "Defs 48-49", Fidelity.Exact,   Severity.Cosmetic,   "pure computation over Q-function values"),
     BridgeEntry("BluffFramework",           "Defs 35-39", Fidelity.Exact,   Severity.Cosmetic,   "pure predicates over formal types"),
-    BridgeEntry("AdaptationSafety",         "Defs 52-53, 57/57A-C (v0.31.1)", Fidelity.Exact, Severity.Cosmetic, "pure computation; v0.31.1 AS-strong and legacy scalar both available"),
+    BridgeEntry("AdaptationSafety",         "Defs 52-53, 57/57A-C (v0.31.1)", Fidelity.Exact, Severity.Cosmetic, "exact per-profile AS-strong (Def 57), robustRegret (Def 57A), inAdaptationSafeClass (Def 57B); Approx lower-bound variants also available"),
     BridgeEntry("RevealSchedule",           "Def 51",     Fidelity.Exact,   Severity.Cosmetic,   "pure computation"),
 
     // -- v0.31.1 formal objects (Wave 3-5) --
-    BridgeEntry("SecurityValue",            "Def 55",     Fidelity.Exact,       Severity.Cosmetic,   "pure min over rival profiles; computation is exact"),
-    BridgeEntry("PointwiseExploitability",  "Def 55A",    Fidelity.Exact,       Severity.Cosmetic,   "pure clamped subtraction; exact given inputs"),
-    BridgeEntry("DeploymentExploitability", "Def 55B",    Fidelity.Exact,       Severity.Cosmetic,   "max over finite belief set; exact given inputs"),
+    BridgeEntry("SecurityValue",            "Def 52B",    Fidelity.Exact,       Severity.Cosmetic,   "pure min over rival profiles; computation is exact"),
+    BridgeEntry("PointwiseExploitability",  "Def 52C",    Fidelity.Exact,       Severity.Cosmetic,   "pure clamped subtraction; exact given inputs"),
+    BridgeEntry("DeploymentExploitability", "Def 52D",    Fidelity.Exact,       Severity.Cosmetic,   "max over finite belief set; exact given inputs"),
     BridgeEntry("DeploymentBaseline",       "A10",        Fidelity.Approximate, Severity.Behavioral, "baseline exploitability from CFR; conservative estimate"),
     BridgeEntry("SafetyBellman.T_safe",     "Def 60",     Fidelity.Exact,       Severity.Cosmetic,   "pure Bellman operator; exact computation"),
     BridgeEntry("SafetyBellman.B*",         "Def 61",     Fidelity.Approximate, Severity.Behavioral, "iterative fixed point; convergence tolerance 1e-10"),
     BridgeEntry("SafetyBellman.Certificate","Def 65",     Fidelity.Exact,       Severity.Cosmetic,   "structural validity checks are exact"),
     BridgeEntry("TotalVulnerability",       "Corollary 9.3", Fidelity.Approximate, Severity.Behavioral, "sum of two conservative estimates"),
-    BridgeEntry("ChainWorld",               "Def 28",     Fidelity.Exact,       Severity.Cosmetic,   "enumerated world algebra; exact"),
+    BridgeEntry("ChainWorld",               "Def 44'",    Fidelity.Exact,       Severity.Cosmetic,   "enumerated world algebra; exact"),
     BridgeEntry("GridWorld",                "Def 44",     Fidelity.Exact,       Severity.Cosmetic,   "keyed grid coordinates; exact"),
-    BridgeEntry("RiskDecomposition",        "Defs 56A-C", Fidelity.Exact,       Severity.Cosmetic,   "pure telescopic computation; exact given inputs"),
-    BridgeEntry("GridWorldValues",          "Def 44 (v0.31.1)", Fidelity.Approximate, Severity.Behavioral, "V^{1,0} and V^{0,1} available via PftDpw when solver loaded; interpolated fallback otherwise")
+    BridgeEntry("RiskDecomposition",        "Defs 67-69", Fidelity.Exact,       Severity.Cosmetic,   "pure telescopic computation; exact given inputs"),
+    BridgeEntry("GridWorldValues",          "Def 44 (v0.31.1)", Fidelity.Approximate, Severity.Behavioral, "all four worlds solver-computed via PftDpw when available; interpolated/absent fallback otherwise")
   )
 
   /** All objects with Structural severity -- these degrade the formal model's coherence. */

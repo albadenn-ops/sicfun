@@ -167,7 +167,7 @@ class FormalClosureValidationTest extends munit.FunSuite:
   // ========================================================================
 
   test("Appendix B: detector-triggered retreat reduces beta"):
-    val config = ExploitationConfig(initialBeta = 0.8, retreatRate = 0.2, adaptationTolerance = 0.05)
+    val config = ExploitationConfig(initialBeta = 0.8, cpRetreatRate = 0.2, epsilonAdapt = 0.05)
     val state = ExploitationState.initial(config)
 
     // AlwaysDetect triggers retreat
@@ -184,7 +184,7 @@ class FormalClosureValidationTest extends munit.FunSuite:
     assertEqualsDouble(updated.beta, 0.6, 1e-12)
 
   test("Appendix B: NeverDetect does not trigger retreat"):
-    val config = ExploitationConfig(initialBeta = 0.8, retreatRate = 0.2, adaptationTolerance = 0.05)
+    val config = ExploitationConfig(initialBeta = 0.8, cpRetreatRate = 0.2, epsilonAdapt = 0.05)
     val state = ExploitationState.initial(config)
 
     val updated = ExploitationInterpolation.updateExploitation(
@@ -199,7 +199,7 @@ class FormalClosureValidationTest extends munit.FunSuite:
     assertEqualsDouble(updated.beta, state.beta, 1e-12)
 
   test("Appendix B: false changepoint does not bypass safety budget"):
-    val config = ExploitationConfig(initialBeta = 0.8, retreatRate = 0.2, adaptationTolerance = 0.01)
+    val config = ExploitationConfig(initialBeta = 0.8, cpRetreatRate = 0.2, epsilonAdapt = 0.01)
     val state = ExploitationState.initial(config)
 
     // Exploitability exceeds safety bound at high beta — safety clamp should reduce beta
@@ -220,7 +220,7 @@ class FormalClosureValidationTest extends munit.FunSuite:
     assert(exploitAtClamped <= 0.04 + 1e-10, s"clamped beta should satisfy safety: exploit=$exploitAtClamped")
 
   test("Appendix B: changepoint retreat and safety clamp interact correctly"):
-    val config = ExploitationConfig(initialBeta = 0.9, retreatRate = 0.3, adaptationTolerance = 0.02)
+    val config = ExploitationConfig(initialBeta = 0.9, cpRetreatRate = 0.3, epsilonAdapt = 0.02)
     val state = ExploitationState.initial(config)
 
     // AlwaysDetect retreats first, then safety clamp applies
@@ -253,6 +253,23 @@ class FormalClosureValidationTest extends munit.FunSuite:
     // reset = (1 - 0.3)*current + 0.3*meta
     assertEqualsDouble(reset.probabilityOf("A"), 0.7 * 0.8 + 0.3 * 0.5, 1e-12)
     assertEqualsDouble(reset.probabilityOf("B"), 0.7 * 0.2 + 0.3 * 0.5, 1e-12)
+
+  // ========================================================================
+  // BridgeManifest four-world closure (post-solver integration)
+  // ========================================================================
+
+  test("BridgeManifest: no Structural severity gaps remain for four-world objects"):
+    import bridge.BridgeManifest
+    val structuralGaps = BridgeManifest.structuralGaps
+    val fourWorldStructural = structuralGaps.filter(_.formalObject.startsWith("FourWorld"))
+    assertEquals(fourWorldStructural.size, 0,
+      s"Expected no Structural four-world gaps, found: ${fourWorldStructural.map(_.formalObject)}")
+
+  test("BridgeManifest: DeltaVocabulary severity is Behavioral (not Structural)"):
+    import bridge.BridgeManifest
+    val dv = BridgeManifest.entries.find(_.formalObject == "DeltaVocabulary")
+    assert(dv.isDefined, "DeltaVocabulary entry must exist")
+    assertEquals(dv.get.severity, Severity.Behavioral)
 
   // ========================================================================
   // Helpers
