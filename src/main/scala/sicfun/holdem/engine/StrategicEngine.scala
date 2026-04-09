@@ -116,7 +116,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
     _sessionState = StrategicEngine.SessionState(
       rivalBeliefs = result.updatedRivals,
       exploitationStates = result.updatedExploitation,
-      rivalSeats = session.rivalSeats
+      rivalSeats = session.rivalSeats,
+      deploymentSet = session.deploymentSet
     )
 
     // Advisory Bellman clamp from last evaluation bundle (design doc §6).
@@ -190,6 +191,26 @@ class StrategicEngine(val config: StrategicEngine.Config):
         case _: CertificationResult.Unavailable => "Unavailable"
       ).getOrElse("none")
     ))
+
+    // Record deployment snapshot for Def 52D tracking
+    _lastBundle.foreach { bundle =>
+      bundle.pointwiseExploitability.foreach { pwExploit =>
+        val session = _sessionState.nn
+        val beliefs = session.rivalBeliefs.values
+        val avgEntropy = if beliefs.isEmpty then 0.0
+          else beliefs.map { b =>
+            val probs = StrategicClass.values.map(c => b.typePosterior.probabilityOf(c))
+            -probs.filter(_ > 0).map(p => p * math.log(p)).sum
+          }.sum / beliefs.size
+        val summary = DeploymentBeliefSummary(
+          beliefEntropy = avgEntropy,
+          exploitabilitySnapshot = pwExploit,
+          timestamp = System.currentTimeMillis()
+        )
+        val updatedDeploy = session.deploymentSet.add(summary)
+        _sessionState = session.copy(deploymentSet = updatedDeploy)
+      }
+    }
 
     action
 
@@ -344,7 +365,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
       _sessionState = StrategicEngine.SessionState(
         rivalBeliefs = session.rivalBeliefs,
         exploitationStates = updatedExploit,
-        rivalSeats = session.rivalSeats
+        rivalSeats = session.rivalSeats,
+        deploymentSet = session.deploymentSet
       )
 
     // --- Action selection from mixed-belief solve ---
@@ -647,7 +669,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
       _sessionState = StrategicEngine.SessionState(
         rivalBeliefs = updatedBeliefs,
         exploitationStates = session.exploitationStates,
-        rivalSeats = session.rivalSeats
+        rivalSeats = session.rivalSeats,
+        deploymentSet = session.deploymentSet
       )
     _handActive = false
     _heroCards = None
@@ -889,7 +912,8 @@ object StrategicEngine:
   final case class SessionState(
       rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
       exploitationStates: Map[PlayerId, ExploitationState],
-      rivalSeats: Map[PlayerId, RivalSeatInfo] = Map.empty
+      rivalSeats: Map[PlayerId, RivalSeatInfo] = Map.empty,
+      deploymentSet: EmpiricalDeploymentSet = EmpiricalDeploymentSet(Vector.empty, maxSize = 50)
   )
 
   /** Four tabular models for the four-world grid solve (Theorem 4). */
