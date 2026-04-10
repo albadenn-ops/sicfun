@@ -304,3 +304,143 @@ class StrategicEngineTest extends FunSuite:
     val finalBeta = engine.sessionState.exploitationStates(PlayerId("v1")).beta
     assert(finalBeta < initialBeta,
       s"Beta should retreat after detected modeling: initial=$initialBeta, final=$finalBeta")
+
+  // ---- Task 5: Advisory clamp in observeAction (design doc §6) ----
+
+  test("advisory clamp retreats beta when cached bundle budget exceeds tolerance"):
+    // Two engines with identical state; one gets a high-budget bundle injected,
+    // the other has no bundle. The difference isolates the advisory clamp effect.
+    val cfg = StrategicEngine.Config(
+      exploitConfig = ExploitationConfig(initialBeta = 1.0, cpRetreatRate = 0.2, epsilonAdapt = 0.05)
+    )
+    val engineWithClamp = new StrategicEngine(cfg)
+    val engineWithout = new StrategicEngine(cfg)
+
+    engineWithClamp.initSession(rivalIds = Vector(PlayerId("v1")))
+    engineWithout.initSession(rivalIds = Vector(PlayerId("v1")))
+    engineWithClamp.startHand(testHeroCards)
+    engineWithout.startHand(testHeroCards)
+
+    // Inject a high-budget bundle (budget=100 >> tolerance=0.10) to trigger the advisory clamp
+    val highBudgetBundle = DecisionEvaluationBundle(
+      profileResults = Map.empty,
+      robustActionLowerBounds = Array(0.0),
+      baselineActionValues = Array(0.0),
+      baselineValue = 0.0,
+      adversarialRootGap = None,
+      pointwiseExploitability = None,
+      deploymentExploitability = None,
+      certification = CertificationResult.LocalRobustScreening(
+        rootLosses = Array(1.0),
+        budgetEstimate = 100.0,  // Way above tolerance (0.05 + 0.05 = 0.10)
+        withinTolerance = false
+      ),
+      chainWorldValues = Map.empty,
+      notes = Vector("test: high budget")
+    )
+    engineWithClamp.injectTestBundle(highBudgetBundle)
+
+    // Both engines observe the same action
+    engineWithClamp.observeAction(PlayerId("v1"), PokerAction.Check, minimalState)
+    engineWithout.observeAction(PlayerId("v1"), PokerAction.Check, minimalState)
+
+    val betaWithClamp = engineWithClamp.sessionState.exploitationStates(PlayerId("v1")).beta
+    val betaWithout = engineWithout.sessionState.exploitationStates(PlayerId("v1")).beta
+
+    // Advisory clamp should retreat beta by cpRetreatRate (0.2) beyond what fullStep alone does
+    assertEqualsDouble(betaWithClamp, math.max(0.0, betaWithout - cfg.exploitConfig.cpRetreatRate), 1e-10)
+
+  test("advisory clamp does NOT fire when budget is within tolerance"):
+    val cfg = StrategicEngine.Config()
+    val engineWithBundle = new StrategicEngine(cfg)
+    val engineWithout = new StrategicEngine(cfg)
+
+    engineWithBundle.initSession(rivalIds = Vector(PlayerId("v1")))
+    engineWithout.initSession(rivalIds = Vector(PlayerId("v1")))
+    engineWithBundle.startHand(testHeroCards)
+    engineWithout.startHand(testHeroCards)
+
+    // Budget within tolerance — clamp should NOT fire
+    val withinToleranceBundle = DecisionEvaluationBundle(
+      profileResults = Map.empty,
+      robustActionLowerBounds = Array(0.0),
+      baselineActionValues = Array(0.0),
+      baselineValue = 0.0,
+      adversarialRootGap = None,
+      pointwiseExploitability = None,
+      deploymentExploitability = None,
+      certification = CertificationResult.LocalRobustScreening(
+        rootLosses = Array(0.0),
+        budgetEstimate = 0.01,  // Well below tolerance (0.05 + 0.05 = 0.10)
+        withinTolerance = true
+      ),
+      chainWorldValues = Map.empty,
+      notes = Vector("test: within tolerance")
+    )
+    engineWithBundle.injectTestBundle(withinToleranceBundle)
+
+    engineWithBundle.observeAction(PlayerId("v1"), PokerAction.Check, minimalState)
+    engineWithout.observeAction(PlayerId("v1"), PokerAction.Check, minimalState)
+
+    val betaWith = engineWithBundle.sessionState.exploitationStates(PlayerId("v1")).beta
+    val betaWithout = engineWithout.sessionState.exploitationStates(PlayerId("v1")).beta
+
+    // No advisory clamp — betas should be identical (only fullStep effect)
+    assertEqualsDouble(betaWith, betaWithout, 1e-10)
+
+  // ---- Task 6: Deployment tracking across decide() calls ----
+
+  test("deployment entries accumulate across decide() calls (PftDpw integration)"):
+    assume(nativeAvailable, "Native library not available")
+    val cfg = StrategicEngine.Config(
+      solverBackend = StrategicEngine.SolverBackend.PftDpw,
+      numSimulations = 50
+    )
+    val engine = new StrategicEngine(cfg)
+    engine.initSession(rivalIds = Vector(PlayerId("v1")))
+
+    // Hand 1
+    engine.startHand(testHeroCards)
+    engine.decide(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
+    engine.endHand()
+    val sizeAfter1 = engine.sessionState.deploymentSet.entries.size
+
+    // Hand 2
+    engine.startHand(testHeroCards)
+    engine.decide(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
+    engine.endHand()
+    val sizeAfter2 = engine.sessionState.deploymentSet.entries.size
+
+    // PftDpw produces pointwiseExploitability, so entries should accumulate
+    assert(sizeAfter1 >= 1, s"Expected >= 1 entry after first decide, got $sizeAfter1")
+    assert(sizeAfter2 >= 2, s"Expected >= 2 entries after second decide, got $sizeAfter2")
+    assert(sizeAfter2 > sizeAfter1, "Entries should grow across decide() calls")
+
+  test("deploymentExploitability populates in bundle after prior entries exist (PftDpw integration)"):
+    assume(nativeAvailable, "Native library not available")
+    val cfg = StrategicEngine.Config(
+      solverBackend = StrategicEngine.SolverBackend.PftDpw,
+      numSimulations = 50
+    )
+    val engine = new StrategicEngine(cfg)
+    engine.initSession(rivalIds = Vector(PlayerId("v1")))
+
+    // First call: no prior entries → deploymentExploitability should be None
+    engine.startHand(testHeroCards)
+    engine.decide(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
+    val bundle1 = engine.lastDecisionBundle
+    engine.endHand()
+
+    // Second call: prior entries exist → deploymentExploitability should be Some
+    engine.startHand(testHeroCards)
+    engine.decide(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
+    val bundle2 = engine.lastDecisionBundle
+    engine.endHand()
+
+    assert(bundle1.isDefined, "First bundle must exist")
+    // First call: deployment set was empty before decide, so deploymentExploitability = None
+    assertEquals(bundle1.get.deploymentExploitability, None)
+    assert(bundle2.isDefined, "Second bundle must exist")
+    // Second call: deployment set has entries from first call
+    assert(bundle2.get.deploymentExploitability.isDefined,
+      "deploymentExploitability should be Some after prior entries accumulated")

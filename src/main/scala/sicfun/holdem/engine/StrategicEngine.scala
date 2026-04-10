@@ -31,6 +31,10 @@ class StrategicEngine(val config: StrategicEngine.Config):
   def lastDecisionDiagnostics: Option[StrategicEngine.DecisionDiagnostics] = _lastDiagnostics
   def lastDecisionBundle: Option[DecisionEvaluationBundle] = _lastBundle
 
+  /** Test-only: inject a bundle to simulate solver output for testing advisory clamp / deployment tracking. */
+  private[engine] def injectTestBundle(bundle: DecisionEvaluationBundle): Unit =
+    _lastBundle = Some(bundle)
+
   def sessionState: StrategicEngine.SessionState =
     require(_sessionState != null, "Session not initialized — call initSession first")
     _sessionState.nn
@@ -175,6 +179,14 @@ class StrategicEngine(val config: StrategicEngine.Config):
         decideWPomcp(gameState, candidateActions, heroBucket, session, solverConfig)
       case StrategicEngine.SolverBackend.PftDpw =>
         decidePftDpw(gameState, candidateActions, heroBucket, session)
+
+    // Wire deployment exploitability from session's prior deployment set (Def 52D).
+    // Retrospective: reflects max exploitability over beliefs accumulated in prior calls.
+    val currentDeploy = _sessionState.nn.deploymentSet
+    if currentDeploy.entries.nonEmpty then
+      _lastBundle = _lastBundle.map(b => b.copy(
+        deploymentExploitability = Some(currentDeploy.deploymentExploitability)
+      ))
 
     val bundleOpt = _lastBundle
     _lastDiagnostics = Some(StrategicEngine.DecisionDiagnostics(
