@@ -9,10 +9,23 @@ import sicfun.core.Card
 import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
 
+/** Tests for the [[GenerateSignals]] CLI entry point. Exercises the end-to-end
+  * pipeline: hand-state snapshot on disk + trained model artifact -> signal audit log.
+  *
+  * Coverage includes:
+  *   - Basic run producing correct signal count and persisted audit fields
+  *   - Player-id and sequence-range filters with append mode
+  *   - Rejection of invalid CLI options
+  *
+  * Each test creates a temporary directory tree with synthetic snapshots and model
+  * artifacts, then validates the TSV audit log written by the CLI.
+  */
 class GenerateSignalsCliTest extends FunSuite:
+  /** Parses a card token, failing the test on invalid input. */
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
+  /** Builds a synthetic [[PokerEvent]] on a fixed flop board (Ts 9h 8d). */
   private def event(
       handId: String,
       sequence: Long,
@@ -36,6 +49,9 @@ class GenerateSignalsCliTest extends FunSuite:
       action = action
     )
 
+  /** Creates a uniform-prediction model artifact with relaxed calibration gate,
+    * suitable for testing the signal generation pipeline without training a real model.
+    */
   private def artifact: TrainedPokerActionModel =
     TrainedPokerActionModel(
       version = ModelVersion(
@@ -150,6 +166,7 @@ class GenerateSignalsCliTest extends FunSuite:
     assert(result.isLeft)
   }
 
+  /** Recursively deletes a directory tree (deepest paths first) for temp cleanup. */
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)

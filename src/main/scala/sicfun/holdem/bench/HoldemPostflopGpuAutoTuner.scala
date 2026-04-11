@@ -5,7 +5,7 @@ import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.cli.*
 
-import sicfun.core.Card
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 import java.io.{File, FileOutputStream}
 import java.util.Properties
@@ -22,9 +22,13 @@ object HoldemPostflopGpuAutoTuner:
   private val ProviderProperty = "sicfun.postflop.provider"
   private val NativeEngineProperty = "sicfun.postflop.native.engine"
   private val NativeGpuPathProperty = "sicfun.postflop.native.gpu.path"
+  private val NativeGpuPathEnv = "sicfun_POSTFLOP_NATIVE_GPU_PATH"
+  private val NativeGpuLibProperty = "sicfun.postflop.native.gpu.lib"
+  private val NativeGpuLibEnv = "sicfun_POSTFLOP_NATIVE_GPU_LIB"
   private val PostflopAutoTuneProperty = "sicfun.postflop.autotune"
   private val PostflopCudaBlockSizeProperty = "sicfun.postflop.native.cuda.blockSize"
   private val PostflopCudaMaxChunkMatchupsProperty = "sicfun.postflop.native.cuda.maxChunkMatchups"
+  private val DefaultGpuLibrary = "sicfun_postflop_cuda"
 
   private val CacheVersion = "1"
   private val DefaultCachePath = "data/postflop-autotune.properties"
@@ -111,7 +115,7 @@ object HoldemPostflopGpuAutoTuner:
           villains = spot.villainCount,
           trials = config.trials
         )
-        saveCache(new File(config.cachePath), Vector(result))
+        saveCache(new File(config.cachePath), config, Vector(result), configuredGpuLibraryIdentity())
         println(s"cache written: ${new File(config.cachePath).getAbsolutePath}")
       }
 
@@ -236,11 +240,24 @@ object HoldemPostflopGpuAutoTuner:
     sys.props.update(PostflopCudaBlockSizeProperty, candidate.blockSize.toString)
     sys.props.update(PostflopCudaMaxChunkMatchupsProperty, candidate.maxChunkMatchups.toString)
 
-  private def saveCache(file: File, results: Vector[DeviceTuningResult]): Unit =
+  private def saveCache(
+      file: File,
+      config: Config,
+      results: Vector[DeviceTuningResult],
+      gpuLibraryIdentity: String
+  ): Unit =
     val parent = file.getParentFile
     if parent != null then parent.mkdirs()
     val props = new Properties()
     props.setProperty("version", CacheVersion)
+    props.setProperty("gpuLibraryIdentity", gpuLibraryIdentity)
+    props.setProperty("tune.villains", config.villains.toString)
+    props.setProperty("tune.trials", config.trials.toString)
+    props.setProperty("tune.warmupRuns", config.warmupRuns.toString)
+    props.setProperty("tune.runs", config.runs.toString)
+    props.setProperty("tune.seedBase", config.seedBase.toString)
+    props.setProperty("tune.blockCandidates", config.blockCandidates.mkString(","))
+    props.setProperty("tune.chunkCandidates", config.chunkCandidates.mkString(","))
     props.setProperty("device.count", results.size.toString)
     results.zipWithIndex.foreach { case (result, idx) =>
       val prefix = s"device.$idx."
@@ -258,13 +275,17 @@ object HoldemPostflopGpuAutoTuner:
     try props.store(out, "postflop gpu auto-tune cache")
     finally out.close()
 
+  private def configuredGpuLibraryIdentity(): String =
+    GpuRuntimeSupport.resolveNonEmpty(NativeGpuPathProperty, NativeGpuPathEnv) match
+      case Some(path) =>
+        val file = new File(path)
+        val mtime = if file.exists() then file.lastModified() else 0L
+        s"path=${file.getAbsolutePath}|mtime=$mtime"
+      case None =>
+        val lib = GpuRuntimeSupport.resolveNonEmpty(NativeGpuLibProperty, NativeGpuLibEnv).getOrElse(DefaultGpuLibrary)
+        s"lib=$lib"
+
   private def buildSpot(villainCount: Int, seedBase: Long): Spot =
-    def card(token: String): Card =
-      Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card token: $token"))
-
-    def hole(a: String, b: String): HoleCards =
-      HoleCards.from(Vector(card(a), card(b)))
-
     val hero = hole("Ac", "Kh")
     val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
     val dead = (hero.toVector ++ board.cards).map(sicfun.core.CardId.toId).toSet

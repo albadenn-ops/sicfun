@@ -1,4 +1,5 @@
 package sicfun.holdem.engine
+import sicfun.holdem.history.ShowdownRecord
 import sicfun.holdem.types.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.model.*
@@ -11,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.mutable
 import scala.util.Random
+import scala.util.hashing.MurmurHash3
 
 /** Observed villain action with the corresponding public game state. */
 final case class VillainObservation(action: PokerAction, state: GameState)
@@ -107,8 +109,11 @@ object ActionValueModel:
   * when it exceeds [[MaxPosteriorCacheSize]].
   */
 object RangeInferenceEngine:
+  /** Maximum cached posterior inference results before full cache eviction. */
   private val MaxPosteriorCacheSize = 256
+  /** Maximum cached prior distributions before full cache eviction. */
   private val MaxPriorCacheSize = 512
+  /** Epsilon for response profile comparison in the aggregation fast-path check. */
   private inline val ProfileEps = 1e-12
   private val EquityPosteriorMaxHandsProperty = "sicfun.range.equityPosterior.maxHands"
   private val EquityPosteriorMaxHandsEnv = "sicfun_RANGE_EQUITY_POSTERIOR_MAX_HANDS"
@@ -118,6 +123,13 @@ object RangeInferenceEngine:
   private val DefaultEquityPosteriorMinMass = 0.995
   private val DefaultEquityPosteriorMinHands = 64
 
+  /** Internal aggregation result from iterating over the posterior to compute
+    * fold/continue probabilities and the continuation range.
+    *
+    * The `continuationMatchesPosterior` flag is an optimization: if all hands produce
+    * the same response profile (within ProfileEps), the continuation range is identical
+    * to the input posterior and we can skip the separate equity calculation.
+    */
   private final case class AggregatedResponses(
       foldProbability: Double,
       continueProbability: Double,
@@ -132,6 +144,7 @@ object RangeInferenceEngine:
       folds: Vector[PreflopFold],
       villainPos: Position,
       observations: Seq[VillainObservation],
+      showdownHistoryHash: Int,
       ddreMode: HoldemDdreProvider.Mode,
       ddreProvider: HoldemDdreProvider.Provider,
       ddreAlpha: Double,
@@ -159,6 +172,16 @@ object RangeInferenceEngine:
     posteriorCache.clear()
     priorCache.clear()
 
+  private[engine] def showdownHistoryHash(showdownHistory: Vector[ShowdownRecord]): Int =
+    MurmurHash3.seqHash(showdownHistory.map(record => (record.handId, record.cards.toToken)))
+
+  /** Generic cache-or-compute helper with double-checked locking.
+    *
+    * First tries a lock-free read from the ConcurrentHashMap. On miss, acquires the
+    * mutation lock, checks again (another thread may have computed it), and either
+    * returns the existing value or computes, caches, and returns the new value.
+    * Cache is fully cleared when it exceeds maxSize (simple eviction strategy).
+    */
   private def cachedOrCompute[K, V](
       cache: ConcurrentHashMap[K, V],
       key: K,
@@ -195,7 +218,8 @@ object RangeInferenceEngine:
       bunchingTrials: Int = 10_000,
       rng: Random = new Random(),
       useCache: Boolean = true,
-      revealedCards: Option[HoleCards] = None
+      revealedCards: Option[HoleCards] = None,
+      showdownHistory: Vector[ShowdownRecord] = Vector.empty
   ): PosteriorInferenceResult =
     revealedCards match
       case Some(cards) =>
@@ -227,7 +251,8 @@ object RangeInferenceEngine:
             actionModel,
             bunchingTrials,
             rng,
-            ddreConfig
+            ddreConfig,
+            showdownHistory
           )
 
         if useCache then
@@ -237,6 +262,7 @@ object RangeInferenceEngine:
             folds = folds,
             villainPos = villainPos,
             observations = observations,
+            showdownHistoryHash = showdownHistoryHash(showdownHistory),
             ddreMode = ddreConfig.mode,
             ddreProvider = ddreConfig.provider,
             ddreAlpha = ddreConfig.alpha,
@@ -251,6 +277,19 @@ object RangeInferenceEngine:
           )(computeResult)
         else computeResult
 
+  /** Core posterior computation pipeline.
+    *
+    * Steps:
+    *   1. Compute the bunching-conditioned prior (or naive prior if bunching is disabled).
+    *   2. Apply showdown-history bias to the prior (if showdown records exist).
+    *   3. If the action model is effectively uniform, skip the Bayesian update
+    *      (all hands have equal likelihood, so the posterior equals the prior).
+    *   4. Otherwise, run [[HoldemBayesProvider.updatePosterior]] to apply Bayesian
+    *      updates from observed villain actions.
+    *   5. Resolve the DDRE (Data-Driven Range Estimation) policy: off, shadow, or blend
+    *      modes determine whether/how the DDRE posterior is fused with the Bayesian one.
+    *   6. Wrap everything into a [[PosteriorInferenceResult]] with lazy collapse diagnostics.
+    */
   private def computePosterior(
       hero: HoleCards,
       board: Board,
@@ -261,7 +300,8 @@ object RangeInferenceEngine:
       actionModel: PokerActionModel,
       bunchingTrials: Int,
       rng: Random,
-      ddreConfig: HoldemDdreProvider.Config
+      ddreConfig: HoldemDdreProvider.Config,
+      showdownHistory: Vector[ShowdownRecord]
   ): PosteriorInferenceResult =
     // priorForContext always returns a normalized range.
     val normalizedPrior = priorForContext(
@@ -273,11 +313,23 @@ object RangeInferenceEngine:
       bunchingTrials = bunchingTrials,
       rng = rng
     )
+    val effectivePrior = ShowdownPriorBias.applyBias(
+      prior = normalizedPrior,
+      showdowns = showdownHistory,
+      deadCards = hero.asSet ++ board.asSet
+    )
     val observationsForBayes = observations.map(o => o.action -> o.state).toVector
     val canSkipBayesUpdate =
       observationsForBayes.nonEmpty &&
         actionModel.isEffectivelyUniform
 
+    /** Applies DDRE policy for decision-time posterior selection.
+      *
+      * Modes:
+      * - Off: pure Bayesian posterior.
+      * - Shadow: compute DDRE for telemetry, still return Bayesian posterior.
+      * - Blend*: validate and fuse Bayes/DDRE according to configured alpha.
+      */
     def resolveDecisionPosteriorFor(
         bayesPosterior: DiscreteDistribution[HoleCards]
     ): DiscreteDistribution[HoleCards] =
@@ -286,7 +338,7 @@ object RangeInferenceEngine:
         resolveDecisionPosterior(
           hero = hero,
           board = board,
-          prior = normalizedPrior,
+          prior = effectivePrior,
           bayesPosterior = bayesPosterior,
           observations = observationsForBayes,
           actionModel = actionModel,
@@ -295,12 +347,12 @@ object RangeInferenceEngine:
 
     val (posterior, logEvidence, compact) =
       if observationsForBayes.isEmpty then
-        (resolveDecisionPosteriorFor(normalizedPrior), 0.0, None)
+        (resolveDecisionPosteriorFor(effectivePrior), 0.0, None)
       else if canSkipBayesUpdate then
-        (resolveDecisionPosteriorFor(normalizedPrior), 0.0, None)
+        (resolveDecisionPosteriorFor(effectivePrior), 0.0, None)
       else
         val bayesUpdate = HoldemBayesProvider.updatePosterior(
-          prior = normalizedPrior,
+          prior = effectivePrior,
           observations = observationsForBayes,
           actionModel = actionModel
         )
@@ -312,12 +364,12 @@ object RangeInferenceEngine:
         (resolved, bayesUpdate.logEvidence, compactOption)
 
     PosteriorInferenceResult(
-      normalizedPrior,
+      effectivePrior,
       posterior,
       compact,
       logEvidence,
       {
-        val collapseSummary = CollapseMetrics.summary(normalizedPrior, posterior)
+        val collapseSummary = CollapseMetrics.summary(effectivePrior, posterior)
         PosteriorCollapse(
           entropyReduction = collapseSummary.entropyReduction,
           klDivergence = collapseSummary.klDivergence,
@@ -328,6 +380,15 @@ object RangeInferenceEngine:
       }
     )
 
+  /** Computes the context-conditioned prior range for a villain position.
+    *
+    * If bunching is enabled (bunchingTrials > 1 and folds are present), uses
+    * [[BunchingEffect.adjustedRange]] to account for the information conveyed by
+    * other players' preflop folds. Otherwise, uses the naive table range with
+    * dead-card filtering.
+    *
+    * Results are cached by (hero, board, folds, villainPos, tableRanges, bunchingTrials).
+    */
   private def priorForContext(
       hero: HoleCards,
       board: Board,
@@ -365,6 +426,9 @@ object RangeInferenceEngine:
         )
     }
 
+  /** Simple dead-card filtering of the table range for a villain position.
+    * Removes hands that overlap with hero cards or board cards, then normalizes.
+    */
   private def naiveVillainRange(
       hero: HoleCards,
       board: Board,
@@ -382,6 +446,11 @@ object RangeInferenceEngine:
     require(filtered.nonEmpty, "villain range is empty after hero/board filtering")
     DiscreteDistribution(filtered).normalized
 
+  /** Validates Bayes/DDRE candidates against legal support, then chooses/fuses based on mode.
+    *
+    * This method is fail-closed only when both sources are invalid in blend modes.
+    * In all degradable paths it logs a `ddre_degraded` event and returns a safe fallback.
+    */
   private def resolveDecisionPosterior(
       hero: HoleCards,
       board: Board,
@@ -513,6 +582,12 @@ object RangeInferenceEngine:
               s"Bayesian and DDRE posteriors are invalid (bayes=$bayesReason, ddre=${ddreFailure.reasonCategory})"
             )
 
+  /** Validates that a posterior distribution has positive legal mass (hands not blocked
+    * by dead cards) and no invalid (NaN, negative, infinite) probabilities.
+    *
+    * Uses bitmask operations for efficient dead-card checking: each card is mapped to
+    * a bit position, and a hand is legal iff (handMask & deadMask) == 0.
+    */
   private def validatePosteriorForDecision(
       name: String,
       distribution: DiscreteDistribution[HoleCards],
@@ -532,6 +607,14 @@ object RangeInferenceEngine:
     if legalMass <= Eps then Left(s"${name}_zero_legal_mass")
     else Right(())
 
+  /** Fuses Bayesian and DDRE posteriors using linear interpolation.
+    *
+    * For each legal hand: fused(hand) = (1 - alpha) * bayes(hand) + alpha * ddre(hand).
+    * The result is renormalized. Returns Left if any intermediate probability is
+    * invalid or if the fused distribution has zero legal mass.
+    *
+    * @param alpha the DDRE blend weight (0 = pure Bayes, 1 = pure DDRE)
+    */
   private def fusePosteriors(
       bayes: DiscreteDistribution[HoleCards],
       ddre: DiscreteDistribution[HoleCards],
@@ -584,6 +667,7 @@ object RangeInferenceEngine:
       .replaceAll("\\s+", "_")
       .replaceAll("[^A-Za-z0-9_\\-.:=]", "_")
 
+  /** Bitmask with bits set for both cards in a hole-card pair (for dead-card checking). */
   private inline def handMask(hand: HoleCards): Long =
     cardMask(hand.first) | cardMask(hand.second)
 
@@ -595,6 +679,7 @@ object RangeInferenceEngine:
       idx += 1
     mask
 
+  /** Single-bit mask for a card (bit position = card ID in 0..51). */
   private inline def cardMask(card: Card): Long =
     1L << CardId.toId(card)
 
@@ -744,7 +829,13 @@ object RangeInferenceEngine:
     }
     ActionRecommendation(heroEquity, evaluations, best.action)
 
-  /** Truncates a CompactPosterior to top-k hands by weight. */
+  /** Truncates a CompactPosterior to top-k hands by weight.
+    *
+    * Retention guarantees:
+    * - keep at most `maxHands`
+    * - keep at least `minHands`
+    * - continue keeping hands until cumulative mass reaches `minMass`
+    */
   private def truncateCompact(
       cp: HoldemEquity.CompactPosterior,
       maxHands: Int,
@@ -777,6 +868,13 @@ object RangeInferenceEngine:
       if keptCount == 0 then cp
       else new HoldemEquity.CompactPosterior(hands, weights, keptCount)
 
+  /** Compacts a posterior to at most maxHands entries for faster equity calculation.
+    *
+    * Sorts hands by descending probability, keeps the top entries until either maxHands
+    * is reached or cumulative mass exceeds minMass (whichever comes later, subject to
+    * minHands floor). This reduces Monte Carlo sampling noise by focusing equity trials
+    * on the most probable villain hands.
+    */
   private def compactPosteriorForEquity(
       posterior: DiscreteDistribution[HoleCards]
   ): DiscreteDistribution[HoleCards] =
@@ -832,6 +930,17 @@ object RangeInferenceEngine:
 
   private inline val Eps = Probability.Eps
 
+  /** Computes response-aware raise EV by modeling how the villain's range reacts.
+    *
+    * Two fast paths:
+    *   1. UniformVillainResponseModel: uses the single response profile directly (no per-hand loop).
+    *   2. Non-uniform model: aggregates per-hand responses, checks if continuation range
+    *      differs from the base posterior, and if so runs a separate equity calculation
+    *      against the narrowed continuation range.
+    *
+    * @param heroEquityMean the hero's equity against the full posterior (used as a shortcut
+    *        if the continuation range matches the posterior)
+    */
   private def responseAwareRaiseEv(
       hero: HoleCards,
       state: GameState,
@@ -890,6 +999,12 @@ object RangeInferenceEngine:
             continuationEquityMean = continuationEquityMean
           )
 
+  /** Approximate EV for raise lines with response-aware continuation probabilities.
+    *
+    * Behavior model:
+    * - folds win current pot immediately
+    * - continuing lines assume a one-street realized-equity approximation
+    */
   private def raiseEvFromContinuation(
       state: GameState,
       raiseAmount: Double,

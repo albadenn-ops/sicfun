@@ -4,6 +4,7 @@ import sicfun.holdem.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.cli.*
+import sicfun.holdem.bench.BenchSupport.{BatchData, loadBatch}
 
 import sicfun.core.HandEvaluator
 
@@ -49,12 +50,6 @@ object HeadsUpGpuPocGate:
   private val AllowedOptionKeys =
     Set("table", "mode", "trials", "maxMatchups", "cpuParallelism", "speedupThreshold", "warmupRuns", "runs", "seed")
 
-  private final case class BatchData(
-      packedKeys: Array[Long],
-      keyMaterial: Array[Long]
-  ):
-    def size: Int = packedKeys.length
-
   private final case class ValidationSummary(
       checked: Int,
       violations: Int
@@ -62,6 +57,11 @@ object HeadsUpGpuPocGate:
     def isPass: Boolean =
       checked > 0 && violations.toDouble / checked.toDouble <= 0.01
 
+  /** Entry point. Runs both CPU and GPU backends on the same workload, validates
+    * correctness (exact: 1e-9 tolerance; MC: 6-sigma + 0.05 absolute), and
+    * measures GPU-vs-CPU throughput speedup. Passes only if both correctness and
+    * speedup thresholds are met.
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     require(config.cpuParallelism > 0, "cpuParallelism must be positive")
@@ -135,17 +135,6 @@ object HeadsUpGpuPocGate:
 
     if gatePass then sys.exit(0) else sys.exit(2)
 
-  private def loadBatch(table: String, maxMatchups: Long): BatchData =
-    table.trim.toLowerCase match
-      case "full" =>
-        val batch = HeadsUpEquityTable.selectFullBatch(maxMatchups)
-        BatchData(batch.packedKeys, batch.keyMaterial)
-      case "canonical" =>
-        val batch = HeadsUpEquityCanonicalTable.selectCanonicalBatch(maxMatchups)
-        BatchData(batch.packedKeys, batch.keyMaterial)
-      case other =>
-        throw new IllegalArgumentException(s"unknown table '$other' (expected full or canonical)")
-
   private def runCpu(
       batch: BatchData,
       mode: HeadsUpEquityTable.Mode,
@@ -178,6 +167,15 @@ object HeadsUpGpuPocGate:
       (values, elapsed)
     }
 
+  /** Validates GPU results against CPU baseline.
+    *
+    * Exact mode: requires win/tie/loss to match within 1e-9 (accounts for floating-point
+    * ordering differences but not genuine errors).
+    *
+    * MC mode: uses a 6-sigma tolerance on the larger stderr, with a floor of 0.05 absolute.
+    * The 6-sigma bound means a "violation" is statistically very unlikely (< 0.0002%)
+    * to be caused by random sampling alone.
+    */
   private def validate(
       mode: HeadsUpEquityTable.Mode,
       cpu: Array[EquityResultWithError],

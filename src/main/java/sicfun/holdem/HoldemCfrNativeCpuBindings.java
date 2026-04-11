@@ -50,6 +50,34 @@ public final class HoldemCfrNativeCpuBindings {
   );
 
   /**
+   * Root-only solve ABI for decision-policy callers.
+   *
+   * <p>Uses the same tree encoding as {@link #solveTree}, but writes only the
+   * normalized average strategy for {@code rootInfoSetIndex}. This avoids
+   * materializing every infoset strategy and skips expected-value output.
+   *
+   * @return 0 on success, non-zero status code on failure.
+   */
+  public static native int solveTreeRoot(
+      int iterations,
+      int averagingDelay,
+      boolean cfrPlus,
+      boolean linearAveraging,
+      int rootNodeId,
+      int rootInfoSetIndex,
+      int[] nodeTypes,
+      int[] nodeStarts,
+      int[] nodeCounts,
+      int[] nodeInfosets,
+      int[] edgeChildIds,
+      double[] edgeProbabilities,
+      double[] terminalUtilities,
+      int[] infosetPlayers,
+      int[] infosetActionCounts,
+      double[] outRootStrategy
+  );
+
+  /**
    * Fixed-point ABI variant.
    *
    * <p>Chance probabilities and output strategies use `Prob` raw values (`Int32 @ 2^30`).

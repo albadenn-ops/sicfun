@@ -1,8 +1,9 @@
 package sicfun.holdem.bench
 
-import sicfun.core.{Card, Deck, DiscreteDistribution}
+import sicfun.core.{Deck, DiscreteDistribution}
 import sicfun.holdem.types.*
 import sicfun.holdem.equity.{HoldemEquity, HoldemCombinator}
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 /** A/B benchmark: equityExact (Double) vs equityExactProb (Int32 fixed-point).
   *
@@ -10,15 +11,15 @@ import sicfun.holdem.equity.{HoldemEquity, HoldemCombinator}
   *   mode: "turn" (default) or "flop"
   */
 object ProbEquityBenchmark:
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(throw new IllegalArgumentException(s"bad card: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
-
   private def board(tokens: String*): Board =
     Board.from(tokens.map(card))
 
+  /** Entry point. Runs an interleaved A/B benchmark comparing `equityExact` (Double
+    * arithmetic) vs `equityExactProb` (Int32 fixed-point arithmetic via FixedVal/Prob).
+    * Interleaving on even/odd runs mitigates JIT and GC ordering bias. After timing,
+    * runs both paths once more and prints a correctness comparison (win/tie/loss/equity
+    * values and the absolute equity difference between the two implementations).
+    */
   def main(args: Array[String]): Unit =
     val warmup = if args.length > 0 then args(0).toInt else 5
     val runs = if args.length > 1 then args(1).toInt else 20

@@ -17,6 +17,7 @@ import scala.collection.mutable
   * }}}
   */
 object HeadsUpCanonicalTableReadableDump:
+  /** A single decoded row ready for TSV output, with both raw hand tokens and class labels. */
   private final case class Row(
       key: Int,
       hero: String,
@@ -30,6 +31,11 @@ object HeadsUpCanonicalTableReadableDump:
       stderr: Double
   )
 
+  /** Entry point. Loads a canonical binary table, decodes each entry into human-readable
+    * hand tokens and hand classes, sorts by the requested column, and writes a TSV file.
+    *
+    * @param args positional: inputTablePath, outputTsvPath, [sortColumn], [order], [limit]
+    */
   def main(args: Array[String]): Unit =
     if args.length < 2 then
       System.err.println(
@@ -101,6 +107,13 @@ object HeadsUpCanonicalTableReadableDump:
     println(s"sort: $sortBy $order")
     limit.foreach(n => println(s"limit: $n"))
 
+  /** Builds a map from canonical key -> (hero, villain) representative hands.
+    *
+    * Iterates all non-overlapping pair combinations and picks the first encountered
+    * representative for each canonical key. The "first encountered" criterion means
+    * the representative is stable across runs but arbitrary — it exists only for
+    * human-readable display (the actual equity is suit-isomorphic).
+    */
   private def canonicalRepresentativesByKey(): Map[Int, (HoleCards, HoleCards)] =
     val out = mutable.HashMap.empty[Int, (HoleCards, HoleCards)]
     HoleCardsIndex.foreachNonOverlappingPair { (_, hero, _, villain) =>
@@ -150,6 +163,9 @@ object HeadsUpCanonicalTableReadableDump:
         idx += 1
     finally writer.close()
 
+  /** Converts a specific hole card combo to its hand class token (e.g., "AKs", "TT", "72o").
+    * Pairs get two characters (e.g., "AA"), non-pairs get three (high+low+suitedness).
+    */
   private def handClass(hand: HoleCards): String =
     val r1 = hand.first.rank
     val r2 = hand.second.rank

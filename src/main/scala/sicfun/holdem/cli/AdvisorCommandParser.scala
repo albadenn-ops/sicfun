@@ -3,20 +3,61 @@ import sicfun.holdem.types.*
 
 import sicfun.core.Card
 
-/** Typed commands for the interactive poker advisor REPL. */
+/**
+  * Command parser for the interactive poker advisor REPL.
+  *
+  * This file defines the [[AdvisorCommand]] ADT (algebraic data type) representing all
+  * possible commands the user can issue in the advisor REPL, and the [[AdvisorCommandParser]]
+  * that transforms raw text input into typed command values.
+  *
+  * The parser is designed for a conversational poker coaching workflow:
+  *   1. Start a new hand (`new`)
+  *   2. Set hero's hole cards (`h AcKh` or just `AcKh`)
+  *   3. Record actions for hero and villain (`h raise 6`, `v call`)
+  *   4. Deal community cards (`board Ts9h8d`)
+  *   5. Ask for advice (`?` or `advise`)
+  *   6. Review the hand after showdown (`review`)
+  *
+  * The parser is intentionally forgiving: it accepts multiple synonyms for each command
+  * (e.g. "quit"/"exit"/"q"), supports both concatenated and spaced card notation,
+  * and treats "bet" as an alias for "raise" since casual players use both interchangeably.
+  *
+  * Invalid or unrecognized input always produces [[AdvisorCommand.Unknown]] with a
+  * descriptive reason string, rather than throwing exceptions. This keeps the REPL loop
+  * simple and lets the caller display helpful error messages.
+  */
+
+/** Typed commands for the interactive poker advisor REPL.
+  *
+  * Each variant represents a distinct user intent. The [[Unknown]] variant captures
+  * unrecognized input together with a reason string for error reporting.
+  */
 enum AdvisorCommand:
+  /** Start a new hand, resetting the current hand state. */
   case NewHand
+  /** Set hero's private hole cards for the current hand. */
   case HeroCards(cards: sicfun.holdem.types.HoleCards)
+  /** Record an action taken by the hero (fold, check, call, or raise). */
   case HeroAction(action: PokerAction)
+  /** Record an action taken by the villain (fold, check, call, or raise). */
   case VillainAction(action: PokerAction)
+  /** Deal community cards to the board (flop, turn, or river cards). */
   case DealBoard(cards: Vector[Card])
+  /** Request a strategic recommendation from the advisor engine. */
   case Advise
+  /** Review the completed hand with post-hoc analysis. */
   case Review
+  /** Display cumulative session statistics (hands played, win rate, etc.). */
   case SessionStats
+  /** Undo the most recent action or state change. */
   case Undo
+  /** Display help text listing all available commands. */
   case Help
+  /** Reveal villain's hole cards at showdown for post-hand analysis. */
   case VillainShowdown(cards: sicfun.holdem.types.HoleCards)
+  /** Exit the advisor REPL session. */
   case Quit
+  /** Unrecognized input, with the original text and a descriptive reason for rejection. */
   case Unknown(input: String, reason: String)
 
 /** Parses raw REPL input lines into typed [[AdvisorCommand]] values.
@@ -37,6 +78,18 @@ enum AdvisorCommand:
   */
 object AdvisorCommandParser:
 
+  /** Parses a raw REPL input line into a typed [[AdvisorCommand]].
+    *
+    * The input is trimmed, split on whitespace, and the first token is matched
+    * case-insensitively against known command prefixes. Sub-tokens are dispatched
+    * to specialized parsers for hero actions, villain actions, and board cards.
+    *
+    * As a convenience, bare 4-character tokens (e.g. "AcKh") are interpreted as
+    * hero hole cards, allowing the user to skip the "h" prefix.
+    *
+    * @param line the raw input string from the REPL
+    * @return a typed [[AdvisorCommand]]; never throws
+    */
   def parse(line: String): AdvisorCommand =
     val trimmed = line.trim
     if trimmed.isEmpty then AdvisorCommand.Unknown("", "empty input")
@@ -64,6 +117,10 @@ object AdvisorCommandParser:
 
   // ---- Hero sub-commands ----
 
+  /** Parses the tokens following "h" or "hero", dispatching to action or hole-card parsing.
+    *
+    * Supports: "h raise 6", "h call", "h fold", "h check", "h AcKh", "h Ac Kh".
+    */
   private def parseHeroSub(tokens: Vector[String]): AdvisorCommand =
     val first = tokens.head.toLowerCase
     first match
@@ -86,6 +143,11 @@ object AdvisorCommandParser:
 
   // ---- Villain sub-commands ----
 
+  /** Parses the tokens following "v" or "villain", dispatching to action or showdown parsing.
+    *
+    * Supports: "v raise 20", "v call", "v fold", "v check", "v show QhQs", "v show Qh Qs".
+    * "bet" is accepted as a synonym for "raise" since casual players use both.
+    */
   private def parseVillainSub(tokens: Vector[String]): AdvisorCommand =
     val first = tokens.head.toLowerCase
     first match
@@ -106,6 +168,14 @@ object AdvisorCommandParser:
 
   // ---- Board sub-command ----
 
+  /** Parses board card tokens into a [[AdvisorCommand.DealBoard]].
+    *
+    * Accepts two notations:
+    *   - Concatenated: "Ts9h8d" (a single token, split into 2-character chunks)
+    *   - Spaced: "Ts 9h 8d" (each card as a separate whitespace-delimited token)
+    *
+    * Validates each card token via `Card.parse` and reports invalid cards by name.
+    */
   private def parseBoardSub(tokens: Vector[String]): AdvisorCommand =
     // Support: "board Ts9h8d" (one token, split into 2-char chunks)
     //      or: "board Ts 9h 8d" (separate tokens)
@@ -124,6 +194,14 @@ object AdvisorCommandParser:
 
   // ---- Helpers ----
 
+  /** Parses a raise/bet amount from the remaining tokens.
+    *
+    * Validates that the amount is present, numeric, and positive.
+    * Returns a HeroAction or VillainAction depending on `isHero`.
+    *
+    * @param tokens the remaining tokens after "raise" or "bet"
+    * @param isHero true if the raise belongs to the hero, false for villain
+    */
   private def parseRaiseAmount(tokens: Vector[String], isHero: Boolean): AdvisorCommand =
     if tokens.isEmpty then
       val who = if isHero then "h" else "v"
@@ -138,6 +216,14 @@ object AdvisorCommandParser:
         case None =>
           AdvisorCommand.Unknown(s"raise ${tokens.head}", s"invalid number: ${tokens.head}")
 
+  /** Attempts to parse a 4-character token as canonical hole cards.
+    *
+    * Delegates to [[CliHelpers.parseHoleCards]] and catches any exception,
+    * returning `None` for invalid input rather than propagating the error.
+    *
+    * @param token a 4-character string like "AcKh"
+    * @return `Some(holeCards)` if valid, `None` otherwise
+    */
   private def tryParseHoleCards(token: String): Option[HoleCards] =
     try Some(CliHelpers.parseHoleCards(token))
     catch case _: Exception => None

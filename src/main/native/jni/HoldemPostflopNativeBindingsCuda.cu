@@ -1,3 +1,53 @@
+/*
+ * HoldemPostflopNativeBindingsCuda.cu -- CUDA JNI binding for postflop
+ * Monte Carlo equity computation in the sicfun poker analytics system.
+ *
+ * Given a hero hand, a partial board (1-5 community cards), and a batch of
+ * villain hands, this binding runs Monte Carlo simulations on the GPU to
+ * estimate postflop win/tie/loss probabilities and standard errors. Each
+ * CUDA thread handles one hero-vs-villain matchup independently.
+ *
+ * Key features:
+ *   - Configurable block size, chunk size, and trials-per-launch via JVM
+ *     system properties or environment variables (sicfun.postflop.native.cuda.*).
+ *   - Chunked dispatch: the villain batch is split into chunks to avoid driver
+ *     timeouts (TDR) on Windows. Each chunk is a separate kernel launch.
+ *   - Sub-launch trial splitting: for very high trial counts, each chunk is
+ *     further split into trial sub-launches to stay under TDR limits. Results
+ *     are accumulated host-side across sub-launches.
+ *   - xorshift64*-based PRNG with splitmix64 seed mixing for deterministic,
+ *     per-matchup random board generation.
+ *   - 5-card hand evaluator using brute-force C(7,5)=21 subset enumeration
+ *     (compact macro-expanded loop, no recursion on GPU).
+ *   - Score encoding: 32-bit packed score with 8-bit category (0=high card
+ *     through 8=straight flush) and 20-bit tiebreaker (5 x 4-bit rank nibbles).
+ *
+ * When board_size == 5 (river), no random sampling is needed — the kernel
+ * performs a single deterministic showdown comparison per matchup.
+ *
+ * Target GPU: GTX 960M (Maxwell, sm_50, CUDA 11.8).
+ * Compiled into: sicfun_gpu_kernel.dll
+ *
+ * JNI class: sicfun.holdem.HoldemPostflopNativeGpuBindings
+ *
+ * Error status codes:
+ *   100 -- null array argument
+ *   101 -- array length mismatch
+ *   102 -- JNI read error
+ *   124 -- JNI write error
+ *   125 -- invalid card ID (not in 0..51)
+ *   126 -- invalid trial count
+ *   127 -- overlapping/duplicate cards
+ *   128 -- invalid board size (not in 1..5)
+ *   130 -- no CUDA device / device selection failed
+ *   131 -- cudaMalloc failed
+ *   132 -- cudaMemcpy (host-to-device) failed
+ *   133 -- kernel launch error
+ *   134 -- cudaDeviceSynchronize failed
+ *   135 -- cudaMemcpy (device-to-host) failed
+ *   137 -- kernel launch timeout (TDR)
+ */
+
 #include <jni.h>
 #include <cuda_runtime.h>
 
@@ -13,6 +63,9 @@
 #include <string>
 #include <vector>
 
+/* HD_FORCE: marks functions callable from both host and device, with forced
+ * inlining. Used for card helpers, PRNG, and hand evaluation that must work
+ * in both CPU validation paths and CUDA kernels. */
 #if defined(__CUDACC__)
 #define HD_FORCE __host__ __device__ __forceinline__
 #else
@@ -21,23 +74,27 @@
 
 namespace {
 
-constexpr int kDeckSize = 52;
-constexpr int kRanksPerSuit = 13;
-constexpr int kMinRankValue = 2;
-constexpr int kMaxRankValue = 14;
-constexpr int kBoardCardCount = 5;
-constexpr int kCombos7Of5Count = 21;
-constexpr int kMaxRemainingDeck = 50;
-constexpr int kDefaultCudaThreadsPerBlock = 128;
-constexpr int kDefaultCudaMaxChunkMatchups = 4096;
-constexpr int kDefaultCudaMaxTrialsPerLaunch = 4096;
-constexpr int kStatusInvalidBoardSize = 128;
-constexpr uint64_t kRngMul = 2685821657736338717ULL;
-constexpr jint kEngineUnknown = 0;
-constexpr jint kEngineCuda = 2;
+/* ---- Constants ---------------------------------------------------------- */
 
+constexpr int kDeckSize = 52;                /* Standard 52-card deck. */
+constexpr int kRanksPerSuit = 13;            /* 2..A per suit. */
+constexpr int kMinRankValue = 2;             /* Rank encoding: 2 = deuce. */
+constexpr int kMaxRankValue = 14;            /* Rank encoding: 14 = ace. */
+constexpr int kBoardCardCount = 5;           /* Full community board = 5 cards. */
+constexpr int kCombos7Of5Count = 21;         /* C(7,5) = 21 five-card subsets from 7. */
+constexpr int kMaxRemainingDeck = 50;        /* Max remaining cards: 52 - 2 hero. */
+constexpr int kDefaultCudaThreadsPerBlock = 128;       /* Default CUDA block size. */
+constexpr int kDefaultCudaMaxChunkMatchups = 4096;     /* Default max matchups per kernel launch. */
+constexpr int kDefaultCudaMaxTrialsPerLaunch = 4096;   /* Default max MC trials per sub-launch. */
+constexpr int kStatusInvalidBoardSize = 128; /* Error: board_size not in [1,5]. */
+constexpr uint64_t kRngMul = 2685821657736338717ULL; /* xorshift64* output multiplier. */
+constexpr jint kEngineUnknown = 0;           /* No computation has run yet. */
+constexpr jint kEngineCuda = 2;              /* Last successful computation used CUDA. */
+
+/* Tracks which engine last completed successfully. Read by queryNativeEngine(). */
 std::atomic<jint> g_last_engine_code(kEngineUnknown);
 
+/* Checks for a pending JNI exception, clears it if present, returns true if one was found. */
 bool check_and_clear_exception(JNIEnv* env) {
   if (!env->ExceptionCheck()) {
     return false;
@@ -46,10 +103,12 @@ bool check_and_clear_exception(JNIEnv* env) {
   return true;
 }
 
+/* Returns true if card_id is in [0, 51]. Uses unsigned comparison trick. */
 HD_FORCE bool is_valid_card_id(const int card_id) {
-  return card_id >= 0 && card_id < kDeckSize;
+  return static_cast<unsigned int>(card_id) < static_cast<unsigned int>(kDeckSize);
 }
 
+/* Trims whitespace and lowercases a string. Used for parsing config properties. */
 std::string normalize_token(const std::string& raw) {
   size_t start = 0;
   size_t end = raw.size();
@@ -66,6 +125,7 @@ std::string normalize_token(const std::string& raw) {
   return out;
 }
 
+/* Parses a positive integer from a string. Returns -1 on failure. */
 int parse_positive_text_int(const std::string& text) {
   const std::string trimmed = normalize_token(text);
   if (trimmed.empty()) {
@@ -80,6 +140,7 @@ int parse_positive_text_int(const std::string& text) {
   return static_cast<int>(parsed);
 }
 
+/* Parses a positive integer from an environment variable value. */
 int parse_positive_env_int(const char* value) {
   if (value == nullptr || value[0] == '\0') {
     return -1;
@@ -87,6 +148,11 @@ int parse_positive_env_int(const char* value) {
   return parse_positive_text_int(std::string(value));
 }
 
+/*
+ * Reads a JVM system property via JNI reflection (System.getProperty(key)).
+ * Returns true if the property exists and is non-empty. This allows CUDA
+ * tuning parameters to be set from the JVM side without environment variables.
+ */
 bool try_read_system_property(JNIEnv* env, const char* key, std::string& out) {
   out.clear();
   if (env == nullptr || key == nullptr || key[0] == '\0') {
@@ -132,21 +198,17 @@ bool try_read_system_property(JNIEnv* env, const char* key, std::string& out) {
   return !out.empty();
 }
 
+/* Clamps block size to [32, 1024] and rounds down to a warp-aligned multiple of 32. */
 int normalize_cuda_block_size(const int raw) {
-  int block = raw;
-  if (block < 32) {
-    block = 32;
-  }
-  if (block > 1024) {
-    block = 1024;
-  }
-  block = (block / 32) * 32;
-  if (block < 32) {
-    block = 32;
-  }
-  return block;
+  return std::clamp(raw, 32, 1024) & ~31;
 }
 
+/*
+ * Resolves CUDA block size from (in priority order):
+ * 1. JVM system property: sicfun.postflop.native.cuda.blockSize
+ * 2. Environment variable: sicfun_POSTFLOP_CUDA_BLOCK_SIZE
+ * 3. Default: 128 threads
+ */
 int resolve_cuda_threads_per_block(JNIEnv* env) {
   std::string property_value;
   if (try_read_system_property(env, "sicfun.postflop.native.cuda.blockSize", property_value)) {
@@ -162,23 +224,15 @@ int resolve_cuda_threads_per_block(JNIEnv* env) {
   return kDefaultCudaThreadsPerBlock;
 }
 
+/* Clamps max chunk size to [1, entries]. Prevents over-large kernel launches. */
 int normalize_cuda_max_chunk(const int raw, const int entries) {
   if (entries <= 0) {
     return 1;
   }
-  int chunk = raw;
-  if (chunk <= 0) {
-    chunk = kDefaultCudaMaxChunkMatchups;
-  }
-  if (chunk > entries) {
-    chunk = entries;
-  }
-  if (chunk < 1) {
-    chunk = 1;
-  }
-  return chunk;
+  return std::clamp(raw > 0 ? raw : kDefaultCudaMaxChunkMatchups, 1, entries);
 }
 
+/* Resolves max matchups per kernel launch from JVM property, env var, or default (4096). */
 int resolve_cuda_max_chunk_matchups(JNIEnv* env, const int entries) {
   std::string property_value;
   if (try_read_system_property(env, "sicfun.postflop.native.cuda.maxChunkMatchups", property_value)) {
@@ -194,23 +248,15 @@ int resolve_cuda_max_chunk_matchups(JNIEnv* env, const int entries) {
   return normalize_cuda_max_chunk(kDefaultCudaMaxChunkMatchups, entries);
 }
 
+/* Clamps max trials per sub-launch to [1, trials]. */
 int normalize_cuda_max_trials_per_launch(const int raw, const int trials) {
   if (trials <= 0) {
     return 1;
   }
-  int chunk_trials = raw;
-  if (chunk_trials <= 0) {
-    chunk_trials = kDefaultCudaMaxTrialsPerLaunch;
-  }
-  if (chunk_trials > trials) {
-    chunk_trials = trials;
-  }
-  if (chunk_trials < 1) {
-    chunk_trials = 1;
-  }
-  return chunk_trials;
+  return std::clamp(raw > 0 ? raw : kDefaultCudaMaxTrialsPerLaunch, 1, trials);
 }
 
+/* Resolves max MC trials per sub-launch from JVM property, env var, or default (4096). */
 int resolve_cuda_max_trials_per_launch(JNIEnv* env, const int trials) {
   std::string property_value;
   if (try_read_system_property(env, "sicfun.postflop.native.cuda.maxTrialsPerLaunch", property_value)) {
@@ -226,36 +272,55 @@ int resolve_cuda_max_trials_per_launch(JNIEnv* env, const int trials) {
   return normalize_cuda_max_trials_per_launch(kDefaultCudaMaxTrialsPerLaunch, trials);
 }
 
+/* ---- Card helpers -------------------------------------------------------- */
+
+/* Returns the rank (2..14) of a card encoded as 0..51. Rank = card % 13 + 2. */
 HD_FORCE int card_rank(const int card_id) {
   return (card_id % kRanksPerSuit) + kMinRankValue;
 }
 
+/* Returns the suit (0..3) of a card encoded as 0..51. Suit = card / 13. */
 HD_FORCE int card_suit(const int card_id) {
   return card_id / kRanksPerSuit;
 }
 
+/* ---- Hand evaluation ---------------------------------------------------- */
+
+/*
+ * Encodes a hand category and tiebreakers into a 32-bit score.
+ * Format: [category:8][tb0:4][tb1:4][tb2:4][tb3:4][tb4:4]
+ * Categories: 0=high card, 1=pair, 2=two pair, 3=trips, 4=straight,
+ *             5=flush, 6=full house, 7=quads, 8=straight flush.
+ * Higher 32-bit value = better hand. This encoding allows simple integer
+ * comparison for showdown resolution without complex logic.
+ */
 HD_FORCE uint32_t encode_score(const int category, const int* tiebreak, const int tiebreak_size) {
   uint32_t score = static_cast<uint32_t>(category) << 24;
   for (int i = 0; i < tiebreak_size && i < 5; ++i) {
-    score |= (static_cast<uint32_t>(tiebreak[i] & 0x0F) << (20 - (i * 4)));
+    score |= (static_cast<uint32_t>(tiebreak[i] & 0x0F) << (20 - (i << 2)));
   }
   return score;
 }
 
+/*
+ * Evaluates a 5-card poker hand and returns a packed 32-bit score.
+ * Uses rank counting + flush/straight detection. Called 21 times per
+ * 7-card evaluation via the EVAL_COMBO macro in evaluate7_score().
+ */
 HD_FORCE uint32_t evaluate5_score(const int cards[5]) {
-  int suits[5];
+  uint8_t suits[5];
   int rank_counts[kMaxRankValue + 1];
   for (int rank = 0; rank <= kMaxRankValue; ++rank) {
     rank_counts[rank] = 0;
   }
-  for (int i = 0; i < 5; ++i) {
+  for (uint8_t i = 0; i < 5; ++i) {
     const int rank = card_rank(cards[i]);
-    suits[i] = card_suit(cards[i]);
+    suits[i] = static_cast<uint8_t>(card_suit(cards[i]));
     ++rank_counts[rank];
   }
 
   bool is_flush = true;
-  for (int i = 1; i < 5; ++i) {
+  for (uint8_t i = 1; i < 5; ++i) {
     if (suits[i] != suits[0]) {
       is_flush = false;
       break;
@@ -355,12 +420,17 @@ HD_FORCE uint32_t evaluate5_score(const int cards[5]) {
     tiebreak[3] = singles[2];
     return encode_score(1, tiebreak, 4);
   }
-  for (int i = 0; i < 5; ++i) {
+  for (uint8_t i = 0; i < 5; ++i) {
     tiebreak[i] = singles[i];
   }
   return encode_score(0, tiebreak, 5);
 }
 
+/*
+ * Evaluates the best 5-card hand from 7 cards by brute-force enumeration
+ * of all C(7,5)=21 subsets. The EVAL_COMBO macro expands each subset
+ * inline to avoid loop overhead on the GPU. Returns the highest score.
+ */
 HD_FORCE uint32_t evaluate7_score(const int cards[7]) {
   int five_cards[5];
   uint32_t best = 0;
@@ -401,6 +471,9 @@ HD_FORCE uint32_t evaluate7_score(const int cards[7]) {
   return best;
 }
 
+/* Compares two players' hands against a 5-card board. Returns +1 (hero wins),
+ * 0 (tie), or -1 (villain wins). Uses the 7-card evaluator on each player's
+ * 2 hole cards + 5 board cards. */
 HD_FORCE int compare_showdown(
     const int hero_first,
     const int hero_second,
@@ -412,15 +485,13 @@ HD_FORCE int compare_showdown(
       villain_first, villain_second, board[0], board[1], board[2], board[3], board[4]};
   const uint32_t hero_score = evaluate7_score(hero_cards);
   const uint32_t villain_score = evaluate7_score(villain_cards);
-  if (hero_score > villain_score) {
-    return 1;
-  }
-  if (hero_score < villain_score) {
-    return -1;
-  }
-  return 0;
+  return (hero_score > villain_score) - (hero_score < villain_score);
 }
 
+/* ---- PRNG (xorshift64* with splitmix64 seed mixer) ---------------------- */
+
+/* Splitmix64 avalanche mixer. Converts a raw seed into a well-distributed
+ * initial state for xorshift64*. Uses Stafford's Mix13 variant. */
 HD_FORCE uint64_t mix64(uint64_t value) {
   uint64_t z = value + 0x9E3779B97F4A7C15ULL;
   z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -429,6 +500,7 @@ HD_FORCE uint64_t mix64(uint64_t value) {
   return z;
 }
 
+/* xorshift64* PRNG: generates next 64-bit pseudo-random value and advances state. */
 HD_FORCE uint64_t next_u64(uint64_t& state) {
   uint64_t x = state;
   x ^= x >> 12;
@@ -438,6 +510,8 @@ HD_FORCE uint64_t next_u64(uint64_t& state) {
   return x * kRngMul;
 }
 
+/* Returns a uniformly distributed random int in [0, bound) using rejection
+ * sampling to eliminate modulo bias. */
 HD_FORCE int bounded_rand(uint64_t& state, const int bound) {
   if (bound <= 1) {
     return 0;
@@ -453,6 +527,25 @@ HD_FORCE int bounded_rand(uint64_t& state, const int bound) {
   }
 }
 
+/* ---- CUDA kernel -------------------------------------------------------- */
+
+/*
+ * Postflop Monte Carlo equity kernel. One CUDA thread per villain matchup.
+ *
+ * Each thread:
+ *   1. Reads its villain hand cards from global memory via __ldg() (read-only
+ *      cache path, beneficial on Maxwell+).
+ *   2. Builds a bitmask of dead cards (hero + villain + known board cards).
+ *   3. Creates an array of remaining live cards for random board completion.
+ *   4. If board is already complete (5 cards), does a single showdown comparison
+ *      and writes the result as all-win, all-tie, or all-loss counts.
+ *   5. Otherwise, runs 'trials' Monte Carlo iterations:
+ *      - Randomly selects (5 - board_size) cards from the remaining deck using
+ *        rejection sampling with a bitmask to avoid duplicates.
+ *      - Evaluates both hands and tallies win/tie/loss counts.
+ *   6. Writes raw counts (as doubles) to output arrays. Standard error is set
+ *      to 0.0 here — the host computes it from the accumulated sub-launch results.
+ */
 __global__ void postflop_monte_carlo_kernel(
     const int hero_first,
     const int hero_second,
@@ -472,20 +565,20 @@ __global__ void postflop_monte_carlo_kernel(
     return;
   }
 
-  const int villain_first = villain_first_cards[idx];
-  const int villain_second = villain_second_cards[idx];
+  const int villain_first = __ldg(&villain_first_cards[idx]);
+  const int villain_second = __ldg(&villain_second_cards[idx]);
   uint64_t dead_mask =
       (1ULL << static_cast<uint64_t>(hero_first)) |
       (1ULL << static_cast<uint64_t>(hero_second)) |
       (1ULL << static_cast<uint64_t>(villain_first)) |
       (1ULL << static_cast<uint64_t>(villain_second));
   for (int b = 0; b < board_size; ++b) {
-    dead_mask |= (1ULL << static_cast<uint64_t>(board_cards[b]));
+    dead_mask |= (1ULL << static_cast<uint64_t>(__ldg(&board_cards[b])));
   }
 
   int remaining[kMaxRemainingDeck];
-  int rem_count = 0;
-  for (int card = 0; card < kDeckSize; ++card) {
+  uint8_t rem_count = 0;
+  for (uint8_t card = 0; card < kDeckSize; ++card) {
     const uint64_t bit = (1ULL << static_cast<uint64_t>(card));
     if ((dead_mask & bit) == 0ULL) {
       remaining[rem_count++] = card;
@@ -494,7 +587,7 @@ __global__ void postflop_monte_carlo_kernel(
 
   int board[kBoardCardCount];
   for (int b = 0; b < board_size; ++b) {
-    board[b] = board_cards[b];
+    board[b] = __ldg(&board_cards[b]);
   }
 
   const int cards_needed = kBoardCardCount - board_size;
@@ -517,7 +610,7 @@ __global__ void postflop_monte_carlo_kernel(
     return;
   }
 
-  uint64_t rng_state = mix64(seeds[idx] ^ 0xD6E8FEB86659FD93ULL);
+  uint64_t rng_state = mix64(__ldg(&seeds[idx]) ^ 0xD6E8FEB86659FD93ULL);
   if (rng_state == 0ULL) {
     rng_state = 0x9E3779B97F4A7C15ULL;
   }
@@ -527,7 +620,7 @@ __global__ void postflop_monte_carlo_kernel(
   int loss_count = 0;
   for (int t = 0; t < trials; ++t) {
     uint64_t used = 0ULL;
-    int filled = 0;
+    uint8_t filled = 0;
     while (filled < cards_needed) {
       const int ri = bounded_rand(rng_state, rem_count);
       const uint64_t bit = (1ULL << static_cast<uint64_t>(ri));
@@ -554,6 +647,25 @@ __global__ void postflop_monte_carlo_kernel(
 
 }  // namespace
 
+/* ── JNI exports ─────────────────────────────────────────────────────────── */
+
+/*
+ * JNI entry point: HoldemPostflopNativeGpuBindings.computePostflopBatchMonteCarlo()
+ *
+ * Computes postflop Monte Carlo equity for a batch of villain hands against
+ * a fixed hero hand and partial board. The flow:
+ *   1. Validates all inputs: null checks, array lengths, card ranges, duplicates.
+ *   2. Resolves CUDA tuning parameters (block size, chunk size, trials-per-launch)
+ *      from JVM properties / env vars / defaults.
+ *   3. Allocates device memory for board, villain hands, seeds, and results.
+ *   4. Processes the batch in chunks of max_chunk_matchups. Within each chunk,
+ *      further splits into sub-launches of max_trials_per_launch each.
+ *   5. Accumulates win/tie/loss counts across sub-launches on the host.
+ *   6. Converts counts to probabilities and computes standard error.
+ *   7. Writes results back to JNI arrays.
+ *
+ * Returns 0 on success, or a status code (see file header).
+ */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_computePostflopBatchMonteCarlo(
     JNIEnv* env,
@@ -842,7 +954,7 @@ Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_computePostflopBatchMonteCarl
     loss_buf[idx] = loss_count / total_trials;
     const double mean = (win_count + (0.5 * tie_count)) / total_trials;
     const double ex2 = (win_count + (0.25 * tie_count)) / total_trials;
-    const double variance_population = std::max(0.0, ex2 - (mean * mean));
+    const double variance_population = fmax(0.0, ex2 - (mean * mean));
     const double variance_sample =
         trials > 1 ? (variance_population * total_trials / static_cast<double>(trials - 1)) : 0.0;
     stderr_buf[idx] = sqrt(variance_sample / total_trials);
@@ -862,6 +974,7 @@ Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_computePostflopBatchMonteCarl
   return 0;
 }
 
+/* Returns 0 (unknown) or 2 (CUDA) depending on the last successful computation. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_queryNativeEngine(
     JNIEnv*,
@@ -869,6 +982,7 @@ Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_queryNativeEngine(
   return g_last_engine_code.load(std::memory_order_relaxed);
 }
 
+/* Returns the number of CUDA-capable devices, or 0 if CUDA is unavailable. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_cudaDeviceCount(
     JNIEnv*,
@@ -881,6 +995,7 @@ Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_cudaDeviceCount(
   return static_cast<jint>(count);
 }
 
+/* Returns a pipe-delimited device info string: "name|SMs|clockMHz|memMB|major.minor". */
 extern "C" JNIEXPORT jstring JNICALL
 Java_sicfun_holdem_HoldemPostflopNativeGpuBindings_cudaDeviceInfo(
     JNIEnv* env,

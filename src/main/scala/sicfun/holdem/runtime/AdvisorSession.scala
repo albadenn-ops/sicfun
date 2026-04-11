@@ -9,7 +9,14 @@ import sicfun.core.Card
 
 import scala.util.Random
 
-/** Configuration for a heads-up advisor session. */
+/** Configuration for a heads-up advisor session.
+  *
+  * @param startingStack        Chips each player starts with (default 200 = 100 BB).
+  * @param smallBlind           Small blind size.
+  * @param bigBlind             Big blind size.
+  * @param heroStartsAsSB       If true, hero starts on the button (SB) in hand #1.
+  * @param decisionBudgetMillis Max milliseconds the engine can spend per recommendation.
+  */
 final case class SessionConfig(
     startingStack: Double = 200.0,
     smallBlind: Double = 1.0,
@@ -36,7 +43,17 @@ final case class HeroDecisionRecord(
     villainObservations: Vector[VillainObservation]
 )
 
-/** Events logged for undo support. */
+/** Events logged for undo support.
+  *
+  * Each user action appends a [[HandEvent]] to the hand's event log.  The event captures
+  * a full snapshot of all mutable fields before the action was applied, so undo can
+  * restore the exact previous state without recomputation.
+  *
+  * Three event types cover all state transitions:
+  *  - [[HeroCardsSet]] — hero hole cards were assigned or changed.
+  *  - [[ActionRecorded]] — a hero or villain action was applied (fold/check/call/raise).
+  *  - [[BoardDealt]] — community cards were dealt (flop/turn/river).
+  */
 enum HandEvent:
   case HeroCardsSet(previous: Option[HoleCards])
   case ActionRecorded(
@@ -66,7 +83,16 @@ enum HandEvent:
       villainCommittedBefore: Double
   )
 
-/** In-progress hand state. */
+/** In-progress hand state, tracking all the mutable aspects of a single hand.
+  *
+  * This is an immutable snapshot that gets replaced on every state change.
+  * Key fields:
+  *  - `heroCommittedThisStreet` / `villainCommittedThisStreet` — chips committed on the current street only (reset to 0 when a new street is dealt).
+  *  - `villainObservations` — villain actions observed this hand, used for range inference.
+  *  - `heroDecisions` — hero decision records for post-hand review.
+  *  - `eventLog` — full undo history; each event captures a pre-action snapshot.
+  *  - `lastHeroActionWasRaise` — tracks whether the villain's next action is a response to a hero raise (for archetype learning).
+  */
 final case class HandSnapshot(
     handNumber: Int,
     heroCards: Option[HoleCards] = None,
@@ -98,9 +124,40 @@ final case class CommandResult(
 
 /** Pure-ish state machine for an interactive poker advisor session.
   *
+  * Manages a sequence of heads-up poker hands, processing user commands (new hand,
+  * set hero cards, record actions, deal board, request advice) and maintaining
+  * cumulative session statistics and opponent memory.
+  *
+  * '''State management:'''
   * The `RealTimeAdaptiveEngine` is intentionally mutable (archetype posterior
   * updates are side-effectful) — this matches how it is used everywhere in
-  * the codebase. The rest of the state is replaced functionally on each command.
+  * the codebase. The rest of the state is replaced functionally via the `updated()`
+  * factory method, which creates a new session with the specified changes.
+  *
+  * '''Opponent memory:'''
+  * If opponent memory is configured (via `opponentMemoryTarget`/`opponentMemorySite`/
+  * `opponentMemoryName`), each villain action is persisted to the profile store.
+  * The store is flushed to disk at hand boundaries (not after every action) to
+  * reduce I/O.  Undo also restores the memory state to the pre-action snapshot.
+  *
+  * '''Undo support:'''
+  * Every state-changing command appends a [[HandEvent]] to the hand's event log.
+  * Each event captures a complete pre-action snapshot, so undo simply restores
+  * those saved values without needing to replay the entire hand history.
+  *
+  * @param config                     Session-level configuration (stack, blinds, budget).
+  * @param engine                     Shared mutable [[RealTimeAdaptiveEngine]] (archetype learning is side-effectful).
+  * @param tableRanges                Preflop opening ranges for the table format.
+  * @param hand                       Current hand in progress (None between hands).
+  * @param stats                      Cumulative session statistics.
+  * @param rng                        Seeded RNG for reproducible engine decisions.
+  * @param rememberedOpponent         Loaded opponent profile (if any).
+  * @param rememberedVillainObservations  Villain observations carried over from previous hands.
+  * @param opponentMemoryTarget       Persistence target (file path or JDBC URL).
+  * @param opponentMemorySite         Site key for opponent lookup (e.g., "pokerstars").
+  * @param opponentMemoryName         Opponent screen name.
+  * @param opponentMemoryStore        In-memory profile store (flushed to disk at boundaries).
+  * @param opponentMemoryDirty        True if the store has unflushed changes.
   */
 final class AdvisorSession(
     val config: SessionConfig,
@@ -120,6 +177,10 @@ final class AdvisorSession(
   private val HeroIdx = 0
   private val VillainIdx = 1
 
+  /** Dispatch a user command and return the updated session + output lines.
+    * Each command handler returns a [[CommandResult]] containing a new session
+    * (with updated state) and a vector of lines to display to the user.
+    */
   def execute(command: AdvisorCommand): CommandResult =
     command match
       case AdvisorCommand.NewHand          => doNewHand()
@@ -139,6 +200,10 @@ final class AdvisorSession(
 
   // ---- NewHand ----
 
+  /** Start a new hand: flush opponent memory if dirty, archive villain observations from
+    * the previous hand, alternate hero's position (BTN/BB), post blinds, and initialize
+    * a fresh [[HandSnapshot]].  Also clears the engine's inference cache.
+    */
   private def doNewHand(): CommandResult =
     val prevHand = hand
     val newNumber = prevHand.map(_.handNumber + 1).getOrElse(1)
@@ -243,6 +308,18 @@ final class AdvisorSession(
         if validationError.isDefined then CommandResult(this, Vector(validationError.get))
         else doValidatedAction(h, isHero, action)
 
+  /** Apply a validated action to the hand state.
+    *
+    * This is the main action-processing method.  It:
+    * 1. Captures a full pre-action snapshot as a [[HandEvent.ActionRecorded]] for undo.
+    * 2. Updates chip contributions, pot, stacks, and to-call based on the action type.
+    * 3. Feeds villain actions to the engine for archetype learning (if responding to a hero raise).
+    * 4. Records villain observations for range inference (all non-fold villain actions).
+    * 5. Persists villain actions to opponent memory if configured.
+    * 6. Records hero decisions for post-hand review.
+    * 7. Computes hero net result on fold (the only way a hand ends through actions here).
+    * 8. Updates session statistics if the hand is finished.
+    */
   private def doValidatedAction(h: HandSnapshot, isHero: Boolean, action: PokerAction): CommandResult =
     val event = HandEvent.ActionRecorded(
       isHero = isHero,
@@ -482,6 +559,13 @@ final class AdvisorSession(
 
   // ---- Advise ----
 
+  /** Run the adaptive engine to produce an action recommendation for the current state.
+    *
+    * Builds a [[GameState]] from the current hand snapshot, constructs candidate actions
+    * (check/fold/call + several raise sizes), combines remembered + live villain observations,
+    * and invokes [[engine.decide]].  The result includes equity estimate, action EVs,
+    * archetype posterior, CFR equilibrium baseline (if configured), and top posterior hands.
+    */
   private def doAdvise(): CommandResult =
     hand match
       case None => CommandResult(this, Vector("No hand in progress. Type 'new' to start."))
@@ -505,6 +589,7 @@ final class AdvisorSession(
             // positions folded before the button opened.
             val openerPos = Position.Button
             val folds = tableRanges.format.foldsBeforeOpener(openerPos).map(PreflopFold(_))
+            val showdownHistory = rememberedOpponent.map(_.showdownHands).getOrElse(Vector.empty)
 
             val result = engine.decide(
               hero = heroCards,
@@ -515,7 +600,8 @@ final class AdvisorSession(
               candidateActions = candidates,
               decisionBudgetMillis = Some(config.decisionBudgetMillis),
               rng = new Random(rng.nextLong()),
-              revealedCards = h.villainRevealedCards
+              revealedCards = h.villainRevealedCards,
+              showdownHistory = showdownHistory
             )
 
             val out = formatAdvice(result, h)
@@ -523,6 +609,10 @@ final class AdvisorSession(
 
   // ---- Review ----
 
+  /** Re-evaluate all hero decisions in the current hand, comparing each actual action
+    * to the engine's recommendation.  Reports EV difference in big blinds and flags
+    * decisions where the actual action had significantly lower EV as "MISTAKE".
+    */
   private def doReview(): CommandResult =
     hand match
       case None => CommandResult(this, Vector("No hand to review."))
@@ -535,6 +625,7 @@ final class AdvisorSession(
         h.heroDecisions.zipWithIndex.foreach { case (dec, i) =>
           val candidates = buildCandidateActionsForState(dec.gameState)
           val folds = Vector.empty[PreflopFold]
+          val showdownHistory = rememberedOpponent.map(_.showdownHands).getOrElse(Vector.empty)
 
           val result = engine.decide(
             hero = dec.heroCards,
@@ -545,7 +636,8 @@ final class AdvisorSession(
             candidateActions = candidates,
             decisionBudgetMillis = Some(config.decisionBudgetMillis),
             rng = new Random(rng.nextLong()),
-            revealedCards = h.villainRevealedCards
+            revealedCards = h.villainRevealedCards,
+            showdownHistory = showdownHistory
           )
 
           val recommended = result.decision.recommendation.bestAction
@@ -600,6 +692,11 @@ final class AdvisorSession(
 
   // ---- Undo ----
 
+  /** Undo the most recent event by restoring the pre-action snapshot captured in the event.
+    *
+    * For [[HandEvent.ActionRecorded]] that ended the hand (fold), also reverts session stats.
+    * For opponent memory changes, restores the previous memory state and re-persists it.
+    */
   private def doUndo(): CommandResult =
     hand match
       case None => CommandResult(this, Vector("Nothing to undo."))
@@ -692,6 +789,10 @@ final class AdvisorSession(
 
   // ---- Internal helpers ----
 
+  /** Create a new session with the specified state changes, preserving all other fields.
+    * This is the functional-update pattern: the session itself is immutable (except for
+    * the shared mutable engine), so each command returns a fresh session.
+    */
   private def updated(
       newHand: Option[HandSnapshot],
       newStats: AdvisorSessionStats,
@@ -716,6 +817,13 @@ final class AdvisorSession(
       opponentMemoryDirty = newOpponentMemoryDirty
     )
 
+  /** Record a villain action in the opponent profile store (if configured).
+    *
+    * Creates a synthetic [[PokerEvent]] from the current hand state and feeds it to
+    * the store's `observeEvent`.  Also reports whether the villain is responding to
+    * a hero raise (for archetype frequency tracking).  Returns the updated store,
+    * opponent profile, and dirty flag.
+    */
   private def persistVillainObservation(
       h: HandSnapshot,
       action: PokerAction
@@ -757,6 +865,9 @@ final class AdvisorSession(
   private def saveOpponentMemorySnapshot(store: Option[OpponentProfileStore]): Unit =
     opponentMemoryTarget.foreach(target => OpponentProfileStorePersistence.save(target, store.getOrElse(OpponentProfileStore.empty)))
 
+  /** Persist the opponent profile store to disk if it has unflushed changes.
+    * Called at hand boundaries and on quit to avoid losing opponent observations.
+    */
   private def flushOpponentMemoryIfDirty(
       store: Option[OpponentProfileStore],
       dirty: Boolean
@@ -795,13 +906,18 @@ final class AdvisorSession(
   private def roundChips(v: Double): Double =
     math.round(v * 2.0) / 2.0 // round to nearest 0.5
 
+  private def formatHintMetrics(metrics: Vector[Double]): String =
+    metrics.map(value => f"$value%.3f").mkString("[", ", ", "]")
+
   private def formatAdvice(result: AdaptiveDecisionResult, h: HandSnapshot): Vector[String] =
     val out = Vector.newBuilder[String]
     val bb = config.bigBlind
 
     rememberedOpponent.foreach { profile =>
       out += s"  Memory: ${profile.site}/${profile.playerName} (${profile.handsObserved} hands)"
-      profile.exploitHints.take(2).foreach(hint => out += s"  Exploit: $hint")
+      profile.exploitHintDetails.take(2).foreach { hint =>
+        out += s"  Exploit: ${hint.text} ${formatHintMetrics(hint.metrics)}"
+      }
     }
 
     // Archetype line

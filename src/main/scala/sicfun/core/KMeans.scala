@@ -2,6 +2,13 @@ package sicfun.core
 
 import scala.util.Random
 
+/** Hyperparameters for k-means clustering.
+  *
+  * @param k                     number of clusters to produce (must be >= 1)
+  * @param maxIterations         upper bound on the number of assign-recompute cycles (default 100)
+  * @param convergenceThreshold  maximum centroid shift (Euclidean distance) to declare convergence (default 1e-6)
+  * @param seed                  RNG seed for deterministic centroid initialization (default 42)
+  */
 final case class KMeansConfig(
     k: Int,
     maxIterations: Int = 100,
@@ -12,6 +19,15 @@ final case class KMeansConfig(
   require(maxIterations >= 1, "maxIterations must be >= 1")
   require(convergenceThreshold >= 0.0, "convergenceThreshold must be >= 0")
 
+/** Result of a k-means fit run.
+  *
+  * @param centroids     the final cluster centers, each a d-dimensional vector
+  * @param assignments   per-point cluster index (0-based), aligned with the input points
+  * @param inertia       total within-cluster sum of squared distances (lower = tighter clusters)
+  * @param iterationsRun number of assign-recompute cycles actually executed
+  * @param converged     true if the algorithm stopped because all centroid shifts were
+  *                      below the convergence threshold (rather than hitting maxIterations)
+  */
 final case class KMeansResult(
     centroids: Vector[Vector[Double]],
     assignments: Vector[Int],
@@ -20,7 +36,34 @@ final case class KMeansResult(
     converged: Boolean
 )
 
+/** Lightweight k-means (Lloyd's algorithm) implementation for dense Double vectors.
+  *
+  * Used in the sicfun poker system for player clustering (grouping opponents by
+  * behavioral feature vectors such as aggression frequency, VPIP, fold-to-3bet, etc.).
+  *
+  * Design decisions:
+  *  - '''Random initialization''': centroids are initialized by randomly shuffling point
+  *    indices and taking the first k. This is simpler than k-means++ but sufficient for
+  *    the small cluster counts (k <= 10) typical in poker player profiling.
+  *  - '''While-loop hot paths''': inner loops use `while` instead of `foreach`/`map` to
+  *    avoid boxing and closure allocation, which matters when clustering large datasets.
+  *  - '''Empty cluster handling''': if a cluster loses all members during reassignment,
+  *    its centroid is preserved from the previous iteration (no random re-seeding).
+  */
 object KMeans:
+  /** Runs k-means clustering on the given points.
+    *
+    * The algorithm iterates between two steps until convergence or maxIterations:
+    *  1. '''Assignment''': each point is assigned to the nearest centroid (by Euclidean distance).
+    *  2. '''Update''': each centroid is recomputed as the mean of its assigned points.
+    *
+    * Convergence is declared when the maximum centroid shift across all clusters is
+    * below `config.convergenceThreshold`.
+    *
+    * @param points a non-empty vector of d-dimensional feature vectors (all same dimension)
+    * @param config clustering hyperparameters
+    * @return a [[KMeansResult]] containing centroids, assignments, inertia, and convergence info
+    */
   def fit(points: Vector[Vector[Double]], config: KMeansConfig): KMeansResult =
     require(points.nonEmpty, "points must be non-empty")
     val dimension = validatePoints(points)
@@ -56,6 +99,15 @@ object KMeans:
       converged = converged
     )
 
+  /** Assigns a single point to the nearest centroid by squared Euclidean distance.
+    *
+    * This is the public API for inference after training: given a new observation,
+    * determine which cluster it belongs to.
+    *
+    * @param point     the d-dimensional feature vector to classify
+    * @param centroids the cluster centers (from a [[KMeansResult]])
+    * @return the 0-based index of the nearest centroid
+    */
   def assign(point: Vector[Double], centroids: Vector[Vector[Double]]): Int =
     require(centroids.nonEmpty, "centroids must be non-empty")
     val dimension = centroids.head.length
@@ -65,6 +117,9 @@ object KMeans:
     }
     assignInternal(point, centroids, dimension)
 
+  /** Validates that all points share the same dimension and contain only finite values.
+    * @return the common dimension of all points
+    */
   private def validatePoints(points: Vector[Vector[Double]]): Int =
     val dimension = points.head.length
     require(dimension > 0, "point dimension must be > 0")
@@ -76,6 +131,7 @@ object KMeans:
     }
     dimension
 
+  /** Selects k initial centroids by random shuffle of point indices (simple random init). */
   private def initializeCentroids(
       points: Vector[Vector[Double]],
       k: Int,
@@ -83,6 +139,7 @@ object KMeans:
   ): Vector[Vector[Double]] =
     rng.shuffle(points.indices.toVector).take(k).map(points)
 
+  /** Finds the index of the nearest centroid by squared Euclidean distance (internal, no validation). */
   private def assignInternal(
       point: Vector[Double],
       centroids: Vector[Vector[Double]],
@@ -99,6 +156,14 @@ object KMeans:
       i += 1
     bestIdx
 
+  /** Recomputes cluster centroids as the mean of assigned points.
+    *
+    * Returns the new centroids and the maximum Euclidean shift of any centroid,
+    * which is used for convergence checking.
+    *
+    * If a cluster has zero assigned points, its centroid is carried forward unchanged
+    * from the previous iteration.
+    */
   private def recomputeCentroids(
       points: Vector[Vector[Double]],
       assignments: Vector[Int],
@@ -140,6 +205,9 @@ object KMeans:
 
     (next.toVector, maxShift)
 
+  /** Computes total within-cluster sum of squared distances (inertia / WCSS).
+    * Lower inertia indicates tighter, more compact clusters.
+    */
   private def computeInertia(
       points: Vector[Vector[Double]],
       assignments: Vector[Int],
@@ -153,6 +221,9 @@ object KMeans:
       i += 1
     total
 
+  /** Computes the squared Euclidean distance between two d-dimensional vectors.
+    * Uses squared distance (no sqrt) for efficiency since only relative ordering matters.
+    */
   private def squaredDistance(a: Vector[Double], b: Vector[Double], dimension: Int): Double =
     var sum = 0.0
     var i = 0

@@ -4,7 +4,26 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths, StandardOpenOption}
 import scala.jdk.CollectionConverters.*
 
-/** Tab-separated-value (TSV) persistence for [[SignalEnvelope]] audit logs.
+/**
+ * TSV-based persistence layer for the signal audit log in the sicfun poker analytics system.
+ *
+ * This object handles reading, writing, and appending [[SignalEnvelope]] records to
+ * flat TSV files. The audit log is the durable record of all signals generated during
+ * a poker session, used for post-session analysis, model calibration review, and
+ * debugging.
+ *
+ * Key design decisions:
+ *   - '''TSV format''': Chosen for human readability, easy grep/awk analysis, and
+ *     compatibility with spreadsheet tools. Each signal occupies exactly one row.
+ *   - '''Append-safe''': The [[append]] method creates the file with a header if absent,
+ *     then appends a single row atomically. This is safe for single-writer scenarios
+ *     (the typical case for one advisor session writing to one log file).
+ *   - '''Map serialization''': Feature and metric maps are serialized as pipe-delimited
+ *     `key=value` pairs, sorted by key for deterministic output.
+ *   - '''Field sanitization''': Tabs, newlines, and carriage returns in string fields are
+ *     replaced with spaces to prevent TSV structure corruption.
+ *
+ * Tab-separated-value (TSV) persistence for [[SignalEnvelope]] audit logs.
   *
   * Provides write, append, and read operations for signal audit log files.
   * Each file has a fixed header row followed by one TSV row per signal.
@@ -83,6 +102,9 @@ object SignalAuditLogIO:
       deserializeSignal(path, index + 2, line)
     }
 
+  /** Serializes a [[SignalEnvelope]] into a single TSV row with 18 tab-separated columns.
+   * All string fields are sanitized to remove tab/newline characters.
+   */
   private def serializeSignal(signal: SignalEnvelope): String =
     val payload = signal.payload
     val reconstruction = signal.reconstruction
@@ -107,6 +129,9 @@ object SignalAuditLogIO:
       reconstruction.eventSequenceInHand.toString
     ).mkString("\t")
 
+  /** Deserializes a single TSV row back into a [[SignalEnvelope]].
+   * Reconstructs the payload, reconstruction path, and signal level from the 18 columns.
+   */
   private def deserializeSignal(path: Path, rowNum: Int, line: String): SignalEnvelope =
     val cols = line.split("\t", -1).toVector
     require(cols.length == ExpectedColumns.length, s"$path:$rowNum expected ${ExpectedColumns.length} columns, got ${cols.length}")
@@ -135,6 +160,9 @@ object SignalAuditLogIO:
     val level = SignalLevel.valueOf(col(1))
     SignalEnvelope(col(0), level, payload, reconstruction)
 
+  /** Serializes a String->Double map as pipe-delimited "key=value" pairs, sorted by key.
+   * Returns "-" for empty maps.
+   */
   private def serializeMap(values: Map[String, Double]): String =
     if values.isEmpty then "-"
     else
@@ -142,6 +170,9 @@ object SignalAuditLogIO:
         s"${sanitizeKey(k)}=${java.lang.Double.toString(v)}"
       }.mkString("|")
 
+  /** Deserializes a pipe-delimited "key=value" string back into a String->Double map.
+   * Returns empty map for "-" or empty string.
+   */
   private def deserializeMap(
       raw: String,
       path: Path,
@@ -161,8 +192,12 @@ object SignalAuditLogIO:
         key -> value
       }.toMap
 
+  /** Replaces tabs, newlines, and carriage returns with spaces to preserve TSV row integrity. */
   private def sanitizeField(value: String): String =
     value.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim
 
+  /** Replaces pipe, equals, tab, newline, and CR characters in map keys with underscores
+   * to prevent conflicts with the map serialization format.
+   */
   private def sanitizeKey(key: String): String =
     key.replace('|', '_').replace('=', '_').replace('\t', '_').replace('\n', '_').replace('\r', '_').trim

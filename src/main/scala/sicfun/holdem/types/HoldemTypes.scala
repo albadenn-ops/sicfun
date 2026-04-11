@@ -3,6 +3,32 @@ package sicfun.holdem.types
 import sicfun.core.Card
 import sicfun.core.CardId
 
+/**
+  * Core Hold'em domain types: hole cards, community board, and equity results.
+  *
+  * This file defines the fundamental value types shared across the entire sicfun poker
+  * analytics system. These types are intentionally minimal, immutable case classes with
+  * strict invariant checks (via `require`):
+  *
+  *   - [[HoleCards]]: A canonically ordered pair of private cards dealt to a player.
+  *     Canonical ordering (by deck index) ensures that the same two-card hand always
+  *     has a single representation, which is critical for hash-map lookups in range
+  *     distributions and equity tables.
+  *
+  *   - [[Board]]: The 0-5 community cards visible on the table. Length encodes the
+  *     current street (0 = preflop, 3 = flop, 4 = turn, 5 = river).
+  *
+  *   - [[EquityResult]], [[EquityResultWithError]], [[EquityEstimate]], [[EquityShareResult]]:
+  *     Progressively richer representations of win/tie/loss probabilities, from exact
+  *     enumeration results to Monte Carlo estimates with variance statistics, to
+  *     multiway pot share calculations.
+  *
+  * Performance notes:
+  *   - [[HoleCards]] methods are `inline def` for zero-overhead access on hot paths.
+  *   - `hashCode` and `equals` use raw card IDs (integers) to avoid virtual dispatch.
+  *   - `isDisjointFrom` is branch-free integer comparison for use in tight enumeration loops.
+  */
+
 /** A player's two private hole cards in Texas Hold'em.
   *
   * Cards are stored in canonical order (by deck index) so that

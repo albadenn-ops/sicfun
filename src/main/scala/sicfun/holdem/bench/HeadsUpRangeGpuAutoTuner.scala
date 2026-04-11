@@ -17,11 +17,15 @@ import scala.collection.mutable.ArrayBuffer
 object HeadsUpRangeGpuAutoTuner:
   private val ProviderProperty = "sicfun.gpu.provider"
   private val NativePathProperty = "sicfun.gpu.native.path"
+  private val NativePathEnv = "sicfun_GPU_NATIVE_PATH"
+  private val NativeLibProperty = "sicfun.gpu.native.lib"
+  private val NativeLibEnv = "sicfun_GPU_NATIVE_LIB"
   private val NativeEngineProperty = "sicfun.gpu.native.engine"
   private val RangeAutoTuneProperty = "sicfun.gpu.range.autotune"
   private val RangeNativeBlockSizeProperty = "sicfun.gpu.native.range.cuda.blockSize"
   private val RangeNativeMaxChunkHeroesProperty = "sicfun.gpu.native.range.cuda.maxChunkHeroes"
   private val RangeNativeMemoryPathProperty = "sicfun.gpu.native.range.memoryPath"
+  private val DefaultNativeLibrary = "sicfun_gpu_kernel"
   private val CacheVersion = "1"
   private val DefaultCachePath = "data/headsup-range-autotune.properties"
   private val DefaultSeedBase = 0x38A7B35C1DF6241EL
@@ -83,6 +87,7 @@ object HeadsUpRangeGpuAutoTuner:
     // Prevent runtime cache from overriding candidate properties while tuning.
     sys.props.update(RangeAutoTuneProperty, "false")
     config.nativePath.foreach(path => sys.props.update(NativePathProperty, path))
+    HeadsUpGpuRuntime.resetLoadCacheForTests()
 
     val availability = HeadsUpGpuRuntime.availability
     println("heads-up range gpu auto-tuner")
@@ -134,7 +139,7 @@ object HeadsUpRangeGpuAutoTuner:
     if results.isEmpty then
       throw new IllegalStateException("no successful auto-tune result for any device")
 
-    saveCache(new File(config.cachePath), results.toVector)
+    saveCache(new File(config.cachePath), config, results.toVector, configuredNativeLibraryIdentity())
     println(s"cache written: ${new File(config.cachePath).getAbsolutePath}")
 
   private def tuneDevice(
@@ -209,11 +214,26 @@ object HeadsUpRangeGpuAutoTuner:
     sys.props.update(RangeNativeMaxChunkHeroesProperty, candidate.maxChunkHeroes.toString)
     sys.props.update(RangeNativeMemoryPathProperty, candidate.memoryPath)
 
-  private def saveCache(file: File, results: Vector[DeviceTuningResult]): Unit =
+  private def saveCache(
+      file: File,
+      config: Config,
+      results: Vector[DeviceTuningResult],
+      nativeLibraryIdentity: String
+  ): Unit =
     val parent = file.getParentFile
     if parent != null then parent.mkdirs()
     val props = new Properties()
     props.setProperty("version", CacheVersion)
+    props.setProperty("nativeLibraryIdentity", nativeLibraryIdentity)
+    props.setProperty("tune.heroes", config.heroes.toString)
+    props.setProperty("tune.entriesPerHero", config.entriesPerHero.toString)
+    props.setProperty("tune.trials", config.trials.toString)
+    props.setProperty("tune.warmupRuns", config.warmupRuns.toString)
+    props.setProperty("tune.runs", config.runs.toString)
+    props.setProperty("tune.seedBase", config.seedBase.toString)
+    props.setProperty("tune.blockCandidates", BlockCandidates.mkString(","))
+    props.setProperty("tune.chunkHeroesCandidates", ChunkHeroesCandidates.mkString(","))
+    props.setProperty("tune.memoryPathCandidates", MemoryPathCandidates.mkString(","))
     props.setProperty("device.count", results.size.toString)
     results.zipWithIndex.foreach { case (result, idx) =>
       val prefix = s"device.$idx."
@@ -229,6 +249,16 @@ object HeadsUpRangeGpuAutoTuner:
     val out = new FileOutputStream(file)
     try props.store(out, "heads-up range gpu auto-tune cache")
     finally out.close()
+
+  private def configuredNativeLibraryIdentity(): String =
+    GpuRuntimeSupport.resolveNonEmpty(NativePathProperty, NativePathEnv) match
+      case Some(path) =>
+        val file = new File(path)
+        val mtime = if file.exists() then file.lastModified() else 0L
+        s"path=${file.getAbsolutePath}|mtime=$mtime"
+      case None =>
+        val lib = GpuRuntimeSupport.resolveNonEmpty(NativeLibProperty, NativeLibEnv).getOrElse(DefaultNativeLibrary)
+        s"lib=$lib"
 
   private def buildSyntheticCsrBatch(heroes: Int, entriesPerHero: Int): CsrBatch =
     val heroIds = new Array[Int](heroes)

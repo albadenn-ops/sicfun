@@ -1,5 +1,25 @@
 package sicfun.holdem.types
 
+/**
+  * Poker action types and coarsened category enumeration for ML classification.
+  *
+  * This file defines the [[PokerAction]] enum representing the four possible actions
+  * a player can take at any decision point in Texas Hold'em, plus a companion
+  * [[PokerAction.Category]] enum that erases continuous raise amounts into a discrete
+  * four-class label space suitable for multinomial classification.
+  *
+  * The separation between [[PokerAction]] and [[PokerAction.Category]] is intentional:
+  *   - The full [[PokerAction]] type (with `Raise(amount)`) is used in game simulation,
+  *     event sourcing, and bet-history tracking where the exact raise size matters.
+  *   - The coarsened [[PokerAction.Category]] is used as the label type in ML models
+  *     ([[sicfun.holdem.model.PokerActionModel]]), where predicting the action category
+  *     is a multinomial classification problem and the raise amount is handled separately.
+  *
+  * The `category` method on [[PokerAction]] is `inline def` to eliminate the overhead
+  * of the pattern match at call sites -- important because it is called per-sample
+  * during training data preparation and model evaluation.
+  */
+
 /** Represents a discrete poker action that a player can take at a decision point in a hand.
   *
   * Each variant corresponds to a standard Texas Hold'em action. [[Raise]] carries a

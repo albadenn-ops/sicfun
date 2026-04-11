@@ -356,6 +356,29 @@ CUDA 11.8 Windows build (for older GPUs like `sm_50`):
 powershell -ExecutionPolicy Bypass -File src/main/native/build-windows-cuda11.ps1
 ```
 
+Machine prerequisite check:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1
+```
+
+Machine prerequisite auto-install:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1 -InstallMissing
+```
+
+Build script discovery/override notes:
+
+- auto-discovers JDK headers from `-JavaHome`, `SICFUN_GPU_BUILD_JAVA_HOME`, `JAVA_HOME`, or `javac.exe` on `PATH`
+- also scans common installed JDK roots under `Program Files\Java`, `Program Files\Microsoft`, and `Program Files\Eclipse Adoptium`
+- auto-discovers CUDA from `-CudaRoot`, `SICFUN_GPU_BUILD_CUDA_ROOT`, `CUDA_PATH`, or `nvcc.exe` on `PATH`
+- auto-discovers `vcvars64.bat` from `-VcVars`, `SICFUN_GPU_BUILD_VCVARS`, or Visual Studio `vswhere`
+- auto-detects local GPU compute capability from `nvidia-smi` on `PATH` or the default `NVSMI` install path unless you override `-Arch=<sm_xy>` or `-Architectures=<csv>`
+- if auto-detection returns a capability newer than this CUDA 11 build supports, the script falls back to the highest supported CUDA 11 target and warns
+- the script currently supports Windows x64 hosts only because it resolves `vcvars64.bat` and produces x64 DLLs
+- use `-CheckPrerequisites` to validate the machine before building, or `-InstallMissingPrerequisites` to let the script install supported missing prerequisites with `winget`
+
 This produces:
 
 - `src/main/native/build/sicfun_gpu_kernel.dll`

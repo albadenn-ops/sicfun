@@ -9,6 +9,17 @@ import sicfun.holdem.types.*
 
 import scala.util.Random
 
+/** Tests for [[MultiwayInferenceEngine]].
+  *
+  * Validates the multiway inference and recommendation system:
+  *   - '''Raise response estimation''': uniform model produces equal fold/continue mass;
+  *     non-uniform model shifts continuation range toward stronger hands.
+  *   - '''Multiway equity''': exact enumeration on river with tiny ranges; dead bluff-catcher
+  *     correctly folds against two stronger ranges.
+  *   - '''Opponent posteriors''': one posterior per opponent, overrides are respected.
+  *   - '''End-to-end inferAndRecommend''': produces correct fold recommendation against
+  *     two strong opponents with overridden ranges.
+  */
 class MultiwayInferenceEngineTest extends FunSuite:
   test("estimateRaiseResponseFromRange renormalizes legal fold and continue mass when facing a raise") {
     val response = MultiwayInferenceEngine.estimateRaiseResponseFromRange(

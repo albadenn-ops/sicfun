@@ -3,6 +3,7 @@ import sicfun.holdem.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.cli.*
+import sicfun.holdem.bench.BenchSupport.loadBatch
 
 /** Fast fail gate that verifies the native GPU runtime is usable and that
   * execution actually happens on CUDA (not CPU fallback).
@@ -35,12 +36,15 @@ object HeadsUpGpuSmokeGate:
 
   private val AllowedOptionKeys = Set("table", "trials", "maxMatchups", "seed", "nativePath")
 
-  private final case class BatchData(
-      packedKeys: Array[Long],
-      keyMaterial: Array[Long]
-  ):
-    def size: Int = packedKeys.length
-
+  /** Entry point. Configures the native CUDA runtime, runs a single MC batch, and
+    * validates three things:
+    *   1. All result values are finite (no NaN/Infinity).
+    *   2. win + tie + loss sums to ~1.0 for every entry.
+    *   3. Telemetry confirms CUDA engine was used (not silent CPU fallback).
+    *
+    * This is intentionally fast (128 matchups default) — it exists to catch total
+    * breakage, not subtle numerical errors (that is the POC gate's job).
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     require(config.trials > 0, "trials must be positive")
@@ -111,17 +115,6 @@ object HeadsUpGpuSmokeGate:
     config.nativePath match
       case Some(path) => sys.props.update(NativePathProperty, path)
       case None => ()
-
-  private def loadBatch(table: String, maxMatchups: Long): BatchData =
-    table.trim.toLowerCase match
-      case "full" =>
-        val batch = HeadsUpEquityTable.selectFullBatch(maxMatchups)
-        BatchData(batch.packedKeys, batch.keyMaterial)
-      case "canonical" =>
-        val batch = HeadsUpEquityCanonicalTable.selectCanonicalBatch(maxMatchups)
-        BatchData(batch.packedKeys, batch.keyMaterial)
-      case other =>
-        throw new IllegalArgumentException(s"unknown table '$other' (expected canonical or full)")
 
   private def parseArgs(args: Vector[String]): Config =
     val options = CliHelpers.requireOptions(args)

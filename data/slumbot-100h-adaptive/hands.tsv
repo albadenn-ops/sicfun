@@ -1,0 +1,101 @@
+hand	heroPosition	heroHole	board	winningsChips	winningsBb	decisions	villainObservations	action
+1	BigBlind	8dJd	Ks9s6d	300	3.000	2	3	b200b300c/b300f
+2	Button	8dJs		100	1.000	1	1	b300f
+3	BigBlind	4c9d	AdTs3h	300	3.000	2	3	b200b300c/b300f
+4	Button	QcQd	KcJh5dQhAh	1900	19.000	4	7	b300c/kb450c/kb1150c/kb2850f
+5	BigBlind	Qd5h	8c6s5s	300	3.000	2	3	b200b300c/b450f
+6	Button	5cKh		900	9.000	2	2	b300b900b1800f
+7	BigBlind	Ac2h		200	2.000	1	2	b200b300f
+8	Button	Kd6h		100	1.000	1	1	b300f
+9	BigBlind	2sJs		200	2.000	1	2	b200b300f
+10	Button	Jc6d	Ac9c7c	250	2.500	2	3	b250c/kb400f
+11	BigBlind	Th3s	Ac5s4d	300	3.000	2	3	b200b300c/b300f
+12	Button	JcJs	9d5s4h3cKc	1900	19.000	4	7	b300c/kb450c/kb1150c/kb2850f
+13	BigBlind	4d5d	Js6s5sTd8s	1200	12.000	4	5	b200b300c/b300c/b600c/b1200f
+14	Button	3c8c		100	1.000	1	1	b250f
+15	BigBlind	9hJh	Kc8s5s	300	3.000	2	3	b200b300c/b300f
+16	Button	TcAc	Kc8c4d	300	3.000	2	3	b300c/kb450f
+17	BigBlind	Kc4s	KdJsTc2c2s	-20000	-200.000	5	5	b200b300c/b450c/b1150c/b2850b18100c
+18	Button	4h6h	Tc9c3d	-7750	-77.500	4	4	b250b750b1250c/b3250b6500b18750f
+19	BigBlind	6cQc	Jh9c6h3dQs	-4750	-47.500	4	5	b200b300c/b450c/b1150c/b2850c
+20	Button	Qh4s		750	7.500	2	2	b250b750b1250f
+21	BigBlind	6h2s	Kc5d5c6s	4800	48.000	4	5	b200b300c/b300b2400b4500c/b7200f
+22	Button	JcKs	Kd9d2h3dAd	1900	19.000	4	7	b300c/kb450c/kb1150c/kb2850f
+23	BigBlind	5d4h	AsJd3d9s8d	-2400	-24.000	4	5	b200b300c/b300c/b600c/b1200c
+24	Button	4c4s		100	1.000	1	1	b300f
+25	BigBlind	Jc7h		200	2.000	1	2	b200b300f
+26	Button	Kd9s		100	1.000	1	1	b300f
+27	BigBlind	2h9h		50	0.500	0	1	f
+28	Button	Qd4h	KsTh6s	250	2.500	2	3	b250c/kb250f
+29	BigBlind	AdKs	Qs2s2h	450	4.500	2	3	b200b450c/b700f
+30	Button	9sJs		100	1.000	1	1	b300f
+31	BigBlind	TcJd	Ad8s8cKc	600	6.000	3	4	b200b300c/b300c/b600f
+32	Button	QcTs	AhKc4d	1800	18.000	3	4	b300b900b1800c/kb2700f
+33	BigBlind	6c5s	KcQd3h	300	3.000	2	3	b200b300c/b300f
+34	Button	AcTh	8c6s5c	600	6.000	2	3	b300c/b300b600f
+35	BigBlind	TcQs	KsQd4sQc3c	4750	47.500	4	5	b200b300c/b450c/b1150c/b2850c
+36	Button	4cTh	Jc6d3d7c2h	-2000	-20.000	4	7	b250c/kb250c/kb500c/kb1000c
+37	BigBlind	Tc4s	9d8s7dKdKh	6000	60.000	5	6	b200b300c/b300c/b600b3000b5400c/b6000f
+38	Button	QcKs	Ac9d7c4c4h	-20000	-200.000	5	7	b300c/b300b1000c/b1100b3900c/kb5200b14800c
+39	BigBlind	4h7s	AdTc6s3c5h	1200	12.000	4	5	b200b300c/b300c/b600c/b1800f
+40	Button	6c4h	Qc5c3dJcTh	-3500	-35.000	5	7	b250b750b1250c/b250b500c/kb1750c/kk
+41	BigBlind	Kc7h	Qd9h5s8h	3000	30.000	4	5	b200b300c/b300b1500b2700c/b3000f
+42	Button	QhKs	8h8d2d7cKd	-20000	-200.000	5	5	b300b900b1800c/kb2700b7200b17350b18200c//
+43	BigBlind	6hTh	8s7d2c2d4d	-12000	-120.000	5	6	b200b300c/b300c/b600c/b1200b6000b10800c
+44	Button	Ac2s		100	1.000	1	1	b300f
+45	BigBlind	Td6s	Kd8d6c	300	3.000	2	3	b200b300c/b450f
+46	Button	4h4s	JsJd5cKc6c	-18000	-180.000	5	8	b300b900b1800c/kb2700c/kb4500c/kb9000c
+47	BigBlind	8dAd		50	0.500	0	1	f
+48	Button	2cAs		100	1.000	1	1	b300f
+49	BigBlind	9c2s	KsJhJd	300	3.000	2	3	b200b300c/b300f
+50	Button	5dJd		100	1.000	1	1	b250f
+51	BigBlind	Tc9d		200	2.000	1	2	b200b300f
+52	Button	2s4s	JsTh3hQdQh	-20000	-200.000	4	5	b250b750b1250b6750b12250c/kb7750c//
+53	BigBlind	Ac9h		200	2.000	1	2	b200b450f
+54	Button	5c7d	Jc6s4s	250	2.500	2	3	b250c/kb250f
+55	BigBlind	9c2h		50	0.500	0	1	f
+56	Button	5d7d	AcTs9hTdQh	-7000	-70.000	5	8	b250b750b1250c/b250b500c/kb1750c/kb3500c
+57	BigBlind	Jc9d	Kh9s7h	300	3.000	2	3	b200b300c/b450f
+58	Button	Jd7s	6h5h3h4h	750	7.500	3	5	b250c/b250b500c/kb1150f
+59	BigBlind	4c7d	JhTd4d	300	3.000	2	3	b200b300c/b300f
+60	Button	7c5h	9s9d2h	1250	12.500	3	4	b250b750b1250c/kb1250f
+61	BigBlind	7hKh	Jd7c6s	300	3.000	2	3	b200b300c/b450f
+62	Button	6cJs	Ah3d2hAc7h	5000	50.000	5	8	b250b750b1250c/kb1250c/kb2500c/kb5000f
+63	BigBlind	8sAs		200	2.000	1	2	b200b450f
+64	Button	4c5h	AsTd7s	250	2.500	2	3	b250c/kb250f
+65	BigBlind	4c7c	KdTh9d	1200	12.000	3	4	b200b300c/b300b900b1500f
+66	Button	5dKs		100	1.000	1	1	b300f
+67	BigBlind	Kc2d		200	2.000	1	2	b200b300f
+68	Button	9cQs	KsKhJc	300	3.000	2	3	b300c/kb450f
+69	BigBlind	8c3h	5d4c2cJdAs	20000	200.000	4	4	b200b300c/b300b2400b4500b19700c//
+70	Button	6c3h	As9s3c	1500	15.000	3	4	b250b750b1250c/b250b2300f
+71	BigBlind	3dAs		200	2.000	1	2	b200b300f
+72	Button	7h2s	Ad8c7sKc	650	6.500	3	5	b250c/kb400c/kb1000f
+73	BigBlind	6cKd	9c5s3h5d	600	6.000	3	4	b200b300c/b300c/b600f
+74	Button	2c2d	Kh7c3s2h8s	20000	200.000	4	3	b300b900b1500b8100b15300b20000c///
+75	BigBlind	TdJd	9c8s6cTc	6600	66.000	4	5	b200b300b1800b3300c/b3300c/b9900f
+76	Button	3hQs	Kd9s3d6s7c	1650	16.500	4	7	b250c/kb400c/kb1000c/kb1650f
+77	BigBlind	2d3h		50	0.500	0	1	f
+78	Button	2cAs	AdKhJh	300	3.000	2	3	b300c/kb450f
+79	BigBlind	4cAc		50	0.500	0	1	f
+80	Button	3hTs	9c6s6h	250	2.500	2	3	b250c/kb250f
+81	BigBlind	6d5h		50	0.500	0	1	f
+82	Button	KsAs		100	1.000	1	1	b300f
+83	BigBlind	Kc3s	Jc9h3dKs7s	0	0.000	4	5	b200b300c/b300c/b900c/b2250c
+84	Button	2d4s	Jd9s8d3dJs	-2000	-20.000	4	7	b250c/kb250c/kb500c/kb1000c
+85	BigBlind	Td5s	8c7h5hAd	750	7.500	3	4	b200b300c/b450c/b750f
+86	Button	9sTs	Qs8h4h	300	3.000	2	3	b300c/kb300f
+87	BigBlind	3hQs		-3300	-33.000	3	3	b200b300b1800b3300b20000f
+88	Button	AcQs	Jd7c4d9d	750	7.500	3	5	b300c/kb450c/kb750f
+89	BigBlind	2c8s	AsKs7h	300	3.000	2	3	b200b300c/b300f
+90	Button	8hQh	8c6d2h	300	3.000	2	3	b300c/kb450f
+91	BigBlind	Td9s	Tc6c4dQhKs	1900	19.000	4	5	b200b300c/b450c/b1150c/b2850f
+92	Button	4dTh		100	1.000	1	1	b250f
+93	BigBlind	4dTd	Ks5s2s	300	3.000	2	3	b200b300c/b300f
+94	Button	Th3s	KsJd8s	250	2.500	2	3	b250c/kb250f
+95	BigBlind	4dQs	6d5c3s	300	3.000	2	3	b200b300c/b300f
+96	Button	2h7s	8s7d6d	500	5.000	2	3	b250c/b250b800f
+97	BigBlind	KhKs		50	0.500	0	1	f
+98	Button	Jh4s	AcKh5s6d	500	5.000	3	5	b250c/kb250c/kb500f
+99	BigBlind	6hTh	Qs7c5h2hJd	-2400	-24.000	4	5	b200b300c/b300c/b600c/b1200c
+100	Button	TcJs	Ah4d2h9d3d	-2400	-24.000	4	7	b300c/kb300c/kb600c/kb1200c

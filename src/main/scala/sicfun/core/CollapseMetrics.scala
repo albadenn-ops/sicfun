@@ -34,18 +34,25 @@ object CollapseMetrics:
     var posteriorEntropyNats = 0.0
     var kl = 0.0
 
+    // Single pass over the posterior: simultaneously compute posterior entropy and KL divergence.
+    // This avoids normalizing/iterating over the distributions multiple times.
     normalizedPosterior.weights.foreach { case (a, qProb) =>
       if qProb > 0.0 then
         val logQ = math.log(qProb)
+        // Accumulate posterior entropy in nats: H = -sum(q * log(q))
         posteriorEntropyNats -= qProb * logQ
         if qProb > Eps then
           val pProb = normalizedPrior.probabilityOf(a)
           require(pProb > Eps, s"posterior has support outside prior for element $a")
+          // KL divergence in bits: KL(q||p) = sum(q * (log(q) - log(p)) / ln(2))
           kl += qProb * ((logQ - math.log(pProb)) / Ln2)
     }
 
+    // Convert nats to bits by dividing by ln(2).
     val priorEntropyBits = priorEntropyNats / Ln2
     val posteriorEntropyBits = posteriorEntropyNats / Ln2
+    // Effective support (perplexity) = exp(entropy in nats).
+    // A uniform distribution over N outcomes has effective support = N.
     val priorSupport = math.exp(priorEntropyNats)
     val posteriorSupport = math.exp(posteriorEntropyNats)
     val ratio =

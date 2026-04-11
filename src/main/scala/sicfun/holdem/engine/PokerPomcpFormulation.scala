@@ -1,0 +1,308 @@
+package sicfun.holdem.engine
+
+import sicfun.holdem.types.*
+import sicfun.holdem.strategic.*
+import sicfun.holdem.strategic.StrategicClass
+import sicfun.holdem.strategic.solver.WPomcpRuntime
+
+/** Builds flat array inputs for the WPomcp V2 factored tabular model.
+  *
+  * Translates poker domain state (GameState, PokerAction, StrategicRivalBelief)
+  * into the flat Array[Double]/Array[Int] format consumed by the C++ solver via JNI.
+  *
+  * Public-state layout: pubState index = street * NumPotBuckets * NumStackBuckets + potBucket * NumStackBuckets + stackBucket
+  * Streets: 0=Preflop, 1=Flop, 2=Turn, 3=River  -> 4 * 8 * 6 = 192 total pub states.
+  *
+  * Per-round abstraction: the C++ simulate_v2 models each MCTS depth step as one
+  * full betting round — hero acts, all rivals respond, then the street advances.
+  * This means terminal_flags and rival_policy are evaluated per-round, not per
+  * individual action within a betting round. The tradeoff is simplicity (one
+  * action per player per depth) vs fidelity (intra-round re-raises are collapsed).
+  */
+object PokerPomcpFormulation:
+
+  private val NumPotBuckets   = 8
+  private val NumStackBuckets = 6
+  val NumPubStates: Int  = 4 * NumPotBuckets * NumStackBuckets  /* 192 */
+  val NumRivalTypes: Int = StrategicClass.values.length          /* 4   */
+  val NumHandBuckets: Int = 10
+  val DefaultPotBucketSize: Double = 50.0
+
+  /** Build rival policy table: P(action | rivalType, pubState).
+    *
+    * Indexed as: rivalPolicy(rivalType * numPubStates * numActions + pubState * numActions + action)
+    * Uses type-conditioned action priors derived from StrategicClass behavioral profiles.
+    * Action 0 = fold, action 1 = check/call, actions 2+ = raises (distributed uniformly).
+    *
+    * @param numRivalTypes number of discrete rival type categories
+    * @param numPubStates  number of discrete public states
+    * @param numActions    number of available hero actions
+    * @return flat array of length numRivalTypes * numPubStates * numActions
+    */
+  def buildRivalPolicy(
+      numRivalTypes: Int,
+      numPubStates: Int,
+      numActions: Int
+  ): Array[Double] =
+    val size = numRivalTypes * numPubStates * numActions
+    val result = new Array[Double](size)
+    for typeIdx <- 0 until numRivalTypes do
+      val priors = classPriors(StrategicClass.fromOrdinal(typeIdx), numActions)
+      for pub <- 0 until numPubStates do
+        val base = typeIdx * numPubStates * numActions + pub * numActions
+        System.arraycopy(priors, 0, result, base, numActions)
+    result
+
+  /** Per-class action distribution: (foldP, passiveP, raiseP) per StrategicClass.
+    * Exposed as a val so callers can override with calibrated values.
+    */
+  val defaultClassPriors: Map[StrategicClass, (Double, Double, Double)] = Map(
+    StrategicClass.Value     -> (0.05, 0.75, 0.20),
+    StrategicClass.Bluff     -> (0.10, 0.25, 0.65),
+    StrategicClass.StructuralBluff -> (0.05, 0.45, 0.50),
+    StrategicClass.Mixed  -> (0.15, 0.75, 0.10)
+  )
+
+  /** Per-class action distribution for numActions actions.
+    * Returns normalized array of length numActions.
+    * Action 0 = fold, action 1 = check/call, actions 2+ = raises.
+    */
+  private def classPriors(
+      cls: StrategicClass,
+      numActions: Int,
+      priorTable: Map[StrategicClass, (Double, Double, Double)] = defaultClassPriors
+  ): Array[Double] =
+    val raw = new Array[Double](numActions)
+    val (foldP, passiveP, raiseP) = priorTable.getOrElse(cls, (0.25, 0.50, 0.25))
+    raw(0) = foldP
+    if numActions > 1 then raw(1) = passiveP
+    val raiseSlots = math.max(1, numActions - 2)
+    for i <- 2 until numActions do raw(i) = raiseP / raiseSlots
+    val sum = raw.sum
+    if sum > 0 then for i <- raw.indices do raw(i) /= sum
+    raw
+
+  /** Build action effects: [numActions * 3] fields per action.
+    *
+    * Each action contributes three consecutive doubles:
+    *   (pot_delta_frac, is_fold, is_allin)
+    *
+    * where:
+    *   - pot_delta_frac = chips added to pot as a fraction of current pot (capped at 10x)
+    *   - is_fold        = 1.0 if action is Fold, else 0.0
+    *   - is_allin       = 1.0 if raise amount >= remaining stack, else 0.0
+    *
+    * @param actions    the ordered action vector (fold should be action 0 by convention)
+    * @param potChips   current pot size in chips (Double)
+    * @param stackChips hero's remaining stack in chips (Double)
+    * @return flat array of length actions.size * 3
+    */
+  def buildActionEffects(
+      actions: Vector[PokerAction],
+      potChips: Double,
+      stackChips: Double,
+      toCallChips: Double = 0.0
+  ): Array[Double] =
+    val result = new Array[Double](actions.size * 3)
+    var i = 0
+    for action <- actions do
+      val base = i * 3
+      action match
+        case PokerAction.Fold =>
+          result(base)     = 0.0
+          result(base + 1) = 1.0
+          result(base + 2) = 0.0
+        case PokerAction.Check =>
+          result(base)     = 0.0
+          result(base + 1) = 0.0
+          result(base + 2) = 0.0
+        case PokerAction.Call =>
+          val frac = if potChips > 0.0 then toCallChips / potChips else 0.0
+          result(base)     = math.min(frac, 10.0)
+          result(base + 1) = 0.0
+          result(base + 2) = 0.0
+        case PokerAction.Raise(amount) =>
+          val frac = if potChips > 0.0 then amount / potChips else 1.0
+          result(base)     = math.min(frac, 10.0)
+          result(base + 1) = 0.0
+          result(base + 2) = if amount >= stackChips then 1.0 else 0.0
+      i += 1
+    result
+
+  /** Default showdown equity table: linear heuristic.
+    * Replace with calibrated bucket-vs-bucket equity from HeadsUpEquityTable.
+    */
+  val defaultShowdownEquity: (Int, Int) => Array[Double] = buildLinearShowdownEquity
+
+  /** Linear equity heuristic: equity = 0.5 + (heroBucket - rivalBucket) * 0.4 / max(H, R).
+    * Named explicitly so callers know this is an approximation.
+    */
+  def buildLinearShowdownEquity(numHeroBuckets: Int, numRivalBuckets: Int): Array[Double] =
+    Array.tabulate(numHeroBuckets * numRivalBuckets) { idx =>
+      val hb = idx / numRivalBuckets
+      val rb = idx % numRivalBuckets
+      val diff = (hb - rb).toDouble / math.max(numHeroBuckets, numRivalBuckets).toDouble
+      0.5 + diff * 0.4
+    }
+
+  /** Build showdown equity table: E[hero equity | heroBucket, rivalBucket].
+    *
+    * Indexed as: showdownEquity(heroBucket * numRivalBuckets + rivalBucket)
+    * Delegates to buildLinearShowdownEquity by default.
+    *
+    * @param numHeroBuckets  number of hero hand-strength buckets
+    * @param numRivalBuckets number of rival hand-strength buckets
+    * @return flat array of length numHeroBuckets * numRivalBuckets, all in [0.1, 0.9]
+    */
+  def buildShowdownEquity(
+      numHeroBuckets: Int,
+      numRivalBuckets: Int
+  ): Array[Double] =
+    buildLinearShowdownEquity(numHeroBuckets, numRivalBuckets)
+
+  /** Build terminal flags: outcome code at each (pubState, action) pair.
+    *
+    * Indexed as: terminalFlags(pubState * numActions + action)
+    * Codes:
+    *   0 = Continue (non-terminal)
+    *   1 = HeroFold  (action index 0 is always fold by convention)
+    *   2 = RivalFold (not used in hero-action table; reserved for rival policy)
+    *   3 = Showdown  (non-fold action at street=River, i.e. street ordinal >= 3)
+    *
+    * Public-state layout mirrors buildRivalPolicy:
+    *   street = pubState / (NumPotBuckets * NumStackBuckets)   (0-3)
+    *
+    * @param numPubStates number of discrete public states (must equal NumPubStates = 192)
+    * @param numActions   number of actions (fold must be action 0)
+    * @return flat array of length numPubStates * numActions, values in {0,1,2,3}
+    */
+  def buildTerminalFlags(
+      numPubStates: Int,
+      numActions: Int
+  ): Array[Int] =
+    val flags = new Array[Int](numPubStates * numActions)
+    for pub <- 0 until numPubStates do
+      val street = pub / (NumPotBuckets * NumStackBuckets)
+      for a <- 0 until numActions do
+        val idx = pub * numActions + a
+        if a == 0 then
+          flags(idx) = 1  // HeroFold — action 0 is fold by convention
+        else if street >= 3 then
+          flags(idx) = 3  // Showdown — river, non-fold
+        else
+          flags(idx) = 0  // Continue — non-terminal mid-hand action
+    flags
+
+  /** Build complete SearchInputV2 from poker game state and strategic beliefs.
+    *
+    * @param showdownEquityFn equity table builder; defaults to [[defaultShowdownEquity]]
+    *        (linear heuristic). Callers may inject calibrated bucket-vs-bucket equity.
+    */
+  def buildSearchInputV2(
+      gameState: GameState,
+      rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
+      heroActions: Vector[PokerAction],
+      heroBucket: Int,
+      particlesPerRival: Int = 100,
+      showdownEquityFn: (Int, Int) => Array[Double] = defaultShowdownEquity
+  ): WPomcpRuntime.SearchInputV2 =
+    val numActions = heroActions.size
+    val rivalParticles = buildRivalParticles(rivalBeliefs, particlesPerRival, heroBucket)
+    val model = buildFactoredModel(numActions, heroActions, gameState, showdownEquityFn)
+    WPomcpRuntime.SearchInputV2(
+      publicState = WPomcpRuntime.PublicState(gameState.street.ordinal, gameState.pot.toDouble),
+      rivalParticles = rivalParticles,
+      model = model,
+      heroBucket = heroBucket
+    )
+
+  /** Build SearchInputV2 for profile-conditional evaluation.
+    *
+    * Solves the game assuming ALL rivals play according to a single StrategicClass
+    * (the one corresponding to profileId). This enables the 6-solve flow where we
+    * evaluate each pure-type rival profile separately.
+    *
+    * Implementation: rival particles are overridden so every particle has its type
+    * set to the profile's ordinal. The full rival policy table is retained (the solver
+    * only exercises the profile type's slice since all particles index into it).
+    *
+    * @param profileId which pure rival profile to assume for all rivals
+    */
+  def buildSearchInputForProfile(
+      gameState: GameState,
+      rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
+      heroActions: Vector[PokerAction],
+      heroBucket: Int,
+      particlesPerRival: Int = 100,
+      profileId: JointRivalProfileId
+  ): WPomcpRuntime.SearchInputV2 =
+    val numActions = heroActions.size
+    val profileTypeOrdinal = StrategicClass.fromOrdinal(profileId.ordinal).ordinal
+    val rivalParticles = buildProfileParticles(
+      rivalBeliefs, particlesPerRival, profileTypeOrdinal
+    )
+    val model = buildFactoredModel(numActions, heroActions, gameState, defaultShowdownEquity)
+    WPomcpRuntime.SearchInputV2(
+      publicState = WPomcpRuntime.PublicState(gameState.street.ordinal, gameState.pot.toDouble),
+      rivalParticles = rivalParticles,
+      model = model,
+      heroBucket = heroBucket
+    )
+
+  /** Build rival particles from belief posteriors (used by buildSearchInputV2). */
+  private def buildRivalParticles(
+      rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
+      particlesPerRival: Int,
+      heroBucket: Int
+  ): IndexedSeq[WPomcpRuntime.RivalParticles] =
+    rivalBeliefs.values.toIndexedSeq.map { belief =>
+      val (types, weights) = belief.toParticles(particlesPerRival, heroBucket)
+      /* Distribute rival private states (hand buckets) uniformly across [0, NumHandBuckets).
+       * Each particle gets a bucket proportional to its index so that the showdown equity
+       * table is exercised across the full rival bucket range, not collapsed to a single value. */
+      val privStates = Array.tabulate(particlesPerRival)(i => i % NumHandBuckets)
+      WPomcpRuntime.RivalParticles(
+        rivalTypes = types,
+        privStates = privStates,
+        weights = weights
+      )
+    }
+
+  /** Build rival particles where all types are overridden to a single profile ordinal.
+    * Used by buildSearchInputForProfile for profile-conditional evaluation.
+    */
+  private def buildProfileParticles(
+      rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
+      particlesPerRival: Int,
+      profileTypeOrdinal: Int
+  ): IndexedSeq[WPomcpRuntime.RivalParticles] =
+    rivalBeliefs.values.toIndexedSeq.map { _ =>
+      val types = Array.fill(particlesPerRival)(profileTypeOrdinal)
+      val privStates = Array.tabulate(particlesPerRival)(i => i % NumHandBuckets)
+      val uniformWeight = 1.0 / particlesPerRival.toDouble
+      val weights = Array.fill(particlesPerRival)(uniformWeight)
+      WPomcpRuntime.RivalParticles(
+        rivalTypes = types,
+        privStates = privStates,
+        weights = weights
+      )
+    }
+
+  /** Build the FactoredModel shared by both buildSearchInputV2 and buildSearchInputForProfile. */
+  private def buildFactoredModel(
+      numActions: Int,
+      heroActions: Vector[PokerAction],
+      gameState: GameState,
+      showdownEquityFn: (Int, Int) => Array[Double]
+  ): WPomcpRuntime.FactoredModel =
+    WPomcpRuntime.FactoredModel(
+      rivalPolicy = buildRivalPolicy(NumRivalTypes, NumPubStates, numActions),
+      numRivalTypes = NumRivalTypes,
+      numPubStates = NumPubStates,
+      actionEffects = buildActionEffects(heroActions, gameState.pot, gameState.stackSize, gameState.toCall),
+      showdownEquity = showdownEquityFn(NumHandBuckets, NumHandBuckets),
+      numHeroBuckets = NumHandBuckets,
+      numRivalBuckets = NumHandBuckets,
+      terminalFlags = buildTerminalFlags(NumPubStates, numActions),
+      potBucketSize = DefaultPotBucketSize
+    )

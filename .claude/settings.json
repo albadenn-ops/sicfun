@@ -1,9 +1,32 @@
 {
+  "permissions": {
+    "deny": [
+      "mcp__intellij-idea__get_file_text_by_path",
+      "mcp__intellij-idea__replace_text_in_file",
+      "mcp__intellij-idea__create_new_file",
+      "mcp__intellij-idea__find_files_by_glob",
+      "mcp__intellij-idea__find_files_by_name_keyword",
+      "mcp__intellij-idea__search_in_files_by_text",
+      "mcp__intellij-idea__search_in_files_by_regex",
+      "mcp__intellij-idea__execute_terminal_command",
+      "mcp__intellij-idea__list_directory_tree"
+    ]
+  },
   "enabledPlugins": {
     "skill-creator@claude-plugins-official": true,
     "github@claude-plugins-official": true,
     "superpowers@claude-plugins-official": true,
     "code-simplifier@claude-plugins-official": true,
     "clangd-lsp@claude-plugins-official": true
+  },
+  "mcpServers": {
+    "jcodemunch": {
+      "command": "uvx",
+      "args": ["jcodemunch-mcp"]
+    },
+    "jdocmunch": {
+      "command": "uvx",
+      "args": ["jdocmunch-mcp"]
+    }
   }
 }

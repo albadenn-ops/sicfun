@@ -6,6 +6,19 @@ import sicfun.core.Card
 
 import scala.util.Random
 
+/**
+  * Statistical convergence tests for Monte Carlo equity estimation.
+  *
+  * These tests verify that Monte Carlo estimates converge to exact values as trial count
+  * increases. The convergence bound is set at max(6 * stderr, epsilon) to allow for
+  * statistical fluctuation while still catching systematic errors.
+  *
+  * Covers:
+  *   - Single-villain equityMonteCarlo vs equityExact on a turn board (20K trials)
+  *   - Multi-villain equityMonteCarloMulti vs equityExactMulti on a turn board (25K trials)
+  *
+  * The 6-sigma bound means these tests should fail by random chance less than 1 in ~500M runs.
+  */
 class MonteCarloConvergenceTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))

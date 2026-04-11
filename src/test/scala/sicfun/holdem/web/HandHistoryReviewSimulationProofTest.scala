@@ -10,6 +10,23 @@ import java.nio.file.{Files, Path}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
+/** End-to-end simulation proof test for the hand history review pipeline.
+  *
+  * Runs a reproducible 6-max [[TexasHoldemPlayingHall]] session with an
+  * exact-GTO hero against a mixed villain pool (TAG, LAG, maniac), exports
+  * the resulting hands in PokerStars review-upload format, then feeds them
+  * back through [[HandHistoryReviewService]] to verify the full roundtrip:
+  *
+  *   1. Hall simulation produces a valid `review-upload-pokerstars.txt`
+  *   2. The review service successfully parses all 12 exported hands
+  *   3. All hands are analyzed (none skipped) with decisions extracted
+  *   4. Multiple simulated opponents are profiled
+  *   5. No warnings are generated for well-formed simulated data
+  *   6. The diagnostic trace matches the top-level response fields
+  *
+  * This test uses a 180-second timeout due to the combined cost of the
+  * hall simulation and the review analysis pass.
+  */
 class HandHistoryReviewSimulationProofTest extends FunSuite:
   override val munitTimeout: Duration = 180.seconds
 
@@ -69,6 +86,23 @@ class HandHistoryReviewSimulationProofTest extends FunSuite:
       assert(response.decisionsAnalyzed > 0, s"expected analyzed decisions, got ${response.decisionsAnalyzed}")
       assert(response.opponents.map(_.playerName).distinct.size >= 2, s"expected multiple simulated opponents, got ${response.opponents}")
       assertEquals(response.warnings, Vector.empty)
+      assertEquals(response.trace.request.rawHeroName, Some("Hero"))
+      assertEquals(response.trace.request.normalizedHeroName, Some("Hero"))
+      assertEquals(response.trace.request.requestedSite, Some("PokerStars"))
+      assert(response.trace.request.handHistoryBytes > 0)
+      assertEquals(response.trace.importStage.handsImported, 12)
+      assertEquals(response.trace.importStage.siteResolved, Some("PokerStars"))
+      assertEquals(response.trace.importStage.heroNameResolved, Some("Hero"))
+      assertEquals(response.trace.hands.length, 12)
+      assert(response.trace.hands.forall(_.status == "analyzed"))
+      assert(response.trace.hands.forall(_.heroCardsPresent))
+      assertEquals(response.trace.summary.handsImported, response.handsImported)
+      assertEquals(response.trace.summary.handsAnalyzed, response.handsAnalyzed)
+      assertEquals(response.trace.summary.handsSkipped, response.handsSkipped)
+      assertEquals(response.trace.summary.decisionsAnalyzed, response.decisionsAnalyzed)
+      assertEquals(response.trace.summary.totalEvLost, response.totalEvLost)
+      assertEquals(response.trace.summary.biggestMistakeEv, response.biggestMistakeEv)
+      assertEquals(response.trace.summary.warningCount, response.warnings.length)
     finally
       deleteRecursively(root)
   }

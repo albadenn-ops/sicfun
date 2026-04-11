@@ -1,0 +1,13 @@
+=== Slumbot Match Runner ===
+handsPlayed: 10000
+heroNetChips: -3387200.000
+heroBbPer100: -338.720
+heroWins: 8546
+heroTies: 25
+heroLosses: 1429
+buttonHands: 5000
+buttonNetChips: -1589900.000
+bigBlindHands: 5000
+bigBlindNetChips: -1797300.000
+heroMode: adaptive
+modelId: slumbot-bootstrap-uniform

@@ -1,0 +1,16 @@
+=== Adaptive Proof Report (9-Max) ===
+Seed: 12345
+Blocks: 1
+Total hands: 50
+
+Overall hero bb/100: +385,0
+
+Per-villain hero bb/100:
+  Villain01_overfoldrive       -22.0
+  Villain02_overcallbigb       +0.0
+  Villain03_overblufftur       +0.0
+  Villain04_passivebigpo       +150.0
+  Villain05_prefloptoolo       -27.0
+  Villain06_prefloptooti       +167.0
+  Villain07_tag                +117.0
+  Villain08_gto                +0.0

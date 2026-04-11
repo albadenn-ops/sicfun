@@ -9,7 +9,18 @@ import munit.FunSuite
 import java.nio.file.{Files, Paths}
 import scala.util.Random
 
+/** Integration test that verifies bit-exact parity between the CPU-native and
+  * CUDA-native exact-enumeration backends on a small canonical matchup slice.
+  *
+  * The test discovers the native DLL at build time, configures system properties
+  * to force first CPU then CUDA execution, builds an exact canonical table slice
+  * with each engine, and asserts zero delta on all equity components (win/tie/loss/equity).
+  * Also validates that CUDA batch telemetry is recorded.
+  *
+  * Gracefully skips when the native library or CUDA device is unavailable.
+  */
 class HeadsUpGpuExactParityGateTest extends FunSuite:
+  // System property keys controlling the GPU runtime configuration
   private val ProviderProperty = "sicfun.gpu.provider"
   private val NativePathProperty = "sicfun.gpu.native.path"
   private val NativeEngineProperty = "sicfun.gpu.native.engine"
@@ -17,9 +28,27 @@ class HeadsUpGpuExactParityGateTest extends FunSuite:
   private val NativeCudaBlockSizeProperty = "sicfun.gpu.native.cuda.blockSize"
   private val NativeCudaMaxChunkMatchupsProperty = "sicfun.gpu.native.cuda.maxChunkMatchups"
 
+  /** Resets the GPU runtime's cached native library load state before each test
+    * so system property changes take effect on the next load attempt.
+    */
+  override def beforeEach(context: BeforeEach): Unit =
+    HeadsUpGpuRuntime.resetLoadCacheForTests()
+    super.beforeEach(context)
+
+  /** Resets the GPU runtime cache after each test to avoid cross-test contamination. */
+  override def afterEach(context: AfterEach): Unit =
+    try HeadsUpGpuRuntime.resetLoadCacheForTests()
+    finally super.afterEach(context)
+
+  /** Temporarily sets/clears system properties for the duration of `thunk`,
+    * restoring originals afterward. Used to switch between CPU and CUDA engines.
+    */
   private def withSystemProperties[A](updates: Seq[(String, Option[String])])(thunk: => A): A =
     TestSystemPropertyScope.withSystemProperties(updates)(thunk)
 
+  /** Builds a small exact-enumeration canonical table slice using the GPU backend
+    * with whatever native engine is currently configured via system properties.
+    */
   private def buildExactSlice(maxMatchups: Long, seed: Long): HeadsUpEquityCanonicalTable =
     HeadsUpEquityCanonicalTable.buildAll(
       mode = HeadsUpEquityTable.Mode.Exact,

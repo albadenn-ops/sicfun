@@ -56,15 +56,11 @@ void fill_remaining_deck(
     const int villain_first,
     const int villain_second,
     uchar remaining[REMAINING_AFTER_HOLE]) {
-  int dead[DECK_SIZE];
-  for (int i = 0; i < DECK_SIZE; ++i) dead[i] = 0;
-  dead[hero_first] = 1;
-  dead[hero_second] = 1;
-  dead[villain_first] = 1;
-  dead[villain_second] = 1;
+  const ulong dead_mask = (1UL << hero_first) | (1UL << hero_second) |
+                          (1UL << villain_first) | (1UL << villain_second);
   int idx = 0;
   for (int card = 0; card < DECK_SIZE; ++card) {
-    if (!dead[card]) {
+    if (!((dead_mask >> card) & 1UL)) {
       remaining[idx++] = (uchar)card;
     }
   }
@@ -228,9 +224,7 @@ inline int compare_showdown(
   int villain[7] = {vf, vs, (int)board[0], (int)board[1], (int)board[2], (int)board[3], (int)board[4]};
   const uint h_score = evaluate7_score(hero);
   const uint v_score = evaluate7_score(villain);
-  if (h_score > v_score) return 1;
-  if (h_score < v_score) return -1;
-  return 0;
+  return (h_score > v_score) - (h_score < v_score);
 }
 
 /* ── Monte Carlo standard error ──────────────────────────────────── */
@@ -241,8 +235,7 @@ inline double monte_carlo_stderr(
   const double n = (double)trials;
   const double mean = ((double)win_count + 0.5 * (double)tie_count) / n;
   const double ex2  = ((double)win_count + 0.25 * (double)tie_count) / n;
-  double pop_var = ex2 - (mean * mean);
-  if (pop_var < 0.0) pop_var = 0.0;
+  const double pop_var = fmax(ex2 - (mean * mean), 0.0);
   const double sample_var = pop_var * (n / (n - 1.0));
   return sqrt(sample_var / n);
 }
@@ -303,9 +296,9 @@ __kernel void monte_carlo_kernel(
   for (int trial = 0; trial < trials; ++trial) {
     sample_board_cards(remaining, &state, board);
     const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-    if (cmp > 0)       ++win_count;
-    else if (cmp == 0) ++tie_count;
-    else               ++loss_count;
+    win_count  += (cmp > 0);
+    tie_count  += (cmp == 0);
+    loss_count += (cmp < 0);
   }
 
   const double total = (double)trials;

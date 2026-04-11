@@ -2,7 +2,19 @@ package sicfun.core
 
 import scala.util.Random
 
+/** Micro-benchmark for comparing category-only hand evaluation against full 5-card ranking.
+  *
+  * It generates deterministic random 5-card samples, validates categorical parity, and
+  * reports throughput/checksums to detect accidental optimizer dead-code elimination.
+  */
 object BenchmarkHandEvaluator:
+  /** Benchmark configuration parsed from command-line arguments.
+    *
+    * @param samples       number of random 5-card hands to generate and evaluate per round
+    * @param warmupRounds  JVM warm-up rounds (run but not timed) to trigger JIT compilation
+    * @param measureRounds timed rounds whose results are averaged for the final report
+    * @param seed          RNG seed for deterministic hand generation (reproducible benchmarks)
+    */
   private final case class Config(
       samples: Int,
       warmupRounds: Int,
@@ -13,6 +25,16 @@ object BenchmarkHandEvaluator:
     require(warmupRounds >= 0, "warmupRounds must be >= 0")
     require(measureRounds > 0, "measureRounds must be positive")
 
+  /** Benchmark results including throughput, timing, and correctness check.
+    *
+    * @param mismatchCount          number of hands where categorize5 disagreed with evaluate5
+    *                               (should be 0 if the evaluator is correct)
+    * @param evaluate5MeanMillis    mean wall-clock time per round for full evaluate5
+    * @param categorize5MeanMillis  mean wall-clock time per round for category-only categorize5
+    * @param speedupX               ratio of evaluate5 time to categorize5 time
+    * @param evaluate5Checksum      XOR of all evaluate5 ordinals (prevents dead-code elimination)
+    * @param categorize5Checksum    XOR of all categorize5 ordinals (prevents dead-code elimination)
+    */
   final case class Report(
       samples: Int,
       warmupRounds: Int,
@@ -27,6 +49,11 @@ object BenchmarkHandEvaluator:
       categorize5Checksum: Long
   )
 
+  /** Pre-extracted hand data in struct-of-arrays layout for cache-friendly iteration.
+    *
+    * Stores the Card vectors (for evaluate5) alongside pre-extracted rank values and
+    * flush flags (for categorize5) to avoid redundant field access during timed loops.
+    */
   private final case class PreparedHands(
       cards: Array[Vector[Card]],
       r0: Array[Int],
@@ -55,9 +82,15 @@ object BenchmarkHandEvaluator:
         System.err.println(error)
         sys.exit(1)
 
+  /** Parses arguments and runs the benchmark, returning either an error message or a report. */
   def run(args: Array[String]): Either[String, Report] =
     parseArgs(args).map(execute)
 
+  /** Core benchmark execution: generates hands, runs warmup, then measures timed rounds.
+    *
+    * Checksums are XOR-accumulated across rounds to prevent the JIT from eliminating
+    * the evaluation calls as dead code (the checksum is included in the report).
+    */
   private def execute(config: Config): Report =
     val prepared = prepareHands(config.samples, config.seed)
     val mismatchCount = countMismatches(prepared)
@@ -108,6 +141,12 @@ object BenchmarkHandEvaluator:
       categorize5Checksum = categorizeChecksum
     )
 
+  /** Generates `samples` random 5-card hands using rejection sampling for uniqueness.
+    *
+    * For each hand, draws 5 random card indices from the deck, rejecting duplicates.
+    * Pre-extracts rank values and flush flags into parallel arrays for cache-efficient
+    * iteration during timed loops.
+    */
   private def prepareHands(samples: Int, seed: Long): PreparedHands =
     val deck = Deck.full.toArray
     val rng = new Random(seed)
@@ -151,6 +190,9 @@ object BenchmarkHandEvaluator:
 
     PreparedHands(cards, r0, r1, r2, r3, r4, isFlush)
 
+  /** Counts how many hands produce different categories between evaluate5 and categorize5.
+    * A non-zero result indicates a classification bug in one of the two code paths.
+    */
   private def countMismatches(prepared: PreparedHands): Int =
     var mismatches = 0
     var i = 0
@@ -168,6 +210,7 @@ object BenchmarkHandEvaluator:
       i += 1
     mismatches
 
+  /** Runs evaluate5 on all prepared hands, returning a checksum to prevent dead-code elimination. */
   private def runEvaluate5(prepared: PreparedHands): Long =
     var checksum = 0L
     var i = 0
@@ -176,6 +219,7 @@ object BenchmarkHandEvaluator:
       i += 1
     checksum
 
+  /** Runs categorize5 on all prepared hands, returning a checksum to prevent dead-code elimination. */
   private def runCategorize5(prepared: PreparedHands): Long =
     var checksum = 0L
     var i = 0
@@ -191,6 +235,7 @@ object BenchmarkHandEvaluator:
       i += 1
     checksum
 
+  /** Parses CLI arguments in `--key=value` format into a validated Config. */
   private def parseArgs(args: Array[String]): Either[String, Config] =
     if args.contains("--help") || args.contains("-h") then Left(usage)
     else

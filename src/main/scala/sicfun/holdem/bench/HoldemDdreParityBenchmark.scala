@@ -7,7 +7,8 @@ import sicfun.holdem.provider.*
 import sicfun.holdem.model.*
 import sicfun.holdem.cli.*
 
-import sicfun.core.{Card, DiscreteDistribution}
+import sicfun.core.DiscreteDistribution
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 import scala.collection.mutable
 
@@ -108,6 +109,10 @@ object HoldemDdreParityBenchmark:
       posterior: DiscreteDistribution[HoleCards]
   )
 
+  /** Orchestrates the full benchmark lifecycle: header, per-mode measurement, parity
+    * comparison against the reference provider, and gate evaluation. Returns 0 for PASS,
+    * 2 for FAIL (used as the process exit code).
+    */
   private final class BenchmarkRunner(config: Config):
     private val spot = benchmarkSpot(config.hypothesisCount)
     private val propertyUpdates = modePropertyUpdates(config)
@@ -405,6 +410,10 @@ object HoldemDdreParityBenchmark:
   private def isKnownMode(mode: String): Boolean =
     providerForMode(mode).nonEmpty
 
+  /** Constructs a deterministic benchmark spot with a prior drawn from the NineMax BigBlind
+    * default range (top `hypothesisCount` hands by weight), a flop board, and two villain
+    * observations. Uses a uniform action model so DDRE behavior depends only on the prior.
+    */
   private def benchmarkSpot(hypothesisCount: Int): BenchmarkSpot =
     val hero = hole("Ac", "Kd")
     val board = Board.from(Seq(card("7h"), card("9c"), card("2d")))
@@ -451,6 +460,11 @@ object HoldemDdreParityBenchmark:
       actionModel = PokerActionModel.uniform
     )
 
+  /** Computes L1 norm and max absolute difference between two posterior distributions.
+    * Iterates over the union of all hands present in either distribution, accumulating
+    * the total absolute probability difference (L1) and tracking the worst single-hand
+    * deviation (maxAbs).
+    */
   private def computeParity(
       reference: DiscreteDistribution[HoleCards],
       candidate: DiscreteDistribution[HoleCards]
@@ -516,12 +530,6 @@ object HoldemDdreParityBenchmark:
       onnxArtifactDir = options.get("onnxArtifactDir"),
       onnxAllowExperimental = CliHelpers.requireBooleanOption(options, "onnxAllowExperimental", false)
     )
-
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card token: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
 
   private def withSystemProperties[A](updates: Seq[(String, Option[String])])(thunk: => A): A =
     val previous = updates.map { case (key, _) => key -> sys.props.get(key) }.toMap

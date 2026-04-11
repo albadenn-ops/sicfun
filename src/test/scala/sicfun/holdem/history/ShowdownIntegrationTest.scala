@@ -8,6 +8,20 @@ import sicfun.holdem.model.*
 import munit.FunSuite
 import sicfun.core.Card
 
+/** End-to-end integration test for the showdown card pipeline, verifying
+  * that revealed villain hole cards flow correctly through the entire chain:
+  *
+  *   1. '''Hand history import''': [[HandHistoryImport.parseText]] extracts
+  *      showdown cards from the `*** SHOW DOWN ***` section
+  *   2. '''Opponent profiling''': [[OpponentProfile.fromImportedHands]]
+  *      populates the `showdownHands` field with [[ShowdownRecord]] entries
+  *   3. '''Range inference''': [[RangeInferenceEngine.inferPosterior]] with
+  *      `revealedCards` collapses the posterior to a single-combo support
+  *      with probability ~1.0 and `effectiveSupportPosterior = 1.0`
+  *
+  * This test uses a minimal PokerStars hand that reaches showdown (Villain
+  * shows QhQs) and asserts exact values at each stage of the pipeline.
+  */
 class ShowdownIntegrationTest extends FunSuite:
 
   private def card(t: String): Card =

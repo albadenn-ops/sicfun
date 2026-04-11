@@ -10,6 +10,29 @@ import munit.FunSuite
 
 import java.nio.file.Files
 
+/** Tests for [[HandHistoryReviewService]], the core analysis engine that
+  * processes uploaded hand history text and produces structured review
+  * results with decision analysis, opponent summaries, and diagnostic traces.
+  *
+  * Each test seeds a temporary model artifact directory with a small
+  * trained [[PokerActionModel]] (66 training samples, 180 iterations)
+  * and creates a [[HandHistoryReviewService]] configured with low
+  * trial counts for fast execution.
+  *
+  * Coverage:
+  *   - '''Full analysis''': a reviewable PokerStars hand (Hero has AcKh,
+  *     folds to a flop check-raise) produces a complete response with
+  *     site, hero name, hand counts, decision analysis, opponent hints
+  *     with structured metrics, and a full diagnostic trace (request,
+  *     import stage, per-hand details, summary)
+  *   - '''Missing hero hole cards''': a hand where Hero's cards are not
+  *     dealt (won preflop without showdown) is honestly skipped with a
+  *     "hero hole cards" warning and correct trace metadata
+  *   - '''Forum hero alias normalization''': a PokerStars hand pasted
+  *     from a forum with a "(HERO)" suffix on the hero name is normalized
+  *     to the canonical name, and the trace reflects both raw and
+  *     normalized hero names
+  */
 class HandHistoryReviewServiceTest extends FunSuite:
 
   private val reviewableHand =
@@ -148,7 +171,35 @@ class HandHistoryReviewServiceTest extends FunSuite:
       assertEquals(response.handsSkipped, 0)
       assert(response.decisionsAnalyzed > 0, s"expected decisions, got ${response.decisionsAnalyzed}")
       assert(response.opponents.exists(_.playerName == "Villain"))
+      val villain = response.opponents.find(_.playerName == "Villain").getOrElse(fail(s"missing villain in opponents: ${response.opponents}"))
+      assert(villain.hints.nonEmpty, s"expected structured hints for villain summary: $villain")
+      assertEquals(villain.hints.head.metrics.length, 4)
+      assert(villain.hints.head.ruleId.nonEmpty)
       assertEquals(response.warnings, Vector.empty)
+      assertEquals(response.trace.request.rawHeroName, Some("Hero"))
+      assertEquals(response.trace.request.normalizedHeroName, Some("Hero"))
+      assertEquals(response.trace.request.requestedSite, None)
+      assert(response.trace.request.handHistoryBytes > 0)
+      assertEquals(response.trace.importStage.handsImported, 1)
+      assertEquals(response.trace.importStage.siteResolved, Some("PokerStars"))
+      assertEquals(response.trace.importStage.heroNameResolved, Some("Hero"))
+      assertEquals(response.trace.importStage.distinctPlayersObserved, 2)
+      assertEquals(response.trace.hands.length, 1)
+      assertEquals(response.trace.hands.head.status, "analyzed")
+      assertEquals(response.trace.hands.head.playerCount, 2)
+      assertEquals(response.trace.hands.head.heroNameResolved, Some("Hero"))
+      assertEquals(response.trace.hands.head.heroCardsPresent, true)
+      assert(response.trace.hands.head.decisionsAnalyzed > 0)
+      assertEquals(response.trace.hands.head.skipReason, None)
+      assertEquals(response.trace.summary.handsImported, response.handsImported)
+      assertEquals(response.trace.summary.handsAnalyzed, response.handsAnalyzed)
+      assertEquals(response.trace.summary.handsSkipped, response.handsSkipped)
+      assertEquals(response.trace.summary.decisionsAnalyzed, response.decisionsAnalyzed)
+      assertEquals(response.trace.summary.mistakes, response.mistakes)
+      assertEquals(response.trace.summary.totalEvLost, response.totalEvLost)
+      assertEquals(response.trace.summary.biggestMistakeEv, response.biggestMistakeEv)
+      assertEquals(response.trace.summary.warningCount, response.warnings.length)
+      assert(response.trace.summary.opponentsProfiled >= response.opponents.length)
     }
   }
 
@@ -169,6 +220,16 @@ class HandHistoryReviewServiceTest extends FunSuite:
       assertEquals(response.handsSkipped, 1)
       assertEquals(response.decisionsAnalyzed, 0)
       assert(response.warnings.exists(_.contains("hero hole cards")))
+      assertEquals(response.trace.request.rawHeroName, Some("Hero"))
+      assertEquals(response.trace.hands.length, 1)
+      assertEquals(response.trace.hands.head.status, "skipped")
+      assertEquals(response.trace.hands.head.heroNameResolved, Some("Hero"))
+      assertEquals(response.trace.hands.head.heroCardsPresent, false)
+      assertEquals(response.trace.hands.head.skipReason, Some("hero_hole_cards_missing"))
+      assertEquals(response.trace.summary.handsAnalyzed, 0)
+      assertEquals(response.trace.summary.handsSkipped, 1)
+      assertEquals(response.trace.summary.decisionsAnalyzed, 0)
+      assertEquals(response.trace.summary.warningCount, response.warnings.length)
     }
   }
 
@@ -190,5 +251,13 @@ class HandHistoryReviewServiceTest extends FunSuite:
       assertEquals(response.handsAnalyzed, 1)
       assert(response.decisionsAnalyzed > 0, s"expected decisions, got ${response.decisionsAnalyzed}")
       assertEquals(response.warnings, Vector.empty)
+      assertEquals(response.trace.request.rawHeroName, Some("TUNGLIMING(HERO)"))
+      assertEquals(response.trace.request.normalizedHeroName, Some("TUNGLIMING"))
+      assertEquals(response.trace.importStage.siteResolved, Some("PokerStars"))
+      assertEquals(response.trace.importStage.heroNameResolved, Some("TUNGLIMING"))
+      assertEquals(response.trace.hands.length, 1)
+      assertEquals(response.trace.hands.head.status, "analyzed")
+      assertEquals(response.trace.hands.head.heroNameResolved, Some("TUNGLIMING"))
+      assertEquals(response.trace.hands.head.heroCardsPresent, true)
     }
   }

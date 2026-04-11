@@ -12,6 +12,29 @@ import sicfun.core.Card
 import java.nio.file.{Files, Path, Paths, StandardCopyOption}
 import scala.util.Random
 
+/** Integration tests for the DDRE (Decision-Driving Range Estimation) provider system.
+  *
+  * These tests exercise the full DDRE pipeline from range inference through posterior
+  * blending, using the `RangeInferenceEngine` as the entry point. They verify:
+  *
+  *  - '''Shadow mode''': DDRE shadow mode does not alter the Bayesian decision posterior
+  *    (DDRE runs silently for monitoring only).
+  *  - '''Blend fallback''': when the DDRE provider is disabled, blend modes fall back
+  *    cleanly to the pure Bayesian posterior.
+  *  - '''Blend-primary with synthetic''': with `alpha=1.0` and the synthetic provider,
+  *    the blended posterior measurably differs from the Bayesian baseline.
+  *  - '''Entropy guard''': an absurdly high `minEntropyBits` threshold causes DDRE to
+  *    reject its own posterior, triggering fallback to Bayesian.
+  *  - '''Native provider fallback''': invalid native library paths for CPU and GPU
+  *    providers gracefully fall back to Bayesian.
+  *  - '''ONNX provider fallback''': invalid model paths and unvalidated artifacts
+  *    fall back to Bayesian, while explicitly opting in to experimental artifacts
+  *    allows the ONNX path to produce a non-Bayesian posterior.
+  *
+  * All ONNX tests use a small smoke model (`ddre-smoke-sqrt.onnx`) bundled as a
+  * test resource. The smoke model computes `posterior = sqrt(prior * likelihoods)`,
+  * which is deliberately different from Bayesian to verify the ONNX path is exercised.
+  */
 class HoldemDdreIntegrationTest extends FunSuite:
   private val DdreModeProperty = "sicfun.ddre.mode"
   private val DdreProviderProperty = "sicfun.ddre.provider"
@@ -42,6 +65,9 @@ class HoldemDdreIntegrationTest extends FunSuite:
       case Some(url) => Paths.get(url.toURI).toString
       case None => fail("missing test resource: sicfun/ddre/ddre-smoke-sqrt.onnx")
 
+  /** Creates a temporary DDRE artifact directory with a smoke ONNX model.
+    * The model file is copied from test resources and wrapped with artifact metadata.
+    */
   private def createSmokeArtifactDir(
       validationStatus: String = "experimental",
       decisionDrivingAllowed: Boolean = false
@@ -83,6 +109,9 @@ class HoldemDdreIntegrationTest extends FunSuite:
     )
     dir
 
+  /** Runs a full range inference for a fixed preflop spot (Ac Kd vs BigBlind raising 25).
+    * The seed controls random number generation for bunching trials, ensuring reproducibility.
+    */
   private def runPosterior(seed: Long): PosteriorInferenceResult =
     val hero = hole("Ac", "Kd")
     val board = Board.empty
@@ -110,6 +139,9 @@ class HoldemDdreIntegrationTest extends FunSuite:
       useCache = false
     )
 
+  /** Computes the L1 distance (sum of absolute differences) between two posteriors.
+    * Used to verify that blended/DDRE posteriors measurably differ from Bayesian baselines.
+    */
   private def l1Distance(a: PosteriorInferenceResult, b: PosteriorInferenceResult): Double =
     a.posterior.weights.keysIterator.map { hand =>
       math.abs(a.posterior.probabilityOf(hand) - b.posterior.probabilityOf(hand))

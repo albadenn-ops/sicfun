@@ -5,15 +5,29 @@ import sicfun.holdem.equity.*
 import munit.FunSuite
 import sicfun.core.{Card, DiscreteDistribution}
 
+/** Tests for [[EvAnalysis.evVariance]], which computes the weighted mean equity
+  * and variance of hero's equity across a Bayesian posterior over villain hands.
+  *
+  * Coverage includes:
+  *   - Single-hand posteriors (zero variance baseline)
+  *   - Uniform vs non-uniform weight distributions
+  *   - Filtering of overlapping hands (hero/board card conflicts)
+  *   - Filtering of zero-weight hands
+  *   - Rejection when no valid villain hands remain
+  *   - Relationship between stderr and weight concentration
+  */
 class EvAnalysisTest extends FunSuite:
+  /** Parses a two-character card token (e.g. "Ah") into a [[Card]], failing the test on bad input. */
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
+  /** Parses a four-character string (e.g. "AcKc") into canonical [[HoleCards]]. */
   private def holeCards(token: String): HoleCards =
     val c1 = card(token.substring(0, 2))
     val c2 = card(token.substring(2, 4))
     HoleCards.canonical(c1, c2)
 
+  /** Builds a [[Board]] from a varargs list of card tokens. */
   private def board(tokens: String*): Board =
     Board.from(tokens.map(t => card(t)))
 

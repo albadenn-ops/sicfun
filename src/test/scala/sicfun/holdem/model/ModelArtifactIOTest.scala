@@ -7,7 +7,17 @@ import sicfun.core.Card
 import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
 
+/**
+ * Tests for [[PokerActionModelArtifactIO]] directory-based model artifact persistence.
+ *
+ * Validates:
+ *   - Save/load roundtrip preserves model version, calibration, gate config, sample counts,
+ *     evaluation strategy, validation fraction, split seed, and prediction probabilities
+ *   - Save/load roundtrip preserves retirement state (retiredAt + retirementReason)
+ *   - Loaded model produces identical predictions to the original on the same inputs
+ */
 class ModelArtifactIOTest extends FunSuite:
+  /** Parses a card token string, failing the test if invalid. */
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
@@ -27,6 +37,9 @@ class ModelArtifactIOTest extends FunSuite:
     betHistory = Vector.empty
   )
 
+  /** Generates synthetic training data: alternating (hand1, Raise) and (hand2, Fold) pairs
+   * on a fixed flop board. The `size` parameter controls how many pairs to generate.
+   */
   private def trainingData(size: Int): Seq[(GameState, HoleCards, PokerAction)] =
     Seq.fill(size)(Seq(
       (state, hand1, PokerAction.Raise(20.0)),
@@ -97,6 +110,7 @@ class ModelArtifactIOTest extends FunSuite:
       deleteRecursively(dir)
   }
 
+  /** Recursively deletes a directory and all its contents. */
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)

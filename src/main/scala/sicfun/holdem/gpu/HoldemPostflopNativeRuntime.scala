@@ -9,7 +9,34 @@ import java.io.{File, FileInputStream}
 import java.util.Properties
 import java.util.concurrent.atomic.AtomicReference
 
-/** Runtime wrapper for postflop native Monte Carlo batch evaluation. */
+/** Runtime wrapper for postflop native Monte Carlo batch equity evaluation via JNI.
+  *
+  * This object handles equity computation for postflop (flop/turn/river) scenarios
+  * where community cards are known. Unlike preflop evaluation ([[HeadsUpGpuRuntime]]),
+  * postflop equity requires dealing out remaining community cards via Monte Carlo
+  * simulation.
+  *
+  * ==Backend Resolution==
+  * Supports three engine modes via `sicfun.postflop.native.engine`:
+  *  - `"cpu"` -- forces the CPU-only native library (`sicfun_postflop_native`)
+  *  - `"cuda"` -- forces the CUDA GPU library (`sicfun_postflop_cuda`)
+  *  - `"auto"` (default) -- prefers GPU, falls back to CPU if CUDA is unavailable,
+  *    and routes small workloads directly to CPU to avoid GPU launch overhead
+  *
+  * ==Auto-Tuning==
+  * When `sicfun.postflop.autotune` is enabled (default: true), CUDA block-size and
+  * chunk-size parameters are loaded from a device-fingerprinted properties cache,
+  * similar to [[HeadsUpRangeGpuRuntime]].
+  *
+  * ==Windows WDDM/TDR Considerations==
+  * On Windows with WDDM, long-running CUDA kernels can be killed by the TDR
+  * (Timeout Detection and Recovery) watchdog. The chunk-size parameters limit
+  * individual kernel launch durations to stay within the TDR threshold.
+  *
+  * ==Thread Safety==
+  * Library loading and config caching use `AtomicReference` CAS. JNI calls are
+  * stateless, so concurrent calls are safe.
+  */
 private[holdem] object HoldemPostflopNativeRuntime:
   enum Backend:
     case Cpu
@@ -97,6 +124,18 @@ private[holdem] object HoldemPostflopNativeRuntime:
           detail = s"unsupported postflop provider '$other' (expected auto|native|disabled)"
         )
 
+  /** Computes Monte Carlo equity for one hero hand against multiple villains on a given board.
+    *
+    * Each villain matchup gets its own deterministic seed derived from `seedBase` and
+    * the villain's card ids plus the array index, ensuring reproducible results.
+    *
+    * @param hero     hero's hole cards
+    * @param board    community cards (1-5 cards; must be non-empty for postflop)
+    * @param villains array of villain hole cards to evaluate against
+    * @param trials   Monte Carlo trials per matchup
+    * @param seedBase global seed base for deterministic per-matchup seeding
+    * @return `Right(results)` with one EquityResultWithError per villain, or `Left(reason)`
+    */
   def computePostflopBatch(
       hero: HoleCards,
       board: Board,
@@ -227,6 +266,9 @@ private[holdem] object HoldemPostflopNativeRuntime:
                   .getOrElse(ex.getClass.getSimpleName)
               )
 
+  /** Resolves which native backend to use based on the configured engine mode.
+    * In "auto" mode: tries GPU first, falls back to CPU with a diagnostic note.
+    */
   private def resolveBackend(): Either[String, ResolvedBackend] =
     configuredNativeEngine match
       case "cpu" =>
@@ -287,6 +329,10 @@ private[holdem] object HoldemPostflopNativeRuntime:
       gpuLoadResultRef.compareAndSet(null, loaded)
       gpuLoadResultRef.get()
 
+  /** Loads a native library with support for multiple path/lib property candidates.
+    * This allows legacy property names to coexist with new CPU/GPU-specific names.
+    * Candidates are tried in order; the first non-empty resolution wins.
+    */
   private def loadLibraryWithOverrides(
       label: String,
       pathCandidates: Seq[(String, String)],
@@ -326,6 +372,10 @@ private[holdem] object HoldemPostflopNativeRuntime:
   private def configuredAutoMinGpuWork: Long =
     runtimeConfig().autoMinGpuWork
 
+  /** Loads and applies cached auto-tune parameters (blockSize, maxChunkMatchups)
+    * from a device-fingerprinted properties file. Guards against redundant re-application
+    * via a fingerprint-based idempotency check.
+    */
   private def maybeApplyCachedPostflopAutoTune(deviceIndex: Int): Unit =
     if !postflopAutoTuneEnabled then ()
     else if hasExplicitPostflopCudaConfig then ()
@@ -334,13 +384,16 @@ private[holdem] object HoldemPostflopNativeRuntime:
       if deviceCount <= 0 then ()
       else
         val boundedDeviceIndex = math.max(0, math.min(deviceIndex, deviceCount - 1))
+        val cacheFile = resolvedPostflopAutoTuneCacheFile
+        val cacheMtime = if cacheFile.isFile then cacheFile.lastModified() else 0L
         val fingerprint = safeCudaDeviceFingerprint(boundedDeviceIndex)
         if fingerprint.isEmpty then ()
         else
-          val appliedKey = s"$boundedDeviceIndex|$fingerprint"
+          val appliedKey =
+            s"$boundedDeviceIndex|$fingerprint|${cacheFile.getAbsolutePath}|$cacheMtime|$configuredGpuLibraryIdentity"
           if appliedPostflopTuneFingerprintRef.get() == appliedKey then ()
           else
-            loadPostflopAutoTuneDecision(resolvedPostflopAutoTuneCacheFile, boundedDeviceIndex, fingerprint) match
+            loadPostflopAutoTuneDecision(cacheFile, boundedDeviceIndex, fingerprint) match
               case Some(decision) =>
                 sys.props.update(PostflopCudaBlockSizeProperty, decision.blockSize.toString)
                 sys.props.update(PostflopCudaMaxChunkMatchupsProperty, decision.maxChunkMatchups.toString)
@@ -373,33 +426,36 @@ private[holdem] object HoldemPostflopNativeRuntime:
         val version = Option(props.getProperty("version")).map(_.trim).getOrElse("")
         if version != PostflopAutoTuneCacheVersion then None
         else
-          val count = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("device.count")).getOrElse(0)
-          if count <= 0 then None
+          val cachedGpuLibraryIdentity = Option(props.getProperty("gpuLibraryIdentity")).map(_.trim).getOrElse("")
+          if cachedGpuLibraryIdentity.isEmpty || cachedGpuLibraryIdentity != configuredGpuLibraryIdentity then None
           else
-            boundary:
-              var idx = 0
-              while idx < count do
-                val prefix = s"device.$idx."
-                val cachedIndex =
-                  GpuRuntimeSupport.parseNonNegativeIntOpt(props.getProperty(s"${prefix}index")).getOrElse(-1)
-                val cachedFingerprint = Option(props.getProperty(s"${prefix}fingerprint")).map(_.trim).getOrElse("")
-                if cachedIndex == deviceIndex && cachedFingerprint == fingerprint then
-                  val blockSizeOpt = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}blockSize"))
-                  val maxChunkOpt =
-                    GpuRuntimeSupport
-                      .parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunkMatchups"))
-                      .orElse(GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunk")))
-                  if blockSizeOpt.nonEmpty && maxChunkOpt.nonEmpty then
-                    break(
-                      Some(
-                        PostflopAutoTuneDecision(
-                          blockSize = blockSizeOpt.get,
-                          maxChunkMatchups = maxChunkOpt.get
+            val count = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty("device.count")).getOrElse(0)
+            if count <= 0 then None
+            else
+              boundary:
+                var idx = 0
+                while idx < count do
+                  val prefix = s"device.$idx."
+                  val cachedIndex =
+                    GpuRuntimeSupport.parseNonNegativeIntOpt(props.getProperty(s"${prefix}index")).getOrElse(-1)
+                  val cachedFingerprint = Option(props.getProperty(s"${prefix}fingerprint")).map(_.trim).getOrElse("")
+                  if cachedIndex == deviceIndex && cachedFingerprint == fingerprint then
+                    val blockSizeOpt = GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}blockSize"))
+                    val maxChunkOpt =
+                      GpuRuntimeSupport
+                        .parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunkMatchups"))
+                        .orElse(GpuRuntimeSupport.parsePositiveIntOpt(props.getProperty(s"${prefix}maxChunk")))
+                    if blockSizeOpt.nonEmpty && maxChunkOpt.nonEmpty then
+                      break(
+                        Some(
+                          PostflopAutoTuneDecision(
+                            blockSize = blockSizeOpt.get,
+                            maxChunkMatchups = maxChunkOpt.get
+                          )
                         )
                       )
-                    )
-                idx += 1
-              None
+                  idx += 1
+                None
     catch
       case _: Throwable => None
 
@@ -412,6 +468,9 @@ private[holdem] object HoldemPostflopNativeRuntime:
   private def hasExplicitPostflopCudaConfig: Boolean =
     runtimeConfig().hasExplicitPostflopCudaConfig
 
+  /** Lazily computes and caches the full runtime configuration from system
+    * properties and environment variables. Uses CAS for thread-safe initialisation.
+    */
   private def runtimeConfig(): RuntimeConfig =
     val cached = runtimeConfigRef.get()
     if cached != null then cached
@@ -456,6 +515,16 @@ private[holdem] object HoldemPostflopNativeRuntime:
     catch
       case _: Throwable => ""
 
+  private def configuredGpuLibraryIdentity: String =
+    GpuRuntimeSupport.resolveNonEmpty(GpuPathProperty, GpuPathEnv) match
+      case Some(path) =>
+        val file = new File(path)
+        val mtime = if file.exists() then file.lastModified() else 0L
+        s"path=${file.getAbsolutePath}|mtime=$mtime"
+      case None =>
+        val lib = GpuRuntimeSupport.resolveNonEmpty(GpuLibProperty, GpuLibEnv).getOrElse(DefaultGpuLibrary)
+        s"lib=$lib"
+
   private def safeEngineLabel(backend: Backend): String =
     try
       val code =
@@ -494,6 +563,10 @@ private[holdem] object HoldemPostflopNativeRuntime:
       i += 1
     out
 
+  /** When the CUDA kernel fails in "auto" engine mode, attempts to re-run the
+    * same batch on the CPU backend. If the CPU also fails, returns a combined
+    * error message describing both failures.
+    */
   private def tryCpuFallbackAfterGpuFailure(
       gpuStatus: Int,
       heroFirst: Int,

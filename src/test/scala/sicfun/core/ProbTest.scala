@@ -3,6 +3,20 @@ package sicfun.core
 import Prob.*
 import munit.FunSuite
 
+/** Tests for [[Prob]] fixed-point probability type (2^30 scale).
+  *
+  * Validates:
+  *  - '''Constants''': Zero, One, and Half have the expected raw representations.
+  *  - '''Round-trip precision''': fromDouble -> toDouble preserves common probability values
+  *    (0, 0.25, 0.5, 0.75, 1.0, 1/3, 1/1326) within 1e-9 tolerance.
+  *  - '''Arithmetic''': addition of complementary probabilities yields One (within 1 LSB);
+  *    subtraction produces correct results; multiplication uses Long intermediate to avoid
+  *    overflow (critical for One * One); very small probability products (1/1326)^2 maintain precision.
+  *  - '''Division''': integer division truncates correctly.
+  *  - '''Comparison operators''': ordering is consistent.
+  *  - '''Out-of-range values''': fromDouble does not throw for values outside [0,1]
+  *    (callers are responsible for range validation).
+  */
 class ProbTest extends FunSuite:
   private val tolerance = 1e-9
 

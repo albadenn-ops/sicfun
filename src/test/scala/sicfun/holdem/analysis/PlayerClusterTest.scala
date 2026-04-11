@@ -2,7 +2,20 @@ package sicfun.holdem.analysis
 
 import munit.FunSuite
 
+/** Tests for [[PlayerCluster]], which groups [[PlayerSignature]] vectors into
+  * behavioral archetypes using K-Means clustering.
+  *
+  * Coverage includes:
+  *   - Separation of passive (high fold-rate) vs aggressive (high raise-rate) archetypes
+  *   - Deterministic fingerprints given the same seed and data
+  *   - Assignment of new candidates to the nearest pre-computed centroid
+  *   - Fingerprint structure (cluster id + centroid version)
+  *   - Inertia monotonically decreasing as k increases
+  */
 class PlayerClusterTest extends FunSuite:
+  /** Convenience builder for a 6-dimensional [[PlayerSignature]] matching the
+    * standard feature layout: foldRate, raiseRate, callRate, checkRate, entropy, avgPotOdds.
+    */
   private def signature(
       fold: Double,
       raise: Double,

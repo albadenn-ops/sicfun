@@ -2,9 +2,10 @@ package sicfun.holdem.validation
 
 import sicfun.holdem.engine.RealTimeAdaptiveEngine
 import sicfun.holdem.equity.{TableFormat, TableRanges}
-import sicfun.holdem.history.{HandHistoryImport, HandHistorySite, OpponentProfile}
+import sicfun.holdem.history.{ExploitHint, HandHistoryImport, HandHistorySite, OpponentProfile}
 import sicfun.holdem.model.{PokerActionModel, PokerActionModelArtifactIO}
-import sicfun.holdem.types.{PokerAction, Street}
+import sicfun.holdem.strategic.bridge.StrategicSnapshot
+import sicfun.holdem.types.{GameState, PokerAction, Position, Street}
 import sicfun.holdem.web.HandHistoryReviewServer
 
 import java.nio.file.{Files, Path, Paths}
@@ -18,6 +19,21 @@ import java.nio.file.{Files, Path, Paths}
   */
 object ValidationRunner:
 
+  /** Configuration for a validation run.
+    *
+    * @param handsPerPlayer  total hands to simulate per villain (default 1M for convergence)
+    * @param chunkSize       hands per export chunk for incremental parsing
+    * @param convergenceStep granularity (in parsed hands) for convergence tracking steps
+    * @param outputDir       root output directory for hand histories and reports
+    * @param modelDir        optional pre-trained PokerActionModel for the adaptive hero
+    * @param seed            master RNG seed for reproducibility
+    * @param bunchingTrials  MC trials for bunching-effect estimation
+    * @param equityTrials    MC trials for equity estimation
+    * @param minEquityTrials minimum MC trials for equity (floor for adaptive time budget)
+    * @param budgetMs        per-decision time budget in milliseconds
+    * @param fastHero        if true, use fast equity-based hero (no adaptive engine)
+    * @param severityFilter  if set, only run players matching this severity label (e.g. "severe")
+    */
   final case class Config(
       handsPerPlayer: Int = 1_000_000,
       chunkSize: Int = 1000,
@@ -53,6 +69,16 @@ object ValidationRunner:
     // GTO control: no leak, no noise — false positive canary
     leakyPlayers :+ (NoLeak(), "gto-baseline")
 
+  /** Select the appropriate villain strategy for a given leak type.
+    *
+    * GTO baseline controls use the CFR solver (no heuristic fallback) to ensure
+    * equilibrium play. Leak-injected villains use the faster equity-based heuristic
+    * since the leak deviations dominate the signal anyway.
+    */
+  private[validation] def villainStrategyFor(leak: InjectedLeak): VillainStrategy =
+    if leak.id == "gto-baseline" then CfrVillainStrategy(allowHeuristicFallback = false)
+    else EquityBasedStrategy()
+
   def main(args: Array[String]): Unit =
     val config = parseConfig(args)
     if args.contains("--web-spotcheck") then
@@ -61,6 +87,18 @@ object ValidationRunner:
     else
       run(config)
 
+  /** Run the full validation pipeline for all players in the population.
+    *
+    * For each villain (6 leak types x 3 severities + 1 GTO control = 19 players):
+    *   1. Simulate `handsPerPlayer` hands via HeadsUpSimulator
+    *   2. Export to PokerStars format (full + chunked)
+    *   3. Feed through import/profiling pipeline with convergence tracking
+    *   4. Collect results for the scorecard
+    *
+    * The scorecard is printed to stdout and saved to `<outputDir>/scorecard.txt`.
+    *
+    * @return per-player validation results for all players
+    */
   def run(config: Config): Vector[PlayerValidationResult] =
     Files.createDirectories(config.outputDir)
     val population = config.severityFilter match
@@ -89,6 +127,22 @@ object ValidationRunner:
 
     results
 
+  /** Run the full pipeline for a single player: simulate, export, parse, profile, track.
+    *
+    * Execution flow:
+    *   1. Create the hero engine (adaptive or fast equity-based)
+    *   2. Create the leak-injected villain with appropriate baseline noise
+    *   3. Simulate all hands and export as PokerStars text (full + chunked files)
+    *   4. Write ground truth JSON (leak ID, severity, fire rate, hero EV)
+    *   5. Parse chunks back through HandHistoryImport (resilient: bad chunks are skipped)
+    *   6. Profile at fine-grained convergence steps, tracking leak detection and archetype
+    *   7. Return the PlayerValidationResult
+    *
+    * @param config     run configuration
+    * @param leak       the injected leak for this player
+    * @param villainName human-readable villain name
+    * @param playerSeed RNG seed for this player's simulation
+    */
   private def runOnePlayer(
       config: Config,
       leak: InjectedLeak,
@@ -120,7 +174,8 @@ object ValidationRunner:
       heroEngine = heroEngine,
       villain = villainPlayer,
       seed = playerSeed,
-      budgetMs = config.budgetMs
+      budgetMs = config.budgetMs,
+      villainStrategy = villainStrategyFor(leak)
     )
 
     // Simulate all hands
@@ -144,6 +199,40 @@ object ValidationRunner:
     // Hero EV
     val heroTotalNet = records.map(_.heroNet).sum
     val heroNetBbPer100 = (heroTotalNet / config.handsPerPlayer) * 100.0
+
+    // Compute strategic snapshot from the last hand's hero action (representative sample).
+    val strategicSummary: Option[StrategicSummary] =
+      records.lastOption.flatMap { lastRecord =>
+        val heroActions = lastRecord.actions.filter(_.player == "Hero")
+        heroActions.lastOption.flatMap { ra =>
+          scala.util.Try {
+            val gs = GameState(
+              street = ra.street,
+              board = lastRecord.board,
+              pot = ra.potBefore,
+              toCall = ra.toCall,
+              position = Position.Button,
+              stackSize = ra.stackBefore,
+              betHistory = Vector.empty
+            )
+            val heroEquity = math.max(0.0, math.min(1.0, 0.5 + heroNetBbPer100 / 200.0))
+            val snap = StrategicSnapshot.build(
+              gameState = gs,
+              heroAction = ra.action,
+              heroEquity = heroEquity,
+              engineEv = heroEquity,
+              staticEquity = heroEquity * 0.95,
+              hasDrawPotential = lastRecord.streetsPlayed >= 2
+            )
+            StrategicSummary(
+              dominantClass = snap.strategicClass.toString,
+              fidelityCoverage = snap.fidelitySummary,
+              fourWorldV11 = snap.fourWorld.v11.value,
+              fourWorldV00 = snap.fourWorld.v00.value
+            )
+          }.toOption
+        }
+      }
 
     // Ground truth JSON
     val groundTruth = ujson.Obj(
@@ -188,15 +277,16 @@ object ValidationRunner:
       val windowHands = parsedHands.take(handsInWindow)
       val profiles = OpponentProfile.fromImportedHands("simulated", windowHands, Set("Hero"))
       profiles.headOption.foreach { profile =>
-        val hints = profile.exploitHints
+        val hints = profile.exploitHintDetails
         val archetype = profile.archetypePosterior.mapEstimate.toString
         lastArchetype = archetype
         if archetypeStableStep.isEmpty && archetype == prevArchetype && prevArchetype.nonEmpty then
           archetypeStableStep = Some(stepIdx)
         prevArchetype = archetype
 
+        val matchedHint = matchingHint(hints, leak.id)
         val detected = hintMatchesLeak(hints, leak.id)
-        val confidence = if detected then 0.8 else 0.1
+        val confidence = math.max(0.1, matchedHint.map(_.leakDetectionConfidence).getOrElse(0.1))
         tracker.recordChunk(stepIdx, detected, confidence, falsePositives = 0)
         // Debug: last step stats for undetected leaks
         if stepIdx == totalSteps - 1 && !detected then
@@ -208,7 +298,7 @@ object ValidationRunner:
           println(f"  [DBG] $villainName: evts=${evts.size} turn(n=${turnEvts.size} r=$turnRaises) rvr(facing=${riverFacing.size} folds=$riverFolds) hints=$hints")
       }
 
-    // TODO: cluster analysis (secondary) — use PlayerSignature.compute for cluster assignment
+    // Deferred enhancement: add cluster analysis using PlayerSignature.compute for assignment.
     PlayerValidationResult(
       villainName = villainName,
       leakId = leak.id,
@@ -220,7 +310,8 @@ object ValidationRunner:
       convergence = tracker.summary(step),
       assignedArchetype = lastArchetype,
       archetypeConvergenceChunk = archetypeStableStep,
-      clusterId = None
+      clusterId = None,
+      strategicSummary = strategicSummary
     )
 
   /** Start the web review server with sample validation chunks for visual spot-checking.
@@ -276,12 +367,48 @@ object ValidationRunner:
     * Uses specific profiler hint phrases — not generic keywords — to avoid
     * false positive matches on normal profiling language.
     */
-  private def hintMatchesLeak(hints: Vector[String], leakId: String): Boolean =
+  private def hintMatchesLeak(hints: Vector[ExploitHint], leakId: String): Boolean =
+    matchingHint(hints, leakId).nonEmpty
+
+  private def matchingHint(hints: Vector[ExploitHint], leakId: String): Option[ExploitHint] =
+    if leakId == "gto-baseline" then
+      val leakIds = Vector("overfold-river-aggression", "overcall-big-bets", "overbluff-turn-barrel",
+        "preflop-too-loose", "preflop-too-tight")
+      leakIds
+        .flatMap(id => matchingHint(hints, id))
+        .sortBy(-_.leakDetectionConfidence)
+        .headOption
+    else
+      val matchingRuleIds = leakId match
+        case "overfold-river-aggression" => Set("overfold-river-aggression")
+        case "overcall-big-bets" => Set("overcall-big-bets", "call-vs-raise", "calling-station-profile", "showdown-weak-heavy")
+        case "overbluff-turn-barrel" => Set("overbluff-turn-barrel")
+        case "passive-big-pots" => Set.empty[String]
+        case "preflop-too-loose" => Set("preflop-too-loose")
+        case "preflop-too-tight" => Set("preflop-too-tight")
+        case _ => Set.empty[String]
+
+      hints
+        .filter(hint => matchingRuleIds.contains(hint.ruleId))
+        .sortBy(-_.leakDetectionConfidence)
+        .headOption
+        .orElse {
+          hints
+            .filter(hint => legacyHintMatchesLeak(Vector(hint.text), leakId))
+            .sortBy(-_.leakDetectionConfidence)
+            .headOption
+        }
+
+  private def legacyHintMatchesLeak(hints: Vector[String], leakId: String): Boolean =
     leakId match
       case "overfold-river-aggression" =>
         hints.exists(_.contains("Over-folds on the river"))
       case "overcall-big-bets" =>
-        hints.exists(h => h.contains("calling station") || h.contains("Calls too often facing large bets"))
+        hints.exists(h =>
+          h.contains("calling station") ||
+            h.contains("Calls too often facing large bets") ||
+            h.contains("shown down weak hands")
+        )
       case "overbluff-turn-barrel" =>
         hints.exists(_.contains("Very aggressive on the turn"))
       case "passive-big-pots" =>
@@ -296,7 +423,7 @@ object ValidationRunner:
         // False positive check: does the profiler incorrectly match ANY leak pattern?
         val leakIds = Vector("overfold-river-aggression", "overcall-big-bets", "overbluff-turn-barrel",
           "preflop-too-loose", "preflop-too-tight")
-        leakIds.exists(id => hintMatchesLeak(hints, id))
+        leakIds.exists(id => legacyHintMatchesLeak(hints, id))
       case _ => false
 
   private def parseConfig(args: Array[String]): Config =

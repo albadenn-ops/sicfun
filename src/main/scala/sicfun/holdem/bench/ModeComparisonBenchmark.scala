@@ -61,6 +61,11 @@ object ModeComparisonBenchmark:
       runOnce: Int => Either[String, ModeSample]
   )
 
+  /** Entry point. Builds a fixed canonical matchup batch, discovers available compute
+    * devices, warms each mode, then measures throughput in randomized mode order per run
+    * to eliminate systematic ordering bias. Exports raw samples to CSV, summary statistics
+    * to a separate CSV, and renders an SVG boxplot comparing states/second across modes.
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     require(config.maxMatchups > 0L, "maxMatchups must be positive")
@@ -178,6 +183,9 @@ object ModeComparisonBenchmark:
     println(s"graph svg: ${svgPath.toAbsolutePath}")
     println("=== Done ===")
 
+  /** Creates a Runner that benchmarks a single compute device. Allocates output arrays
+    * once and reuses them across runs to avoid allocation noise in timing.
+    */
   private def runnerForDevice(
       mode: String,
       device: HeadsUpHybridDispatcher.ComputeDevice,
@@ -216,6 +224,9 @@ object ModeComparisonBenchmark:
           )
     )
 
+  /** Creates a Runner that benchmarks the hybrid multi-device dispatcher. The dispatcher
+    * splits the workload across all available devices (CUDA + OpenCL + CPU) in parallel.
+    */
   private def runnerForHybrid(
       mode: String,
       matchups: Int,
@@ -305,6 +316,10 @@ object ModeComparisonBenchmark:
     }
     Files.write(path, (header +: lines).mkString("\n").getBytes(StandardCharsets.UTF_8))
 
+  /** Renders a standalone SVG boxplot visualizing throughput distribution per mode.
+    * Each mode gets a box (Q1-Q3), whiskers (min-max), median line, and mean dot.
+    * The chart uses a fixed palette: blue=CPU, red=CUDA, green=OpenCL, amber=hybrid.
+    */
   private def writeBoxplotSvg(
       path: Path,
       title: String,

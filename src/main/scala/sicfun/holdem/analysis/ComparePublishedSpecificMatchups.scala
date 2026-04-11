@@ -5,7 +5,16 @@ import sicfun.holdem.cli.*
 
 import sicfun.holdem.cli.CliHelpers.{fmt2, fmt5}
 
-/** Compares exact table values against published specific preflop matchup odds.
+/** Validates our canonical exact equity table against published specific preflop matchup odds
+  * from cardfight.com (e.g., AA vs KK, TT vs AKs).
+  *
+  * Unlike [[ComparePublishedPreflopVsRandom]] which compares against "vs random" aggregate odds,
+  * this tool validates specific hero-vs-villain matchups where both hands are known. This catches
+  * different categories of table bugs (e.g., miskeyed individual matchups vs systematic aggregation errors).
+  *
+  * Supports both exact 4-card tokens (e.g., "AcAs") and range class tokens (e.g., "AA", "AQs").
+  * When range class tokens are used, equity is averaged over all non-overlapping combo pairs
+  * in the two classes.
   *
   * Usage:
   * {{{
@@ -13,14 +22,24 @@ import sicfun.holdem.cli.CliHelpers.{fmt2, fmt5}
   * }}}
   */
 object ComparePublishedSpecificMatchups:
+  /** A published matchup from an external source with known hero vs villain equity.
+    *
+    * @param label        human-readable label (e.g., "AA vs KK")
+    * @param hero         hero hand token: exact 4-char (e.g., "AcAs") or range class (e.g., "AA")
+    * @param villain      villain hand token: exact 4-char or range class
+    * @param sourceWinPct published hero win percentage
+    * @param sourceTiePct published tie percentage
+    * @param sourceUrl    URL of the published reference for traceability
+    */
   private[holdem] final case class PublishedMatchup(
       label: String,
-      hero: String,    // Either exact 4-char token (e.g. AcAs) or range class token (e.g. AA, AQs)
-      villain: String, // Either exact 4-char token or range class token
+      hero: String,
+      villain: String,
       sourceWinPct: Double,
       sourceTiePct: Double,
       sourceUrl: String
   ):
+    /** Standard poker equity: wins plus half of ties. */
     def sourceEqPct: Double = sourceWinPct + (0.5 * sourceTiePct)
 
   private[holdem] val Matchups: Vector[PublishedMatchup] = Vector(
@@ -82,6 +101,10 @@ object ComparePublishedSpecificMatchups:
     )
   )
 
+  /** Entry point. Loads a canonical exact table and prints a comparison for each published matchup.
+    *
+    * @param args expects a single positional argument: path to a canonical exact binary table
+    */
   def main(args: Array[String]): Unit =
     if args.length < 1 then
       System.err.println("Usage: ComparePublishedSpecificMatchups <canonicalExactTablePath>")
@@ -111,14 +134,32 @@ object ComparePublishedSpecificMatchups:
       )
     }
 
+  /** Computes our win% and tie% for a hero-vs-villain matchup from the canonical table.
+    *
+    * Two code paths depending on token format:
+    *   1. '''Exact tokens''' (4-char, e.g. "AcAs"): single direct table lookup.
+    *   2. '''Range class tokens''' (e.g. "AA", "AKs"): enumerate all combo pairs, skip
+    *      overlapping pairs (shared cards), weight by distribution, and normalize.
+    *
+    * Normalization: since some combo pairs are skipped (card overlap), the raw weights
+    * do not sum to 1.0. We divide by `total` (sum of non-overlapping pair weights) to
+    * get conditional probabilities given disjoint hands.
+    *
+    * @param table        canonical exact equity table
+    * @param heroToken    hero hand token (exact 4-char or range class)
+    * @param villainToken villain hand token (exact 4-char or range class)
+    * @return (winPct, tiePct) as percentages in [0, 100]
+    */
   private[holdem] def computeWinTiePct(table: HeadsUpEquityCanonicalTable, heroToken: String, villainToken: String): (Double, Double) =
     val heroExact = parseExactHoleCardsOrNone(heroToken)
     val villainExact = parseExactHoleCardsOrNone(villainToken)
 
     (heroExact, villainExact) match
+      // Fast path: both tokens specify exact combos — single table lookup.
       case (Some(hero), Some(villain)) =>
         val result = table.equity(hero, villain)
         (result.win * 100.0, result.tie * 100.0)
+      // Slow path: at least one token is a range class — enumerate all combo pairs.
       case _ =>
         val heroDist = CliHelpers.parseRangeDistribution(heroToken)
         val villainDist = CliHelpers.parseRangeDistribution(villainToken)
@@ -129,6 +170,7 @@ object ComparePublishedSpecificMatchups:
 
         heroDist.weights.foreach { case (hero, heroWeight) =>
           villainDist.weights.foreach { case (villain, villainWeight) =>
+            // Only include pairs where hero and villain do not share any cards.
             if HoleCardsIndex.areDisjoint(hero, villain) then
               val pairWeight = heroWeight * villainWeight
               val result = table.equity(hero, villain)
@@ -140,12 +182,16 @@ object ComparePublishedSpecificMatchups:
         }
 
         require(total > 0.0, s"no non-overlapping combo pairs for $heroToken vs $villainToken")
+        // Normalize by total weight of non-overlapping pairs to get conditional probabilities.
         val ourWin = (win / total) * 100.0
         val ourTie = (tie / total) * 100.0
         val norm = (win + tie + loss) / total
         require(math.abs(norm - 1.0) <= 1e-10, s"normalization drift for $heroToken vs $villainToken: $norm")
         (ourWin, ourTie)
 
+  /** Attempts to parse a token as exact hole cards (4 characters = rank+suit for each card).
+    * Returns None for range class tokens (2-3 characters like "AA" or "AKs").
+    */
   private def parseExactHoleCardsOrNone(token: String): Option[HoleCards] =
     if token.trim.length == 4 then Some(CliHelpers.parseHoleCards(token.trim))
     else None

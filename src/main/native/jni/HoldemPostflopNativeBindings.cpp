@@ -1,3 +1,35 @@
+/*
+ * HoldemPostflopNativeBindings.cpp -- CPU-only JNI binding for postflop
+ * Monte Carlo equity computation in the sicfun poker analytics system.
+ *
+ * Given a hero hand, a partial board (1-5 community cards), and a batch of
+ * villain hands, this binding runs Monte Carlo simulations on the CPU to
+ * estimate postflop win/tie/loss probabilities and standard errors.
+ *
+ * Key features:
+ *   - Multi-threaded via lock-free work-stealing (atomic index advancement).
+ *   - Bitmask-based incremental hand evaluator: builds EvalState incrementally
+ *     by adding one card at a time (avoids recomputing from scratch per board).
+ *   - Welford online variance for single-pass standard error estimation.
+ *   - Optimized paths for river (0 cards needed: deterministic), turn
+ *     (1 card: enumerate remaining deck), and earlier streets (2+ cards: MC).
+ *   - Two-card runout uses direct index sampling (no shuffle), avoiding
+ *     Fisher-Yates overhead for the common turn-to-river case.
+ *
+ * Compiled into: sicfun_native_cpu.dll
+ * JNI class: sicfun.holdem.HoldemPostflopNativeBindings
+ *
+ * Error status codes:
+ *   100 -- null array argument
+ *   101 -- array length mismatch
+ *   102 -- JNI read error
+ *   124 -- JNI write error
+ *   125 -- invalid card ID (not in 0..51)
+ *   126 -- invalid trial count
+ *   127 -- overlapping/duplicate cards
+ *   128 -- invalid board size (not in 1..5)
+ */
+
 #include <jni.h>
 
 #include <algorithm>
@@ -13,19 +45,23 @@
 
 namespace {
 
-constexpr int kDeckSize = 52;
-constexpr int kRanksPerSuit = 13;
-constexpr int kMinRankValue = 2;
-constexpr int kMaxRankValue = 14;
-constexpr int kBoardCardCount = 5;
-constexpr int kMaxRemainingDeck = 50;
-constexpr int kWorkChunkSize = 8;
-constexpr int kStatusInvalidBoardSize = 128;
-constexpr jint kEngineUnknown = 0;
-constexpr jint kEngineCpu = 1;
+/* ---- Constants ---------------------------------------------------------- */
 
+constexpr int kDeckSize = 52;               /* Standard 52-card deck. */
+constexpr int kRanksPerSuit = 13;           /* 2..A per suit. */
+constexpr int kMinRankValue = 2;            /* Rank encoding: 2 = deuce. */
+constexpr int kMaxRankValue = 14;           /* Rank encoding: 14 = ace. */
+constexpr int kBoardCardCount = 5;          /* Full community board = 5 cards. */
+constexpr int kMaxRemainingDeck = 50;       /* Max remaining cards after hero hole cards. */
+constexpr int kWorkChunkSize = 8;           /* Matchups per atomic work-steal chunk. */
+constexpr int kStatusInvalidBoardSize = 128; /* Error: board_size not in [1,5]. */
+constexpr jint kEngineUnknown = 0;          /* No computation has run yet. */
+constexpr jint kEngineCpu = 1;              /* Last successful computation used CPU. */
+
+/* Tracks which engine last completed successfully. Read by queryNativeEngine(). */
 std::atomic<jint> g_last_engine_code(kEngineUnknown);
 
+/* Win/tie/loss probabilities and standard error for one hero-vs-villain matchup. */
 struct EquityResultNative {
   double win;
   double tie;
@@ -33,6 +69,7 @@ struct EquityResultNative {
   double std_error;
 };
 
+/* Checks for a pending JNI exception, clears it if present, returns true if one was found. */
 bool check_and_clear_exception(JNIEnv* env) {
   if (!env->ExceptionCheck()) {
     return false;
@@ -41,22 +78,44 @@ bool check_and_clear_exception(JNIEnv* env) {
   return true;
 }
 
+/* Returns true if card_id is in [0, 51]. */
 inline bool is_valid_card_id(const int card_id) {
   return card_id >= 0 && card_id < kDeckSize;
 }
 
+/* ---- Card helpers -------------------------------------------------------- */
+
+/* Returns the rank (2..14) of a card encoded as 0..51. */
 inline int card_rank(const int card_id) {
   return (card_id % kRanksPerSuit) + kMinRankValue;
 }
 
+/* Returns the suit (0..3) of a card encoded as 0..51. */
 inline int card_suit(const int card_id) {
   return card_id / kRanksPerSuit;
 }
 
+/* Returns a 16-bit mask with one bit set at the rank position (0-based from deuce). */
 inline uint16_t card_rank_bit(const int card_id) {
   return static_cast<uint16_t>(1) << static_cast<uint16_t>(card_id % kRanksPerSuit);
 }
 
+/* ---- Bitmask-based incremental hand evaluator ----------------------------- */
+
+/*
+ * EvalState accumulates card information incrementally. Instead of evaluating
+ * all 7 cards from scratch for each board, cards are added one at a time
+ * via add_card_to_state(). This is critical for performance: the exact
+ * exhaustive path and the MC path both exploit incremental state building
+ * to avoid redundant work across nested board-card loops.
+ *
+ * Bitmask fields:
+ *   rank_mask       -- one bit per distinct rank present (13-bit).
+ *   suit_rank_mask  -- per-suit rank bitmasks for flush detection.
+ *   pair_mask       -- bits set for ranks that appear >= 2 times.
+ *   trip_mask       -- bits set for ranks that appear >= 3 times.
+ *   quad_mask       -- bits set for ranks that appear 4 times.
+ */
 struct EvalState {
   uint8_t rank_counts[kMaxRankValue + 1] = {};
   uint8_t suit_counts[4] = {0, 0, 0, 0};
@@ -67,6 +126,7 @@ struct EvalState {
   uint16_t quad_mask = 0;
 };
 
+/* Adds a card to an EvalState, updating all bitmasks and counts incrementally. */
 inline void add_card_to_state(EvalState& state, const int card) {
   const int rank = card_rank(card);
   const int suit = card_suit(card);
@@ -87,10 +147,11 @@ inline void add_card_to_state(EvalState& state, const int card) {
   }
 }
 
+/* Builds an EvalState from hole cards + known board cards. */
 inline EvalState build_eval_state(
     const int first,
     const int second,
-    const int* board_cards,
+    const int* __restrict__ board_cards,
     const int board_size) {
   EvalState state;
   add_card_to_state(state, first);
@@ -101,6 +162,8 @@ inline EvalState build_eval_state(
   return state;
 }
 
+/* Encodes a hand category + tiebreakers into a 32-bit score for comparison.
+ * Format: [category:8][tb0:4][tb1:4][tb2:4][tb3:4][tb4:4]. Higher = better. */
 inline uint32_t encode_score(const int category, const int* tiebreak, const int tiebreak_size) {
   uint32_t score = static_cast<uint32_t>(category) << 24;
   for (int i = 0; i < tiebreak_size && i < 5; ++i) {
@@ -109,32 +172,32 @@ inline uint32_t encode_score(const int category, const int* tiebreak, const int 
   return score;
 }
 
-inline int highest_bit_index_16(const uint16_t mask) {
-  if (mask == 0) {
-    return -1;
-  }
-  for (int bit = 15; bit >= 0; --bit) {
-    if ((mask & (static_cast<uint16_t>(1) << bit)) != 0) {
-      return bit;
-    }
-  }
-  return -1;
+#if defined(_MSC_VER)
+#include <intrin.h>
+static inline int popcount_16(uint16_t x) { return static_cast<int>(__popcnt16(x)); }
+static inline int highest_bit_index_16(uint16_t x) {
+  if (x == 0) return -1;
+  unsigned long idx;
+  _BitScanReverse(&idx, static_cast<unsigned long>(x));
+  return static_cast<int>(idx);
 }
-
-inline int popcount_16(uint16_t mask) {
-  int count = 0;
-  while (mask != 0) {
-    mask = static_cast<uint16_t>(mask & static_cast<uint16_t>(mask - 1));
-    ++count;
-  }
-  return count;
+#else
+static inline int popcount_16(uint16_t x) { return __builtin_popcount(x); }
+static inline int highest_bit_index_16(uint16_t x) {
+  if (x == 0) return -1;
+  return 31 - __builtin_clz(static_cast<unsigned int>(x));
 }
+#endif
 
+/* Returns the highest rank (2..14) with a bit set in the mask, or 0 if empty. */
 inline int highest_rank_from_mask(const uint16_t mask) {
   const int bit = highest_bit_index_16(mask);
   return bit >= 0 ? (bit + kMinRankValue) : 0;
 }
 
+/* Detects the highest straight from a 13-bit rank bitmask. Uses parallel bit
+ * AND across 5 consecutive shifted masks to find 5-consecutive-rank runs.
+ * Returns the high card rank of the straight, or 0 if none. Handles A-2-3-4-5 wheel. */
 inline int straight_high_from_rank_mask(const uint16_t rank_mask) {
   const uint16_t run = static_cast<uint16_t>(
       rank_mask &
@@ -153,13 +216,20 @@ inline int straight_high_from_rank_mask(const uint16_t rank_mask) {
   return ((rank_mask & wheel_mask) == wheel_mask) ? 5 : 0;
 }
 
+/*
+ * Single-pass 7-card hand evaluator using pre-computed bitmasks.
+ * Evaluates directly from rank/suit/pair/trip/quad masks without enumerating
+ * all C(7,5)=21 subsets. Checks hand categories in descending order:
+ * straight flush > quads > full house > flush > straight > trips > two pair > pair > high card.
+ * Returns a 32-bit packed score for comparison.
+ */
 uint32_t evaluate7_score_from_masks(
     const uint16_t rank_mask,
     const uint16_t pair_mask,
     const uint16_t trip_mask,
     const uint16_t quad_mask,
-    const uint8_t suit_counts[4],
-    const uint16_t suit_rank_mask[4]) {
+    const uint8_t* __restrict__ suit_counts,
+    const uint16_t* __restrict__ suit_rank_mask) {
   int flush_suit = -1;
   for (int suit = 0; suit < 4; ++suit) {
     if (suit_counts[suit] >= 5) {
@@ -268,6 +338,7 @@ uint32_t evaluate7_score_from_masks(
   return encode_score(0, tiebreak, 5);
 }
 
+/* Evaluates a completed EvalState (7 cards added) to a 32-bit score. */
 inline uint32_t evaluate_state_score(const EvalState& state) {
   return evaluate7_score_from_masks(
       state.rank_mask,
@@ -278,6 +349,7 @@ inline uint32_t evaluate_state_score(const EvalState& state) {
       state.suit_rank_mask);
 }
 
+/* Convenience: evaluates 7 individual cards directly into a score. */
 inline uint32_t evaluate7_score_direct(
     const int c0,
     const int c1,
@@ -297,14 +369,11 @@ inline uint32_t evaluate7_score_direct(
   return evaluate_state_score(state);
 }
 
+/* ---- Showdown comparison helpers ----------------------------------------- */
+
+/* Returns +1 if hero wins, -1 if villain wins, 0 if tie. Branchless. */
 inline int compare_scores(const uint32_t hero_score, const uint32_t villain_score) {
-  if (hero_score > villain_score) {
-    return 1;
-  }
-  if (hero_score < villain_score) {
-    return -1;
-  }
-  return 0;
+  return static_cast<int>(hero_score > villain_score) - static_cast<int>(hero_score < villain_score);
 }
 
 inline int compare_completed_states(const EvalState& hero_state, const EvalState& villain_state) {
@@ -351,21 +420,24 @@ inline int compare_with_runout(
   return compare_completed_states(hero_state, villain_state);
 }
 
+/* Builds the array of remaining live cards after removing hero, villain, and board
+ * cards. Uses a 64-bit dead mask. Returns 0 on success, 127 if duplicates detected. */
 jint fill_remaining_deck_postflop(
     const int hero_first,
     const int hero_second,
     const int villain_first,
     const int villain_second,
-    const int* board_cards,
+    const int* __restrict__ board_cards,
     const int board_size,
-    int remaining[kMaxRemainingDeck],
-    int* remaining_count) {
-  bool dead[kDeckSize] = {};
+    int* __restrict__ remaining,
+    int* __restrict__ remaining_count) {
+  uint64_t dead_mask = 0;
   auto mark_dead = [&](const int card_id) -> bool {
-    if (dead[card_id]) {
+    const uint64_t bit = uint64_t(1) << card_id;
+    if (dead_mask & bit) {
       return false;
     }
-    dead[card_id] = true;
+    dead_mask |= bit;
     return true;
   };
 
@@ -383,7 +455,7 @@ jint fill_remaining_deck_postflop(
 
   int idx = 0;
   for (int card = 0; card < kDeckSize; ++card) {
-    if (!dead[card]) {
+    if (!(dead_mask & (uint64_t(1) << card))) {
       remaining[idx++] = card;
     }
   }
@@ -391,12 +463,14 @@ jint fill_remaining_deck_postflop(
   return 0;
 }
 
+/* Samples cards_needed random cards from the remaining deck using Fisher-Yates
+ * partial shuffle. Only shuffles the first cards_needed positions. */
 void sample_runout_cards(
-    const int* remaining,
+    const int* __restrict__ remaining,
     const int remaining_count,
     const int cards_needed,
     std::mt19937_64& rng,
-    int* runout_cards) {
+    int* __restrict__ runout_cards) {
   if (cards_needed <= 0) {
     return;
   }
@@ -410,39 +484,22 @@ void sample_runout_cards(
   }
 }
 
-jint compute_postflop_mc_equity_cpu(
-    const int hero_first,
-    const int hero_second,
-    const int* board_cards,
-    const int board_size,
-    const int villain_first,
-    const int villain_second,
+/*
+ * Core equity computation on precomputed state. Skips validation — callers
+ * must ensure inputs are valid. Uses count-based variance instead of Welford:
+ * since outcomes are discrete {0, 0.5, 1}, the sample variance can be computed
+ * exactly from win/tie/loss counts at the end, eliminating a floating-point
+ * division per MC trial.
+ */
+void compute_equity_core(
+    const EvalState& hero_base,
+    const EvalState& villain_base,
+    const int* __restrict__ remaining,
+    const int remaining_count,
+    const int cards_needed,
     const int trials,
     const uint64_t seed,
-    EquityResultNative* out) {
-  const int cards_needed = kBoardCardCount - board_size;
-  if (cards_needed < 0 || cards_needed > kBoardCardCount) {
-    return kStatusInvalidBoardSize;
-  }
-
-  int remaining[kMaxRemainingDeck];
-  int remaining_count = 0;
-  const jint fill_status = fill_remaining_deck_postflop(
-      hero_first,
-      hero_second,
-      villain_first,
-      villain_second,
-      board_cards,
-      board_size,
-      remaining,
-      &remaining_count);
-  if (fill_status != 0) {
-    return fill_status;
-  }
-
-  const EvalState hero_base = build_eval_state(hero_first, hero_second, board_cards, board_size);
-  const EvalState villain_base = build_eval_state(villain_first, villain_second, board_cards, board_size);
-
+    EquityResultNative* __restrict__ out) {
   if (cards_needed == 0) {
     const int cmp = compare_completed_states(hero_base, villain_base);
     if (cmp > 0) {
@@ -452,7 +509,7 @@ jint compute_postflop_mc_equity_cpu(
     } else {
       *out = EquityResultNative{0.0, 0.0, 1.0, 0.0};
     }
-    return 0;
+    return;
   }
 
   if (cards_needed == 1) {
@@ -461,15 +518,10 @@ jint compute_postflop_mc_equity_cpu(
     int loss_count = 0;
     for (int i = 0; i < remaining_count; ++i) {
       const int cmp = compare_with_one_runout(hero_base, villain_base, remaining[i]);
-      if (cmp > 0) {
-        ++win_count;
-      } else if (cmp == 0) {
-        ++tie_count;
-      } else {
-        ++loss_count;
-      }
+      win_count  += (cmp > 0);
+      tie_count  += (cmp == 0);
+      loss_count += (cmp < 0);
     }
-
     const double total = static_cast<double>(remaining_count);
     *out = EquityResultNative{
         static_cast<double>(win_count) / total,
@@ -477,33 +529,13 @@ jint compute_postflop_mc_equity_cpu(
         static_cast<double>(loss_count) / total,
         0.0,
     };
-    return 0;
+    return;
   }
 
   int win_count = 0;
   int tie_count = 0;
   int loss_count = 0;
-  double mean = 0.0;
-  double m2 = 0.0;
   int runout[kBoardCardCount];
-
-  auto record_outcome = [&](const int cmp, const int trial) {
-    double outcome = 0.0;
-    if (cmp > 0) {
-      ++win_count;
-      outcome = 1.0;
-    } else if (cmp == 0) {
-      ++tie_count;
-      outcome = 0.5;
-    } else {
-      ++loss_count;
-      outcome = 0.0;
-    }
-    const double delta = outcome - mean;
-    mean += delta / static_cast<double>(trial + 1);
-    const double delta2 = outcome - mean;
-    m2 += delta * delta2;
-  };
 
   std::mt19937_64 rng(seed);
   if (cards_needed == 2) {
@@ -518,25 +550,75 @@ jint compute_postflop_mc_equity_cpu(
       }
       const int cmp =
           compare_with_two_runout(hero_base, villain_base, remaining[first_idx], remaining[second_idx]);
-      record_outcome(cmp, trial);
+      win_count  += (cmp > 0);
+      tie_count  += (cmp == 0);
+      loss_count += (cmp < 0);
     }
   } else {
     for (int trial = 0; trial < trials; ++trial) {
       sample_runout_cards(remaining, remaining_count, cards_needed, rng, runout);
       const int cmp = compare_with_runout(hero_base, villain_base, runout, cards_needed);
-      record_outcome(cmp, trial);
+      win_count  += (cmp > 0);
+      tie_count  += (cmp == 0);
+      loss_count += (cmp < 0);
     }
   }
 
+  /* Compute variance from counts. For discrete outcomes {0, 0.5, 1} the
+   * sample variance is exact: var = [W*(1-eq)^2 + T*(0.5-eq)^2 + L*eq^2] / (N-1)
+   * where eq = (W + 0.5*T) / N. This avoids Welford's per-trial division. */
   const double total = static_cast<double>(trials);
-  const double variance = trials > 1 ? (m2 / static_cast<double>(trials - 1)) : 0.0;
+  const double w = static_cast<double>(win_count);
+  const double t = static_cast<double>(tie_count);
+  const double eq = (w + 0.5 * t) / total;
+  const double variance = trials > 1
+      ? (w * (1.0 - eq) * (1.0 - eq) + t * (0.5 - eq) * (0.5 - eq)
+         + static_cast<double>(loss_count) * eq * eq) / (total - 1.0)
+      : 0.0;
   const double std_error = std::sqrt(variance / total);
-  *out = EquityResultNative{
-      static_cast<double>(win_count) / total,
-      static_cast<double>(tie_count) / total,
-      static_cast<double>(loss_count) / total,
-      std_error,
-  };
+  *out = EquityResultNative{w / total, t / total, static_cast<double>(loss_count) / total, std_error};
+}
+
+/*
+ * Computes postflop MC equity for one hero-vs-villain matchup on the CPU.
+ * Validates inputs, builds state, and delegates to compute_equity_core.
+ */
+jint compute_postflop_mc_equity_cpu(
+    const int hero_first,
+    const int hero_second,
+    const int* __restrict__ board_cards,
+    const int board_size,
+    const int villain_first,
+    const int villain_second,
+    const int trials,
+    const uint64_t seed,
+    EquityResultNative* __restrict__ out) {
+  if (!is_valid_card_id(hero_first) || !is_valid_card_id(hero_second) ||
+      !is_valid_card_id(villain_first) || !is_valid_card_id(villain_second)) {
+    return 125;
+  }
+  for (int b = 0; b < board_size; ++b) {
+    if (!is_valid_card_id(board_cards[b])) {
+      return 125;
+    }
+  }
+  const int cards_needed = kBoardCardCount - board_size;
+  if (cards_needed < 0 || cards_needed > kBoardCardCount) {
+    return kStatusInvalidBoardSize;
+  }
+
+  int remaining[kMaxRemainingDeck];
+  int remaining_count = 0;
+  const jint fill_status = fill_remaining_deck_postflop(
+      hero_first, hero_second, villain_first, villain_second,
+      board_cards, board_size, remaining, &remaining_count);
+  if (fill_status != 0) {
+    return fill_status;
+  }
+
+  const EvalState hero_base = build_eval_state(hero_first, hero_second, board_cards, board_size);
+  const EvalState villain_base = build_eval_state(villain_first, villain_second, board_cards, board_size);
+  compute_equity_core(hero_base, villain_base, remaining, remaining_count, cards_needed, trials, seed, out);
   return 0;
 }
 
@@ -552,6 +634,8 @@ int parse_positive_env_int(const char* value) {
   return static_cast<int>(parsed);
 }
 
+/* Determines the number of worker threads: min(hardware_concurrency, entries).
+ * Overridable via sicfun_POSTFLOP_NATIVE_THREADS environment variable. */
 int resolve_worker_count(const int entries) {
   if (entries <= 1) {
     return 1;
@@ -571,6 +655,18 @@ int resolve_worker_count(const int entries) {
 
 }  // namespace
 
+/* ── JNI exports ─────────────────────────────────────────────────────────── */
+
+/*
+ * JNI entry point: HoldemPostflopNativeBindings.computePostflopBatchMonteCarlo()
+ *
+ * CPU-only postflop MC equity for a batch of villain hands. Validates inputs,
+ * then dispatches work across multiple threads using lock-free work-stealing
+ * (atomic next_index with kWorkChunkSize granularity). Each worker thread
+ * processes matchups independently and writes results directly to shared
+ * output buffers (no synchronization needed since each index is owned by
+ * exactly one thread).
+ */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemPostflopNativeBindings_computePostflopBatchMonteCarlo(
     JNIEnv* env,
@@ -632,25 +728,25 @@ Java_sicfun_holdem_HoldemPostflopNativeBindings_computePostflopBatchMonteCarlo(
   if (!is_valid_card_id(hero_first) || !is_valid_card_id(hero_second)) {
     return 125;
   }
-  bool fixed_dead[kDeckSize] = {};
-  if (fixed_dead[hero_first]) {
+  uint64_t fixed_dead = 0;
+  auto fixed_mark_dead = [&](const int card_id) -> bool {
+    const uint64_t bit = uint64_t(1) << card_id;
+    if (fixed_dead & bit) return false;
+    fixed_dead |= bit;
+    return true;
+  };
+  if (!fixed_mark_dead(hero_first) || !fixed_mark_dead(hero_second)) {
     return 127;
   }
-  fixed_dead[hero_first] = true;
-  if (fixed_dead[hero_second]) {
-    return 127;
-  }
-  fixed_dead[hero_second] = true;
 
   for (int b = 0; b < board_size; ++b) {
     const jint card_id = board_buf[static_cast<size_t>(b)];
     if (!is_valid_card_id(card_id)) {
       return 125;
     }
-    if (fixed_dead[card_id]) {
+    if (!fixed_mark_dead(card_id)) {
       return 127;
     }
-    fixed_dead[card_id] = true;
   }
 
   for (jsize i = 0; i < n; ++i) {
@@ -659,10 +755,29 @@ Java_sicfun_holdem_HoldemPostflopNativeBindings_computePostflopBatchMonteCarlo(
     if (!is_valid_card_id(vf) || !is_valid_card_id(vs)) {
       return 125;
     }
-    if (vf == vs || fixed_dead[vf] || fixed_dead[vs]) {
+    if (vf == vs || (fixed_dead & (uint64_t(1) << vf)) || (fixed_dead & (uint64_t(1) << vs))) {
       return 127;
     }
   }
+
+  /* Precompute shared state: hero EvalState, board-only EvalState, and base
+   * remaining deck (hero + board cards removed) are identical for all villains.
+   * Computing them once avoids N redundant build_eval_state + fill_remaining calls. */
+  const EvalState hero_base = build_eval_state(
+      static_cast<int>(hero_first), static_cast<int>(hero_second),
+      board_buf.data(), static_cast<int>(board_size));
+  EvalState board_only;
+  for (int b = 0; b < board_size; ++b) {
+    add_card_to_state(board_only, static_cast<int>(board_buf[static_cast<size_t>(b)]));
+  }
+  int base_remaining[kMaxRemainingDeck];
+  int base_remaining_count = 0;
+  for (int card = 0; card < kDeckSize; ++card) {
+    if (!(fixed_dead & (uint64_t(1) << card))) {
+      base_remaining[base_remaining_count++] = card;
+    }
+  }
+  const int cards_needed = kBoardCardCount - static_cast<int>(board_size);
 
   std::atomic<jsize> next_index(0);
   std::atomic<jint> worker_error(0);
@@ -680,21 +795,32 @@ Java_sicfun_holdem_HoldemPostflopNativeBindings_computePostflopBatchMonteCarlo(
       const jsize end = std::min<jsize>(n, start + kWorkChunkSize);
       for (jsize i = start; i < end; ++i) {
         const size_t idx = static_cast<size_t>(i);
-        EquityResultNative result{};
-        const jint status = compute_postflop_mc_equity_cpu(
-            static_cast<int>(hero_first),
-            static_cast<int>(hero_second),
-            board_buf.data(),
-            static_cast<int>(board_size),
-            static_cast<int>(villain_first_buf[idx]),
-            static_cast<int>(villain_second_buf[idx]),
-            static_cast<int>(trials),
-            static_cast<uint64_t>(seed_buf[idx]),
-            &result);
-        if (status != 0) {
-          worker_error.store(status, std::memory_order_relaxed);
-          return;
+        const int vf = static_cast<int>(villain_first_buf[idx]);
+        const int vs = static_cast<int>(villain_second_buf[idx]);
+
+        /* Build villain state from board-only + 2 villain cards (saves
+         * board_size redundant add_card_to_state calls per villain). */
+        EvalState villain_base = board_only;
+        add_card_to_state(villain_base, vf);
+        add_card_to_state(villain_base, vs);
+
+        /* Build per-villain remaining deck by filtering base_remaining
+         * (~48 cards) instead of iterating all 52 + dead-mask checks. */
+        int remaining[kMaxRemainingDeck];
+        int remaining_count = 0;
+        const uint64_t villain_bits = (uint64_t(1) << vf) | (uint64_t(1) << vs);
+        for (int r = 0; r < base_remaining_count; ++r) {
+          const int card = base_remaining[r];
+          if (!(villain_bits & (uint64_t(1) << card))) {
+            remaining[remaining_count++] = card;
+          }
         }
+
+        EquityResultNative result{};
+        compute_equity_core(
+            hero_base, villain_base, remaining, remaining_count,
+            cards_needed, static_cast<int>(trials),
+            static_cast<uint64_t>(seed_buf[idx]), &result);
         win_buf[idx] = result.win;
         tie_buf[idx] = result.tie;
         loss_buf[idx] = result.loss;
@@ -728,6 +854,7 @@ Java_sicfun_holdem_HoldemPostflopNativeBindings_computePostflopBatchMonteCarlo(
   return 0;
 }
 
+/* Returns 0 (unknown) or 1 (CPU) depending on the last successful computation. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemPostflopNativeBindings_queryNativeEngine(
     JNIEnv*,

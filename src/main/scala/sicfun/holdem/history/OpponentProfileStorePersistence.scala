@@ -5,6 +5,17 @@ import java.util.Locale
 import java.util.Properties
 import scala.collection.mutable
 
+/** Persistence facade for [[OpponentProfileStore]] across JSON and PostgreSQL targets.
+  *
+  * Dispatches load/save operations to the appropriate backend based on the
+  * [[OpponentMemoryTarget]] type:
+  *   - [[OpponentMemoryTarget.Json]]: reads/writes a single JSON file via OpponentProfileStore.load/save
+  *   - [[OpponentMemoryTarget.Postgres]]: uses JDBC to read/write PostgreSQL tables
+  *
+  * The PostgreSQL backend manages 5 tables (profiles, players, aliases, player collapses,
+  * profile collapses) with automatic schema creation on first use. It uses batch inserts
+  * (512 rows per batch) for performance and validates the schema state before operations.
+  */
 object OpponentProfileStorePersistence:
   private[history] val PostgresProfilesTable = "opponent_profiles"
   private[history] val PostgresPlayersTable = "opponent_players"
@@ -63,16 +74,19 @@ object OpponentProfileStorePersistence:
     else
       PostgresStoreState.Partial(missingTables, missingColumns)
 
+  /** Load an OpponentProfileStore from the specified target (JSON file or PostgreSQL). */
   def load(target: OpponentMemoryTarget): OpponentProfileStore =
     target match
       case OpponentMemoryTarget.Json(path) => OpponentProfileStore.load(path)
       case config: OpponentMemoryTarget.Postgres => PostgresOpponentProfileStore.load(config)
 
+  /** Save an OpponentProfileStore to the specified target (JSON file or PostgreSQL). */
   def save(target: OpponentMemoryTarget, store: OpponentProfileStore): Unit =
     target match
       case OpponentMemoryTarget.Json(path) => OpponentProfileStore.save(path, store)
       case config: OpponentMemoryTarget.Postgres => PostgresOpponentProfileStore.save(config, store)
 
+/** PostgreSQL-backed store implementation used by [[OpponentProfileStorePersistence]]. */
 private object PostgresOpponentProfileStore:
   private val InsertBatchSize = 512
   private val ProfilesTable = OpponentProfileStorePersistence.PostgresProfilesTable

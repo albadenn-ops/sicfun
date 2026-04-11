@@ -1,8 +1,34 @@
 package sicfun.holdem.types
 
+/**
+  * Immutable event record for event-sourced hand history reconstruction.
+  *
+  * This file defines [[PokerEvent]], the atomic unit of hand history in the sicfun system.
+  * Each event captures a single player action together with the complete decision-point
+  * context (street, board, pot, position, stack, etc.), making it self-contained enough
+  * to reconstruct the full game state without external lookups.
+  *
+  * Events are designed for an event-sourcing architecture:
+  *   - A complete hand history is an ordered sequence of `PokerEvent` instances sharing
+  *     the same `handId`, sorted by `sequenceInHand`.
+  *   - [[HandEngine]] consumes these events to build and maintain [[HandState]] snapshots.
+  *   - Events can arrive out of order and be replayed idempotently.
+  *
+  * Construction-time validation enforces domain invariants:
+  *   - Board size must match the street's expected card count.
+  *   - Check requires `toCall == 0`; Call requires `toCall > 0`.
+  *   - Raise amount must be positive.
+  *   - All monetary and temporal fields must be non-negative.
+  *
+  * The `SchemaVersion` constant in the companion object is used by serialization layers
+  * (snapshot I/O, TSV export) to detect and handle schema evolution.
+  */
+
 /** Companion object for [[PokerEvent]] containing the schema version constant. */
 object PokerEvent:
-  /** Current event schema version used for serialization compatibility checks. */
+  /** Current event schema version used for serialization compatibility checks.
+    * Bump this when adding/removing/renaming fields to trigger migration logic in I/O code.
+    */
   val SchemaVersion: String = "poker-event-v1"
 
 /** An immutable record of a single player action with full decision-point context.

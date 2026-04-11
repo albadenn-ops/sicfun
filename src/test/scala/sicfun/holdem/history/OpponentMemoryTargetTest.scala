@@ -4,6 +4,22 @@ import munit.FunSuite
 
 import java.nio.file.Paths
 
+/** Tests for [[OpponentMemoryTarget.parse]], which routes a raw store path
+  * string to either a [[OpponentMemoryTarget.Json]] file target or a
+  * [[OpponentMemoryTarget.Postgres]] JDBC target.
+  *
+  * Coverage:
+  *   - `postgres://` URLs are normalized to `jdbc:postgresql://` with
+  *     user, password, and schema trimmed/lowercased
+  *   - `postgresql://` URLs are kept intact with `jdbc:` prefix added
+  *   - Mixed-case URL schemes (`PoStGrEs://`, `JDBC:PostgreSQL://`) are
+  *     accepted and normalized
+  *   - Non-PostgreSQL file paths fall back to [[OpponentMemoryTarget.Json]]
+  *   - Unsupported URL-like targets (e.g. `mysql://`) are rejected with
+  *     a descriptive error message
+  *   - Invalid PostgreSQL schema identifiers (containing hyphens) are
+  *     rejected
+  */
 class OpponentMemoryTargetTest extends FunSuite:
   test("parse normalizes postgres urls to PostgreSQL JDBC form") {
     val parsed = OpponentMemoryTarget.parse(

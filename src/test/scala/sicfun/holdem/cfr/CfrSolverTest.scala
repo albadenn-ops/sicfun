@@ -3,7 +3,25 @@ import sicfun.holdem.*
 
 import munit.FunSuite
 
+/** Tests for the game-agnostic CFR solver using Kuhn poker as the reference game.
+  *
+  * Kuhn poker is the simplest non-trivial poker game with a known Nash equilibrium,
+  * making it the standard verification target for CFR implementations. The game uses
+  * three cards (J, Q, K), one dealt to each of two players, with a single betting
+  * round. The known equilibrium has:
+  *  - Player 0 bluffs with J at ~1/3 frequency
+  *  - Player 0 mostly checks with Q (it's a "trap" hand with no clear value)
+  *  - Player 0 bets with K at high frequency (value bet)
+  *  - Game value for player 0 is approximately -1/18 (~-0.056)
+  *
+  * This test verifies that [[CfrSolver.solve]] converges to these known equilibrium
+  * properties with CFR+ and linear averaging enabled.
+  */
 class CfrSolverTest extends FunSuite:
+  // --- Kuhn poker game model ---
+  // Three cards ranked J < Q < K, dealt one per player. One round of betting:
+  // check/bet, then opponent responds with check/bet or call/fold.
+
   private enum KuhnCard:
     case J
     case Q
@@ -27,6 +45,13 @@ class CfrSolverTest extends FunSuite:
       p1: Option[KuhnCard]
   )
 
+  /** Kuhn poker game implementation for the [[CfrSolver.ExtensiveFormGame]] interface.
+    *
+    * The game tree starts at a chance node dealing all 6 permutations of (J, Q, K)
+    * to two players with equal probability. Player 0 acts first (check/bet),
+    * then player 1 responds. Terminal payoffs are +/- 1 for check-check or fold
+    * outcomes, +/- 2 for bet-call showdowns. Payoffs are from player 0's perspective.
+    */
   private object KuhnGame extends CfrSolver.ExtensiveFormGame[KuhnState, KuhnAction]:
     private val cards = Vector(KuhnCard.J, KuhnCard.Q, KuhnCard.K)
     private val dealOutcomes =
@@ -118,6 +143,8 @@ class CfrSolverTest extends FunSuite:
     private def isTerminal(history: String): Boolean =
       history == "cc" || history == "bc" || history == "bf" || history == "cbc" || history == "cbf"
 
+  // Verify that CFR+ with linear averaging converges to the known Kuhn poker
+  // Nash equilibrium mixed strategy within reasonable tolerance after 40k iterations.
   test("CFR converges to Kuhn-like mixed strategy profile") {
     val result = CfrSolver.solve(
       game = KuhnGame,
@@ -143,6 +170,7 @@ class CfrSolverTest extends FunSuite:
     )
   }
 
+  /** Extracts the average-strategy probability for a specific action at a specific infoset. */
   private def actionProbability(
       result: CfrSolver.TrainingResult[KuhnAction],
       key: String,

@@ -2,6 +2,35 @@ package sicfun.holdem.io
 import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 
+/**
+ * Action dataset domain model and builder for the sicfun poker analytics system.
+ *
+ * This file defines the data structures that represent a labeled training dataset
+ * for poker action classification. Each [[ActionExample]] pairs an observed poker
+ * decision point (encoded as a fixed-dimension feature vector) with a categorical
+ * label (Fold/Check/Call/Raise). The [[ActionDataset]] aggregates examples with
+ * [[DatasetProvenance]] metadata for reproducibility and audit.
+ *
+ * Key design decisions:
+ *   - Features are pre-extracted at dataset build time (not lazily) to ensure
+ *     consistency between training and evaluation.
+ *   - The [[DatasetBuilder]] enforces temporal ordering within each hand to catch
+ *     data corruption (duplicate sequences, timestamp regressions) early.
+ *   - Output is deterministic regardless of input ordering: events are sorted by
+ *     (handId, sequenceInHand, timestamp, playerId) before feature extraction.
+ *   - The category-to-index mapping is explicit in provenance, avoiding silent
+ *     label mismatches when models are trained on different dataset versions.
+ */
+
+/** A single labeled training example extracted from a poker event.
+ *
+ * @param handId                unique identifier of the poker hand
+ * @param sequenceInHand        ordinal position of this action within the hand
+ * @param playerId              identifier of the acting player
+ * @param occurredAtEpochMillis wall-clock timestamp of the original action
+ * @param features              pre-extracted normalized feature vector (dimension matches [[FeatureExtractor.dimension]])
+ * @param label                 integer class label corresponding to the action category via [[DatasetProvenance.labelMapping]]
+ */
 final case class ActionExample(
     handId: String,
     sequenceInHand: Long,
@@ -11,6 +40,16 @@ final case class ActionExample(
     label: Int
 )
 
+/** Provenance metadata recording how a dataset was generated, enabling reproducibility.
+ *
+ * @param schemaVersion          version of the [[PokerEvent]] schema used during generation
+ * @param source                 human-readable origin description (e.g. filename, pipeline name)
+ * @param generatedAtEpochMillis wall-clock time when the dataset was built
+ * @param eventCount             total number of examples in the dataset
+ * @param uniqueHandCount        number of distinct poker hands represented
+ * @param featureNames           ordered names of feature dimensions (matches [[FeatureExtractor.featureNames]])
+ * @param labelMapping           mapping from action category to integer label index
+ */
 final case class DatasetProvenance(
     schemaVersion: String,
     source: String,
@@ -21,6 +60,14 @@ final case class DatasetProvenance(
     labelMapping: Map[PokerAction.Category, Int]
 )
 
+/** Descriptive statistics for a single feature dimension across all examples.
+ *
+ * @param name feature name (from [[DatasetProvenance.featureNames]])
+ * @param mean arithmetic mean of this feature's values
+ * @param std  sample standard deviation (Bessel-corrected, n-1 denominator)
+ * @param min  minimum observed value
+ * @param max  maximum observed value
+ */
 final case class FeatureStatistics(
     name: String,
     mean: Double,
@@ -29,16 +76,34 @@ final case class FeatureStatistics(
     max: Double
 )
 
+/** Aggregate statistics for an entire dataset, including class balance and per-feature summaries.
+ *
+ * @param totalExamples     total number of labeled examples
+ * @param classDistribution count of examples per action category (Fold, Check, Call, Raise)
+ * @param featureStatistics per-feature descriptive statistics (one entry per dimension)
+ */
 final case class DatasetStatistics(
     totalExamples: Int,
     classDistribution: Map[PokerAction.Category, Int],
     featureStatistics: Vector[FeatureStatistics]
 )
 
+/** A complete labeled dataset for training poker action classification models.
+ *
+ * Pairs a vector of [[ActionExample]] instances with [[DatasetProvenance]] metadata.
+ * Provides convenience methods for extracting the training matrix and computing
+ * descriptive statistics.
+ *
+ * @param examples   ordered vector of labeled training examples
+ * @param provenance metadata describing how this dataset was generated
+ */
 final case class ActionDataset(
     examples: Vector[ActionExample],
     provenance: DatasetProvenance
 ):
+  /** Returns the (features, label) pairs suitable for direct consumption by
+   * [[sicfun.core.MultinomialLogistic.train]].
+   */
   def trainingMatrix: Vector[(Vector[Double], Int)] =
     examples.map(example => (example.features, example.label))
 
@@ -48,16 +113,19 @@ final case class ActionDataset(
     val numFeatures = provenance.featureNames.length
     val reverseLabel = provenance.labelMapping.map { case (cat, idx) => idx -> cat }
 
+    // Count examples per action category by reversing the label mapping
     val classCounts = scala.collection.mutable.Map.empty[PokerAction.Category, Int]
     examples.foreach { ex =>
       val cat = reverseLabel(ex.label)
       classCounts(cat) = classCounts.getOrElse(cat, 0) + 1
     }
 
+    // Compute per-feature descriptive statistics (mean, std, min, max)
     val featureStats = (0 until numFeatures).map { f =>
       val values = examples.map(_.features(f))
       val n = values.length
       val mean = values.sum / n
+      // Bessel-corrected variance (n-1 denominator) for sample standard deviation
       val variance = if n > 1 then values.map(v => math.pow(v - mean, 2)).sum / (n - 1) else 0.0
       FeatureStatistics(
         name = provenance.featureNames(f),
@@ -74,7 +142,30 @@ final case class ActionDataset(
       featureStatistics = featureStats
     )
 
+/** Factory for constructing [[ActionDataset]] instances from raw [[PokerEvent]] sequences.
+ *
+ * The builder validates input integrity (non-empty events, unique sequences per hand,
+ * monotonic timestamps within each hand), extracts features via [[FeatureExtractor]],
+ * and produces a deterministic output regardless of input ordering.
+ */
 object DatasetBuilder:
+  /** Builds an [[ActionDataset]] from a sequence of poker events.
+   *
+   * The method performs the following steps:
+   *   1. Validates all preconditions (non-empty input, valid source/schema, complete category coverage)
+   *   2. Validates temporal ordering within each hand (no duplicate sequences, no timestamp regressions)
+   *   3. Sorts events deterministically by (handId, sequenceInHand, timestamp, playerId)
+   *   4. Extracts features from each event via [[FeatureExtractor.extract]]
+   *   5. Maps action categories to integer labels via the provided categoryIndex
+   *
+   * @param events                  raw poker events to convert into training examples
+   * @param source                  provenance description (e.g. "hand-history-file-2026.tsv")
+   * @param generatedAtEpochMillis  generation timestamp (defaults to current time)
+   * @param schemaVersion           event schema version (defaults to [[PokerEvent.SchemaVersion]])
+   * @param categoryIndex           mapping from action category to integer label index
+   * @return a fully populated [[ActionDataset]] with provenance metadata
+   * @throws IllegalArgumentException if any validation check fails
+   */
   def build(
       events: Seq[PokerEvent],
       source: String,
@@ -126,11 +217,21 @@ object DatasetBuilder:
     )
     ActionDataset(examples, provenance)
 
+  /** Sorts events into a deterministic canonical order for reproducible dataset generation.
+   * The sort key is (handId, sequenceInHand, timestamp, playerId), ensuring that the same
+   * set of events always produces identical output regardless of input ordering.
+   */
   private def sortEvents(events: Seq[PokerEvent]): Seq[PokerEvent] =
     events.sortBy(event =>
       (event.handId, event.sequenceInHand, event.occurredAtEpochMillis, event.playerId)
     )
 
+  /** Validates temporal integrity within each hand:
+   *   - No duplicate sequenceInHand values within the same hand
+   *   - Timestamps are monotonically non-decreasing when ordered by sequence
+   *
+   * These checks detect data corruption before it silently pollutes training data.
+   */
   private def validateTemporalOrder(events: Seq[PokerEvent]): Unit =
     events.groupBy(_.handId).foreach { case (handId, handEvents) =>
       val bySequence = handEvents.sortBy(_.sequenceInHand)

@@ -7,6 +7,25 @@ import java.sql.Connection
 import java.util.UUID
 import scala.collection.mutable
 
+/** Integration tests for the PostgreSQL backend of [[OpponentProfileStorePersistence]].
+  *
+  * Uses an embedded PostgreSQL server (via `io.zonky.test.db`) to exercise
+  * the full JDBC persistence path without requiring an external database.
+  * Each test gets a fresh randomly-named schema to avoid cross-contamination.
+  *
+  * Coverage:
+  *   - '''Roundtrip''': save a normalized store (with profiles, players,
+  *     aliases, player collapses, and profile collapses), reload it, and
+  *     assert equality; verifies all 5 required tables are created
+  *   - '''Empty schema bootstrap''': loading from a non-existent schema
+  *     returns an empty store without creating the schema
+  *   - '''Partial schema detection (missing tables)''': creating only one
+  *     of the 5 required tables and attempting to load produces a clear
+  *     `IllegalStateException` naming the missing tables
+  *   - '''Partial schema detection (missing columns)''': creating all tables
+  *     but dropping a required column (e.g. `payload`) produces a clear
+  *     error naming the missing column
+  */
 class OpponentProfileStorePostgresIntegrationTest extends FunSuite:
   private var postgres: Option[EmbeddedPostgres] = None
   private val schemasToDrop = mutable.ArrayBuffer.empty[String]

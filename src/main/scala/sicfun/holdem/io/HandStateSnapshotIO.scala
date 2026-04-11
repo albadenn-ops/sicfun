@@ -8,7 +8,26 @@ import java.nio.file.{Files, Path, Paths}
 import java.util.Properties
 import scala.jdk.CollectionConverters.*
 
-/** Persist and restore a HandState to/from a directory.
+/**
+ * Directory-based snapshot persistence for poker hand state in the sicfun system.
+ *
+ * This object serializes and deserializes a [[HandState]] (the complete in-progress
+ * state of a single poker hand) to a two-file directory layout. It is used by the
+ * real-time advisor session to checkpoint hand state for crash recovery and by the
+ * signal audit system for offline reconstruction of past decisions.
+ *
+ * Key design decisions:
+ *   - '''Two-file layout''': Metadata (handId, timestamps, event count) is stored in
+ *     a Java Properties file for quick inspection without parsing the full event log.
+ *     Events are stored in a TSV file for human readability and easy grep-ability.
+ *   - '''Structural validation on load''': The loader checks event count consistency,
+ *     sequence uniqueness, sort order, and timestamp agreement between metadata and
+ *     events. This catches silent corruption from manual edits or partial writes.
+ *   - '''No handId in the events TSV''': Since all events in a snapshot belong to the
+ *     same hand, the handId is stored once in metadata and injected during deserialization,
+ *     reducing redundancy and file size.
+ *
+ * Persist and restore a HandState to/from a directory.
   *
   * Layout:
   *   state.properties  — handId, lastUpdatedAt, eventCount
@@ -91,6 +110,7 @@ object HandStateSnapshotIO:
 
   // ---- metadata ----------------------------------------------------------------
 
+  /** Writes the hand state metadata (handId, lastUpdatedAt, eventCount) to a Java Properties file. */
   private def writeMetadata(path: Path, state: HandState): Unit =
     val props = Properties()
     props.setProperty("handId", state.handId)
@@ -100,6 +120,7 @@ object HandStateSnapshotIO:
     try props.store(writer, "HandState snapshot")
     finally writer.close()
 
+  /** Reads and returns the Properties from the metadata file. */
   private def readMetadata(path: Path): Properties =
     require(Files.exists(path), s"missing state metadata: $path")
     val props = Properties()
@@ -108,12 +129,14 @@ object HandStateSnapshotIO:
     finally reader.close()
     props
 
+  /** Extracts a required non-empty property value, throwing if missing or blank. */
   private def readRequired(props: Properties, key: String): String =
     Option(props.getProperty(key)).map(_.trim).filter(_.nonEmpty)
       .getOrElse(throw new IllegalArgumentException(s"missing required metadata key: $key"))
 
   // ---- events ------------------------------------------------------------------
 
+  /** Writes all events to a TSV file with a header row. */
   private def writeEvents(path: Path, state: HandState): Unit =
     val writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)
     try
@@ -125,6 +148,7 @@ object HandStateSnapshotIO:
       }
     finally writer.close()
 
+  /** Reads events from the TSV file, injecting the handId from metadata into each event. */
   private def readEvents(path: Path, handId: String): Vector[PokerEvent] =
     require(Files.exists(path), s"missing events file: $path")
     val lines = Files.readAllLines(path, StandardCharsets.UTF_8).asScala.toVector
@@ -140,6 +164,7 @@ object HandStateSnapshotIO:
 
   // ---- event serialization -----------------------------------------------------
 
+  /** Serializes a single event to a tab-delimited row (without the handId column). */
   private def serializeEvent(e: PokerEvent): String =
     Vector(
       e.sequenceInHand.toString,
@@ -156,6 +181,7 @@ object HandStateSnapshotIO:
       serializeBetHistory(e.betHistory)
     ).mkString("\t")
 
+  /** Deserializes a TSV row into a PokerEvent, expecting 12 columns (handId is provided externally). */
   private def deserializeEvent(handId: String, path: Path, rowNum: Int, line: String): PokerEvent =
     val cols = line.split("\t", -1).toVector
     require(cols.length == 12, s"$path:$rowNum expected 12 columns, got ${cols.length}")

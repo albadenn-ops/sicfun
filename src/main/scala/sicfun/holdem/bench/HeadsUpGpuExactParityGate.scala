@@ -37,6 +37,12 @@ object HeadsUpGpuExactParityGate:
 
   private val AllowedOptionKeys = Set("maxMatchups", "seed", "parallelism", "nativePath")
 
+  /** Entry point. Builds a small canonical slice on both the CPU and CUDA native engines,
+    * then asserts that every win/tie/loss/equity value is bit-for-bit identical. This is
+    * a strict parity gate: any floating-point difference causes a FAIL.
+    *
+    * The gate also verifies via telemetry that CUDA was actually used (not CPU fallback).
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     require(config.maxMatchups > 0L, "maxMatchups must be positive")
@@ -101,6 +107,13 @@ object HeadsUpGpuExactParityGate:
     println(s"gate=FAIL reason=$reason$suffix")
     throw new IllegalStateException(s"gate failed: reason=$reason$suffix")
 
+  /** Builds a canonical table slice using the specified native engine ("cpu" or "cuda").
+    *
+    * For CUDA, sets very small block size (32) and chunk size (1) to keep the GPU dispatch
+    * fast enough to avoid WDDM TDR (Timeout Detection and Recovery) on display-attached
+    * GPUs like the GTX 960M. These tiny parameters would be terrible for throughput but
+    * are safe for a correctness-only gate.
+    */
   private def buildSlice(config: Config, engine: String): HeadsUpEquityCanonicalTable =
     sys.props.update(NativeEngineProperty, engine)
     if engine == "cuda" then

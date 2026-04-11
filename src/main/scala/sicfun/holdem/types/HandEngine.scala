@@ -1,10 +1,36 @@
 package sicfun.holdem.types
 
+/**
+  * Event-sourced hand state management for Texas Hold'em.
+  *
+  * This file implements the core event-sourcing infrastructure for tracking in-progress
+  * poker hands. It contains two main types:
+  *
+  *   - [[HandState]]: An immutable snapshot of all events applied to a hand so far,
+  *     with O(1) idempotency checking via an `appliedSequences` set.
+  *
+  *   - [[HandEngine]]: A stateless object that provides pure functions for creating,
+  *     updating, and querying hand states. All mutations return new `HandState` instances.
+  *
+  * The design handles real-world event delivery challenges:
+  *   - '''Out-of-order delivery''': Events may arrive in any sequence order. The engine
+  *     inserts them into the correct sorted position so the event vector is always
+  *     ordered by `sequenceInHand`.
+  *   - '''Duplicate delivery''': Exact re-delivery of an event is silently absorbed
+  *     (idempotent no-op). Conflicting payloads for the same sequence number are
+  *     rejected with an error, catching data corruption early.
+  *   - '''Player-level views''': [[HandEngine.toGameState]] derives a [[GameState]]
+  *     from a specific player's most recent event, enabling per-player decision analysis.
+  *
+  * This module is used by the live hand simulator, playing hall, and snapshot I/O layer.
+  */
+
 /** Immutable snapshot of an in-progress hand's event log.
   *
   * Events are maintained in sorted order by `sequenceInHand`, regardless of the
   * order in which they were applied. The `appliedSequences` set enables O(1)
-  * idempotency checks so that duplicate deliveries are silently absorbed.
+  * idempotency checks: exact duplicate deliveries are absorbed; conflicting
+  * duplicates are rejected as errors.
   *
   * @param handId           unique hand identifier
   * @param events           events applied so far, sorted ascending by sequenceInHand
@@ -43,7 +69,7 @@ final case class HandState(
   *  - '''Idempotency''': re-applying an identical event is a no-op; re-applying the
   *    same `sequenceInHand` with a different payload raises an error.
   *  - '''Sorted event sequence''': the internal event vector is always kept in
-  *    ascending `sequenceInHand` order via binary-search insertion.
+  *    ascending `sequenceInHand` order via order-preserving insertion.
   *  - '''Player-level views''': [[toGameState]] derives a [[GameState]] snapshot
   *    from the player's most recent event.
   */
@@ -97,7 +123,11 @@ object HandEngine:
         lastUpdatedAt = updatedAt
       )
 
-  /** Apply a sequence of events. Duplicates are silently skipped. */
+  /** Apply a sequence of events.
+    *
+    * Exact duplicates are skipped (idempotent no-op). If a duplicate sequence carries
+    * a different payload, [[applyEvent]] throws and the fold stops with that error.
+    */
   def applyEvents(state: HandState, events: Seq[PokerEvent]): HandState =
     events.foldLeft(state)(applyEvent)
 

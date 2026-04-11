@@ -32,11 +32,16 @@ Quick health check:
 powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1 -Quick
 ```
 
+- Covers the core engine/runtime smoke path.
+- Does not include the hand-history review end-to-end proof.
+
 Full validation sweep:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1
 ```
+
+- Includes the hand-history review end-to-end proof: playing-hall export -> import -> analysis service -> async HTTP job completion.
 
 ## 2. Main Workload: Playing Hall
 
@@ -88,11 +93,11 @@ powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 `
 
 ## 2A. Benchmark Control Notes
 
-- As of March 10, 2026, the default long-run heads-up range autotune cache on this machine is `data/headsup-range-autotune.properties` with `block=64`, `chunkHeroes=2048`, `memoryPath=readonly`.
+- Autotune cache files under `data/` are local runtime outputs, not repository source. Generate or refresh them on the machine you are benchmarking.
 - Use `5000` or `10000` hands for exact-mode throughput comparisons. `1000`-hand runs were highly variable and often understated the long-run throughput of the retuned range kernel.
 - Current long-run reference on this machine for `-Workers 1 -TableCountPerWorker 1 -HeroStyle adaptive -GtoMode exact -VillainStyle gto -BunchingTrials 80 -EquityTrials 700` is about `127.99-130.59 hands/s` at `5000` hands and `129.27 hands/s` at `10000` hands.
 - Exact-GTO cache hit rate did not materially change in these longer runs (`~18.7%` to `19.1%`), so the improvement came from the native range path, not higher exact-solve cache reuse.
-- If you need short-run smoke/control comparability, override the range autotune cache with `data/headsup-range-autotune.shortrun-prev.properties`.
+- If you need short-run smoke/control comparability, point `sicfun.gpu.range.autotune.cachePath` at a separately tuned short-run cache file instead of reusing a long-run profile.
 
 Short-run cache override example:
 
@@ -106,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 `
   -LearnEveryHands 0 `
   -SaveTrainingTsv false `
   -SaveDdreTrainingTsv false `
-  -JvmOption "-Dsicfun.gpu.range.autotune.cachePath=data/headsup-range-autotune.shortrun-prev.properties" `
+  -JvmOption "-Dsicfun.gpu.range.autotune.cachePath=data/headsup-range-autotune-short.properties" `
   -OutDir data/bench-hall-short-control
 ```
 
@@ -171,6 +176,75 @@ CUDA native build:
 powershell -ExecutionPolicy Bypass -File src/main/native/build-windows-cuda11.ps1
 ```
 
+GPU build prerequisite checker:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1
+```
+
+GPU build prerequisite auto-installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1 -InstallMissing
+```
+
+- Checks the machine-wide prerequisites the CUDA DLL build actually needs:
+  - Windows x64 host process
+  - JDK with JNI headers
+  - CUDA toolkit with `nvcc.exe`
+  - Visual Studio Build Tools with `vcvars64.bat`
+  - resolvable CUDA architecture via `-Arch`, `-Architectures`, env overrides, or `nvidia-smi`
+- Auto-installs supported missing prerequisites with `winget`:
+  - `Microsoft.OpenJDK.21`
+  - `Nvidia.CUDA` version `11.8`
+  - `Microsoft.VisualStudio.2022.BuildTools` with the C++ workload
+- Auto-install requires an elevated PowerShell session because these are machine-wide installs.
+
+Global GPU/native tuning pass (recommended default):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run-global-tuning.ps1 --targets=runtime
+```
+
+- Automatically builds missing runtime CUDA DLLs under `src/main/native/build/` before tuning:
+  - `sicfun_gpu_kernel.dll`
+  - `sicfun_postflop_cuda.dll`
+- Auto-build uses `src/main/native/build-windows-cuda11.ps1`, which now:
+  - discovers JDK headers from `-JavaHome`, `SICFUN_GPU_BUILD_JAVA_HOME`, `JAVA_HOME`, or `javac.exe` on `PATH`
+  - discovers CUDA from `-CudaRoot`, `SICFUN_GPU_BUILD_CUDA_ROOT`, `CUDA_PATH`, or `nvcc.exe` on `PATH`
+  - discovers `vcvars64.bat` from `-VcVars`, `SICFUN_GPU_BUILD_VCVARS`, or Visual Studio `vswhere`
+  - auto-detects the local GPU compute capability from `nvidia-smi` on `PATH` or the default `NVSMI` install path unless you override `-Arch` or `-Architectures`
+  - clamps unsupported auto-detected newer architectures to the highest CUDA 11 target and emits a warning
+- Global tuning auto-build overrides:
+  - `-Dsicfun.repo.root=<repo-root>` when you launch the tool from a subdirectory instead of the checkout root
+  - `-Dsicfun.gpu.build.javaHome=<jdk>`
+  - `-Dsicfun.gpu.build.cudaRoot=<cuda-root>`
+  - `-Dsicfun.gpu.build.vcvars=<path-to-vcvars64.bat>`
+  - `-Dsicfun.gpu.build.arch=<sm_xy>`
+  - `-Dsicfun.gpu.build.architectures=<csv>`
+- Auto-build currently supports Windows x64 hosts only because the repo build script resolves `vcvars64.bat` and produces x64 DLLs.
+- To let the global tuning path auto-install missing machine prerequisites before building native DLLs, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run-global-tuning.ps1 -InstallMissingPrerequisites --targets=runtime
+```
+
+- Reuses existing persisted cache entries when the cache still matches the current hardware and native library identity.
+- Re-runs only the stale or missing runtime tuners by default.
+- Use `--targets=all` to include the research-only canonical exact tuner harnesses.
+- Use `--force=true` to ignore caches and retune every selected target.
+
+Windows portability proof for the operator path:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/prove-global-gpu-tuning-portability.ps1
+```
+
+- Runs from a temp working directory outside the repo root.
+- Forces `sicfun_gpu_kernel.dll` and `sicfun_postflop_cuda.dll` to be missing first.
+- Verifies the global tuning operator entrypoint auto-builds the native DLLs, then reaches backend/range/postflop tuning code instead of stopping at the missing-DLL gate.
+- Requires the same Windows x64 + JDK + CUDA + Visual Studio prerequisites expected by `src/main/native/build-windows-cuda11.ps1`.
+
 Heads-up range CUDA auto-tuner:
 
 ```powershell
@@ -203,12 +277,58 @@ Start the packaged app:
 powershell -ExecutionPolicy Bypass -File dist/hand-history-web/bin/run-hand-history-web.ps1
 ```
 
+Install the packaged app as a Windows service with NSSM:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File dist/hand-history-web/bin/install-hand-history-web-service.ps1 `
+  -NssmPath C:\tools\nssm\nssm.exe
+```
+
+Start the installed service and wait for readiness:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File dist/hand-history-web/bin/start-hand-history-web-service.ps1
+```
+
+Drain and stop the service cleanly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File dist/hand-history-web/bin/drain-stop-hand-history-web-service.ps1
+```
+
+Uninstall the service:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File dist/hand-history-web/bin/uninstall-hand-history-web-service.ps1
+```
+
 Operator notes:
 - The packaged release serves the upload UI from `dist/hand-history-web/static`.
+- The packaged release writes a config template to `dist/hand-history-web/conf/hand-history-web.env`. Keep long-lived runtime settings there instead of baking them into a service command line.
+- `bin/run-hand-history-web.ps1` now loads `conf/hand-history-web.env` by default. Override with `-ConfigFile <path>` or `CONFIG_FILE=<path>` when you need a different config file.
 - The source and packaged launchers bind to `127.0.0.1` by default. Pass `-Host 0.0.0.0` only if you intentionally want network exposure.
+- Optional built-in HTTP Basic auth now protects `/`, `/api/analyze-hand-history`, and `/api/analyze-hand-history/jobs/{id}` while leaving `/api/health` and `/api/ready` open for service managers and probes. Set `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD` in `conf/hand-history-web.env` or via process env. Prefer config/env over CLI flags so credentials do not appear in the Java command line.
+- Platform-user auth is available as a separate mode. Set `USER_STORE_PATH` to enable persistent local users, profile defaults, browser sessions, and per-user job ownership. Leave `BASIC_AUTH_*` unset when using platform-user auth; the modes are mutually exclusive.
+- Google OIDC can be enabled on top of platform-user auth with `GOOGLE_OIDC_CLIENT_ID`, `GOOGLE_OIDC_CLIENT_SECRET`, and `GOOGLE_OIDC_REDIRECT_URI`. For HTTPS deployments, also set `USER_AUTH_COOKIE_SECURE=true`.
+- In-process rate limiting now caps the expensive API routes. Use `RATE_LIMIT_SUBMITS_PER_MINUTE` and `RATE_LIMIT_STATUS_PER_MINUTE` to tune submit and job-status polling caps independently; set either to `0` to disable that limiter.
+- By default the limiter buckets by the remote socket address. If you deploy behind a trusted reverse proxy, set `RATE_LIMIT_CLIENT_IP_HEADER` to a proxy-populated single-value client-IP header such as `X-Real-IP`. Same-host loopback proxies are trusted automatically; for proxies on other hosts, also set `RATE_LIMIT_TRUSTED_PROXY_IPS` to a comma-separated list of exact proxy peer IP literals. Do not enable the header knob on a directly exposed app because clients can spoof those headers.
+- The packaged launcher now requires `java` on `PATH`, checks `java -version` before startup, accepts Java 17+, and recommends JDK 21 for operator parity.
+- The packaged service helper scripts assume a Windows host and use NSSM as the service wrapper. Service install/uninstall requires an elevated PowerShell session.
+- The service install script configures stdout/stderr capture under `dist/hand-history-web/logs/` and enables basic Windows service restart-on-failure recovery.
 - Uploads are accepted quickly and processed as background jobs; the page polls `/api/analyze-hand-history/jobs/{id}` until the review finishes.
-- `scripts/release-hand-history-web.ps1` validates the required static assets and smoke-checks `/`, `/api/health`, async `/api/analyze-hand-history`, and oversized-upload rejection before declaring the build ready.
-- The web server supports `HOST`, `PORT`, `STATIC_DIR`, `MODEL_DIR`, and `MAX_UPLOAD_BYTES` environment-variable overrides in addition to CLI flags.
+- Analysis admission is now bounded. Use `-MaxConcurrentJobs`, `-MaxQueuedJobs`, and `-ShutdownGraceMs` or the matching `MAX_CONCURRENT_JOBS`, `MAX_QUEUED_JOBS`, and `SHUTDOWN_GRACE_MS` environment variables to control saturation and shutdown drain behavior.
+- Use `-AnalysisTimeoutMs` or `ANALYSIS_TIMEOUT_MS` to cap a single analysis job. `0` disables the timeout, but the deployment-safe default is a bounded run so one stuck review cannot pin the worker pool indefinitely.
+- `SHUTDOWN_GRACE_MS` is tracked in milliseconds, but the underlying HTTP listener drains in whole-second steps. Sub-second values round up when the listener is stopping.
+- `/api/health` is the liveness/metrics endpoint. It stays `200` while the process is up and now reports readiness summary, auth mode, model mode, upload limit, analysis timeout, submit/status rate-limit settings, the trusted client-IP source used for rate limiting, queue limits, queued jobs, running jobs, timed-out workers still unwinding, and retained terminal-job count in addition to `ok=true`.
+- `/api/ready` is the readiness endpoint for reverse proxies / service managers. It returns `200` only when the instance is accepting new analysis work and switches to `503` when the queue is saturated, the instance is draining, or a timed-out worker is still unwinding. The response also reports the configured `analysisTimeoutMs`, `timedOutWorkersInFlight`, auth mode, submit/status rate-limit settings, and the trusted client-IP source used for rate limiting.
+- Use `-DrainSignalFile <path>` or `DRAIN_SIGNAL_FILE=<path>` when you want external deployment tooling to mark the instance unready before shutdown. While that file exists, `/api/ready` returns `503` and new `POST /api/analyze-hand-history` submissions are rejected, but health checks and in-flight job polling still work.
+- `bin/drain-stop-hand-history-web-service.ps1` turns on the configured drain signal, waits for readiness to fail plus in-memory jobs and in-flight HTTP requests to drain to zero, then stops the Windows service.
+- Runtime state is still in-memory only. Queued and running review jobs are lost on process restart, and completed-job status is retained for only 15 minutes.
+- Under platform-user auth, account/profile data persists in `USER_STORE_PATH`, but browser sessions and in-flight review jobs remain in-memory only. A restart signs users out and drops queued/running jobs.
+- The raw server now emits baseline security headers (`Content-Security-Policy`, `X-Content-Type-Options`, `X-Frame-Options`, and `Referrer-Policy`), can enforce built-in Basic auth, and applies a best-effort in-process rate limiter on the expensive API routes, but that is still not a substitute for TLS termination or edge rate limiting.
+- Do not expose the raw app directly to the public internet without HTTPS in front of it. Built-in Basic auth and the in-process limiter help with access control and abuse containment, but you still want a reverse proxy / ingress layer for TLS termination, network policy, and stronger rate limiting.
+- `scripts/release-hand-history-web.ps1` validates the required static assets and smoke-checks auth-enabled `/`, `/api/health`, `/api/ready`, async `/api/analyze-hand-history`, drain-mode readiness, and oversized-upload rejection before declaring the build ready.
+- The web server supports `CONFIG_FILE`, `HOST`, `PORT`, `STATIC_DIR`, `MODEL_DIR`, `MAX_UPLOAD_BYTES`, `ANALYSIS_TIMEOUT_MS`, `MAX_CONCURRENT_JOBS`, `MAX_QUEUED_JOBS`, `SHUTDOWN_GRACE_MS`, `RATE_LIMIT_SUBMITS_PER_MINUTE`, `RATE_LIMIT_STATUS_PER_MINUTE`, `RATE_LIMIT_CLIENT_IP_HEADER`, `RATE_LIMIT_TRUSTED_PROXY_IPS`, `DRAIN_SIGNAL_FILE`, `BASIC_AUTH_USER`, and `BASIC_AUTH_PASSWORD` environment-variable overrides in addition to CLI flags.
 
 ## 6. Troubleshooting
 
@@ -229,8 +349,8 @@ GPU profile underperforms:
 - Reduce `-Workers` or `-TableCountPerWorker` if GPU is oversubscribed.
 
 Short hall benchmark regressed after retuning the range GPU cache:
-- For `1000`-hand smoke/control runs, use `-JvmOption "-Dsicfun.gpu.range.autotune.cachePath=data/headsup-range-autotune.shortrun-prev.properties"`.
-- For `5000+` hand long exact-mode runs on this machine, keep the default `data/headsup-range-autotune.properties`.
+- For `1000`-hand smoke/control runs, use a dedicated short-run cache file instead of a long-run tuned profile.
+- For `5000+` hand long exact-mode runs, benchmark with a cache that was tuned on the same machine/profile you plan to use.
 
 ## 7. Minimal Command Set
 

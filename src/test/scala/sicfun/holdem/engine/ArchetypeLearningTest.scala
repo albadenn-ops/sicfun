@@ -3,6 +3,17 @@ package sicfun.holdem.engine
 import munit.FunSuite
 import sicfun.holdem.types.*
 
+/** Tests for [[RaiseResponseCounts]] and [[ArchetypeLearning]].
+  *
+  * Validates the Bayesian archetype learning system:
+  *   - [[RaiseResponseCounts]]: immutable counter accumulation and invariant enforcement
+  *   - [[ArchetypeLearning.blendedRaiseResponse]]: mixture profile computation from posteriors
+  *   - [[ArchetypeLearning.updatePosterior]]: single-step Bayesian updates shift mass toward
+  *     archetypes whose likelihood profiles best explain the observed action
+  *   - [[ArchetypeLearning.posteriorFromCounts]]: batch updates match sequential updates
+  *   - Convergence: after many observations of the same action, the MAP estimate converges
+  *     to the expected archetype (folds -> Nit, calls -> CallingStation, raises -> Maniac)
+  */
 class ArchetypeLearningTest extends FunSuite:
 
   // ---------------------------------------------------------------------------

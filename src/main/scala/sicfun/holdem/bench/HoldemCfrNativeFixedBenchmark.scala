@@ -1,8 +1,9 @@
 package sicfun.holdem.bench
 
-import sicfun.core.{Card, DiscreteDistribution}
+import sicfun.core.DiscreteDistribution
 import sicfun.holdem.cfr.{HoldemCfrConfig, HoldemCfrDecisionPolicy, HoldemCfrNativeRuntime, HoldemCfrSolution, HoldemCfrSolver}
 import sicfun.holdem.types.*
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 /** A/B benchmark: Holdem native double vs native fixed-point for CPU or CUDA-compiled CFR providers.
   *
@@ -34,12 +35,12 @@ object HoldemCfrNativeFixedBenchmark:
       label: String
   )
 
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
-
+  /** Entry point. Parses CLI args and runs an interleaved A/B benchmark comparing
+    * native Double vs native fixed-point CFR providers on the same backend (CPU or GPU).
+    * The interleaving alternates run order on even/odd iterations to cancel ordering bias.
+    * After measurement, runs each provider once more for a correctness diff report
+    * comparing EV, best-action agreement, and per-action probability differences.
+    */
   def main(args: Array[String]): Unit =
     val warmup = if args.length > 0 then args(0).toInt else 3
     val runs = if args.length > 1 then args(1).toInt else 10
@@ -113,6 +114,9 @@ object HoldemCfrNativeFixedBenchmark:
       case "gpu" | "cuda" | "native-gpu" => Backend.Gpu
       case other => throw new IllegalArgumentException(s"unsupported backend: $other")
 
+  /** Maps (backend, fixed) to the system property string expected by HoldemCfrSolver.
+    * E.g. (Cpu, true) -> "native-cpu-fixed", (Gpu, false) -> "native-gpu".
+    */
   private def providerName(backend: Backend, fixed: Boolean): String =
     (backend, fixed) match
       case (Backend.Cpu, false) => "native-cpu"
@@ -228,6 +232,10 @@ object HoldemCfrNativeFixedBenchmark:
           println(f"$action baseline=$pBaseline%.6f fixed=$pFixed%.6f diff=${math.abs(pBaseline - pFixed)}%.6f")
         }
 
+  /** Sets a system property for the duration of `thunk`, then restores the original value.
+    * Also resets native load cache and auto-provider selection to ensure each provider
+    * run starts with a clean JNI dispatch state.
+    */
   private def withSystemProperty[A](key: String, value: String)(thunk: => A): A =
     val previous = sys.props.get(key)
     System.setProperty(key, value)

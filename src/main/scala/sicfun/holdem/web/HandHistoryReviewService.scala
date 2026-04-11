@@ -2,18 +2,36 @@ package sicfun.holdem.web
 
 import sicfun.holdem.engine.RealTimeAdaptiveEngine
 import sicfun.holdem.equity.{TableFormat, TableRanges}
-import sicfun.holdem.history.{HandHistoryImport, HandHistorySite, ImportedHand, OpponentProfile}
+import sicfun.holdem.history.{ExploitHint, HandHistoryImport, HandHistorySite, ImportedHand, OpponentProfile}
 import sicfun.holdem.model.{PokerActionModel, PokerActionModelArtifactIO}
 import sicfun.holdem.runtime.HandHistoryAnalyzer
 import sicfun.holdem.types.PokerAction
 
 import ujson.{Arr, Num, Obj, Str, Value}
 
+import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.Locale
 import scala.collection.mutable
 import scala.util.Random
 
+/** Core hand-history analysis service behind the review web API.
+  *
+  * Orchestrates the full analysis pipeline when a user uploads a hand history:
+  *   1. Normalize hero name (strip forum suffixes)
+  *   2. Parse the hand history text via [[HandHistoryImport]]
+  *   3. For each imported hand: resolve hero identity, extract hero decisions,
+  *      build a [[RealTimeAdaptiveEngine]] per hand, compute per-decision EV analysis
+  *   4. Build opponent profiles from the imported hands
+  *   5. Assemble the [[AnalysisResponse]] with decisions, opponents, warnings, and trace
+  *
+  * The service is stateless (no mutable state between analyze() calls) and thread-safe.
+  * Each call creates fresh engine instances with the configured parameters.
+  *
+  * @param config      service configuration (MC trial counts, time budget, max decisions)
+  * @param actionModel the trained PokerActionModel for range inference
+  * @param modelSource human-readable description of the model source (e.g. "artifact:v2")
+  */
 final class HandHistoryReviewService private (
     config: HandHistoryReviewService.ServiceConfig,
     actionModel: PokerActionModel,
@@ -21,9 +39,22 @@ final class HandHistoryReviewService private (
 ):
   import HandHistoryReviewService.*
 
+  /** Analyze a hand history upload and return a structured response.
+    *
+    * @param request the analysis request containing the raw hand history text, optional site, and hero name
+    * @return Right(response) with per-decision analysis, opponent profiles, and trace data,
+    *         or Left(error) if parsing or analysis fails
+    */
   def analyze(request: AnalysisRequest): Either[String, AnalysisResponse] =
+    val normalizedHeroName = request.heroName.map(HandHistoryImport.normalizePlayerName).filter(_.nonEmpty)
     val normalizedRequest = request.copy(
-      heroName = request.heroName.map(HandHistoryImport.normalizePlayerName).filter(_.nonEmpty)
+      heroName = normalizedHeroName
+    )
+    val requestTrace = RequestTrace(
+      rawHeroName = request.heroName,
+      normalizedHeroName = normalizedHeroName,
+      requestedSite = request.site.map(_.toString),
+      handHistoryBytes = normalizedRequest.handHistoryText.getBytes(StandardCharsets.UTF_8).length
     )
     if normalizedRequest.handHistoryText.trim.isEmpty then Left("handHistoryText must be non-empty")
     else
@@ -33,9 +64,10 @@ final class HandHistoryReviewService private (
           site = normalizedRequest.site,
           heroName = normalizedRequest.heroName
         )
-        response <- buildResponse(imported, normalizedRequest)
+        response <- buildResponse(imported, normalizedRequest, requestTrace)
       yield response
 
+  /** Serialize an AnalysisResponse to a ujson Value for HTTP response rendering. */
   def writeJson(response: AnalysisResponse): Value =
     Obj(
       "site" -> Str(response.site),
@@ -50,12 +82,20 @@ final class HandHistoryReviewService private (
       "modelSource" -> Str(response.modelSource),
       "warnings" -> Arr.from(response.warnings.map(Str(_))),
       "decisions" -> Arr.from(response.decisions.map(writeDecision)),
-      "opponents" -> Arr.from(response.opponents.map(writeOpponent))
+      "opponents" -> Arr.from(response.opponents.map(writeOpponent)),
+      "trace" -> writeTrace(response.trace)
     )
 
+  /** Build the full analysis response from imported hands.
+    *
+    * Analyzes each hand individually (skipping hands without hero hole cards),
+    * aggregates decisions and warnings, builds opponent profiles, and assembles
+    * the comprehensive trace for debugging and verification.
+    */
   private def buildResponse(
       imported: Vector[ImportedHand],
-      request: AnalysisRequest
+      request: AnalysisRequest,
+      requestTrace: RequestTrace
   ): Either[String, AnalysisResponse] =
     if imported.isEmpty then Left("no hands were imported from the uploaded text")
     else
@@ -63,10 +103,11 @@ final class HandHistoryReviewService private (
         val warnings = mutable.ArrayBuffer.empty[String]
         val rng = new Random(config.seed)
 
-        val analyzedHands = imported.flatMap { hand =>
+        val handResults = imported.map { hand =>
           analyzeHand(hand, request.heroName, warnings, rng)
         }
-        val allDecisions = analyzedHands.flatMap(_.decisions)
+        val analyzedHands = handResults.filter(_.trace.status == "analyzed")
+        val allDecisions = handResults.flatMap(_.decisions)
         val handsAnalyzed = analyzedHands.length
         val handsSkipped = math.max(0, imported.length - handsAnalyzed)
         val effectiveHero = request.heroName.orElse(resolveHeroName(imported))
@@ -76,10 +117,34 @@ final class HandHistoryReviewService private (
           hands = imported,
           excludePlayers = excludedHeroes
         )
-        val totalEvLost = math.abs(allDecisions.iterator.map(d => math.min(0.0, d.evDifference)).sum)
+        val totalEvLostRaw = math.abs(allDecisions.iterator.map(d => math.min(0.0, d.evDifference)).sum)
         val biggestMistake =
           if allDecisions.isEmpty then 0.0
           else allDecisions.iterator.map(d => math.abs(d.evDifference)).max
+        val warningList = warnings.toVector.distinct
+        val totalEvLost = roundChips(totalEvLostRaw)
+        val biggestMistakeRounded = roundChips(biggestMistake)
+        val trace = AnalysisTrace(
+          request = requestTrace,
+          importStage = ImportTrace(
+            handsImported = imported.length,
+            siteResolved = imported.headOption.map(_.site.toString),
+            heroNameResolved = effectiveHero,
+            distinctPlayersObserved = imported.iterator.flatMap(_.players.iterator.map(_.name)).toSet.size
+          ),
+          hands = handResults.map(_.trace),
+          summary = SummaryTrace(
+            handsImported = imported.length,
+            handsAnalyzed = handsAnalyzed,
+            handsSkipped = handsSkipped,
+            decisionsAnalyzed = allDecisions.length,
+            mistakes = allDecisions.count(HandHistoryAnalyzer.countsAsMistake),
+            totalEvLost = totalEvLost,
+            biggestMistakeEv = biggestMistakeRounded,
+            warningCount = warningList.length,
+            opponentsProfiled = profiles.length
+          )
+        )
 
         Right(
           AnalysisResponse(
@@ -90,15 +155,16 @@ final class HandHistoryReviewService private (
             handsSkipped = handsSkipped,
             decisionsAnalyzed = allDecisions.length,
             mistakes = allDecisions.count(HandHistoryAnalyzer.countsAsMistake),
-            totalEvLost = roundChips(totalEvLost),
-            biggestMistakeEv = roundChips(biggestMistake),
+            totalEvLost = totalEvLost,
+            biggestMistakeEv = biggestMistakeRounded,
             modelSource = modelSource,
-            warnings = warnings.toVector.distinct,
+            warnings = warningList,
             decisions = allDecisions
               .sortBy(d => (-math.abs(d.evDifference), d.handId, d.street.toString))
               .take(config.maxDecisions)
               .map(writeDecisionView),
-            opponents = profiles.take(5).map(writeOpponentView)
+            opponents = profiles.take(5).map(writeOpponentView),
+            trace = trace
           )
         )
       catch
@@ -106,7 +172,8 @@ final class HandHistoryReviewService private (
 
   private final case class HandResult(
       handId: String,
-      decisions: Vector[HandHistoryAnalyzer.AnalyzedDecision]
+      decisions: Vector[HandHistoryAnalyzer.AnalyzedDecision],
+      trace: HandTrace
   )
 
   private def analyzeHand(
@@ -114,15 +181,43 @@ final class HandHistoryReviewService private (
       heroNameOverride: Option[String],
       warnings: mutable.ArrayBuffer[String],
       rng: Random
-  ): Option[HandResult] =
+  ): HandResult =
     val heroName = resolveHeroPlayerId(hand, heroNameOverride).orElse(hand.heroName)
     (heroName, hand.heroHoleCards) match
       case (None, _) =>
-        warnings += s"hand ${hand.handId}: skipped because hero name could not be inferred"
-        None
+        val warning = s"hand ${hand.handId}: skipped because hero name could not be inferred"
+        warnings += warning
+        HandResult(
+          handId = hand.handId,
+          decisions = Vector.empty,
+          trace = HandTrace(
+            handId = hand.handId,
+            status = "skipped",
+            playerCount = hand.players.length,
+            heroNameResolved = None,
+            heroCardsPresent = false,
+            decisionsAnalyzed = 0,
+            skipReason = Some("hero_name_unresolved"),
+            warning = Some(warning)
+          )
+        )
       case (_, None) =>
-        warnings += s"hand ${hand.handId}: skipped because hero hole cards were not present in the uploaded history"
-        None
+        val warning = s"hand ${hand.handId}: skipped because hero hole cards were not present in the uploaded history"
+        warnings += warning
+        HandResult(
+          handId = hand.handId,
+          decisions = Vector.empty,
+          trace = HandTrace(
+            handId = hand.handId,
+            status = "skipped",
+            playerCount = hand.players.length,
+            heroNameResolved = heroName,
+            heroCardsPresent = false,
+            decisionsAnalyzed = 0,
+            skipReason = Some("hero_hole_cards_missing"),
+            warning = Some(warning)
+          )
+        )
       case (Some(heroPlayerId), Some(heroCards)) =>
         val tableRanges = TableRanges.defaults(TableFormat.forPlayerCount(hand.players.length))
         val availablePositions = hand.players.iterator.map(_.position).toSet
@@ -136,9 +231,25 @@ final class HandHistoryReviewService private (
           budgetMs = config.budgetMs,
           rng = new Random(rng.nextLong())
         )
-        if decisions.isEmpty then
-          warnings += s"hand ${hand.handId}: imported but no hero decisions could be analyzed"
-        Some(HandResult(hand.handId, decisions))
+        val warning =
+          if decisions.isEmpty then
+            Some(s"hand ${hand.handId}: imported but no hero decisions could be analyzed")
+          else None
+        warning.foreach(warnings += _)
+        HandResult(
+          handId = hand.handId,
+          decisions = decisions,
+          trace = HandTrace(
+            handId = hand.handId,
+            status = "analyzed",
+            playerCount = hand.players.length,
+            heroNameResolved = Some(heroPlayerId),
+            heroCardsPresent = true,
+            decisionsAnalyzed = decisions.length,
+            skipReason = None,
+            warning = warning
+          )
+        )
 
   private def resolveHeroPlayerId(
       hand: ImportedHand,
@@ -187,7 +298,14 @@ final class HandHistoryReviewService private (
       playerName = profile.playerName,
       handsObserved = profile.handsObserved,
       archetype = profile.archetypePosterior.mapEstimate.toString,
-      hints = profile.exploitHints.take(3)
+      hints = profile.exploitHintDetails.take(3).map(writeHintView)
+    )
+
+  private def writeHintView(hint: ExploitHint): HintView =
+    HintView(
+      ruleId = hint.ruleId,
+      text = hint.text,
+      metrics = hint.metrics
     )
 
   private def writeDecision(decision: DecisionView): Value =
@@ -208,7 +326,54 @@ final class HandHistoryReviewService private (
       "playerName" -> Str(opponent.playerName),
       "handsObserved" -> Num(opponent.handsObserved),
       "archetype" -> Str(opponent.archetype),
-      "hints" -> Arr.from(opponent.hints.map(Str(_)))
+      "hints" -> Arr.from(opponent.hints.map(writeHint))
+    )
+
+  private def writeHint(hint: HintView): Value =
+    Obj(
+      "ruleId" -> Str(hint.ruleId),
+      "text" -> Str(hint.text),
+      "metrics" -> Arr.from(hint.metrics.map(Num(_)))
+    )
+
+  private def writeTrace(trace: AnalysisTrace): Value =
+    Obj(
+      "request" -> Obj(
+        "rawHeroName" -> trace.request.rawHeroName.map(Str(_)).getOrElse(ujson.Null),
+        "normalizedHeroName" -> trace.request.normalizedHeroName.map(Str(_)).getOrElse(ujson.Null),
+        "requestedSite" -> trace.request.requestedSite.map(Str(_)).getOrElse(ujson.Null),
+        "handHistoryBytes" -> Num(trace.request.handHistoryBytes)
+      ),
+      "import" -> Obj(
+        "handsImported" -> Num(trace.importStage.handsImported),
+        "siteResolved" -> trace.importStage.siteResolved.map(Str(_)).getOrElse(ujson.Null),
+        "heroNameResolved" -> trace.importStage.heroNameResolved.map(Str(_)).getOrElse(ujson.Null),
+        "distinctPlayersObserved" -> Num(trace.importStage.distinctPlayersObserved)
+      ),
+      "hands" -> Arr.from(trace.hands.map(writeHandTrace)),
+      "summary" -> Obj(
+        "handsImported" -> Num(trace.summary.handsImported),
+        "handsAnalyzed" -> Num(trace.summary.handsAnalyzed),
+        "handsSkipped" -> Num(trace.summary.handsSkipped),
+        "decisionsAnalyzed" -> Num(trace.summary.decisionsAnalyzed),
+        "mistakes" -> Num(trace.summary.mistakes),
+        "totalEvLost" -> Num(trace.summary.totalEvLost),
+        "biggestMistakeEv" -> Num(trace.summary.biggestMistakeEv),
+        "warningCount" -> Num(trace.summary.warningCount),
+        "opponentsProfiled" -> Num(trace.summary.opponentsProfiled)
+      )
+    )
+
+  private def writeHandTrace(trace: HandTrace): Value =
+    Obj(
+      "handId" -> Str(trace.handId),
+      "status" -> Str(trace.status),
+      "playerCount" -> Num(trace.playerCount),
+      "heroNameResolved" -> trace.heroNameResolved.map(Str(_)).getOrElse(ujson.Null),
+      "heroCardsPresent" -> ujson.Bool(trace.heroCardsPresent),
+      "decisionsAnalyzed" -> Num(trace.decisionsAnalyzed),
+      "skipReason" -> trace.skipReason.map(Str(_)).getOrElse(ujson.Null),
+      "warning" -> trace.warning.map(Str(_)).getOrElse(ujson.Null)
     )
 
   private def renderAction(action: PokerAction): String =
@@ -222,6 +387,7 @@ final class HandHistoryReviewService private (
     math.round(amount * 100.0) / 100.0
 
 object HandHistoryReviewService:
+  /** Runtime configuration for [[HandHistoryReviewService]]. */
   final case class ServiceConfig(
       modelDir: Option[Path] = None,
       seed: Long = 42L,
@@ -235,6 +401,50 @@ object HandHistoryReviewService:
       handHistoryText: String,
       site: Option[HandHistorySite],
       heroName: Option[String]
+  )
+
+  final case class RequestTrace(
+      rawHeroName: Option[String],
+      normalizedHeroName: Option[String],
+      requestedSite: Option[String],
+      handHistoryBytes: Int
+  )
+
+  final case class ImportTrace(
+      handsImported: Int,
+      siteResolved: Option[String],
+      heroNameResolved: Option[String],
+      distinctPlayersObserved: Int
+  )
+
+  final case class HandTrace(
+      handId: String,
+      status: String,
+      playerCount: Int,
+      heroNameResolved: Option[String],
+      heroCardsPresent: Boolean,
+      decisionsAnalyzed: Int,
+      skipReason: Option[String],
+      warning: Option[String]
+  )
+
+  final case class SummaryTrace(
+      handsImported: Int,
+      handsAnalyzed: Int,
+      handsSkipped: Int,
+      decisionsAnalyzed: Int,
+      mistakes: Int,
+      totalEvLost: Double,
+      biggestMistakeEv: Double,
+      warningCount: Int,
+      opponentsProfiled: Int
+  )
+
+  final case class AnalysisTrace(
+      request: RequestTrace,
+      importStage: ImportTrace,
+      hands: Vector[HandTrace],
+      summary: SummaryTrace
   )
 
   final case class DecisionView(
@@ -253,7 +463,13 @@ object HandHistoryReviewService:
       playerName: String,
       handsObserved: Int,
       archetype: String,
-      hints: Vector[String]
+      hints: Vector[HintView]
+  )
+
+  final case class HintView(
+      ruleId: String,
+      text: String,
+      metrics: Vector[Double]
   )
 
   final case class AnalysisResponse(
@@ -269,7 +485,8 @@ object HandHistoryReviewService:
       modelSource: String,
       warnings: Vector[String],
       decisions: Vector[DecisionView],
-      opponents: Vector[OpponentView]
+      opponents: Vector[OpponentView],
+      trace: AnalysisTrace
   )
 
   def create(config: ServiceConfig): Either[String, HandHistoryReviewService] =

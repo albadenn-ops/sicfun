@@ -8,10 +8,22 @@ import sicfun.core.Card
 import java.nio.file.Files
 import scala.jdk.CollectionConverters.*
 
+/**
+ * Tests for the signal audit system: [[SignalBuilder]] and [[SignalAuditLogIO]] integration.
+ *
+ * Validates:
+ *   - [[SignalBuilder.actionRisk]] correctly populates model provenance, reconstruction
+ *     paths, features, and metrics
+ *   - Risk level classification: low-risk events get Info, high-risk get Critical
+ *   - End-to-end write/read roundtrip preserves signal records through [[SignalAuditLogIO]]
+ *   - Append operations maintain a single header row
+ */
 class SignalAuditTest extends FunSuite:
+  /** Parses a card token string, failing the test if invalid. */
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
+  /** Creates a test model artifact with a uniform (untrained) model and passing calibration gate. */
   private def artifact: TrainedPokerActionModel =
     TrainedPokerActionModel(
       version = ModelVersion(
@@ -30,6 +42,7 @@ class SignalAuditTest extends FunSuite:
       splitSeed = Some(1L)
     )
 
+  /** Creates a test event on the flop with a fixed board, parameterized by pot geometry and action. */
   private def event(
       handId: String,
       sequence: Long,

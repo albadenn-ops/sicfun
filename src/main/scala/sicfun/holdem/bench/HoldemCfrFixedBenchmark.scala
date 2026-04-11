@@ -1,8 +1,9 @@
 package sicfun.holdem.bench
 
-import sicfun.core.{Card, DiscreteDistribution}
+import sicfun.core.DiscreteDistribution
 import sicfun.holdem.cfr.{HoldemCfrConfig, HoldemCfrDecisionPolicy, HoldemCfrSolution, HoldemCfrSolver}
 import sicfun.holdem.types.*
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 /** A/B benchmark: HoldemCfrSolver with `scala` vs `scala-fixed`.
   *
@@ -31,12 +32,12 @@ object HoldemCfrFixedBenchmark:
       label: String
   )
 
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
-
+  /** Entry point. Parses CLI args, constructs the benchmark spot, then runs an interleaved
+    * A/B comparison between `scala` (Double regret accumulators) and `scala-fixed` (Int32
+    * fixed-point regret accumulators). Interleaving on even/odd runs mitigates JIT warmup
+    * and GC ordering bias. After timing, runs both providers once more to capture solution
+    * outputs for the correctness diff report.
+    */
   def main(args: Array[String]): Unit =
     val warmup = if args.length > 0 then args(0).toInt else 3
     val runs = if args.length > 1 then args(1).toInt else 12
@@ -51,12 +52,15 @@ object HoldemCfrFixedBenchmark:
     println(s"Warmup: $warmup, Runs: $runs, Iterations: ${spot.config.iterations}")
     println()
 
+    // Warmup both providers to stabilize JIT compilation before measurement.
     var w = 0
     while w < warmup do
       runWithProvider("scala", operation, spot)
       runWithProvider("scala-fixed", operation, spot)
       w += 1
 
+    // Interleaved measurement: alternate which provider runs first per iteration
+    // to cancel out any systematic ordering bias (cache state, GC pressure, etc.).
     val scalaTimes = new Array[Long](runs)
     val fixedTimes = new Array[Long](runs)
     var r = 0
@@ -94,6 +98,10 @@ object HoldemCfrFixedBenchmark:
       case other =>
         throw new IllegalArgumentException(s"unsupported operation: $other")
 
+  /** Constructs a fixed benchmark scenario with hero hand, board, villain posterior,
+    * candidate actions, and CFR config. The "preflop" scenario has no board cards;
+    * the "turn" scenario has a 4-card board with deeper equity computation.
+    */
   private def benchmarkSpot(name: String): Spot =
     name match
       case "turn" =>
@@ -160,6 +168,9 @@ object HoldemCfrFixedBenchmark:
       case other =>
         throw new IllegalArgumentException(s"unsupported scenario: $other")
 
+  /** Runs a single CFR solve under the given provider (set via system property).
+    * Returns Left(solution) for full solves or Right(policy) for decision-only solves.
+    */
   private def runWithProvider(
       provider: String,
       operation: Operation,
@@ -189,6 +200,10 @@ object HoldemCfrFixedBenchmark:
           )
     }
 
+  /** Prints a correctness comparison between the Double baseline and fixed-point result.
+    * For full solves, reports EV difference and per-action probability diffs.
+    * For decision-only solves, reports best-action agreement and probability diffs.
+    */
   private def reportDiff(
       operation: Operation,
       actions: Vector[PokerAction],

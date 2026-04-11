@@ -23,6 +23,16 @@ object GenerateHeadsUpTable:
   private val ProviderProperty = "sicfun.gpu.provider"
   private val ProviderEnv = "sicfun_GPU_PROVIDER"
 
+  /** Entry point. Parses CLI arguments, selects the best available compute backend,
+    * builds the full equity table, and writes it to disk.
+    *
+    * Unlike [[GenerateHeadsUpCanonicalTable]], this generates the full non-canonical table
+    * with 8-byte packed (lowId, highId) keys. The full table has C(1326,2) = 878,475 entries
+    * vs ~14,196 canonical entries, so it is much larger but avoids suit normalization overhead
+    * at lookup time.
+    *
+    * @param args positional: outputPath, mode, trials, maxMatchups, [seed], [parallelism], [backend]
+    */
   def main(args: Array[String]): Unit =
     if args.length < 4 then
       System.err.println(
@@ -89,6 +99,9 @@ object GenerateHeadsUpTable:
     )
     HeadsUpEquityTableIO.write(outputPath, table, meta)
 
+  /** Auto-detects the best available compute backend (GPU preferred, CPU fallback).
+    * Probes "native" then "hybrid" GPU providers before falling back to pure CPU.
+    */
   private def preferredDefaultBackend(): HeadsUpEquityTable.ComputeBackend =
     val configuredProvider = GpuRuntimeSupport.resolveNonEmptyLower(ProviderProperty, ProviderEnv)
     configuredProvider match

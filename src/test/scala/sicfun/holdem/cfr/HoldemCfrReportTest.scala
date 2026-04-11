@@ -6,7 +6,18 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import scala.jdk.CollectionConverters.*
 
+/** Tests for [[HoldemCfrReport]], the single-spot offline CFR reporting CLI.
+  *
+  * Verifies that:
+  *  - A full CLI invocation with all parameters produces a valid solution with
+  *    non-empty policy, non-negative exploitability, and writes summary.txt,
+  *    policy.tsv, and the exploitability tracking TSV with correct header format.
+  *  - Invalid inputs (e.g., unparseable villain range) return Left with an error
+  *    message rather than throwing exceptions.
+  */
 class HoldemCfrReportTest extends FunSuite:
+  // Full integration test: runs HoldemCfrReport.run with a preflop AcKh spot,
+  // verifies output file creation and exploitability tracking header format.
   test("report run writes summary policy and exploitability tracking rows") {
     val root = Files.createTempDirectory("holdem-cfr-report-test-")
     try
@@ -52,6 +63,8 @@ class HoldemCfrReportTest extends FunSuite:
       deleteRecursively(root)
   }
 
+  // Verifies graceful error handling: an unparseable villain range string
+  // should return Left(error) without throwing exceptions.
   test("report run fails on invalid range") {
     val result = HoldemCfrReport.run(Array("--villainRange=NOT_A_RANGE"))
     assert(result.isLeft, s"expected parse failure, got $result")

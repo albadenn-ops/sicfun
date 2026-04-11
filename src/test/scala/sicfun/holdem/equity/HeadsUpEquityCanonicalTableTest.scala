@@ -4,6 +4,17 @@ import sicfun.holdem.types.*
 import munit.FunSuite
 import scala.util.Random
 
+/**
+  * Tests for the suit-isomorphic canonical heads-up equity table.
+  *
+  * Verifies:
+  *   - Canonical key symmetry: keyFor(A,B).value == keyFor(B,A).value with opposite flip flags
+  *   - Suit invariance: suit-relabeled matchups produce identical canonical keys
+  *   - buildAll respects the maxMatchups limit on canonical key count
+  *   - Determinism: same seed produces identical results regardless of parallelism level
+  *
+  * Uses low Monte Carlo trial counts and small matchup limits for fast test execution.
+  */
 class HeadsUpEquityCanonicalTableTest extends FunSuite:
   private val PreflopBackendProperty = "sicfun.holdem.preflopEquityBackend"
 

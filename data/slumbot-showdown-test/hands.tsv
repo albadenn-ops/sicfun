@@ -1,0 +1,6 @@
+hand	heroPosition	heroHole	villainHole	board	winningsChips	winningsBb	decisions	villainObservations	action
+1	BigBlind	9dKh	-		50	0.500	0	1	f
+2	Button	6h6s	-		100	1.000	1	1	b300f
+3	BigBlind	2dQs	-	Ts8s2s	300	3.000	2	3	b200b300c/b450f
+4	Button	8cTc	-		100	1.000	1	1	b300f
+5	BigBlind	JhQs	-	9c8h2hAs2c	-2400	-24.000	4	5	b200b300c/b300c/b600c/b1200c

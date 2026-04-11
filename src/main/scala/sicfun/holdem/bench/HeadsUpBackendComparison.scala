@@ -4,6 +4,7 @@ import sicfun.holdem.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.cli.*
+import sicfun.holdem.bench.BenchSupport.{BatchData, loadBatch}
 
 import sicfun.core.HandEvaluator
 
@@ -71,12 +72,6 @@ object HeadsUpBackendComparison:
       nativeAutoTune: Boolean = true
   )
 
-  private final case class BatchData(
-      packedKeys: Array[Long],
-      keyMaterial: Array[Long]
-  ):
-    def size: Int = packedKeys.length
-
   private final case class ValidationSummary(
       checked: Int,
       violations: Int
@@ -90,6 +85,10 @@ object HeadsUpBackendComparison:
       throughput: Double
   )
 
+  /** Entry point. Runs warmup iterations, then timed runs on all three backends (JVM CPU,
+    * native CPU, native CUDA), validates native results against the JVM baseline, and
+    * reports three speedup ratios: native-cpu/jvm, native-cuda/jvm, native-cuda/native-cpu.
+    */
   def main(args: Array[String]): Unit =
     val config = parseArgs(args.toVector)
     require(config.cpuParallelism > 0, "cpuParallelism must be positive")
@@ -228,17 +227,6 @@ object HeadsUpBackendComparison:
         mode = mode,
         maxMatchups = config.maxMatchups
       )
-
-  private def loadBatch(table: String, maxMatchups: Long): BatchData =
-    table.trim.toLowerCase match
-      case "full" =>
-        val batch = HeadsUpEquityTable.selectFullBatch(maxMatchups)
-        BatchData(batch.packedKeys, batch.keyMaterial)
-      case "canonical" =>
-        val batch = HeadsUpEquityCanonicalTable.selectCanonicalBatch(maxMatchups)
-        BatchData(batch.packedKeys, batch.keyMaterial)
-      case other =>
-        throw new IllegalArgumentException(s"unknown table '$other' (expected full or canonical)")
 
   private def runJvmCpu(
       batch: BatchData,

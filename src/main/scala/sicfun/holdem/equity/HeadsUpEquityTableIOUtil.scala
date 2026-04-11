@@ -97,7 +97,9 @@ object HeadsUpEquityTableIOUtil:
       i += 1
     map.toMap
 
-  /** Wraps a raw InputStream in a DataInputStream, ensuring close on exit. */
+  /** Wraps a raw InputStream in a DataInputStream, ensuring close on exit via try/finally.
+    * This is the base resource-management primitive; file and resource helpers delegate here.
+    */
   def withDataInputStream[A](stream: InputStream)(f: DataInputStream => A): A =
     val in = new DataInputStream(stream)
     try f(in)

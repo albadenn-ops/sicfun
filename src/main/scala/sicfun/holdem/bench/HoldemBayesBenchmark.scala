@@ -8,11 +8,23 @@ import sicfun.holdem.provider.*
 import sicfun.holdem.model.*
 import sicfun.holdem.cli.*
 
-import sicfun.core.Card
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 import scala.util.Random
 
-/** Benchmark harness for Bayesian inference hotspots and provider selection. */
+/** Benchmark harness for Bayesian inference hotspots in the poker advisory pipeline.
+  *
+  * Measures four key stages of the Bayesian inference + recommendation flow:
+  *   1. '''bayesUpdateOnly''' — posterior update given observed villain actions and an action model
+  *   2. '''inferPosterior''' — full range inference including bunching effect adjustment
+  *   3. '''recommendAction''' — action recommendation given a posterior (equity computation)
+  *   4. '''inferAndRecommend''' — end-to-end pipeline (infer posterior + recommend action)
+  *
+  * Uses a fixed flop scenario (AcKh on Ts9h8d) with a trained action model and preset
+  * observations. Reports mean/median/min/max latency in milliseconds for each stage.
+  *
+  * Usage: sbt "runMain sicfun.holdem.bench.HoldemBayesBenchmark [--key=value ...]"
+  */
 object HoldemBayesBenchmark:
   private final case class Config(
       warmupRuns: Int = 2,
@@ -215,12 +227,6 @@ object HoldemBayesBenchmark:
     )
 
   private def buildContext(seed: Long): BenchmarkContext =
-    def card(token: String): Card =
-      Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card token: $token"))
-
-    def hole(a: String, b: String): HoleCards =
-      HoleCards.from(Vector(card(a), card(b)))
-
     val hero = hole("Ac", "Kh")
     val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
     val state = GameState(

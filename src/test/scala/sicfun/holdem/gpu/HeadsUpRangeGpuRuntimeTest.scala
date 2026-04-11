@@ -8,6 +8,23 @@ import munit.FunSuite
 import java.nio.file.{Files, Paths}
 import scala.collection.mutable.ArrayBuffer
 
+/** Tests for [[HeadsUpRangeGpuRuntime]] -- CSR-based hero-vs-range equity computation.
+  *
+  * Coverage includes:
+  *  - '''CPU-emulated CSR aggregation''': verifies that the weighted CSR computation
+  *    matches a manually computed reference (per-matchup deterministic equity aggregated
+  *    with probability weights).
+  *  - '''Zero-weight and empty rows''': confirms that heroes with no non-zero-weight
+  *    villain entries produce all-zero results.
+  *  - '''CSR shape validation''': tests that invalid CSR layouts (wrong offsets length,
+  *    etc.) are rejected before any computation.
+  *  - '''Native CSR API integration''': when the GPU DLL is present, verifies that
+  *    the native CSR JNI call returns valid results in CPU mode, and that intentionally
+  *    invalid CSR layouts produce the expected native status code (112).
+  *
+  * The `disjointVillains` helper ensures test setups never have overlapping hole cards
+  * between hero and villain, which would be rejected by the runtime's validation.
+  */
 class HeadsUpRangeGpuRuntimeTest extends FunSuite:
   private val ProviderProperty = "sicfun.gpu.provider"
   private val NativePathProperty = "sicfun.gpu.native.path"
@@ -19,6 +36,9 @@ class HeadsUpRangeGpuRuntimeTest extends FunSuite:
   private def withProvider[A](provider: String)(thunk: => A): A =
     withSystemProperties(Seq(ProviderProperty -> Some(provider)))(thunk)
 
+  /** Finds `count` villain HoleCardsIndex ids whose hole cards are disjoint from the
+    * hero's (no shared cards). Required because the runtime rejects overlapping matchups.
+    */
   private def disjointVillains(heroId: Int, count: Int): Array[Int] =
     val hero = HoleCardsIndex.byId(heroId)
     val out = ArrayBuffer.empty[Int]
@@ -31,6 +51,10 @@ class HeadsUpRangeGpuRuntimeTest extends FunSuite:
     require(out.length == count, s"unable to sample $count disjoint villains for heroId=$heroId")
     out.toArray
 
+  /** Computes the expected CSR-aggregated equity on the JVM side for comparison
+    * against the runtime's output. Uses the same deterministic per-matchup computation
+    * and probability-weighted aggregation logic.
+    */
   private def expectedCpu(
       heroIds: Array[Int],
       offsets: Array[Int],

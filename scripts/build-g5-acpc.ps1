@@ -14,7 +14,7 @@ $dotnetDirAbs = Join-Path $repoRoot $DotnetDir
 $dotnetInstallScript = Join-Path (Split-Path $dotnetDirAbs -Parent) "dotnet-install.ps1"
 
 if (-not (Test-Path $repoDirAbs)) {
-  throw "G5 repo not found at $repoDirAbs"
+  throw "G5 repo not found at $repoDirAbs. This script expects a local developer checkout under data/tmp/, which is not source-controlled."
 }
 
 if (-not (Test-Path $dotnetInstallScript)) {
@@ -75,4 +75,5 @@ Copy-Item (Join-Path $repoDirAbs "redist/PreFlopCharts") $runtimeDirAbs -Recurse
 Write-Output "G5 ACPC runtime ready:"
 Write-Output "  dotnet:  $dotnet"
 Write-Output "  runtime: $runtimeDirAbs"
+Write-Output "  note:    G5 source, generated runtime, and local toolchains under data/tmp/ are developer-local assets."
 Write-Output "  start:   powershell -ExecutionPolicy Bypass -File scripts/start-g5-acpc.ps1 127.0.0.1 12345"

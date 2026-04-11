@@ -2,11 +2,21 @@ package sicfun.holdem.bench
 
 import sicfun.holdem.cfr.CfrSolver
 
-/** A/B benchmark: CfrSolver.solve (Double) vs solveFixed (FixedVal/Prob).
+/** A/B benchmark comparing CfrSolver.solve (Double arithmetic) vs solveFixed (FixedVal/Prob
+  * fixed-point Int32 arithmetic) on the Kuhn poker game tree.
+  *
+  * Kuhn poker is a minimal extensive-form game (3 cards, 2 players, bet/check/call/fold)
+  * that is small enough to benchmark the CFR solver overhead without equity computation
+  * dominating the runtime. This isolates the question "is fixed-point arithmetic faster
+  * than Double for CFR regret/strategy accumulation?"
+  *
+  * The benchmark alternates solve order on even/odd runs to minimize systematic JIT bias.
+  * After timing, it also verifies correctness by comparing EV and root-node bet probabilities.
   *
   * Usage: sbt "runMain sicfun.holdem.bench.CfrSolverFixedBenchmark [warmup] [runs] [iterations]"
   */
 object CfrSolverFixedBenchmark:
+  /** The three cards in Kuhn poker, ranked J < Q < K. */
   private enum KuhnCard:
     case J
     case Q
@@ -30,6 +40,15 @@ object CfrSolverFixedBenchmark:
       p1: Option[KuhnCard]
   )
 
+  /** Full Kuhn poker game tree implementation as an ExtensiveFormGame.
+    *
+    * Game rules: 3 cards (J, Q, K) are dealt to 2 players, each antes 1 chip.
+    * Player 0 acts first: check or bet(1). Player 1 responds: check/bet or call/fold.
+    * If Player 0 checks and Player 1 bets, Player 0 gets a second decision: call or fold.
+    * At showdown, higher card wins. Terminal payoffs are +/-1 (check-check or fold) or +/-2 (bet-call).
+    *
+    * History encoding: "c"=check, "b"=bet, concatenated. E.g., "cb" = P0 checks, P1 bets.
+    */
   private object KuhnGame extends CfrSolver.ExtensiveFormGame[KuhnState, KuhnAction]:
     private val cards = Vector(KuhnCard.J, KuhnCard.Q, KuhnCard.K)
     private val dealOutcomes =
@@ -121,6 +140,9 @@ object CfrSolverFixedBenchmark:
     private def isTerminal(history: String): Boolean =
       history == "cc" || history == "bc" || history == "bf" || history == "cbc" || history == "cbf"
 
+  /** Entry point. Runs warmup iterations, then alternating timed runs of Double vs Fixed
+    * CFR solvers, and reports median latency, speedup factor, and correctness delta.
+    */
   def main(args: Array[String]): Unit =
     val warmup = if args.length > 0 then args(0).toInt else 3
     val runs = if args.length > 1 then args(1).toInt else 15

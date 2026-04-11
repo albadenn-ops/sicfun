@@ -1,8 +1,9 @@
 package sicfun.holdem.validation
 
 import munit.FunSuite
+import sicfun.holdem.cfr.{HoldemCfrConfig, HoldemCfrNativeRuntime, HoldemCfrSolver}
 import sicfun.holdem.history.{HandHistoryImport, HandHistorySite, OpponentProfile}
-import sicfun.holdem.types.{PokerAction, Street}
+import sicfun.holdem.types.*
 
 /** Calibration test: a CFR equilibrium villain should produce ZERO false
   * positive exploit hints from the profiler.
@@ -11,106 +12,168 @@ import sicfun.holdem.types.{PokerAction, Street}
   * actual equilibrium play and must be recalibrated.
   */
 class CfrGtoCalibrationTest extends FunSuite:
+  private val CfrProviderProperty = "sicfun.cfr.provider"
+  private val CfrDirectShallowApproximationProperty = "sicfun.cfr.directShallowApproximation"
 
-  override val munitTimeout = scala.concurrent.duration.Duration(180, "s")
+  override val munitTimeout = scala.concurrent.duration.Duration(600, "s")
 
-  test("CFR equilibrium villain produces no false positive leak hints"):
-    val cfrStrategy = CfrVillainStrategy()
-    val villain = LeakInjectedVillain(
-      name = "cfr_gto_control",
-      leaks = Vector(NoLeak()),
-      baselineNoise = 0.0,
-      seed = 42L
+  private final case class CalibrationProviderConfiguration(
+      requested: String,
+      detail: String
+  )
+
+  private def withCalibrationCfrProvider[A](thunk: CalibrationProviderConfiguration => A): A =
+    val configuration = CalibrationProviderConfiguration(
+      requested = "auto",
+      detail = describeNativeAvailability()
     )
-    val sim = new HeadsUpSimulator(
-      heroEngine = None,
-      villain = villain,
-      seed = 42L,
-      villainStrategy = cfrStrategy
-    )
+    resetCfrProviderStateForTest()
+    try
+      TestSystemPropertyScope.withSystemProperties(
+        Seq(
+          CfrProviderProperty -> Some(configuration.requested),
+          CfrDirectShallowApproximationProperty -> Some("false")
+        )
+      )(thunk(configuration))
+    finally
+      resetCfrProviderStateForTest()
 
-    val numHands = 2000
-    val records = (1 to numHands).map(sim.playHand).toVector
+  test("CFR equilibrium villain produces no false positive leak hints under the configured auto provider") {
+    withCalibrationCfrProvider { configuredProvider =>
+      println(s"[CFR-CAL] Requested CFR provider: ${configuredProvider.requested}")
+      println(s"[CFR-CAL] Provider detail: ${configuredProvider.detail}")
 
-    // Export, parse, profile
-    val text = PokerStarsExporter.exportHands(records, "Hero", villain.name)
-    val parsed = HandHistoryImport.parseText(text, Some(HandHistorySite.PokerStars), Some("Hero"))
-    assert(parsed.isRight, s"parse failed: ${parsed.left.getOrElse("")}")
-    val hands = parsed.toOption.get
-    val profiles = OpponentProfile.fromImportedHands("simulated", hands, Set("Hero"))
-    assert(profiles.nonEmpty, "no profile generated")
-    val profile = profiles.head
+      val cfrConfig = HoldemCfrConfig(
+        iterations = 500,
+        equityTrials = 1_000,
+        maxVillainHands = 64,
+        includeVillainReraises = true
+      )
+      val cfrStrategy = CfrVillainStrategy(
+        config = cfrConfig,
+        allowHeuristicFallback = false
+      )
+      val villain = LeakInjectedVillain(
+        name = "cfr_gto_control",
+        leaks = Vector(NoLeak()),
+        baselineNoise = 0.0,
+        seed = 42L
+      )
+      val sim = new HeadsUpSimulator(
+        heroEngine = None,
+        villain = villain,
+        seed = 42L,
+        villainStrategy = cfrStrategy
+      )
 
-    // === Calibration data: measure actual rates ===
-    val events = profile.recentEvents
-    val sig = profile.signature
+      val numHands = 2000
+      val records = (1 to numHands).map(sim.playHand).toVector
 
-    println(s"[CFR-CAL] Hands: $numHands, Events: ${events.size}")
-    println(f"[CFR-CAL] Signature: fold=${sig.values(0)}%.3f raise=${sig.values(1)}%.3f " +
-      f"call=${sig.values(2)}%.3f check=${sig.values(3)}%.3f")
-    println(s"[CFR-CAL] Archetype: ${profile.archetypePosterior.mapEstimate}")
+      // Export, parse, profile
+      val text = PokerStarsExporter.exportHands(records, "Hero", villain.name)
+      val parsed = HandHistoryImport.parseText(text, Some(HandHistorySite.PokerStars), Some("Hero"))
+      assert(parsed.isRight, s"parse failed: ${parsed.left.getOrElse("")}")
+      val hands = parsed.toOption.get
+      val profiles = OpponentProfile.fromImportedHands("simulated", hands, Set("Hero"))
+      assert(profiles.nonEmpty, "no profile generated")
+      val profile = profiles.head
 
-    // Per-metric calibration
-    val riverFacingBet = events.filter(e => e.street == Street.River && e.toCall > 0)
-    if riverFacingBet.size >= 5 then
-      val riverFoldRate = riverFacingBet.count(_.action == PokerAction.Fold).toDouble / riverFacingBet.size
-      println(f"[CFR-CAL] River fold rate (facing bet):  $riverFoldRate%.3f  (threshold: 0.30)")
+      // === Calibration data: measure actual rates ===
+      val events = profile.recentEvents
+      val sig = profile.signature
+      val providerCounts = cfrStrategy.providerCountsSnapshot
+      val cfrProviderCounts = providerCounts - "direct"
+      val observedCfrProviders = cfrProviderCounts.keySet.toVector.sorted
 
-    val facingLargeBet = events.filter { e =>
-      e.toCall > 0 && e.potBefore > e.toCall && e.toCall / (e.potBefore - e.toCall) >= 0.6
+      println(s"[CFR-CAL] Hands: $numHands, Events: ${events.size}")
+      println(s"[CFR-CAL] CFR providers served: $providerCounts")
+      println(s"[CFR-CAL] CFR-only providers served: $cfrProviderCounts")
+      println(f"[CFR-CAL] Signature: fold=${sig.values(0)}%.3f raise=${sig.values(1)}%.3f " +
+        f"call=${sig.values(2)}%.3f check=${sig.values(3)}%.3f")
+      println(s"[CFR-CAL] Archetype: ${profile.archetypePosterior.mapEstimate}")
+
+      assert(
+        cfrProviderCounts.nonEmpty,
+        s"expected calibration to exercise CFR providers, got providers $providerCounts"
+      )
+      assertEquals(
+        observedCfrProviders.size,
+        1,
+        s"expected auto selection to stick to one CFR backend, got providers $providerCounts"
+      )
+      println(s"[CFR-CAL] Observed auto-selected CFR provider: ${observedCfrProviders.head}")
+
+      // Per-metric calibration
+      val riverFacingBet = events.filter(e => e.street == Street.River && e.toCall > 0)
+      if riverFacingBet.size >= 5 then
+        val riverFoldRate = riverFacingBet.count(_.action == PokerAction.Fold).toDouble / riverFacingBet.size
+        println(f"[CFR-CAL] River fold rate (facing bet):  $riverFoldRate%.3f  (threshold: 0.30)")
+
+      val facingLargeBet = events.filter { e =>
+        e.toCall > 0 && e.potBefore > e.toCall && e.toCall / (e.potBefore - e.toCall) >= 0.6
+      }
+      if facingLargeBet.size >= 5 then
+        val largeBetCallRate = facingLargeBet.count(_.action == PokerAction.Call).toDouble / facingLargeBet.size
+        println(f"[CFR-CAL] Large bet call rate:           $largeBetCallRate%.3f  (threshold: 0.60)")
+
+      val turnEvents = events.filter(_.street == Street.Turn)
+      if turnEvents.size >= 5 then
+        val turnRaiseRate = turnEvents.count(_.action.category == PokerAction.Category.Raise).toDouble / turnEvents.size
+        println(f"[CFR-CAL] Turn raise rate:               $turnRaiseRate%.3f  (threshold: 0.25)")
+
+      val bigPotCanBet = events.filter(e =>
+        e.potBefore > 0 && e.stackBefore / e.potBefore < 4.0 && e.toCall == 0
+      )
+      if bigPotCanBet.size >= 5 then
+        val bigPotCheckRate = bigPotCanBet.count(_.action == PokerAction.Check).toDouble / bigPotCanBet.size
+        println(f"[CFR-CAL] Big pot check rate:            $bigPotCheckRate%.3f  (threshold: 0.75)")
+
+      val preflopEvents = events.filter(_.street == Street.Preflop)
+      if preflopEvents.size >= 8 then
+        val preflopFoldRate = preflopEvents.count(_.action == PokerAction.Fold).toDouble / preflopEvents.size
+        println(f"[CFR-CAL] Preflop fold rate:             $preflopFoldRate%.3f  (threshold: 0.20)")
+        val preflopCallRate = preflopEvents.count(_.action == PokerAction.Call).toDouble / preflopEvents.size
+        println(f"[CFR-CAL] Preflop call rate:             $preflopCallRate%.3f  (threshold: 0.65)")
+
+      val responseTotal = profile.raiseResponses.total.toDouble
+      if responseTotal >= 4.0 then
+        val foldToRaise = profile.raiseResponses.folds / responseTotal
+        val callVsRaise = profile.raiseResponses.calls / responseTotal
+        val reraiseVsRaise = profile.raiseResponses.raises / responseTotal
+        println(f"[CFR-CAL] Fold to raise:                 $foldToRaise%.3f  (threshold: 0.55)")
+        println(f"[CFR-CAL] Call vs raise:                 $callVsRaise%.3f  (threshold: 0.55)")
+        println(f"[CFR-CAL] Reraise vs raise:              $reraiseVsRaise%.3f  (threshold: 0.28)")
+
+      // === False positive check ===
+      val hints = profile.exploitHints
+      println(s"[CFR-CAL] Exploit hints: $hints")
+      assert(
+        !hints.exists(showdownHint),
+        s"CFR equilibrium villain should not trigger showdown-specific hints: $hints"
+      )
+
+      val leakIds = Vector("overfold-river-aggression", "overcall-big-bets", "overbluff-turn-barrel",
+        "passive-big-pots", "preflop-too-loose", "preflop-too-tight")
+      val matches = leakIds.filter(id => hintMatchesLeak(hints, id))
+      println(s"[CFR-CAL] False positive leak patterns: $matches")
+
+      assert(matches.isEmpty,
+        s"CFR equilibrium villain triggers false positive leak patterns: $matches\n" +
+          s"  Hints: $hints\n" +
+          s"  Use calibration data above to adjust thresholds in OpponentProfileStore.exploitHintsFor")
     }
-    if facingLargeBet.size >= 5 then
-      val largeBetCallRate = facingLargeBet.count(_.action == PokerAction.Call).toDouble / facingLargeBet.size
-      println(f"[CFR-CAL] Large bet call rate:           $largeBetCallRate%.3f  (threshold: 0.60)")
-
-    val turnEvents = events.filter(_.street == Street.Turn)
-    if turnEvents.size >= 5 then
-      val turnRaiseRate = turnEvents.count(_.action.category == PokerAction.Category.Raise).toDouble / turnEvents.size
-      println(f"[CFR-CAL] Turn raise rate:               $turnRaiseRate%.3f  (threshold: 0.25)")
-
-    val bigPotCanBet = events.filter(e =>
-      e.potBefore > 0 && e.stackBefore / e.potBefore < 4.0 && e.toCall == 0
-    )
-    if bigPotCanBet.size >= 5 then
-      val bigPotCheckRate = bigPotCanBet.count(_.action == PokerAction.Check).toDouble / bigPotCanBet.size
-      println(f"[CFR-CAL] Big pot check rate:            $bigPotCheckRate%.3f  (threshold: 0.75)")
-
-    val preflopEvents = events.filter(_.street == Street.Preflop)
-    if preflopEvents.size >= 8 then
-      val preflopFoldRate = preflopEvents.count(_.action == PokerAction.Fold).toDouble / preflopEvents.size
-      println(f"[CFR-CAL] Preflop fold rate:             $preflopFoldRate%.3f  (threshold: 0.20)")
-      val preflopCallRate = preflopEvents.count(_.action == PokerAction.Call).toDouble / preflopEvents.size
-      println(f"[CFR-CAL] Preflop call rate:             $preflopCallRate%.3f  (threshold: 0.65)")
-
-    val responseTotal = profile.raiseResponses.total.toDouble
-    if responseTotal >= 4.0 then
-      val foldToRaise = profile.raiseResponses.folds / responseTotal
-      val callVsRaise = profile.raiseResponses.calls / responseTotal
-      val reraiseVsRaise = profile.raiseResponses.raises / responseTotal
-      println(f"[CFR-CAL] Fold to raise:                 $foldToRaise%.3f  (threshold: 0.55)")
-      println(f"[CFR-CAL] Call vs raise:                 $callVsRaise%.3f  (threshold: 0.55)")
-      println(f"[CFR-CAL] Reraise vs raise:              $reraiseVsRaise%.3f  (threshold: 0.28)")
-
-    // === False positive check ===
-    val hints = profile.exploitHints
-    println(s"[CFR-CAL] Exploit hints: $hints")
-
-    val leakIds = Vector("overfold-river-aggression", "overcall-big-bets", "overbluff-turn-barrel",
-      "passive-big-pots", "preflop-too-loose", "preflop-too-tight")
-    val matches = leakIds.filter(id => hintMatchesLeak(hints, id))
-    println(s"[CFR-CAL] False positive leak patterns: $matches")
-
-    assert(matches.isEmpty,
-      s"CFR equilibrium villain triggers false positive leak patterns: $matches\n" +
-        s"  Hints: $hints\n" +
-        s"  Use calibration data above to adjust thresholds in OpponentProfileStore.exploitHintsFor")
+  }
 
   private def hintMatchesLeak(hints: Vector[String], leakId: String): Boolean =
     leakId match
       case "overfold-river-aggression" =>
         hints.exists(_.contains("Over-folds on the river"))
       case "overcall-big-bets" =>
-        hints.exists(h => h.contains("calling station") || h.contains("Calls too often facing large bets"))
+        hints.exists(h =>
+          h.contains("calling station") ||
+            h.contains("Calls too often facing large bets") ||
+            h.contains("shown down weak hands")
+        )
       case "overbluff-turn-barrel" =>
         hints.exists(_.contains("Very aggressive on the turn"))
       case "passive-big-pots" =>
@@ -120,3 +183,18 @@ class CfrGtoCalibrationTest extends FunSuite:
       case "preflop-too-tight" =>
         hints.exists(_.contains("Over-folds preflop"))
       case _ => false
+
+  private def showdownHint(hint: String): Boolean =
+    hint.contains("shown down") ||
+      hint.contains("premium hands frequently") ||
+      hint.contains("pair-heavy")
+
+  private def describeNativeAvailability(): String =
+    val gpuAvailability = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Gpu)
+    val cpuAvailability = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Cpu)
+    s"auto mode; gpuAvailable=${gpuAvailability.available} (${gpuAvailability.detail}); " +
+      s"cpuAvailable=${cpuAvailability.available} (${cpuAvailability.detail})"
+
+  private def resetCfrProviderStateForTest(): Unit =
+    HoldemCfrNativeRuntime.resetLoadCacheForTests()
+    HoldemCfrSolver.resetAutoProviderForTests()

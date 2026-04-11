@@ -4,6 +4,19 @@ import munit.FunSuite
 import sicfun.core.Card
 import sicfun.holdem.types.*
 
+/** Tests for [[VillainResponseProfile]], [[UniformVillainResponseModel]],
+  * [[VillainResponseModel.BinaryHandRanges]], and [[VillainResponseModel.sbVsBbOpenDefault]].
+  *
+  * Validates:
+  *   - '''VillainResponseProfile''': valid probability triples accepted; negative values,
+  *     non-unit sums, and edge cases (all-fold, all-call, all-raise) handled correctly.
+  *   - '''UniformVillainResponseModel''': returns the same profile regardless of villain hand.
+  *   - '''BinaryHandRanges''': raise/call/fold priority is correct; raiseRange takes priority
+  *     over callRange; non-raise hero actions always produce a call response.
+  *   - '''fromRanges''': valid range strings parse successfully; invalid strings return Left.
+  *   - '''sbVsBbOpenDefault''': non-empty raise and call ranges; known hands produce
+  *     expected fold/call/raise responses.
+  */
 class VillainResponseModelTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
@@ -275,4 +288,150 @@ class VillainResponseModelTest extends FunSuite:
     val junk = hole("2c", "7d")
     val junkProfile = model.response(junk, state, PokerAction.Raise(3.0))
     assertEqualsDouble(junkProfile.foldProbability, 1.0, 1e-12)
+  }
+
+  // ---------------------------------------------------------------------------
+  // HandStrengthResponseModel
+  // ---------------------------------------------------------------------------
+
+  test("HandStrengthResponseModel: strong hand folds less than weak hand") {
+    val base = VillainResponseProfile(0.40, 0.50, 0.10)
+    val model = new HandStrengthResponseModel(() => base)
+
+    val preflopState = GameState(
+      street = Street.Preflop,
+      board = Board.empty,
+      pot = 6.0,
+      toCall = 3.0,
+      position = Position.BigBlind,
+      stackSize = 97.0,
+      betHistory = Vector.empty
+    )
+
+    val aces = hole("Ah", "Ad")
+    val junk = hole("2c", "7d")
+    val raise = PokerAction.Raise(6.0) // pot-sized raise → potOddsFactor = 1.0
+
+    val acesProfile = model.response(aces, preflopState, raise)
+    val junkProfile = model.response(junk, preflopState, raise)
+
+    assert(
+      acesProfile.foldProbability < junkProfile.foldProbability,
+      s"aces fold (${acesProfile.foldProbability}) should be < junk fold (${junkProfile.foldProbability})"
+    )
+    assert(
+      acesProfile.raiseProbability > junkProfile.raiseProbability,
+      s"aces raise (${acesProfile.raiseProbability}) should be > junk raise (${junkProfile.raiseProbability})"
+    )
+  }
+
+  test("HandStrengthResponseModel: bigger raise increases fold probability") {
+    val base = VillainResponseProfile(0.40, 0.50, 0.10)
+    val model = new HandStrengthResponseModel(() => base)
+
+    val state = GameState(
+      street = Street.Flop,
+      board = Board(Vector(card("Kh"), card("9d"), card("3c"))),
+      pot = 10.0,
+      toCall = 5.0,
+      position = Position.BigBlind,
+      stackSize = 90.0,
+      betHistory = Vector.empty
+    )
+
+    val hand = hole("Jh", "Td") // medium strength
+    val smallRaise = PokerAction.Raise(5.0)  // 0.5x pot → factor 0.5
+    val bigRaise = PokerAction.Raise(20.0)   // 2x pot → factor 2.0
+
+    val smallProfile = model.response(hand, state, smallRaise)
+    val bigProfile = model.response(hand, state, bigRaise)
+
+    assert(
+      bigProfile.foldProbability > smallProfile.foldProbability,
+      s"big raise fold (${bigProfile.foldProbability}) should be > small raise fold (${smallProfile.foldProbability})"
+    )
+  }
+
+  test("HandStrengthResponseModel: non-raise action returns pure call") {
+    val base = VillainResponseProfile(0.40, 0.50, 0.10)
+    val model = new HandStrengthResponseModel(() => base)
+
+    val state = GameState(
+      street = Street.Preflop,
+      board = Board.empty,
+      pot = 3.0,
+      toCall = 1.0,
+      position = Position.BigBlind,
+      stackSize = 99.0,
+      betHistory = Vector.empty
+    )
+
+    val hand = hole("Ah", "Ad")
+    for action <- Seq(PokerAction.Fold, PokerAction.Check, PokerAction.Call) do
+      val profile = model.response(hand, state, action)
+      assertEqualsDouble(profile.foldProbability, 0.0, 1e-12)
+      assertEqualsDouble(profile.callProbability, 1.0, 1e-12)
+      assertEqualsDouble(profile.raiseProbability, 0.0, 1e-12)
+  }
+
+  test("HandStrengthResponseModel.modulate: probabilities always sum to 1") {
+    val base = VillainResponseProfile(0.40, 0.50, 0.10)
+    // Test a range of strengths and pot-odds factors
+    for
+      s <- Seq(0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0)
+      pof <- Seq(0.5, 1.0, 1.5, 2.0)
+    do
+      val profile = HandStrengthResponseModel.modulate(base, s, pof)
+      val sum = profile.foldProbability + profile.callProbability + profile.raiseProbability
+      assertEqualsDouble(sum, 1.0, 1e-9, s"sum=$sum for strength=$s, potOddsFactor=$pof")
+      assert(profile.foldProbability >= 0.0, s"negative fold for s=$s, pof=$pof")
+      assert(profile.callProbability >= 0.0, s"negative call for s=$s, pof=$pof")
+      assert(profile.raiseProbability >= 0.0, s"negative raise for s=$s, pof=$pof")
+  }
+
+  test("HandStrengthResponseModel.modulate: zero-strength hand folds maximally") {
+    val base = VillainResponseProfile(0.40, 0.50, 0.10)
+    val profile = HandStrengthResponseModel.modulate(base, strength = 0.0, potOddsFactor = 1.0)
+    // At strength=0: rawFold = 0.40 * 1.0 * 2.0 * 1.0 = 0.80
+    // rawRaise = 0.10 * 2.0 * 0.0 = 0.0
+    assertEqualsDouble(profile.foldProbability, 0.80, 1e-9)
+    assertEqualsDouble(profile.raiseProbability, 0.0, 1e-9)
+  }
+
+  test("HandStrengthResponseModel.modulate: full-strength hand never folds") {
+    val base = VillainResponseProfile(0.40, 0.50, 0.10)
+    val profile = HandStrengthResponseModel.modulate(base, strength = 1.0, potOddsFactor = 1.0)
+    // At strength=1: rawFold = 0.40 * 1.0 * 2.0 * 0.0 = 0.0
+    // rawRaise = 0.10 * 2.0 * 1.0 = 0.20
+    assertEqualsDouble(profile.foldProbability, 0.0, 1e-9)
+    assertEqualsDouble(profile.raiseProbability, 0.20, 1e-9)
+  }
+
+  test("HandStrengthResponseModel: postflop strength uses board texture") {
+    val base = VillainResponseProfile(0.40, 0.50, 0.10)
+    val model = new HandStrengthResponseModel(() => base)
+
+    // Board: K♥ 9♦ 3♣ — villain with K♠Q♠ has top pair, villain with 2♠4♠ has nothing
+    val board = Board(Vector(card("Kh"), card("9d"), card("3c")))
+    val state = GameState(
+      street = Street.Flop,
+      board = board,
+      pot = 10.0,
+      toCall = 5.0,
+      position = Position.BigBlind,
+      stackSize = 90.0,
+      betHistory = Vector.empty
+    )
+
+    val topPair = hole("Ks", "Qs")
+    val air = hole("2s", "4s")
+    val raise = PokerAction.Raise(10.0)
+
+    val topPairProfile = model.response(topPair, state, raise)
+    val airProfile = model.response(air, state, raise)
+
+    assert(
+      topPairProfile.foldProbability < airProfile.foldProbability,
+      s"top pair fold (${topPairProfile.foldProbability}) should be < air fold (${airProfile.foldProbability})"
+    )
   }

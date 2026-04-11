@@ -2,6 +2,14 @@ package sicfun.core
 
 import munit.FunSuite
 
+/** Tests for [[FixedVal]] signed fixed-point arithmetic (2^13 scale).
+  *
+  * Validates:
+  *  - `fromInt` correctly left-shifts by ScaleBits and round-trips to Double.
+  *  - `fromDouble` round-trips for both positive and negative values within tolerance.
+  *  - Addition and subtraction preserve sign and produce correct results.
+  *  - Comparison operators work correctly across sign boundaries.
+  */
 class FixedValTest extends FunSuite:
   private val tolerance = 5e-4
 

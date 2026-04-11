@@ -2,7 +2,21 @@ package sicfun.holdem.types
 
 import munit.FunSuite
 
+/**
+  * Tests for [[GameState]], [[Street]], [[Position]], and [[BetAction]].
+  *
+  * Validates the core game-state snapshot behavior:
+  *   - '''potOdds''' computation: correct fraction, zero when no call is required.
+  *   - '''stackToPot''' computation: correct ratio, infinity for zero pot.
+  *   - '''Validation''': negative pot, toCall, and stackSize are rejected.
+  *   - '''Edge cases''': zero pot + zero toCall, all Position enum values.
+  *   - '''Position enum''': 9 entries, correct ordinals, Hijack at ordinal 6.
+  *   - '''BetHistory''': preserved through construction.
+  */
 class GameStateTest extends FunSuite:
+  /** Factory for a preflop GameState with configurable monetary fields.
+    * Defaults: pot=10, toCall=2, stackSize=100, Button position, empty board and history.
+    */
   private def gs(
       pot: Double = 10.0,
       toCall: Double = 2.0,

@@ -61,6 +61,8 @@ final case class BayesianRange[H](distribution: DiscreteDistribution[H]):
   ): (BayesianRange[H], Double) =
     if actions.isEmpty then (this, 0.0)
     else
+      // Flatten the distribution into parallel arrays for O(1) indexed access in the inner loop.
+      // This avoids repeated Map lookups per observation, which matters for long action sequences.
       val hypotheses = distribution.weights.keysIterator.toVector
       val probabilities = new Array[Double](hypotheses.length)
       var i = 0
@@ -70,16 +72,20 @@ final case class BayesianRange[H](distribution: DiscreteDistribution[H]):
 
       val eps = Probability.Eps
       var logEvidence = 0.0
+      // Process each observation sequentially: multiply prior by likelihood, then renormalize.
+      // This is the standard online Bayesian filter update loop.
       actions.foreach { case (action, features) =>
+        // Compute unnormalized posterior: P(h) * P(action | features, h) for each hypothesis h.
         var evidence = 0.0
         var j = 0
         while j < hypotheses.length do
           val updated = probabilities(j) * model.likelihood(action, features, hypotheses(j))
           probabilities(j) = updated
-          evidence += updated
+          evidence += updated // marginal evidence P(action | features) = sum over h
           j += 1
 
         require(evidence > eps, "likelihoods produce zero evidence")
+        // Normalize in-place to get the posterior P(h | action, features).
         val invEvidence = 1.0 / evidence
         var k = 0
         while k < probabilities.length do

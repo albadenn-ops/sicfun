@@ -2,6 +2,19 @@ package sicfun.core
 
 import munit.FunSuite
 
+/** Tests for [[CollapseMetrics]] distribution collapse and scoring metrics.
+  *
+  * Validates the mathematical properties of each metric:
+  *  - '''Entropy reduction''': zero for identical distributions, positive when the posterior
+  *    is more concentrated than the prior.
+  *  - '''KL divergence''': zero for identical distributions, positive for different ones,
+  *    and fails when the posterior has support outside the prior (infinite KL).
+  *  - '''Effective support''': equals the support size for uniform distributions,
+  *    equals 1 for point masses (the "perplexity" interpretation).
+  *  - '''Collapse ratio''': 0 for no change, near 1 for extreme narrowing.
+  *  - '''Brier score''': 0 for perfect predictions, 2 for maximally wrong binary predictions,
+  *    with correct averaging in the mean variant.
+  */
 class CollapseMetricsTest extends FunSuite:
   test("entropy reduction is zero for identical distributions") {
     val dist = DiscreteDistribution.uniform(Seq(1, 2, 3, 4))

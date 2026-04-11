@@ -6,6 +6,20 @@ import sicfun.holdem.engine.RaiseResponseCounts
 import java.nio.file.Files
 import scala.jdk.CollectionConverters.*
 
+/** Tests for the [[CollapseRememberedPlayers]] CLI tool, which merges
+  * two remembered player identities (canonical + alias) into a single
+  * canonical identity within the [[OpponentProfileStore]].
+  *
+  * Coverage:
+  *   - Successful player collapse: two profiles on different sites are
+  *     collapsed, the store is saved with the collapse record, and a
+  *     reload confirms persistence
+  *   - Profile collapse mode (`--collapseProfiles=true`): both player
+  *     and profile collapses are recorded
+  *   - Error cases: canonical player not found, alias player not found,
+  *     missing required CLI options
+  *   - Help output: `--help` returns usage text as a Left result
+  */
 class CollapseRememberedPlayersTest extends FunSuite:
   private def makeProfile(site: String, name: String, hands: Int): OpponentProfile =
     OpponentProfile(

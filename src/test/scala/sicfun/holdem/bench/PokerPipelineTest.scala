@@ -4,15 +4,26 @@ import sicfun.holdem.*
 import sicfun.holdem.model.*
 
 import munit.FunSuite
-import sicfun.core.{BayesianRange, Card, CollapseMetrics, DiscreteDistribution, MultinomialLogistic}
+import sicfun.core.{BayesianRange, CollapseMetrics, DiscreteDistribution, MultinomialLogistic}
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
+/** Integration tests for the core poker inference pipeline: action model training,
+  * Bayesian range updates, calibration metrics, and evaluation reporting.
+  *
+  * Coverage includes:
+  *   - Uniform model preserves a uniform prior after Bayesian update
+  *   - Trained model shifts posterior toward action-correlated hands
+  *   - CollapseMetrics (entropy reduction, KL divergence, effective support, collapse ratio)
+  *     reflect genuine posterior narrowing
+  *   - Brier score calibration on training data stays below 1.0
+  *   - Calibration summary baselines (uniform, majority) and skill score
+  *   - Evaluation report: accuracy, confusion matrix totals, precision/recall bounds
+  *   - Uniform model evaluation yields low accuracy (~0.25)
+  *   - Stratified k-fold cross-validation returns k fold scores
+  *   - Constructor rejection of mismatched logistic dimensions and feature dimensions
+  *   - `categoryProbabilities` rejection on dimension mismatch; `predictFromFeatures` on 8D model
+  */
 class PokerPipelineTest extends FunSuite:
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(fail(s"invalid card: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
-
   test("uniform model preserves prior") {
     val villainHands = Seq(hole("Ah", "Kh"), hole("7c", "2d"), hole("Qs", "Jd"))
     val prior = DiscreteDistribution.uniform(villainHands)

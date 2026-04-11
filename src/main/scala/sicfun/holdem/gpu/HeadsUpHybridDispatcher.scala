@@ -37,41 +37,71 @@ import java.util.zip.CRC32
   * A single slice failure does not abort other slices that completed successfully.
   */
 object HeadsUpHybridDispatcher:
+  // --- Configuration property keys ---
+  // Each property has a system-property key and an environment-variable fallback.
+  // Resolution order: ScopedRuntimeProperties > system property > environment variable.
+
+  /** Manual weight overrides as comma-separated "deviceId=weight" pairs (e.g. "cuda:0=5000,cpu=1000"). */
   private val HybridWeightsProperty = "sicfun.hybrid.weights"
   private val HybridWeightsEnv = "sicfun_HYBRID_WEIGHTS"
+  /** Minimum matchups a device must receive to justify the dispatch overhead. */
   private val HybridMinSliceMatchupsProperty = "sicfun.hybrid.minSliceMatchups"
   private val HybridMinSliceMatchupsEnv = "sicfun_HYBRID_MIN_SLICE_MATCHUPS"
+  /** Devices with effective weight below (bestWeight * minRelativeWeight) are excluded. */
   private val HybridMinRelativeWeightProperty = "sicfun.hybrid.minRelativeWeight"
   private val HybridMinRelativeWeightEnv = "sicfun_HYBRID_MIN_RELATIVE_WEIGHT"
+  /** Batches smaller than this threshold are dispatched to a single (best) device only. */
   private val HybridCpuOnlyBelowProperty = "sicfun.hybrid.cpuOnlyBelow"
   private val HybridCpuOnlyBelowEnv = "sicfun_HYBRID_CPU_ONLY_BELOW"
+  /** Whether to enable EMA-based adaptive weight recalibration after each dispatch. */
   private val HybridAdaptiveWeightsProperty = "sicfun.hybrid.adaptiveWeights"
   private val HybridAdaptiveWeightsEnv = "sicfun_HYBRID_ADAPTIVE_WEIGHTS"
+  /** EMA smoothing factor for adaptive weight updates (0 < alpha <= 1). */
   private val HybridAdaptiveAlphaProperty = "sicfun.hybrid.adaptiveAlpha"
   private val HybridAdaptiveAlphaEnv = "sicfun_HYBRID_ADAPTIVE_ALPHA"
+  /** Whether to run a warmup pass on all devices before the first real dispatch. */
   private val HybridWarmupProperty = "sicfun.hybrid.warmup"
   private val HybridWarmupEnv = "sicfun_HYBRID_WARMUP"
+  /** Number of matchups in the warmup batch. */
   private val HybridWarmupMatchupsProperty = "sicfun.hybrid.warmupMatchups"
   private val HybridWarmupMatchupsEnv = "sicfun_HYBRID_WARMUP_MATCHUPS"
+  /** MC trials per matchup during warmup (kept low to minimise startup latency). */
   private val HybridWarmupTrialsProperty = "sicfun.hybrid.warmupTrials"
   private val HybridWarmupTrialsEnv = "sicfun_HYBRID_WARMUP_TRIALS"
+  /** When true and CUDA is present, non-CUDA devices are dropped unless explicitly included. */
   private val HybridCudaPrimaryProperty = "sicfun.hybrid.cudaPrimary"
   private val HybridCudaPrimaryEnv = "sicfun_HYBRID_CUDA_PRIMARY"
+  /** When true, CPU device is retained alongside GPU devices even in cudaPrimary mode. */
   private val HybridIncludeCpuWithGpuProperty = "sicfun.hybrid.includeCpuWithGpu"
   private val HybridIncludeCpuWithGpuEnv = "sicfun_HYBRID_INCLUDE_CPU_WITH_GPU"
+  /** Helper devices (OpenCL, CPU) must have at least this fraction of CUDA weight to participate. */
   private val HybridHelperMinRelativeToCudaProperty = "sicfun.hybrid.helperMinRelativeToCuda"
   private val HybridHelperMinRelativeToCudaEnv = "sicfun_HYBRID_HELPER_MIN_RELATIVE_TO_CUDA"
 
+  // --- Default constants ---
+  // Inlined at compile time for zero-overhead access on the hot path.
+
+  /** Minimum matchups per device slice to justify dispatch overhead. */
   private inline val DefaultMinSliceMatchups = 64
+  /** No minimum relative weight filter by default --- all devices participate. */
   private inline val DefaultMinRelativeWeight = 0.0
+  /** Batches with fewer than 8192 matchups go to a single device (avoids multi-device overhead). */
   private inline val DefaultCpuOnlyBelow = 8_192
+  /** EMA smoothing factor: 35% new observation, 65% prior calibrated weight. */
   private inline val DefaultAdaptiveAlpha = 0.35
+  /** Maximum single-step change factor to prevent wild oscillations in calibrated weights. */
   private inline val DefaultAdaptiveStepFactor = 1.35
+  /** Minimum elapsed time (5 ms) for a dispatch to be considered meaningful for calibration. */
   private inline val DefaultAdaptiveMinElapsedNanos = 5_000_000L // 5 ms
+  /** Default warmup batch size: small enough for fast startup, large enough to prime JIT/GPU. */
   private inline val DefaultWarmupMatchups = 64
+  /** Default warmup trials per matchup: minimal work to trigger GPU kernel compilation. */
   private inline val DefaultWarmupTrials = 8
+  /** CUDA-primary policy is on by default: when CUDA exists, prefer it over CPU/OpenCL. */
   private inline val DefaultCudaPrimaryEnabled = true
+  /** By default, CPU is excluded when a GPU is available (GPU is much faster). */
   private inline val DefaultIncludeCpuWithGpu = false
+  /** No minimum helper-to-CUDA ratio by default --- any helper device can participate. */
   private inline val DefaultHelperMinRelativeToCuda = 0.0
 
 
@@ -100,6 +130,11 @@ object HeadsUpHybridDispatcher:
         stderrs: Array[Double]
     ): Int
 
+  /** CUDA GPU device. Estimated weight = SM count * clock MHz, which roughly
+    * approximates throughput for embarrassingly parallel Monte Carlo workloads.
+    * Delegates computation to [[HeadsUpGpuNativeBindings.computeBatchOnDevice]],
+    * which selects the specific CUDA device by index.
+    */
   final case class CudaComputeDevice(
       index: Int,
       override val name: String,
@@ -109,6 +144,7 @@ object HeadsUpHybridDispatcher:
     override val id: String = s"cuda:$index"
     override val kind: String = "cuda"
     override val supportsExact: Boolean = true
+    // Weight heuristic: more SMs and higher clock -> higher throughput.
     override val estimatedWeight: Double = smCount.toDouble * clockMHz.toDouble
 
     override def computeSubBatch(
@@ -126,6 +162,12 @@ object HeadsUpHybridDispatcher:
         index, lowIds, highIds, modeCode, trials, seeds, wins, ties, losses, stderrs
       )
 
+  /** OpenCL GPU/iGPU device. Estimated weight uses a 0.3 scaling factor relative
+    * to CUDA because OpenCL kernels are generally slower for this workload due to
+    * less mature driver optimisation and higher kernel dispatch overhead.
+    * Does NOT support exact (non-MC) mode because the OpenCL kernel only implements
+    * Monte Carlo evaluation.
+    */
   final case class OpenCLComputeDevice(
       index: Int,
       override val name: String,
@@ -135,6 +177,7 @@ object HeadsUpHybridDispatcher:
     override val id: String = s"opencl:$index"
     override val kind: String = "opencl"
     override val supportsExact: Boolean = false
+    // 0.3x scaling accounts for OpenCL's lower throughput vs CUDA on this workload.
     override val estimatedWeight: Double = computeUnits.toDouble * clockMHz.toDouble * 0.3
 
     override def computeSubBatch(
@@ -152,11 +195,18 @@ object HeadsUpHybridDispatcher:
         index, lowIds, highIds, modeCode, trials, seeds, wins, ties, losses, stderrs
       )
 
+  /** CPU-based compute device using the native C library's multi-threaded path.
+    * Estimated weight = threadCount * 1000, calibrated so a typical 8-core CPU
+    * gets weight ~8000, which is comparable to a modest GPU's SM*MHz product.
+    * Falls back to the generic `computeBatch` JNI entry if `computeBatchCpuOnly`
+    * is not available (older native library versions).
+    */
   final case class CpuComputeDevice(threadCount: Int) extends ComputeDevice:
     override val id: String = "cpu"
     override val kind: String = "cpu"
     override val name: String = s"CPU ($threadCount threads)"
     override val supportsExact: Boolean = true
+    // 1000 per thread is a rough heuristic to put CPU weight in the same ballpark as GPU.
     override val estimatedWeight: Double = threadCount.toDouble * 1000.0
 
     override def computeSubBatch(
@@ -215,6 +265,12 @@ object HeadsUpHybridDispatcher:
 
   // ------ Per-device telemetry ------------------------------------------------------------------------------------------------------------------------
 
+  /** Timing and throughput data for a single device's contribution to a batch dispatch.
+    * Used both for reporting and for feeding the adaptive weight calibration loop.
+    *
+    * @param elapsedNanos  high-resolution nanoTime measurement (preferred for throughput).
+    *                      Falls back to `elapsedMs * 1e6` when nanos is unavailable.
+    */
   final case class DeviceTelemetry(
       deviceId: String,
       deviceName: String,
@@ -222,6 +278,9 @@ object HeadsUpHybridDispatcher:
       elapsedMs: Long,
       elapsedNanos: Long = 0L
   ):
+    /** Computes matchups-per-second throughput from the best available timing source.
+      * Returns 0.0 if no valid timing data is available.
+      */
     def throughput: Double =
       val nanos =
         if elapsedNanos > 0L then elapsedNanos
@@ -229,6 +288,10 @@ object HeadsUpHybridDispatcher:
         else 0L
       if nanos > 0L then matchups.toDouble / (nanos.toDouble / 1_000_000_000.0) else 0.0
 
+  /** Records a failover event: which device failed, its JNI status code, which device
+    * rescued the work, and the timing of both the failed and successful attempts.
+    * Collected in [[HybridResult.recovery]] for diagnostics and reliability monitoring.
+    */
   final case class RecoveryTelemetry(
       failedDeviceId: String,
       failedStatus: Int,
@@ -240,12 +303,21 @@ object HeadsUpHybridDispatcher:
 
   // ------ Batch split descriptor ------------------------------------------------------------------------------------------------------------------
 
+  /** Describes a contiguous sub-range of the batch assigned to a specific device.
+    * @param startIdx  offset into the shared lowIds/highIds/seeds arrays
+    * @param count     number of matchups in this slice
+    */
   private final case class SubBatchSlice(
       device: ComputeDevice,
       startIdx: Int,
       count: Int
   )
 
+  /** Result of running a single slice on its assigned device.
+    * `status == 0` means success; non-zero codes come from JNI/native (see
+    * [[GpuRuntimeSupport.describeNativeStatus]]). `Int.MinValue` indicates a
+    * JVM-side exception (e.g. UnsatisfiedLinkError).
+    */
   private final case class SliceAttempt(
       slice: SubBatchSlice,
       status: Int,
@@ -254,12 +326,17 @@ object HeadsUpHybridDispatcher:
       error: Option[String]
   )
 
+  /** Pre-allocated output arrays shared across all slices of a dispatch.
+    * Each slice writes into its own `[startIdx, startIdx+count)` sub-range,
+    * so no synchronisation is needed for non-overlapping slices.
+    */
   private final class DispatchBuffers(size: Int):
     val wins = new Array[Double](size)
     val ties = new Array[Double](size)
     val losses = new Array[Double](size)
     val stderrs = new Array[Double](size)
 
+    /** Converts the flat arrays into an array of [[EquityResultWithError]] value objects. */
     def buildResults(): Array[EquityResultWithError] =
       val out = new Array[EquityResultWithError](wins.length)
       var i = 0
@@ -268,6 +345,7 @@ object HeadsUpHybridDispatcher:
         i += 1
       out
 
+  /** Aggregated telemetry from a completed dispatch: per-device timing and any failover events. */
   private final case class DispatchOutcome(
       perDevice: Vector[DeviceTelemetry],
       recovery: Vector[RecoveryTelemetry]
@@ -275,10 +353,21 @@ object HeadsUpHybridDispatcher:
 
   // ------ Calibrated weights (updated by auto-tuner) ---------------------------------------------------
 
+  /** Thread-safe storage for device throughput weights measured at runtime.
+    * Updated via CAS in [[maybeUpdateCalibratedWeights]] after each dispatch.
+    * These weights override the static `estimatedWeight` heuristic when present.
+    */
   private val calibratedWeightsRef =
     new AtomicReference[Map[String, Double]](Map.empty)
+  /** Guards one-shot warmup: only the first dispatch triggers device warmup. */
   private val warmupDone = new AtomicBoolean(false)
+  /** Counter for naming daemon threads in the dispatch pool (for debuggability). */
   private val dispatchThreadCounter = new AtomicInteger(1)
+  /** Shared cached thread pool for parallel multi-device dispatch.
+    * Uses daemon threads so the pool does not prevent JVM shutdown.
+    * A cached pool is chosen over a fixed pool because the number of devices is
+    * small (typically 2-4) and threads are reused across dispatches.
+    */
   private val dispatchPool: ExecutorService =
     Executors.newCachedThreadPool(new ThreadFactory {
       override def newThread(runnable: Runnable): Thread =
@@ -287,17 +376,23 @@ object HeadsUpHybridDispatcher:
         thread
     })
 
+  /** Replaces the entire calibrated weights map. Used by external auto-tuners. */
   def setCalibratedWeights(weights: Map[String, Double]): Unit =
     calibratedWeightsRef.set(weights)
 
+  /** Returns a snapshot of the current calibrated weights (device ID -> throughput). */
   def calibratedWeights: Map[String, Double] =
     calibratedWeightsRef.get()
 
+  /** Whether the adaptive EMA weight recalibration loop is active. Defaults to true. */
   private def configuredAdaptiveWeightsEnabled: Boolean =
     GpuRuntimeSupport.resolveNonEmpty(HybridAdaptiveWeightsProperty, HybridAdaptiveWeightsEnv)
       .map(GpuRuntimeSupport.parseTruthy)
       .getOrElse(true)
 
+  /** EMA smoothing factor for adaptive calibration (0 < alpha <= 1).
+    * Higher alpha reacts faster to throughput changes but is noisier.
+    */
   private def configuredAdaptiveAlpha: Double =
     val parsed =
       GpuRuntimeSupport.resolveNonEmpty(HybridAdaptiveAlphaProperty, HybridAdaptiveAlphaEnv)
@@ -305,6 +400,9 @@ object HeadsUpHybridDispatcher:
         .filter(value => java.lang.Double.isFinite(value) && value > 0.0 && value <= 1.0)
     parsed.getOrElse(DefaultAdaptiveAlpha)
 
+  /** Batch size threshold below which multi-device dispatch is skipped and only
+    * the single best device is used. Avoids dispatch overhead for small batches.
+    */
   private def configuredCpuOnlyBelow: Int =
     val parsed =
       GpuRuntimeSupport.resolveNonEmpty(HybridCpuOnlyBelowProperty, HybridCpuOnlyBelowEnv)
@@ -346,6 +444,19 @@ object HeadsUpHybridDispatcher:
       .filter(value => java.lang.Double.isFinite(value) && value >= 0.0 && value <= 1.0)
       .getOrElse(DefaultHelperMinRelativeToCuda)
 
+  /** Applies the CUDA-primary device selection policy.
+    *
+    * When enabled and at least one CUDA device is present:
+    *   1. Non-GPU devices are dropped unless `includeCpuWithGpu` is true.
+    *   2. Helper devices (OpenCL, optionally CPU) are further filtered by the
+    *      `helperMinRelativeToCuda` cutoff: they must have at least that fraction
+    *      of the best CUDA device's effective weight to survive.
+    *   3. If filtering removes all CUDA devices (shouldn't happen), falls back to
+    *      keeping only CUDA devices as a safety net.
+    *
+    * This policy ensures CUDA gets the lion's share of work, preventing slow
+    * helper devices from becoming bottlenecks in the parallel dispatch.
+    */
   private def applyCudaPrimaryPolicy(activeDevices: Vector[ComputeDevice]): Vector[ComputeDevice] =
     if !configuredCudaPrimaryEnabled then
       activeDevices
@@ -369,6 +480,18 @@ object HeadsUpHybridDispatcher:
             baseSelection.filter(device => device.kind == "cuda" || effectiveWeight(device) >= minWeight)
           if filtered.exists(_.kind == "cuda") then filtered else baseSelection.filter(_.kind == "cuda")
 
+  /** Runs a one-shot warmup pass on all active devices before the first real dispatch.
+    *
+    * The warmup serves two purposes:
+    *   1. '''JIT/driver init''': CUDA and OpenCL kernels are compiled on first invocation.
+    *      Running a small batch here moves that latency out of the user's critical path.
+    *   2. '''Initial calibration''': if adaptive weights are enabled, warmup throughput
+    *      measurements seed the calibrated weights map so the first real dispatch already
+    *      has device-specific data instead of relying solely on the SM*MHz heuristic.
+    *
+    * The `compareAndSet(false, true)` on `warmupDone` ensures exactly-once execution
+    * even under concurrent dispatch calls.
+    */
   private def maybeWarmUpDevices(modeCode: Int, trials: Int, activeDevices: Vector[ComputeDevice]): Unit =
     if !configuredWarmupEnabled || activeDevices.isEmpty then
       ()
@@ -426,6 +549,25 @@ object HeadsUpHybridDispatcher:
           val detail = Option(ex.getMessage).filter(_.nonEmpty).getOrElse(ex.getClass.getSimpleName)
           GpuRuntimeSupport.log(s"hybrid warmup skipped: $detail")
 
+  /** Updates calibrated weights using an EMA (exponential moving average) of observed
+    * throughput, with step-factor clamping to prevent wild oscillations.
+    *
+    * For each device telemetry entry that passes minimum quality filters (enough matchups
+    * and enough elapsed time), the new calibrated weight is computed as:
+    * {{{
+    *   unclamped = (1 - alpha) * baseline + alpha * observed_throughput
+    *   clamped   = clamp(unclamped, baseline / stepFactor, baseline * stepFactor)
+    * }}}
+    *
+    * The step-factor clamp (default 1.35x) limits each update to at most a 35% change
+    * from the current baseline, smoothing out measurement noise from thermal throttling,
+    * OS scheduling jitter, and WDDM overhead on Windows.
+    *
+    * For a device's first observation (no prior baseline), the observed throughput is
+    * used directly as the initial calibrated weight.
+    *
+    * Thread-safe via `AtomicReference.updateAndGet`.
+    */
   private[holdem] def maybeUpdateCalibratedWeights(perDevice: Vector[DeviceTelemetry]): Unit =
     if !configuredAdaptiveWeightsEnabled || perDevice.isEmpty then
       ()
@@ -461,12 +603,21 @@ object HeadsUpHybridDispatcher:
         }
 
   // ------ Device discovery ------------------------------------------------------------------------------------------------------------------------------------
+  // Discovery is lazy: devices are enumerated once on first access.
+  // CUDA devices are discovered via JNI (cudaDeviceCount/cudaDeviceInfo).
+  // OpenCL devices are discovered similarly, but NVIDIA GPUs already covered by CUDA are excluded.
+  // CPU is always available if the native library loaded successfully.
 
   private lazy val allDevices: Vector[ComputeDevice] = discoverDevices()
 
   /** Returns all discovered compute devices. */
   def devices: Vector[ComputeDevice] = allDevices
 
+  /** Enumerates all available compute devices: CUDA GPUs, then OpenCL devices
+    * (excluding NVIDIA GPUs already found via CUDA to avoid double-counting),
+    * then CPU. Each discovery method catches UnsatisfiedLinkError gracefully
+    * so a missing native library simply means that device type is unavailable.
+    */
   private def discoverDevices(): Vector[ComputeDevice] =
     ensureNativeLibrariesLoaded()
     val cudaDevices = discoverCudaDevices()
@@ -514,6 +665,10 @@ object HeadsUpHybridDispatcher:
       case _: UnsatisfiedLinkError => Vector.empty
       case _: Throwable => Vector.empty
 
+  /** Discovers OpenCL devices, filtering out any NVIDIA GPUs that are already
+    * represented by CUDA devices. This prevents the same physical GPU from
+    * receiving work through both CUDA and OpenCL paths simultaneously.
+    */
   private def discoverOpenCLDevices(cudaDevices: Vector[CudaComputeDevice]): Vector[OpenCLComputeDevice] =
     try
       val count = HeadsUpOpenCLNativeBindings.openclDeviceCount()
@@ -530,6 +685,10 @@ object HeadsUpHybridDispatcher:
       case _: UnsatisfiedLinkError => Vector.empty
       case _: Throwable => Vector.empty
 
+  /** Discovers the CPU device by probing whether the native library is loaded
+    * (via `lastEngineCode()`). If the probe throws, we still create a CPU device
+    * because CPU fallback may work via a different JNI entry point.
+    */
   private def discoverCpuDevice(): Vector[CpuComputeDevice] =
     try
       HeadsUpGpuNativeBindings.lastEngineCode() // test if native lib is loaded
@@ -570,7 +729,16 @@ object HeadsUpHybridDispatcher:
     if parts.length >= 5 then parts(4).trim else ""
 
   // ------ Proportional splitting ------------------------------------------------------------------------------------------------------------------
+  // The splitting pipeline:
+  //   1. effectiveWeight() resolves each device's weight: manual overrides > calibrated > estimated.
+  //   2. proportionalSplit() applies cpuOnlyBelow threshold, minRelativeWeight filter,
+  //      and selectDeviceIdsForBatch() to pick active devices.
+  //   3. proportionalCounts() distributes matchups proportionally to weights, with
+  //      largest-remainder correction to ensure counts sum exactly to totalItems.
 
+  /** Parses manual weight overrides from config (e.g. "cuda:0=5000,cpu=1000").
+    * These take highest priority in the effectiveWeight resolution chain.
+    */
   private def configuredWeightOverrides: Map[String, Double] =
     val raw =
       sys.props
@@ -609,6 +777,12 @@ object HeadsUpHybridDispatcher:
       .filter(value => java.lang.Double.isFinite(value) && value >= 0.0 && value <= 1.0)
       .getOrElse(DefaultMinRelativeWeight)
 
+  /** Resolves the effective dispatch weight for a device using a 3-tier priority:
+    *   1. Manual overrides (from `sicfun.hybrid.weights` config) --- highest priority
+    *   2. Calibrated weights (from adaptive EMA or warmup measurements)
+    *   3. Static estimated weight (SM*MHz heuristic for GPU, threadCount*1000 for CPU)
+    * The result is sanitized: NaN, Infinity, or non-positive values become 0.0.
+    */
   private def effectiveWeight(device: ComputeDevice): Double =
     val overrides = configuredWeightOverrides
     val calibrated = calibratedWeightsRef.get()
@@ -697,6 +871,22 @@ object HeadsUpHybridDispatcher:
           id -> (base + extras(idx))
         }
 
+  /** Builds a vector of [[SubBatchSlice]] entries that partition `totalItems` matchups
+    * across `activeDevices` proportionally to their effective weights.
+    *
+    * The pipeline applies several filters in order:
+    *   1. '''minRelativeWeight filter''': devices whose weight is below
+    *      (bestWeight * minRelativeWeight) are excluded to avoid giving trivially
+    *      small slices to very slow devices.
+    *   2. '''cpuOnlyBelow threshold''': if `applyCpuOnlyThreshold` is true and
+    *      `totalItems <= cpuOnlyBelow`, only the single highest-weight device is used.
+    *   3. '''minSliceMatchups gate''': [[selectDeviceIdsForBatch]] caps the number of
+    *      devices so each receives at least `minSliceMatchups` matchups.
+    *   4. '''Proportional allocation''': [[proportionalCounts]] distributes the remaining
+    *      matchups using weighted largest-remainder method.
+    *
+    * Slices are contiguous and non-overlapping, with `startIdx` advancing sequentially.
+    */
   private def proportionalSplit(
       totalItems: Int,
       activeDevices: Vector[ComputeDevice],
@@ -797,6 +987,11 @@ object HeadsUpHybridDispatcher:
       result
     }
 
+  /** Internal dispatch method that takes an explicit device list (used by tests
+    * and by the public `dispatchBatch` after applying CUDA-primary policy).
+    * Computes a CRC32 checksum of the entire payload for determinism verification,
+    * then splits work across devices and executes the dispatch plan.
+    */
   private[holdem] def dispatchBatchWithDevices(
       lowIds: Array[Int],
       highIds: Array[Int],
@@ -838,6 +1033,14 @@ object HeadsUpHybridDispatcher:
           )
         }
 
+  /** Executes the pre-computed dispatch plan: runs slices in parallel (or
+    * sequentially for single-device batches), then resolves failures via recovery.
+    *
+    * For multi-device dispatch, each slice is submitted to the shared cached
+    * thread pool as a `Callable`. Results are collected in submission order.
+    * If any slice fails, [[resolveAttempt]] triggers the failover pipeline.
+    * The first unrecoverable error short-circuits remaining resolution.
+    */
   private def executeDispatchPlan(
       splits: Vector[SubBatchSlice],
       activeDevices: Vector[ComputeDevice],
@@ -893,6 +1096,9 @@ object HeadsUpHybridDispatcher:
           )
         )
 
+  /** Checks a slice attempt's status: if successful, builds telemetry; if failed,
+    * triggers the recovery pipeline to retry the slice on alternative devices.
+    */
   private def resolveAttempt(
       attempt: SliceAttempt,
       activeDevices: Vector[ComputeDevice],
@@ -942,6 +1148,10 @@ object HeadsUpHybridDispatcher:
           )
         )
 
+  /** Recovery priority ordering: CPU (0) > OpenCL (1) > CUDA (2).
+    * CPU is preferred for recovery because it is the most reliable backend
+    * (no GPU driver issues, no TDR timeouts, no VRAM constraints).
+    */
   private def deviceRecoveryPriority(device: ComputeDevice): Int =
     device.kind match
       case "cpu" => 0
@@ -949,6 +1159,10 @@ object HeadsUpHybridDispatcher:
       case "cuda" => 2
       case _ => 3
 
+  /** Builds an ordered list of devices that could rescue a failed slice.
+    * Excludes the failed device itself. Sorted by: recovery priority (CPU first),
+    * then descending effective weight (fastest first), then stable device ID.
+    */
   private def rescueCandidates(
       failedDevice: ComputeDevice,
       activeDevices: Vector[ComputeDevice]
@@ -966,6 +1180,16 @@ object HeadsUpHybridDispatcher:
         if attempt.status == Int.MinValue then "failed with unknown error"
         else s"returned status ${attempt.status}"
 
+  /** Executes a single sub-batch slice on its assigned device.
+    *
+    * If the slice covers the entire batch (startIdx==0, count==n), the device
+    * writes directly into the shared `buffers` arrays to avoid a copy.
+    * Otherwise, temporary sub-arrays are allocated and the results are copied
+    * back into the correct offset range of the shared buffers after success.
+    *
+    * Returns a [[SliceAttempt]] with status==0 on success or a non-zero status
+    * (or Int.MinValue for JVM exceptions) on failure.
+    */
   private def runSlice(
       slice: SubBatchSlice,
       lowIds: Array[Int],
@@ -1030,6 +1254,12 @@ object HeadsUpHybridDispatcher:
           Some(Option(ex.getMessage).filter(_.nonEmpty).getOrElse(ex.getClass.getSimpleName))
         )
 
+  /** Attempts to recover a failed slice by retrying it on alternative devices.
+    * Tries each rescue candidate sequentially (ordered by [[rescueCandidates]])
+    * until one succeeds. Uses Scala 3 `boundary`/`break` for early return on
+    * successful rescue. Returns `Left` with a detailed error listing all
+    * failures if every rescue candidate also fails.
+    */
   private def attemptRecovery(
       failedAttempt: SliceAttempt,
       activeDevices: Vector[ComputeDevice],
@@ -1079,6 +1309,12 @@ object HeadsUpHybridDispatcher:
           s"device ${failedSlice.device.id} ${errorDetail(failedAttempt)}; recovery failed: ${rescueFailures.result().mkString("; ")}"
         )
 
+  /** Computes a CRC32 checksum over the entire batch payload (lowIds, highIds,
+    * modeCode, trials, seeds). Used by callers to verify that the same logical
+    * batch was dispatched and that results are deterministically reproducible
+    * regardless of how the batch was split across devices.
+    * Integers are encoded in little-endian byte order; longs as two LE ints.
+    */
   private[holdem] def payloadCrc32(
       lowIds: Array[Int],
       highIds: Array[Int],

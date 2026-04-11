@@ -1,3 +1,105 @@
+/*
+ * HeadsUpGpuNativeBindingsCuda.cu -- CUDA + CPU JNI binding for heads-up
+ * (two-player) Texas Hold'em preflop equity computation.
+ *
+ * Part of the sicfun poker analytics system's native acceleration layer.
+ * Compiled into sicfun_gpu_kernel.dll via nvcc targeting Maxwell sm_50
+ * (GTX 960M, CUDA 11.8).
+ *
+ * This file implements batched equity calculation for all C(52,2)=1326
+ * possible hole-card pairs.  Two computation modes are supported:
+ *
+ *   mode_code == 0  (Exact):
+ *     Exhaustive enumeration of all C(48,5) = 1,712,304 possible boards.
+ *     One CUDA block per matchup; threads within the block cooperatively
+ *     partition the board space and reduce via shared memory.
+ *     A "board-major" exact path is also available, which precomputes
+ *     per-endpoint scores for each board chunk and then accumulates
+ *     matchup results, amortizing evaluation across shared endpoints.
+ *
+ *   mode_code == 1  (Monte Carlo):
+ *     Randomly samples boards using a xorshift64* PRNG seeded per matchup.
+ *     Supports two dispatch strategies:
+ *       - One thread per matchup (monte_carlo_kernel / _packed)
+ *       - One block per matchup with parallel-trial reduction
+ *         (monte_carlo_kernel_parallel_trials / _packed_parallel_trials)
+ *     Optional optimizations controlled by system properties / env vars:
+ *       - Board combo index sampling (precomputed C(48,5) index table)
+ *       - Absolute board sampling with rank-pattern lookup tables
+ *         (avoids full 7-card evaluation when no flush is possible)
+ *       - ReadOnly (__ldg) memory path for range CSR data
+ *
+ * Three JNI entry point families:
+ *   - computeBatch / computeBatchCpuOnly / computeBatchOnDevice
+ *       Separate hero/villain ID arrays, jdouble output (legacy API)
+ *   - computeBatchPacked / computeBatchPackedOnDevice
+ *       Packed 22-bit matchup keys, jfloat output (compact API)
+ *   - computeRangeBatchMonteCarloCsr / computeRangeBatchMonteCarloCsrOnDevice
+ *       Range-vs-range equity via CSR (compressed sparse row) layout,
+ *       probability-weighted aggregation per hero hand
+ *
+ * Additionally exposes:
+ *   - lastEngineCode: reports which engine (CPU/CUDA/fallback) was used
+ *   - cudaDeviceCount / cudaDeviceInfo: GPU discovery for the JVM layer
+ *
+ * Card encoding: 0-51, where card_id = suit * 13 + (rank - 2).
+ *   Rank: 2=0 .. A=12 (stored as 2..14 internally).
+ *   Suit: 0=clubs, 1=diamonds, 2=hearts, 3=spades.
+ *
+ * Hand score encoding: 32-bit packed uint32_t.
+ *   Bits [31:24] = hand category (0=HighCard .. 8=StraightFlush).
+ *   Bits [23:0]  = up to 5 tiebreaker nibbles (4 bits each, rank value).
+ *   Higher numeric score beats lower; equal scores are ties.
+ *
+ * Error status codes (returned to JVM as jint):
+ *   0   = success
+ *   100 = null array argument
+ *   101 = array length mismatch
+ *   102 = JNI exception during array access
+ *   111 = invalid mode_code
+ *   112 = invalid CSR range layout
+ *   124 = JNI exception writing results
+ *   125 = hole-card ID out of range [0, 1326)
+ *   126 = trials <= 0 for Monte Carlo mode
+ *   127 = overlapping hero/villain hole cards (shared card)
+ *   130 = CUDA device enumeration failure
+ *   131 = cudaMalloc failure
+ *   132 = cudaMemcpy host->device failure
+ *   133 = kernel launch failure
+ *   134 = cudaDeviceSynchronize failure (includes TDR timeout)
+ *   135 = cudaMemcpy device->host failure
+ *   136 = lookup table upload failure
+ *   137 = CUDA launch timeout (Windows TDR)
+ *   138 = invalid target device index
+ *
+ * Configuration (JVM system properties / environment variables):
+ *   sicfun.gpu.native.engine / sicfun_GPU_NATIVE_ENGINE
+ *     "auto" (default), "cpu", or "cuda"
+ *   sicfun.gpu.native.cuda.blockSize / sicfun_GPU_CUDA_BLOCK_SIZE
+ *     CUDA threads per block (default: 96 MC, 256 exact)
+ *   sicfun.gpu.native.cuda.maxChunkMatchups / sicfun_GPU_CUDA_MAX_CHUNK_MATCHUPS
+ *     Max matchups per kernel launch (default: 4096 MC, 4 exact)
+ *   sicfun.gpu.native.monteCarlo.useBoardCombos
+ *     Use precomputed C(48,5) board index table for MC sampling
+ *   sicfun.gpu.native.monteCarlo.useRankLookup
+ *     Use rank-pattern lookup table to skip full evaluation (default: true)
+ *   sicfun.gpu.native.monteCarlo.absoluteBoardSampling
+ *     Sample from C(52,5) absolute boards with rejection (default: false)
+ *   sicfun.gpu.native.monteCarlo.parallelTrials
+ *     Use parallel-trial kernels (1 block per matchup) (default: true)
+ *   sicfun.gpu.native.exact.boardMajor
+ *     Use board-major exact path (default: false)
+ *   sicfun.gpu.native.range.cuda.blockSize
+ *     Block size for range CSR kernels (default: 128)
+ *   sicfun.gpu.native.range.memoryPath
+ *     "global" (default) or "readonly" (__ldg) for range data reads
+ *
+ * Compile:
+ *   nvcc -std=c++17 -O3 -gencode arch=compute_50,code=sm_50
+ *        -I"%JAVA_HOME%\include" -I"%JAVA_HOME%\include\win32"
+ *        --shared -o sicfun_gpu_kernel.dll HeadsUpGpuNativeBindingsCuda.cu
+ */
+
 #include <jni.h>
 #include <cuda_runtime.h>
 
@@ -9,6 +111,9 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -29,6 +134,8 @@
 
 namespace {
 
+/* ---- Constants ----------------------------------------------------------- */
+
 constexpr int kDeckSize = 52;
 constexpr int kRanksPerSuit = 13;
 constexpr int kMinRankValue = 2;
@@ -36,57 +143,77 @@ constexpr int kMaxRankValue = 14;
 constexpr int kHoleCardsCount = 1326;
 constexpr int kRemainingAfterHoleCards = 48;
 constexpr int kBoardCardCount = 5;
-constexpr int kExactBoardCount = 1712304;  // C(48,5)
-constexpr int kAbsoluteBoardCount = 2598960;  // C(52,5)
-constexpr int kCpuWorkChunkSize = 8;
-constexpr int kIdBits = 11;
-constexpr int kIdMask = (1 << kIdBits) - 1;
-constexpr int kDefaultCudaThreadsPerBlock = 96;
-constexpr int kDefaultRangeCudaThreadsPerBlock = 128;
-constexpr int kDefaultCudaThreadsPerBlockExact = 256;
-constexpr int kDefaultCudaMaxChunkMatchups = 4096;
-constexpr int kDefaultCudaMaxChunkMatchupsExact = 4;
-constexpr int kDefaultRangeCudaMaxChunkHeroes = 4096;
-constexpr int kStatusInvalidRangeLayout = 112;
-constexpr uint64_t kRngMul = 2685821657736338717ULL;
-constexpr jint kEngineUnknown = 0;
-constexpr jint kEngineCpu = 1;
-constexpr jint kEngineCuda = 2;
-constexpr jint kEngineCpuFallbackAfterCudaFailure = 3;
+constexpr int kExactBoardCount = 1712304;  // C(48,5) -- boards after removing 4 hole cards
+constexpr int kAbsoluteBoardCount = 2598960;  // C(52,5) -- all possible 5-card boards from full deck
+constexpr int kCpuWorkChunkSize = 8;  /* Work-stealing granularity for CPU multithreaded dispatch. */
+constexpr int kIdBits = 11;  /* Bits per hole-card ID in packed matchup key (2^11 = 2048 > 1326). */
+constexpr int kIdMask = (1 << kIdBits) - 1;  /* Extraction mask for 11-bit hole-card ID. */
+/* Default CUDA launch parameters.  Tuned for GTX 960M (Maxwell, sm_50).
+ * Kept conservative to stay under Windows TDR timeout (~2 seconds). */
+constexpr int kDefaultCudaThreadsPerBlock = 96;        /* MC: one thread per matchup */
+constexpr int kDefaultRangeCudaThreadsPerBlock = 128;   /* Range CSR: one block per hero */
+constexpr int kDefaultCudaThreadsPerBlockExact = 256;   /* Exact: one block per matchup */
+constexpr int kDefaultCudaMaxChunkMatchups = 4096;      /* MC: matchups per kernel launch */
+constexpr int kDefaultCudaMaxChunkMatchupsExact = 4;    /* Exact: matchups per launch (heavy) */
+constexpr int kDefaultRangeCudaMaxChunkHeroes = 4096;   /* Range: heroes per kernel launch */
+constexpr int kStatusInvalidRangeLayout = 112;  /* Error: malformed CSR offset array. */
+constexpr uint64_t kRngMul = 2685821657736338717ULL;  /* xorshift64* output multiplier. */
+/* Engine identification codes reported to JVM via lastEngineCode(). */
+constexpr jint kEngineUnknown = 0;                    /* Not yet computed or error. */
+constexpr jint kEngineCpu = 1;                         /* CPU path was used. */
+constexpr jint kEngineCuda = 2;                        /* CUDA path was used. */
+constexpr jint kEngineCpuFallbackAfterCudaFailure = 3; /* CUDA failed, fell back to CPU. */
 constexpr uint32_t kInvalidScoreSentinel = 0xFFFFFFFFu;
-constexpr int kRankPairCount = kRanksPerSuit * kRanksPerSuit;
-constexpr int kRankPatternCount = 6188;  // C(13 + 5 - 1, 5)
+constexpr int kRankPairCount = kRanksPerSuit * kRanksPerSuit;  /* 169 = 13x13 rank-pair combos. */
+constexpr int kRankPatternCount = 6188;  // C(13 + 5 - 1, 5) -- distinct 5-card rank multisets
 
+/* ---- Data types ---------------------------------------------------------- */
+
+/* A pair of hole cards identified by their 0-51 card IDs (first < second). */
 struct HoleCards {
   uint8_t first;
   uint8_t second;
 };
 
+/* Equity result for a single hero-vs-villain matchup. */
 struct EquityResultNative {
-  double win;
-  double tie;
-  double loss;
-  double std_error;
+  double win;       /* Probability hero wins. */
+  double tie;       /* Probability of a tie (split pot). */
+  double loss;      /* Probability villain wins. */
+  double std_error; /* Monte Carlo standard error (0.0 for exact). */
 };
 
+/* Engine selection: Auto tries CUDA first, falls back to CPU. */
 enum class NativeEngine {
   Auto,
   Cpu,
   Cuda,
 };
 
+/* GPU memory access path for range CSR data arrays.
+ * ReadOnly uses __ldg() (read-only texture cache) for potentially better L1 hit rate.
+ * Global uses standard global memory loads. */
 enum class RangeMemoryPath {
   ReadOnly,
   Global,
 };
 
-__device__ __constant__ uint8_t d_hole_first[kHoleCardsCount];
-__device__ __constant__ uint8_t d_hole_second[kHoleCardsCount];
-__device__ __constant__ uint8_t d_card_rank[kDeckSize];
-__device__ __constant__ uint8_t d_card_suit[kDeckSize];
-__device__ __constant__ uint16_t d_card_rank_bit[kDeckSize];
+/* ---- CUDA constant memory ------------------------------------------------
+ * These arrays are uploaded once per device and persist for the process lifetime.
+ * Constant memory is cached in a dedicated 64KB cache on Maxwell, providing
+ * broadcast reads when all threads in a warp access the same address. */
+__device__ __constant__ uint8_t d_hole_first[kHoleCardsCount];   /* First card ID for each of 1326 hole-card combos. */
+__device__ __constant__ uint8_t d_hole_second[kHoleCardsCount];  /* Second card ID for each of 1326 hole-card combos. */
+__device__ __constant__ uint8_t d_card_rank[kDeckSize];          /* Precomputed rank (2..14) for each card 0..51. */
+__device__ __constant__ uint8_t d_card_suit[kDeckSize];          /* Precomputed suit (0..3) for each card 0..51. */
+__device__ __constant__ uint16_t d_card_rank_bit[kDeckSize];     /* Precomputed rank bitmask (1 << (rank-2)) for each card. */
+
+/* Global atomic tracking which engine was used for the most recent batch call. */
 std::atomic<jint> g_last_engine_code(kEngineUnknown);
 
+/* ---- JNI helpers --------------------------------------------------------- */
+
+/* Check if a JNI exception is pending and clear it.  Returns true if one was. */
 bool check_and_clear_exception(JNIEnv* env) {
   if (!env->ExceptionCheck()) {
     return false;
@@ -95,6 +222,11 @@ bool check_and_clear_exception(JNIEnv* env) {
   return true;
 }
 
+/* ---- Card property accessors ---------------------------------------------
+ * These use CUDA constant memory on-device for broadcast-cached lookups,
+ * and arithmetic on the host (avoiding the need for host-side lookup tables). */
+
+/* Returns the rank (2..14, where 14=Ace) for a card ID 0..51. */
 HD_FORCE int card_rank(const int card_id) {
 #if defined(__CUDA_ARCH__)
   return static_cast<int>(d_card_rank[card_id]);
@@ -103,6 +235,7 @@ HD_FORCE int card_rank(const int card_id) {
 #endif
 }
 
+/* Returns the suit (0..3) for a card ID 0..51. */
 HD_FORCE int card_suit(const int card_id) {
 #if defined(__CUDA_ARCH__)
   return static_cast<int>(d_card_suit[card_id]);
@@ -111,6 +244,7 @@ HD_FORCE int card_suit(const int card_id) {
 #endif
 }
 
+/* Returns a bitmask with the bit for this card's rank set: 1 << (rank - 2). */
 HD_FORCE uint16_t card_rank_bit(const int card_id) {
 #if defined(__CUDA_ARCH__)
   return d_card_rank_bit[card_id];
@@ -119,6 +253,10 @@ HD_FORCE uint16_t card_rank_bit(const int card_id) {
 #endif
 }
 
+/* ---- Combinatorial utilities --------------------------------------------- */
+
+/* Compute C(n, k) for small values (k <= 5) using unrolled formulas.
+ * Used to map rank multisets to a combinatorial number system index. */
 HD_FORCE int choose_small(const int n, const int k) {
   if (k < 0 || k > n) {
     return 0;
@@ -149,6 +287,10 @@ HD_FORCE int choose_small(const int n, const int k) {
   return result;
 }
 
+/* Map a sorted 5-element rank-offset multiset to a unique index in [0, 6188).
+ * Uses the combinatorial number system: sum of C(b_i + i, i+1) for each element.
+ * This provides a bijection from the C(13+5-1, 5) possible rank multisets to
+ * a contiguous index range, enabling O(1) lookup in precomputed score tables. */
 HD_FORCE int rank_multiset5_id_from_offsets(const int sorted_rank_offsets[5]) {
   const int b0 = sorted_rank_offsets[0];
   const int b1 = sorted_rank_offsets[1] + 1;
@@ -162,6 +304,13 @@ HD_FORCE int rank_multiset5_id_from_offsets(const int sorted_rank_offsets[5]) {
          choose_small(b4, 5);
 }
 
+/* ---- Lookup table construction -------------------------------------------
+ * These lazily-initialized singletons build host-side tables on first access.
+ * Each has a corresponding ensure_cuda_*_uploaded_for_device() function that
+ * copies the table to GPU global/constant memory once per CUDA device. */
+
+/* Returns the canonical table of all 1326 hole-card pairs (first < second).
+ * Index i maps to the i-th combination in lexicographic order. */
 const std::vector<HoleCards>& hole_cards_lookup() {
   static const std::vector<HoleCards> lookup = [] {
     std::vector<HoleCards> table;
@@ -179,6 +328,11 @@ const std::vector<HoleCards>& hole_cards_lookup() {
   return lookup;
 }
 
+/* Upload card property lookup tables to CUDA constant memory for the given device.
+ * Thread-safe (mutex-guarded) and idempotent per device.  Uploads:
+ *   d_hole_first[1326], d_hole_second[1326] -- hole-card pair components
+ *   d_card_rank[52], d_card_suit[52]         -- card rank/suit decomposition
+ *   d_card_rank_bit[52]                       -- rank bitmask per card */
 bool ensure_cuda_lookup_uploaded_for_device(const int device) {
   static std::mutex init_mutex;
   static std::unordered_set<int> initialized_devices;
@@ -230,6 +384,15 @@ bool ensure_cuda_lookup_uploaded_for_device(const int device) {
   return true;
 }
 
+/* Upload packed hole-card table to GPU global memory.  Each entry packs both
+ * card IDs, both rank offsets, and both suits into a single uint32_t:
+ *   bits [5:0]   = first card ID (0..51)
+ *   bits [11:6]  = second card ID (0..51)
+ *   bits [15:12] = first rank offset (0..12)
+ *   bits [19:16] = second rank offset (0..12)
+ *   bits [21:20] = first suit (0..3)
+ *   bits [23:22] = second suit (0..3)
+ * Used by the board-major exact path for fast per-endpoint evaluation. */
 bool ensure_cuda_hole_cards_uploaded_for_device(const int device, const uint32_t** out_device_ptr) {
   static std::mutex init_mutex;
   static std::unordered_map<int, uint32_t*> per_device_table;
@@ -276,6 +439,9 @@ bool ensure_cuda_hole_cards_uploaded_for_device(const int device, const uint32_t
   return true;
 }
 
+/* Build flat table of all C(48,5) board combinations as 5-byte index tuples.
+ * Each board is stored as 5 indices into the 48-card remaining deck (after
+ * removing 4 hole cards).  Total size: 1,712,304 * 5 = ~8.2 MB. */
 const std::vector<uint8_t>& exact_board_combo_indices() {
   static const std::vector<uint8_t> combos = [] {
     std::vector<uint8_t> out;
@@ -300,6 +466,7 @@ const std::vector<uint8_t>& exact_board_combo_indices() {
   return combos;
 }
 
+/* Upload C(48,5) board combo index table to GPU global memory for exact enumeration. */
 bool ensure_cuda_exact_board_indices_uploaded_for_device(const int device, const uint8_t** out_device_ptr) {
   static std::mutex init_mutex;
   static std::unordered_map<int, uint8_t*> per_device_table;
@@ -329,6 +496,10 @@ bool ensure_cuda_exact_board_indices_uploaded_for_device(const int device, const
   return true;
 }
 
+/* Build flat table of all C(52,5) absolute boards (card IDs 0..51).
+ * Used for "absolute board sampling" mode where boards are sampled
+ * from the full deck and rejected if they overlap with hole cards.
+ * Total size: 2,598,960 * 5 = ~12.4 MB. */
 const std::vector<uint8_t>& absolute_board_cards() {
   static const std::vector<uint8_t> boards = [] {
     std::vector<uint8_t> out;
@@ -382,6 +553,11 @@ bool ensure_cuda_absolute_board_cards_uploaded_for_device(const int device, cons
   return true;
 }
 
+/* Precomputed metadata for each of the C(52,5) absolute boards.
+ * rank_pattern_ids: the combinatorial-number-system index of the board's
+ *   sorted rank multiset, enabling O(1) rank-only score lookups.
+ * flush_meta: packed byte with dominant suit index (bits [1:0]) and
+ *   dominant suit count (bits [4:2]), used for fast flush-possibility checks. */
 struct AbsoluteBoardMetadata {
   std::vector<uint16_t> rank_pattern_ids;
   std::vector<uint8_t> flush_meta;
@@ -489,6 +665,20 @@ bool ensure_cuda_absolute_board_metadata_uploaded_for_device(
   return true;
 }
 
+/* ---- Hand evaluation engine -----------------------------------------------
+ * Evaluates 7-card poker hands (2 hole + 5 board) using bitmask-based
+ * incremental evaluation.  Avoids brute-force C(7,5) subset enumeration
+ * by tracking rank/suit bitmasks and count arrays, then determining the
+ * best 5-card hand via a priority chain:
+ *   StraightFlush(8) > FourOfKind(7) > FullHouse(6) > Flush(5) >
+ *   Straight(4) > ThreeOfKind(3) > TwoPair(2) > OnePair(1) > HighCard(0)
+ *
+ * Key optimization: when no flush is possible for a board (board max suit
+ * count + hole suit matches < 5), evaluation can use a precomputed
+ * rank-pattern lookup table instead of the full evaluator. */
+
+/* Pack a hand category (0..8) and up to 5 tiebreaker rank values into
+ * a single 32-bit score.  Higher score beats lower score. */
 HD inline uint32_t encode_score(const int category, const int* tiebreak, const int tiebreak_size) {
   uint32_t score = static_cast<uint32_t>(category) << 24;
   for (int i = 0; i < tiebreak_size && i < 5; ++i) {
@@ -497,33 +687,31 @@ HD inline uint32_t encode_score(const int category, const int* tiebreak, const i
   return score;
 }
 
+/* Find the index of the highest set bit in a 16-bit mask.
+ * Uses platform-specific intrinsics: __clz on CUDA, _BitScanReverse on MSVC,
+ * __builtin_clz on GCC/Clang. */
 HD_FORCE int highest_bit_index_16(const uint16_t mask) {
   if (mask == 0) {
     return -1;
   }
 #if defined(__CUDA_ARCH__)
   return 31 - __clz(static_cast<unsigned int>(mask));
+#elif defined(_MSC_VER)
+  unsigned long idx;
+  _BitScanReverse(&idx, static_cast<unsigned long>(mask));
+  return static_cast<int>(idx);
 #else
-  for (int bit = 15; bit >= 0; --bit) {
-    if ((mask & (static_cast<uint16_t>(1) << bit)) != 0) {
-      return bit;
-    }
-  }
-  return -1;
+  return 31 - __builtin_clz(static_cast<unsigned int>(mask));
 #endif
 }
 
 HD_FORCE int popcount_16(const uint16_t mask) {
 #if defined(__CUDA_ARCH__)
   return __popc(static_cast<unsigned int>(mask));
+#elif defined(_MSC_VER)
+  return static_cast<int>(__popcnt16(mask));
 #else
-  int count = 0;
-  uint16_t value = mask;
-  while (value != 0) {
-    value = static_cast<uint16_t>(value & static_cast<uint16_t>(value - 1));
-    ++count;
-  }
-  return count;
+  return __builtin_popcount(static_cast<unsigned int>(mask));
 #endif
 }
 
@@ -532,6 +720,9 @@ HD_FORCE int highest_rank_from_mask(const uint16_t mask) {
   return bit >= 0 ? (bit + kMinRankValue) : 0;
 }
 
+/* Detect a straight from a 13-bit rank bitmask.  Returns the high card
+ * of the straight (5..14), or 0 if no straight exists.
+ * Detects both regular straights (5 consecutive bits) and the wheel (A-2-3-4-5). */
 HD inline int straight_high_from_rank_mask(const uint16_t rank_mask) {
   const uint16_t run = static_cast<uint16_t>(
       rank_mask &
@@ -550,6 +741,10 @@ HD inline int straight_high_from_rank_mask(const uint16_t rank_mask) {
   return ((rank_mask & wheel_mask) == wheel_mask) ? 5 : 0;
 }
 
+/* Full 7-card hand evaluation from precomputed bitmasks.
+ * Given rank/pair/trip/quad masks plus per-suit counts and rank masks,
+ * determines the best 5-card hand and returns its packed 32-bit score.
+ * This is the core evaluator used by all code paths. */
 HD uint32_t evaluate7_score_from_masks(
     const uint16_t rank_mask,
     const uint16_t pair_mask,
@@ -557,13 +752,12 @@ HD uint32_t evaluate7_score_from_masks(
     const uint16_t quad_mask,
     const uint8_t suit_counts[4],
     const uint16_t suit_rank_mask[4]) {
+  // Branchless flush suit detection: scan all 4 suits, last match wins (at most one can have >=5)
   int flush_suit = -1;
-  for (int suit = 0; suit < 4; ++suit) {
-    if (suit_counts[suit] >= 5) {
-      flush_suit = suit;
-      break;
-    }
-  }
+  flush_suit = (suit_counts[0] >= 5) ? 0 : flush_suit;
+  flush_suit = (suit_counts[1] >= 5) ? 1 : flush_suit;
+  flush_suit = (suit_counts[2] >= 5) ? 2 : flush_suit;
+  flush_suit = (suit_counts[3] >= 5) ? 3 : flush_suit;
 
   int tiebreak[5] = {0, 0, 0, 0, 0};
   if (flush_suit >= 0) {
@@ -665,6 +859,9 @@ HD uint32_t evaluate7_score_from_masks(
   return encode_score(0, tiebreak, 5);  // HighCard
 }
 
+/* Rank-only evaluation: same as evaluate7_score_from_masks but without
+ * flush/straight-flush detection.  Used when we already know no flush is
+ * possible, saving the suit-related computation. */
 HD uint32_t evaluate7_score_rank_only(
     const uint16_t rank_mask,
     const uint16_t pair_mask,
@@ -752,6 +949,8 @@ HD uint32_t evaluate7_score_rank_only(
   return encode_score(0, tiebreak, 5);  // HighCard
 }
 
+/* Evaluate from rank/suit count arrays: builds pair/trip/quad masks from
+ * rank_counts, then delegates to evaluate7_score_from_masks. */
 HD uint32_t evaluate7_score_from_state(
     const uint8_t rank_counts[kMaxRankValue + 1],
     const uint8_t suit_counts[4],
@@ -763,15 +962,12 @@ HD uint32_t evaluate7_score_from_state(
   for (int rank = kMinRankValue; rank <= kMaxRankValue; ++rank) {
     const uint8_t count = rank_counts[rank];
     const uint16_t bit = static_cast<uint16_t>(1) << static_cast<uint16_t>(rank - kMinRankValue);
-    if (count >= 2) {
-      pair_mask = static_cast<uint16_t>(pair_mask | bit);
-    }
-    if (count >= 3) {
-      trip_mask = static_cast<uint16_t>(trip_mask | bit);
-    }
-    if (count == 4) {
-      quad_mask = static_cast<uint16_t>(quad_mask | bit);
-    }
+    const uint16_t pair_bit = static_cast<uint16_t>(-(count >= 2)) & bit;
+    const uint16_t trip_bit = static_cast<uint16_t>(-(count >= 3)) & bit;
+    const uint16_t quad_bit = static_cast<uint16_t>(-(count == 4)) & bit;
+    pair_mask = static_cast<uint16_t>(pair_mask | pair_bit);
+    trip_mask = static_cast<uint16_t>(trip_mask | trip_bit);
+    quad_mask = static_cast<uint16_t>(quad_mask | quad_bit);
   }
   return evaluate7_score_from_masks(
       rank_mask,
@@ -782,6 +978,8 @@ HD uint32_t evaluate7_score_from_state(
       suit_rank_mask);
 }
 
+/* Convenience: evaluate a 7-card hand from an array of card IDs.
+ * Builds all bitmasks from scratch. */
 HD uint32_t evaluate7_score(const int cards[7]) {
   uint8_t rank_counts[kMaxRankValue + 1];
   for (int rank = 0; rank <= kMaxRankValue; ++rank) {
@@ -803,6 +1001,15 @@ HD uint32_t evaluate7_score(const int cards[7]) {
   return evaluate7_score_from_state(rank_counts, suit_counts, rank_mask, suit_rank_mask);
 }
 
+/* ---- Rank-pattern lookup table -------------------------------------------
+ * Precomputes the rank-only hand score for every combination of:
+ *   - Board rank pattern (6188 distinct multisets)
+ *   - Hole-card rank pair (13 x 13 = 169 combinations)
+ * Total table size: 6188 * 169 = 1,045,772 entries (~4 MB of uint32_t).
+ *
+ * When a board has no flush possibility, looking up the score from this
+ * table is much faster than running the full evaluator.  This optimization
+ * is critical for GPU throughput since the evaluator has many branches. */
 const std::vector<uint32_t>& rank_pattern_rankpair_scores() {
   static const std::vector<uint32_t> table = [] {
     std::vector<uint32_t> out(
@@ -938,29 +1145,31 @@ bool ensure_cuda_rank_pattern_scores_uploaded_for_device(const int device, const
   return true;
 }
 
+/* ---- Board / deck utilities ---------------------------------------------- */
+
+/* Build the 48-card remaining deck after removing 4 hole cards.
+ * Uses a 64-bit dead-card bitmask for O(52) branchless filtering. */
 HD void fill_remaining_deck(
     const int hero_first,
     const int hero_second,
     const int villain_first,
     const int villain_second,
     uint8_t remaining[kRemainingAfterHoleCards]) {
-  bool dead[kDeckSize];
-  for (int i = 0; i < kDeckSize; ++i) {
-    dead[i] = false;
-  }
-  dead[hero_first] = true;
-  dead[hero_second] = true;
-  dead[villain_first] = true;
-  dead[villain_second] = true;
-
+  const uint64_t dead_mask =
+      (1ULL << hero_first) | (1ULL << hero_second) |
+      (1ULL << villain_first) | (1ULL << villain_second);
   int idx = 0;
   for (int card = 0; card < kDeckSize; ++card) {
-    if (!dead[card]) {
+    if (!((dead_mask >> card) & 1ULL)) {
       remaining[idx++] = static_cast<uint8_t>(card);
     }
   }
 }
 
+/* Evaluate a 7-card hand (board + hole cards) using precomputed board state.
+ * Incrementally updates the board's bitmasks with the two hole cards,
+ * avoiding recomputation of the board's contribution.  This is the hot path
+ * for both exact and Monte Carlo equity computation. */
 HD_FORCE uint32_t evaluate_with_board_state(
     const uint8_t board_rank_counts[kMaxRankValue + 1],
     const uint8_t board_suit_counts[4],
@@ -1036,6 +1245,9 @@ HD_FORCE uint32_t evaluate_with_board_state(
       suit_rank_mask);
 }
 
+/* Evaluate with rank-pattern lookup optimization: if no flush is possible,
+ * uses the precomputed rank_pattern_scores table for O(1) lookup.
+ * Falls back to full evaluate_with_board_state when a flush is possible. */
 HD_FORCE uint32_t evaluate_with_board_state_lookup(
     const uint8_t board_rank_counts[kMaxRankValue + 1],
     const uint8_t board_suit_counts[4],
@@ -1086,23 +1298,20 @@ HD_FORCE uint32_t evaluate_with_board_state_lookup(
       hole_second);
 }
 
+/* Quick flush-possibility check using precomputed board metadata.
+ * A flush requires 5+ cards of the same suit among 7 cards total.
+ * With board max suit count known, we just check how many hole cards
+ * match that suit: (board_max_suit_count + hole_matches) >= 5. */
 HD_FORCE bool flush_possible_for_board_meta(
     const int board_max_suit_count,
     const int board_max_suit_index,
     const int hole_first,
     const int hole_second) {
-  if (board_max_suit_count >= 5) {
-    return true;
-  }
-  const int first_suit = card_suit(hole_first);
-  const int second_suit = card_suit(hole_second);
-  if (board_max_suit_count == 4) {
-    return first_suit == board_max_suit_index || second_suit == board_max_suit_index;
-  }
-  if (board_max_suit_count == 3) {
-    return first_suit == board_max_suit_index && second_suit == board_max_suit_index;
-  }
-  return false;
+  const int first_match = (card_suit(hole_first) == board_max_suit_index);
+  const int second_match = (card_suit(hole_second) == board_max_suit_index);
+  const int hole_matches = first_match + second_match;
+  // Need (board_max_suit_count + hole_matches) >= 5 for a flush to be possible
+  return (board_max_suit_count + hole_matches) >= 5;
 }
 
 HD_FORCE uint32_t rank_lookup_score_for_pattern(
@@ -1133,15 +1342,12 @@ HD_FORCE int compare_showdown_rank_lookup_only(
       rank_lookup_score_for_pattern(rank_pattern_id, hero_first, hero_second, rank_pattern_scores);
   const uint32_t villain_score =
       rank_lookup_score_for_pattern(rank_pattern_id, villain_first, villain_second, rank_pattern_scores);
-  if (hero_score > villain_score) {
-    return 1;
-  }
-  if (hero_score < villain_score) {
-    return -1;
-  }
-  return 0;
+  return (hero_score > villain_score) - (hero_score < villain_score);
 }
 
+/* Compare hero vs villain on a given 5-card board.  Returns +1 (hero wins),
+ * 0 (tie), or -1 (villain wins).  Builds full board state and evaluates
+ * both players, optionally using the rank-pattern lookup table. */
 HD inline int compare_showdown(
     const int hero_first,
     const int hero_second,
@@ -1183,10 +1389,9 @@ HD inline int compare_showdown(
   }
   for (int suit = 0; suit < 4; ++suit) {
     const int count = static_cast<int>(board_suit_counts[suit]);
-    if (count > board_max_suit_count) {
-      board_max_suit_count = count;
-      board_max_suit_index = suit;
-    }
+    const int is_max = (count > board_max_suit_count);
+    board_max_suit_index = is_max ? suit : board_max_suit_index;
+    board_max_suit_count = is_max ? count : board_max_suit_count;
   }
 
   int sorted_offsets[5] = {0, 0, 0, 0, 0};
@@ -1229,15 +1434,14 @@ HD inline int compare_showdown(
       rank_pattern_scores,
       villain_first,
       villain_second);
-  if (hero_score > villain_score) {
-    return 1;
-  }
-  if (hero_score < villain_score) {
-    return -1;
-  }
-  return 0;
+  return (hero_score > villain_score) - (hero_score < villain_score);
 }
 
+/* ---- PRNG: splitmix64 seed mixer + xorshift64* ---------------------------
+ * Same PRNG used across all native equity code for reproducible results.
+ * splitmix64 mixes the seed for avalanche; xorshift64* generates the stream. */
+
+/* splitmix64 finalizer: mixes a 64-bit seed value for good avalanche. */
 HD uint64_t mix64(uint64_t value) {
   uint64_t z = value + 0x9E3779B97F4A7C15ULL;
   z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -1246,16 +1450,20 @@ HD uint64_t mix64(uint64_t value) {
   return z;
 }
 
+/* Extract hero (low) hole-card ID from a packed 22-bit matchup key.
+ * Layout: bits [21:11] = hero ID, bits [10:0] = villain ID. */
 HD inline int unpack_low_id(const jint packed_key) {
   const uint32_t packed = static_cast<uint32_t>(packed_key);
   return static_cast<int>((packed >> kIdBits) & static_cast<uint32_t>(kIdMask));
 }
 
+/* Extract villain (high) hole-card ID from a packed 22-bit matchup key. */
 HD inline int unpack_high_id(const jint packed_key) {
   const uint32_t packed = static_cast<uint32_t>(packed_key);
   return static_cast<int>(packed & static_cast<uint32_t>(kIdMask));
 }
 
+/* xorshift64* generator: advance state and return multiplied output. */
 HD inline uint64_t next_u64(uint64_t& state) {
   state ^= (state >> 12);
   state ^= (state << 25);
@@ -1267,6 +1475,10 @@ HD inline int bounded_rand(uint64_t& state, const int bound) {
   return static_cast<int>(next_u64(state) % static_cast<uint64_t>(bound));
 }
 
+/* ---- Board sampling strategies ------------------------------------------- */
+
+/* Rejection sampling: draw 5 distinct cards from the 48-card remaining deck.
+ * Uses a 64-bit bitmask to track already-drawn positions. */
 HD inline void sample_board_cards(
     const uint8_t remaining[kRemainingAfterHoleCards],
     uint64_t& state,
@@ -1283,6 +1495,8 @@ HD inline void sample_board_cards(
   }
 }
 
+/* Index-based sampling: pick a random index into the precomputed C(48,5)
+ * board combo table, then map those 5 deck indices to actual card IDs. */
 HD inline void sample_board_cards_from_combos(
     const uint8_t remaining[kRemainingAfterHoleCards],
     const uint8_t* board_combos,
@@ -1297,6 +1511,9 @@ HD inline void sample_board_cards_from_combos(
   board[4] = remaining[board_combos[base + 4]];
 }
 
+/* Absolute board rejection sampling: pick a random C(52,5) board index,
+ * reject if any board card overlaps with the dead-card bitmask (the 4
+ * hole cards).  ~85% acceptance rate (48^5 / 52^5). */
 HD inline int sample_absolute_board_index_non_overlapping(
     const uint8_t* absolute_boards,
     uint64_t& state,
@@ -1333,6 +1550,9 @@ HD inline void load_absolute_board_cards(
   board[4] = absolute_boards[base + 4];
 }
 
+/* Compute Monte Carlo standard error of the equity estimate.
+ * Uses the Bernoulli variance formula: Var = E[X^2] - E[X]^2,
+ * where X = 1 for win, 0.5 for tie, 0 for loss. */
 HD inline double monte_carlo_stderr(
     const int win_count,
     const int tie_count,
@@ -1351,6 +1571,9 @@ HD inline double monte_carlo_stderr(
   return sqrt(sample_variance / n);
 }
 
+/* ---- CPU equity computation ---------------------------------------------- */
+
+/* CPU Monte Carlo equity for a single matchup. */
 EquityResultNative compute_monte_carlo_equity_cpu(
     const int hero_first,
     const int hero_second,
@@ -1375,13 +1598,9 @@ EquityResultNative compute_monte_carlo_equity_cpu(
     sample_board_cards(remaining, state, board);
 
     const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-    if (cmp > 0) {
-      ++win_count;
-    } else if (cmp == 0) {
-      ++tie_count;
-    } else {
-      ++loss_count;
-    }
+    win_count  += (cmp > 0);
+    tie_count  += (cmp == 0);
+    loss_count += (cmp < 0);
   }
 
   const double total = static_cast<double>(trials);
@@ -1394,6 +1613,7 @@ EquityResultNative compute_monte_carlo_equity_cpu(
   };
 }
 
+/* CPU exact equity: enumerate all C(48,5) = 1,712,304 boards. */
 EquityResultNative compute_exact_equity_cpu(
     const int hero_first,
     const int hero_second,
@@ -1420,13 +1640,9 @@ EquityResultNative compute_exact_equity_cpu(
             board[4] = remaining[e];
             const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
             ++total;
-            if (cmp > 0) {
-              ++win_count;
-            } else if (cmp == 0) {
-              ++tie_count;
-            } else {
-              ++loss_count;
-            }
+            win_count  += (cmp > 0);
+            tie_count  += (cmp == 0);
+            loss_count += (cmp < 0);
           }
         }
       }
@@ -1442,6 +1658,12 @@ EquityResultNative compute_exact_equity_cpu(
   };
 }
 
+/* ---- Configuration resolution --------------------------------------------
+ * Settings are read from JVM system properties (via JNI) first, then
+ * from environment variables as fallback.  This allows runtime tuning
+ * without recompilation. */
+
+/* Parse a string as a positive integer; returns -1 on failure. */
 int parse_positive_env_int(const char* value) {
   if (value == nullptr || value[0] == '\0') {
     return -1;
@@ -1469,6 +1691,8 @@ bool parse_truthy(const std::string& raw) {
   return parse_truthy(raw.c_str());
 }
 
+/* Determine CPU worker thread count for parallel batch processing.
+ * Uses hardware_concurrency() as default, overridable via sicfun_GPU_NATIVE_THREADS. */
 int resolve_worker_count(const int entries) {
   if (entries <= 1) {
     return 1;
@@ -1513,6 +1737,8 @@ RangeMemoryPath parse_range_memory_path_value(const std::string& raw) {
   return RangeMemoryPath::Global;
 }
 
+/* Read a JVM system property (java.lang.System.getProperty) via JNI.
+ * Returns false if the property is not set or JNI calls fail. */
 bool try_read_system_property(JNIEnv* env, const char* key, std::string& out) {
   jclass system_class = env->FindClass("java/lang/System");
   if (system_class == nullptr) {
@@ -1560,11 +1786,10 @@ bool try_read_system_property(JNIEnv* env, const char* key, std::string& out) {
   return true;
 }
 
+/* Clamp and align a CUDA block size to [32, 1024], rounded down to a warp multiple. */
 int normalize_cuda_block_size(const int raw, const int fallback) {
-  int threads = raw > 0 ? raw : fallback;
-  threads = std::max(32, std::min(1024, threads));
-  threads = (threads / 32) * 32;
-  return threads > 0 ? threads : fallback;
+  const int threads = raw > 0 ? raw : fallback;
+  return std::clamp(threads, 32, 1024) & ~31;
 }
 
 int resolve_cuda_threads_per_block(JNIEnv* env, const jint mode_code) {
@@ -1602,9 +1827,7 @@ int normalize_cuda_max_chunk_matchups(const int raw, const int entries, const in
   if (entries <= 0) {
     return 1;
   }
-  int chunk = raw > 0 ? raw : fallback;
-  chunk = std::max(1, std::min(entries, chunk));
-  return chunk;
+  return std::clamp(raw > 0 ? raw : fallback, 1, entries);
 }
 
 int resolve_cuda_max_chunk_matchups(JNIEnv* env, const int entries, const jint mode_code) {
@@ -1718,6 +1941,9 @@ bool resolve_exact_board_major_enabled(JNIEnv* env) {
   return parse_truthy(raw);
 }
 
+/* ---- CPU batch dispatch ---------------------------------------------------
+ * Multithreaded CPU equity computation using lock-free work-stealing.
+ * Each worker atomically claims chunks of kCpuWorkChunkSize matchups. */
 int compute_batch_cpu(
     const std::vector<jint>& low_buf,
     const std::vector<jint>& high_buf,
@@ -1787,6 +2013,10 @@ int compute_batch_cpu(
   return worker_error.load(std::memory_order_relaxed);
 }
 
+/* CPU range-vs-range Monte Carlo equity via CSR layout.
+ * For each hero hand, iterates over the villain range (weighted by probability),
+ * computes per-matchup MC equity, and aggregates into a probability-weighted average.
+ * Standard errors are combined via root-sum-of-squares. */
 int compute_range_batch_cpu_monte_carlo_csr(
     const std::vector<jint>& hero_ids,
     const std::vector<jint>& offsets,
@@ -1916,10 +2146,16 @@ int compute_range_batch_cpu_monte_carlo_csr(
   return worker_error.load(std::memory_order_relaxed);
 }
 
+/* ---- CUDA kernels -------------------------------------------------------- */
+
+/* Atomically set a device-side status code (first error wins). */
 __device__ inline void set_status_once(int* status, int code) {
   atomicCAS(status, 0, code);
 }
 
+/* Templated memory load helpers: when UseReadOnly=true, uses __ldg()
+ * (read-only texture cache path) for potentially better cache hit rates
+ * on data that is not modified during the kernel. */
 template <bool UseReadOnly>
 __device__ inline jint load_jint(const jint* ptr, const int idx) {
 #if defined(__CUDA_ARCH__)
@@ -1959,6 +2195,13 @@ __device__ inline jfloat load_jfloat(const jfloat* ptr, const int idx) {
 #endif
 }
 
+/* Monte Carlo kernel (one thread per matchup):
+ * Each thread independently simulates `trials` random boards for its
+ * assigned matchup, counting wins/ties/losses and computing stderr.
+ * Supports three board sampling strategies:
+ *   1. Rejection sampling from 48-card remaining deck
+ *   2. Index-based sampling from precomputed C(48,5) combos
+ *   3. Absolute board sampling with rank-pattern shortcut */
 __global__ void monte_carlo_kernel(
     const jint* low_ids,
     const jint* high_ids,
@@ -2089,13 +2332,9 @@ __global__ void monte_carlo_kernel(
           board,
           rank_pattern_scores);
     }
-    if (cmp > 0) {
-      ++win_count;
-    } else if (cmp == 0) {
-      ++tie_count;
-    } else {
-      ++loss_count;
-    }
+    win_count  += (cmp > 0);
+    tie_count  += (cmp == 0);
+    loss_count += (cmp < 0);
   }
 
   const double total = static_cast<double>(trials);
@@ -2107,6 +2346,11 @@ __global__ void monte_carlo_kernel(
   stderrs[idx] = std_error;
 }
 
+/* Monte Carlo kernel (one BLOCK per matchup, parallel trial reduction):
+ * Thread 0 sets up shared memory (hole cards, remaining deck, dead mask).
+ * All threads cooperatively run trials with stride = blockDim.x, then
+ * reduce win/tie/loss counts via shared-memory tree reduction.
+ * Better GPU utilization when trial count >> thread count per matchup. */
 __global__ void monte_carlo_kernel_parallel_trials(
     const jint* low_ids,
     const jint* high_ids,
@@ -2260,13 +2504,9 @@ __global__ void monte_carlo_kernel_parallel_trials(
           board,
           rank_pattern_scores);
     }
-    if (cmp > 0) {
-      ++local_win;
-    } else if (cmp == 0) {
-      ++local_tie;
-    } else {
-      ++local_loss;
-    }
+    local_win  += (cmp > 0);
+    local_tie  += (cmp == 0);
+    local_loss += (cmp < 0);
   }
 
   extern __shared__ unsigned int reduction[];
@@ -2307,6 +2547,11 @@ __global__ void monte_carlo_kernel_parallel_trials(
   }
 }
 
+/* Exact enumeration kernel (one BLOCK per matchup):
+ * Thread 0 loads hole cards into shared memory and builds the 48-card
+ * remaining deck.  All threads cooperatively enumerate all C(48,5)
+ * board combinations with stride = blockDim.x, then reduce via shared
+ * memory.  Output: exact equity (std_error = 0.0). */
 __global__ void exact_kernel(
     const jint* low_ids,
     const jint* high_ids,
@@ -2370,13 +2615,9 @@ __global__ void exact_kernel(
     board[4] = remaining[board_combos[base + 4]];
 
     const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-    if (cmp > 0) {
-      ++local_win;
-    } else if (cmp == 0) {
-      ++local_tie;
-    } else {
-      ++local_loss;
-    }
+    local_win  += (cmp > 0);
+    local_tie  += (cmp == 0);
+    local_loss += (cmp < 0);
   }
 
   extern __shared__ unsigned int reduction[];
@@ -2413,6 +2654,9 @@ __global__ void exact_kernel(
   }
 }
 
+/* Packed-key variant of monte_carlo_kernel.  Matchup IDs are extracted
+ * from packed 22-bit keys, and seeds are derived from monte_carlo_seed_base
+ * XORed with per-entry key_material.  Output: jfloat (not jdouble). */
 __global__ void monte_carlo_kernel_packed(
     const jint* packed_keys,
     const jlong* key_material,
@@ -2545,13 +2789,9 @@ __global__ void monte_carlo_kernel_packed(
           board,
           rank_pattern_scores);
     }
-    if (cmp > 0) {
-      ++win_count;
-    } else if (cmp == 0) {
-      ++tie_count;
-    } else {
-      ++loss_count;
-    }
+    win_count  += (cmp > 0);
+    tie_count  += (cmp == 0);
+    loss_count += (cmp < 0);
   }
 
   const double total = static_cast<double>(trials);
@@ -2563,6 +2803,8 @@ __global__ void monte_carlo_kernel_packed(
   stderrs[idx] = static_cast<jfloat>(std_error);
 }
 
+/* Packed-key variant of monte_carlo_kernel_parallel_trials.
+ * One block per matchup with shared-memory parallel trial reduction. */
 __global__ void monte_carlo_kernel_packed_parallel_trials(
     const jint* packed_keys,
     const jlong* key_material,
@@ -2718,13 +2960,9 @@ __global__ void monte_carlo_kernel_packed_parallel_trials(
           board,
           rank_pattern_scores);
     }
-    if (cmp > 0) {
-      ++local_win;
-    } else if (cmp == 0) {
-      ++local_tie;
-    } else {
-      ++local_loss;
-    }
+    local_win  += (cmp > 0);
+    local_tie  += (cmp == 0);
+    local_loss += (cmp < 0);
   }
 
   extern __shared__ unsigned int reduction[];
@@ -2765,6 +3003,7 @@ __global__ void monte_carlo_kernel_packed_parallel_trials(
   }
 }
 
+/* Packed-key exact enumeration kernel (one block per matchup). */
 __global__ void exact_kernel_packed(
     const jint* packed_keys,
     const int n,
@@ -2827,13 +3066,9 @@ __global__ void exact_kernel_packed(
     board[4] = remaining[board_combos[base + 4]];
 
     const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-    if (cmp > 0) {
-      ++local_win;
-    } else if (cmp == 0) {
-      ++local_tie;
-    } else {
-      ++local_loss;
-    }
+    local_win  += (cmp > 0);
+    local_tie  += (cmp == 0);
+    local_loss += (cmp < 0);
   }
 
   extern __shared__ unsigned int reduction[];
@@ -2870,6 +3105,19 @@ __global__ void exact_kernel_packed(
   }
 }
 
+/* ---- Board-major exact kernels -------------------------------------------
+ * Two-phase approach for exact equity on packed matchups:
+ *   Phase 1 (prepare): For each board chunk, compute scores for all unique
+ *     hole-card "endpoints" and store in a [board_count x endpoint_count] matrix.
+ *   Phase 2 (accumulate): For each matchup, look up hero/villain endpoint
+ *     scores across all boards in the chunk and increment win/tie/loss counters.
+ * This amortizes board setup cost when many matchups share the same endpoints. */
+
+/* Phase 1: compute hand scores for each (board, endpoint) pair.
+ * Thread 0 loads board cards, builds rank/suit state, and computes
+ * the rank-pattern lookup base.  All threads evaluate endpoints in
+ * parallel using the shared board state, with a fast rank-only lookup
+ * path when no flush is possible. */
 __global__ void exact_prepare_endpoint_scores_kernel(
     const uint8_t* absolute_boards,
     const int board_start,
@@ -3112,6 +3360,10 @@ __global__ void exact_prepare_endpoint_scores_kernel(
   }
 }
 
+/* Phase 2: accumulate matchup results from precomputed endpoint scores.
+ * Each thread handles one matchup, iterating over board_count boards
+ * and comparing hero vs villain scores.  Skips boards where either
+ * endpoint overlaps (kInvalidScoreSentinel). */
 __global__ void exact_accumulate_from_endpoint_scores_kernel(
     const uint32_t* board_scores,
     const int board_count,
@@ -3159,6 +3411,14 @@ __global__ void exact_accumulate_from_endpoint_scores_kernel(
   total_losses[matchup_idx] += losses;
 }
 
+/* ---- Range-vs-range CSR kernels ------------------------------------------
+ * These kernels compute equity for a hero hand against a weighted villain
+ * range stored in CSR (Compressed Sparse Row) format. */
+
+/* Flat CSR kernel (one thread per CSR entry):
+ * Each thread runs MC equity for one (hero, villain) pair, then atomicAdd
+ * the probability-weighted results into the hero's accumulator slots.
+ * Simple but suffers from atomic contention when many entries share a hero. */
 template <bool UseReadOnly>
 __global__ void range_monte_carlo_csr_kernel(
     const jint* hero_ids,
@@ -3228,13 +3488,9 @@ __global__ void range_monte_carlo_csr_kernel(
   for (int trial = 0; trial < trials; ++trial) {
     sample_board_cards(remaining, state, board);
     const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-    if (cmp > 0) {
-      ++win_count;
-    } else if (cmp == 0) {
-      ++tie_count;
-    } else {
-      ++loss_count;
-    }
+    win_count  += (cmp > 0);
+    tie_count  += (cmp == 0);
+    loss_count += (cmp < 0);
   }
 
   const float total = static_cast<float>(trials);
@@ -3250,6 +3506,12 @@ __global__ void range_monte_carlo_csr_kernel(
   atomicAdd(accum_weights + hero_index, p);
 }
 
+/* By-hero CSR kernel (one BLOCK per hero):
+ * Threads within a block cooperatively iterate over the hero's villain
+ * entries with stride = blockDim.x, accumulating weighted equity locally.
+ * A shared-memory tree reduction aggregates per-thread results, producing
+ * one final equity per hero.  Avoids atomics entirely.
+ * This is the default range kernel used for production. */
 template <bool UseReadOnly>
 __global__ void range_monte_carlo_csr_by_hero_kernel(
     const jint* hero_ids,
@@ -3338,13 +3600,9 @@ __global__ void range_monte_carlo_csr_by_hero_kernel(
     for (int trial = 0; trial < trials; ++trial) {
       sample_board_cards(remaining, state, board);
       const int cmp = compare_showdown(hero_first, hero_second, villain_first, villain_second, board);
-      if (cmp > 0) {
-        ++win_count;
-      } else if (cmp == 0) {
-        ++tie_count;
-      } else {
-        ++loss_count;
-      }
+      win_count  += (cmp > 0);
+      tie_count  += (cmp == 0);
+      loss_count += (cmp < 0);
     }
 
     const float total = static_cast<float>(trials);
@@ -3407,6 +3665,15 @@ __global__ void range_monte_carlo_csr_by_hero_kernel(
   }
 }
 
+/* ---- CUDA batch dispatch --------------------------------------------------
+ * These functions handle device setup, memory allocation, chunked kernel
+ * dispatch (to stay under Windows TDR timeout), and result copy-back.
+ * Each function checks configuration, uploads lookup tables on first use,
+ * allocates device buffers, launches kernels in chunks, reads back results,
+ * and frees device memory. */
+
+/* CUDA batch dispatch for separate hero/villain ID arrays (legacy API).
+ * Supports both exact (mode_code=0) and Monte Carlo (mode_code=1) modes. */
 int compute_batch_cuda(
     JNIEnv* env,
     const std::vector<jint>& low_buf,
@@ -3674,6 +3941,11 @@ int compute_batch_cuda(
   return 0;
 }
 
+/* Board-major exact path for packed matchup keys.
+ * Uses two-phase kernel dispatch (prepare + accumulate) to amortize board
+ * evaluation across shared endpoints.  Processes boards in configurable chunks
+ * (default 8192) to bound GPU memory usage.  Includes optional profiling
+ * output controlled by sicfun.gpu.native.exact.boardMajor.profile. */
 int compute_batch_cuda_packed_exact_board_major(
     JNIEnv* env,
     const std::vector<jint>& packed_buf,
@@ -4107,6 +4379,10 @@ int compute_batch_cuda_packed_exact_board_major(
   return 0;
 }
 
+/* CUDA batch dispatch for packed 22-bit matchup keys (compact API).
+ * For exact mode with boardMajor enabled, delegates to the board-major path.
+ * For MC mode, selects between one-thread-per-matchup and parallel-trials
+ * kernels based on trial count and configuration. */
 int compute_batch_cuda_packed(
     JNIEnv* env,
     const std::vector<jint>& packed_buf,
@@ -4380,6 +4656,10 @@ int compute_batch_cuda_packed(
   return 0;
 }
 
+/* CUDA range-vs-range Monte Carlo dispatch via CSR layout.
+ * Validates CSR structure (monotonic offsets, valid IDs, non-negative weights),
+ * uploads all arrays to GPU, and launches range_monte_carlo_csr_by_hero_kernel
+ * in chunks of max_chunk_heroes to avoid TDR timeout. */
 int compute_range_batch_cuda_monte_carlo_csr(
     JNIEnv* env,
     const std::vector<jint>& hero_ids,
@@ -4695,6 +4975,16 @@ int compute_range_batch_cuda_monte_carlo_csr(
 
 }  // namespace
 
+/* ========================================================================== *
+ * JNI entry points                                                           *
+ * These functions are called from Scala/JVM via JNI.  Each validates inputs, *
+ * copies data from JNI arrays into C++ vectors, delegates to CPU or CUDA     *
+ * compute functions, then copies results back into JNI output arrays.        *
+ * ========================================================================== */
+
+/* computeBatch: legacy API with separate hero/villain ID arrays.
+ * Engine selection: Auto tries CUDA first, falls back to CPU on failure.
+ * Output: jdouble arrays for win/tie/loss/stderr probabilities. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatch(
     JNIEnv* env,
@@ -4806,6 +5096,8 @@ Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatch(
   return 0;
 }
 
+/* computeBatchCpuOnly: forced CPU-only path (no CUDA attempt).
+ * Used for benchmarking CPU vs CUDA performance. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatchCpuOnly(
     JNIEnv* env,
@@ -4889,6 +5181,8 @@ Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatchCpuOnly(
   return 0;
 }
 
+/* lastEngineCode: returns the engine code (0=unknown, 1=CPU, 2=CUDA, 3=fallback)
+ * from the most recent batch computation.  Thread-safe via atomic load. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HeadsUpGpuNativeBindings_lastEngineCode(
     JNIEnv*,
@@ -4896,6 +5190,7 @@ Java_sicfun_holdem_HeadsUpGpuNativeBindings_lastEngineCode(
   return g_last_engine_code.load(std::memory_order_relaxed);
 }
 
+/* cudaDeviceCount: returns the number of CUDA-capable GPUs (0 if CUDA unavailable). */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HeadsUpGpuNativeBindings_cudaDeviceCount(
     JNIEnv*,
@@ -4908,6 +5203,9 @@ Java_sicfun_holdem_HeadsUpGpuNativeBindings_cudaDeviceCount(
   return static_cast<jint>(count);
 }
 
+/* cudaDeviceInfo: returns a pipe-delimited string with GPU metadata:
+ *   "name|SMs|clockMHz|memoryMB|major.minor"
+ * Used by the JVM layer for logging and auto-tuning decisions. */
 extern "C" JNIEXPORT jstring JNICALL
 Java_sicfun_holdem_HeadsUpGpuNativeBindings_cudaDeviceInfo(
     JNIEnv* env,
@@ -4935,6 +5233,8 @@ Java_sicfun_holdem_HeadsUpGpuNativeBindings_cudaDeviceInfo(
   return env->NewStringUTF(buf);
 }
 
+/* computeBatchOnDevice: like computeBatch but targets a specific CUDA device index.
+ * No CPU fallback -- returns error status if CUDA fails. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatchOnDevice(
     JNIEnv* env,
@@ -5012,6 +5312,10 @@ Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatchOnDevice(
   return 0;
 }
 
+/* computeBatchPacked: compact API using packed 22-bit matchup keys.
+ * Each packed_key encodes both hero and villain hole-card IDs.
+ * Output: jfloat arrays (single precision, lower memory than jdouble).
+ * Engine selection: Auto tries CUDA, falls back to CPU on failure. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatchPacked(
     JNIEnv* env,
@@ -5153,6 +5457,8 @@ Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatchPacked(
   return 0;
 }
 
+/* computeBatchPackedOnDevice: packed API targeting a specific CUDA device.
+ * No CPU fallback. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatchPackedOnDevice(
     JNIEnv* env,
@@ -5237,6 +5543,11 @@ Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeBatchPackedOnDevice(
   return 0;
 }
 
+/* computeRangeBatchMonteCarloCsr: range-vs-range equity via CSR layout.
+ * hero_ids[h] is the hero hole-card ID for hero h.
+ * offsets[h..h+1] defines the villain range slice in villain_ids/probabilities.
+ * For each hero, computes probability-weighted average equity against the
+ * villain range.  Engine: Auto tries CUDA, falls back to CPU. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeRangeBatchMonteCarloCsr(
     JNIEnv* env,
@@ -5354,6 +5665,8 @@ Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeRangeBatchMonteCarloCsr(
   return 0;
 }
 
+/* computeRangeBatchMonteCarloCsrOnDevice: range CSR targeting a specific
+ * CUDA device.  No CPU fallback. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HeadsUpGpuNativeBindings_computeRangeBatchMonteCarloCsrOnDevice(
     JNIEnv* env,

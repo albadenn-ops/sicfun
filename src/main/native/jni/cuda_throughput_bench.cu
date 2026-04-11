@@ -1,19 +1,47 @@
-// Definitive CUDA micro-benchmark: int32 vs float vs double throughput.
-// Simulates CFR-style operations: accumulate, compare, clamp, multiply.
-//
-// Compile:  nvcc -std=c++17 -O3 -gencode arch=compute_50,code=sm_50 -o cuda_bench.exe cuda_throughput_bench.cu
-// Run:      cuda_bench.exe
+/*
+ * cuda_throughput_bench.cu -- CUDA micro-benchmark for arithmetic throughput
+ * comparison: int32 vs float32 vs float64 (double) on the target GPU.
+ *
+ * Part of the sicfun poker analytics system's native acceleration layer.
+ * This benchmark measures the practical throughput of CFR-style operations
+ * (regret accumulation, regret matching / normalization, strategy weighting,
+ * clamping to non-negative) across three numeric types to inform the choice
+ * of arithmetic precision for the GPU CFR solver.
+ *
+ * Each kernel simulates a 3-action CFR infoset update loop:
+ *   1. Regret matching: clamp regrets to non-negative, normalize to strategy.
+ *   2. Strategy accumulation: weighted sum of strategies.
+ *   3. Regret update with CFR+ clamping.
+ *
+ * On Maxwell sm_50 (GTX 960M), float64 has 1/32 the throughput of float32,
+ * making the choice of precision critical for GPU CFR performance.
+ *
+ * Benchmark methodology:
+ *   - kWarmup warmup launches (not timed) to stabilize GPU clocks.
+ *   - kRuns timed launches with interleaved execution order (alternating
+ *     forward/reverse) to mitigate thermal throttling bias.
+ *   - Reports median of kRuns for each type (robust to outliers).
+ *   - Uses CUDA events for sub-millisecond GPU-side timing.
+ *
+ * Target GPU: GTX 960M (Maxwell, sm_50, CUDA 11.8).
+ *
+ * Compile:  nvcc -std=c++17 -O3 -gencode arch=compute_50,code=sm_50 -o cuda_bench.exe cuda_throughput_bench.cu
+ * Run:      cuda_bench.exe
+ */
 
 #include <cstdint>
 #include <cstdio>
 
-constexpr int kThreads = 128;
-constexpr int kBlocks = 40;       // ~5 SMs on 960M, 8 blocks/SM
-constexpr int kIterations = 5000; // keep under TDR timeout (~2s)
-constexpr int kWarmup = 2;
-constexpr int kRuns = 10;
+/* ---- Launch configuration ------------------------------------------------ */
 
-// ---- int32 kernel: simulates CFR regret accumulation + regret matching ----
+constexpr int kThreads = 128;       /* Threads per block. */
+constexpr int kBlocks = 40;         /* ~5 SMs on GTX 960M, 8 blocks/SM occupancy target. */
+constexpr int kIterations = 5000;   /* Inner loop iterations per thread. Kept under TDR (~2s). */
+constexpr int kWarmup = 2;          /* Warmup launches (not timed) to stabilize GPU clocks. */
+constexpr int kRuns = 10;           /* Timed runs; median is reported. */
+
+/* ---- int32 kernel: simulates CFR regret accumulation + regret matching.
+ * Uses integer division for normalization (1024 scale = ~Q10 fixed-point). */
 __global__ void bench_int32(int* out, const int n_iter) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -56,7 +84,8 @@ __global__ void bench_int32(int* out, const int n_iter) {
   out[tid] = cum_strategy0 + cum_strategy1 + cum_strategy2;
 }
 
-// ---- float kernel: same logic in float ----
+/* ---- float32 kernel: same CFR logic using single-precision floating-point.
+ * Uses reciprocal multiply for normalization (1/sum instead of division). */
 __global__ void bench_float(float* out, const int n_iter) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -100,7 +129,9 @@ __global__ void bench_float(float* out, const int n_iter) {
   out[tid] = cum_strategy0 + cum_strategy1 + cum_strategy2;
 }
 
-// ---- double kernel: same logic in double ----
+/* ---- float64 (double) kernel: same CFR logic using double-precision.
+ * On Maxwell sm_50, double throughput is 1/32 of float — this is the
+ * pathological case that motivates using float32 for the GPU CFR solver. */
 __global__ void bench_double(double* out, const int n_iter) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 

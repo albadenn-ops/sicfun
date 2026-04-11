@@ -1,5 +1,16 @@
 package sicfun.core
 
+/** Tests for [[KMeans]] clustering implementation.
+  *
+  * Coverage includes:
+  *  - '''Input validation''': empty points, k > n, k < 1, inconsistent dimensions, NaN coords.
+  *  - '''Trivial cases''': k=1 assigns everything to one cluster; k=n gives zero inertia.
+  *  - '''Separation''': well-separated point groups are assigned to distinct clusters.
+  *  - '''Determinism''': same seed + same input = identical output.
+  *  - '''Assignment API''': public `assign` method picks the nearest centroid.
+  *  - '''Convergence''': with maxIterations=1 and tight threshold, converged=false.
+  *  - '''Config validation''': rejects non-positive maxIterations and negative thresholds.
+  */
 class KMeansTest extends munit.FunSuite:
   test("fit rejects empty input and invalid k") {
     intercept[IllegalArgumentException] {

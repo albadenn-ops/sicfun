@@ -9,12 +9,22 @@ import java.time.format.DateTimeFormatter
 import java.time.{Instant, LocalDateTime, ZoneId, ZoneOffset}
 import scala.collection.mutable
 
+/** Supported external hand-history sources for import normalization.
+  *
+  * Each site has its own text format for hand histories. The [[HandHistoryImport]]
+  * parser handles the site-specific variations and normalizes them into a common
+  * [[ImportedHand]] representation. Auto-detection inspects the first non-empty line
+  * to identify the site.
+  */
 enum HandHistorySite:
   case PokerStars
   case Winamax
   case GGPoker
 
 object HandHistorySite:
+  /** Parse a site name string into a HandHistorySite enum value.
+    * Accepts common aliases (e.g., "stars" for PokerStars, "gg" for GGPoker).
+    */
   def parse(raw: String): Either[String, HandHistorySite] =
     raw.trim.toLowerCase match
       case "auto" => Left("site auto-detection must use detect(...)")
@@ -23,6 +33,11 @@ object HandHistorySite:
       case "ggpoker" | "gg" | "ggnetwork" => Right(HandHistorySite.GGPoker)
       case other => Left(s"unsupported hand-history site: $other")
 
+  /** Auto-detect the hand history site from the first non-empty line of the text.
+    *
+    * Inspects known header prefixes: "PokerStars Hand #", "Winamax Poker -",
+    * "Poker Hand #" / "GGPoker Hand #" / "#Game No :".
+    */
   def detect(text: String): Either[String, HandHistorySite] =
     val firstNonEmpty = text.linesIterator.map(_.trim.stripPrefix("\uFEFF")).find(_.nonEmpty)
     firstNonEmpty match
@@ -37,6 +52,14 @@ object HandHistorySite:
       case Some(line) => Left(s"could not auto-detect hand-history site from: $line")
       case None => Left("hand-history input is empty")
 
+/** A player parsed from a hand history, with seat assignment and position.
+  *
+  * @param seatIndex     0-based index used internally for ordering
+  * @param seatNumber    1-based seat number as shown in the hand history
+  * @param name          player's screen name (normalized, forum suffixes stripped)
+  * @param startingStack starting chip stack at the beginning of the hand
+  * @param position      table position (Button, BigBlind, etc.) assigned during parsing
+  */
 final case class ImportedPlayer(
     seatIndex: Int,
     seatNumber: Int,
@@ -49,6 +72,23 @@ final case class ImportedPlayer(
   require(name.trim.nonEmpty, "name must be non-empty")
   require(startingStack >= 0.0, "startingStack must be non-negative")
 
+/** A complete hand parsed and normalized from a site-specific hand history.
+  *
+  * Contains all information needed to replay the hand: players with positions,
+  * hero identity and hole cards, the full event sequence, and showdown reveals.
+  * Used by [[OpponentProfile.fromImportedHands]] to build opponent profiles.
+  *
+  * @param site                 the source site (PokerStars, Winamax, GGPoker)
+  * @param handId               unique hand identifier from the site
+  * @param tableName            table name from the hand history
+  * @param startedAtEpochMillis timestamp when the hand started (epoch millis)
+  * @param buttonSeatNumber     seat number of the button/dealer
+  * @param players              all players at the table with positions
+  * @param heroName             hero's screen name (if identified)
+  * @param heroHoleCards        hero's hole cards (if dealt and visible)
+  * @param events               normalized poker event sequence
+  * @param showdownCards        map of player name -> hole cards revealed at showdown
+  */
 final case class ImportedHand(
     site: HandHistorySite,
     handId: String,
@@ -67,6 +107,27 @@ final case class ImportedHand(
   require(buttonSeatNumber > 0, "buttonSeatNumber must be positive")
   require(players.nonEmpty, "players must be non-empty")
 
+/** Parses and normalizes raw hand-history text into SICFUN canonical hand/event structures.
+  *
+  * The importer handles three poker sites (PokerStars, Winamax, GGPoker), each with
+  * their own text format. The parsing strategy:
+  *   1. Split the raw text into per-hand blocks based on site-specific header lines
+  *   2. For each block, extract hand metadata (ID, timestamp, table, button seat)
+  *   3. Parse seat lines to build the player list
+  *   4. Assign table positions based on seat order relative to the button
+  *   5. Parse action lines into normalized PokerEvent instances
+  *   6. Extract hero hole cards and showdown reveals
+  *
+  * Design decisions:
+  *   - Forum hero aliases like "PLAYERNAME(HERO)" are normalized by stripping the suffix
+  *   - Money amounts are parsed tolerantly (handles $, EUR, commas, periods)
+  *   - Position assignment uses a fallback table for non-standard player counts
+  *   - Timestamp parsing supports multiple date formats and timezone indicators
+  *   - BOM characters are stripped from the input
+  *
+  * @see [[ImportedHand]] for the output structure
+  * @see [[OpponentProfile.fromImportedHands]] for the downstream consumer
+  */
 object HandHistoryImport:
   private val PokerStarsHeaderPrefix = "PokerStars Hand #"
   private val WinamaxHeaderPrefix = "Winamax Poker -"
@@ -123,6 +184,13 @@ object HandHistoryImport:
     6 -> Vector(Position.UTG, Position.UTG1, Position.UTG2, Position.Middle, Position.Hijack, Position.Cutoff)
   )
 
+  /** Parse a hand history file from disk.
+    *
+    * @param path     path to the hand history text file (UTF-8)
+    * @param site     optional site hint; if None, auto-detects from the file content
+    * @param heroName optional hero screen name for hole card extraction
+    * @return Right(hands) on success, Left(error) on failure
+    */
   def parseFile(
       path: Path,
       site: Option[HandHistorySite] = None,
@@ -134,6 +202,16 @@ object HandHistoryImport:
     catch
       case e: Exception => Left(s"failed to read hand history file '$path': ${e.getMessage}")
 
+  /** Parse hand history from a raw text string.
+    *
+    * Normalizes the hero name (strips forum suffixes), resolves or auto-detects
+    * the site, then dispatches to the site-specific parser.
+    *
+    * @param text     raw hand history text (may contain multiple hands)
+    * @param site     optional site hint; if None, auto-detects from the text
+    * @param heroName optional hero screen name (forum aliases like "NAME(HERO)" accepted)
+    * @return Right(hands) on success, Left(error) on failure
+    */
   def parseText(
       text: String,
       site: Option[HandHistorySite],
@@ -149,6 +227,7 @@ object HandHistoryImport:
       case HandHistorySite.GGPoker => parseGGPoker(text, normalizedHeroName)
     }
 
+  /** Normalize a player name by stripping common forum hero suffixes like "(HERO)". */
   def normalizePlayerName(raw: String): String =
     raw.trim match
       case ForumHeroSuffixRegex(base) if base.trim.nonEmpty => base.trim

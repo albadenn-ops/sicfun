@@ -2,6 +2,20 @@ package sicfun.core
 
 import sicfun.holdem.types.TestSystemPropertyScope
 
+/** Tests for [[HandEvaluator]] 5-card and 7-card poker hand evaluation.
+  *
+  * Coverage includes:
+  *  - '''Category detection''': each hand category (straight flush, four of a kind,
+  *    full house, flush, straight, two pair) is correctly identified with proper tiebreakers.
+  *  - '''Wheel straight''': the A-2-3-4-5 special case is detected as a straight with high card 5.
+  *  - '''7-card evaluation''': picks the best 5-card subset from 7 cards.
+  *  - '''Ordering''': stronger categories compare greater than weaker ones.
+  *  - '''Caching''': cached variants produce identical results to uncached ones.
+  *  - '''categorize5 parity''': fast category-only path agrees with full evaluate5 on
+  *    25,000 random hands (probabilistic regression test).
+  *  - '''Input validation''': wrong card counts and duplicate cards are rejected.
+  *  - '''Cache disabling''': system properties can set cache max size to 0, effectively disabling caching.
+  */
 class HandEvaluatorTest extends munit.FunSuite:
   private def cards(tokens: String*): Vector[Card] =
     Card.parseAll(tokens).getOrElse(fail(s"invalid cards: ${tokens.mkString(" ")}"))

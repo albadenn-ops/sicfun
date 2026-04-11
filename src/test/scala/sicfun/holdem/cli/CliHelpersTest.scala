@@ -3,6 +3,41 @@ import sicfun.holdem.types.*
 
 import munit.FunSuite
 
+/**
+  * Tests for [[CliHelpers]] argument parsing and formatting utilities.
+  *
+  * This suite validates the two parsing paradigms (throwing and Either-returning)
+  * across all supported value types:
+  *
+  * '''Option parsing''':
+  *   - Strict mode rejects blank trimmed values.
+  *   - Relaxed mode preserves blank trimmed values as empty strings.
+  *   - Relaxed mode still rejects missing value after `=` sign.
+  *   - Malformed tokens (missing `--` prefix) throw with descriptive message.
+  *
+  * '''Typed option helpers (throwing)''':
+  *   - Integer, long, double, and boolean options reject non-numeric/non-boolean values.
+  *
+  * '''Typed option helpers (Either-returning)''':
+  *   - `parseIntOptionEither`, `parseLongOptionEither`, `parseOptionalLongOptionEither`,
+  *     `parseDoubleOptionEither` correctly decode numeric values.
+  *   - `parseStrictBooleanOptionEither` accepts only "true"/"false".
+  *   - `parseBooleanOptionEither` accepts "1"/"true"/"yes" and "0"/"false"/"no".
+  *   - `parseExtendedBooleanOptionEither` additionally accepts "on"/"off".
+  *   - Unsupported tokens produce `Left` with descriptive error messages.
+  *
+  * '''Poker-specific helpers''':
+  *   - `parseHoleCardsOptionEither` parses 4-char hole card tokens.
+  *   - `parsePositionOptionEither` matches position names case-insensitively.
+  *   - `parseCandidateActionsOptionEither` parses comma-separated action tokens with dedup.
+  *
+  * '''CSV and list helpers''':
+  *   - `requireCsvTokens` rejects all-blank input.
+  *   - `requirePositiveIntList` rejects non-integer and non-positive values.
+  *
+  * '''Unknown option guard''':
+  *   - `requireNoUnknownOptions` rejects keys not in the allowed set.
+  */
 class CliHelpersTest extends FunSuite:
   test("strict option parsing rejects blank trimmed values") {
     val parsed = CliHelpers.parseOptions(Array("--hero=   "))

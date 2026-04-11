@@ -1,3 +1,20 @@
+/*
+ * HoldemDdreNativeCpuBindings.cpp -- CPU JNI binding for DDRE (Data-Driven
+ * Range Estimation) posterior inference in the sicfun poker analytics system.
+ *
+ * Bridges sicfun.holdem.HoldemDdreNativeCpuBindings to the pure C++ engine in
+ * DdreNativeInferenceCore.hpp. Unlike the Bayesian binding, DDRE does not
+ * output log-evidence (no outLogEvidenceArray parameter), since DDRE uses a
+ * geometric-mean scoring rule that does not produce a marginal likelihood.
+ *
+ * The critical array acquire/release pattern is the same as the Bayesian CPU
+ * binding — see HoldemBayesNativeCpuBindings.cpp for detailed commentary.
+ *
+ * Compiled into: sicfun_native_cpu.dll
+ *
+ * Reports engine code 1 (CPU) on success.
+ */
+
 #include <jni.h>
 
 #include <atomic>
@@ -11,6 +28,7 @@ constexpr jint kEngineCpu = 1;
 
 std::atomic<jint> g_last_engine_code(kEngineUnknown);
 
+/* Checks and clears any pending JNI exception; see Bayes CPU binding for details. */
 bool clear_pending_jni_exception(JNIEnv* env) {
   if (!env->ExceptionCheck()) {
     return false;
@@ -53,6 +71,13 @@ jdouble* acquire_critical_array(
 
 }  // namespace
 
+/*
+ * JNI entry point: sicfun.holdem.HoldemDdreNativeCpuBindings.inferPosterior()
+ *
+ * Computes DDRE posterior inference on the CPU. Acquires critical arrays for
+ * prior, likelihoods, and output posterior. No log-evidence output (DDRE does
+ * not produce marginal likelihood). Delegates to ddrenative::infer_posterior_raw().
+ */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemDdreNativeCpuBindings_inferPosterior(
     JNIEnv* env,
@@ -138,6 +163,7 @@ Java_sicfun_holdem_HoldemDdreNativeCpuBindings_inferPosterior(
   return ddrenative::kStatusOk;
 }
 
+/* Returns 0 (unknown) or 1 (CPU) depending on whether inferPosterior succeeded. */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemDdreNativeCpuBindings_lastEngineCode(
     JNIEnv* /*env*/, jclass /*clazz*/) {

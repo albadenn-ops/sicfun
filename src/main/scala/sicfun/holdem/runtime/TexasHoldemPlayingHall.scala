@@ -2,12 +2,17 @@ package sicfun.holdem.runtime
 import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 import sicfun.holdem.engine.*
+import sicfun.holdem.engine.GtoSolveEngine.{GtoMode, GtoSolveCacheKey, GtoCachedPolicy, GtoCacheStats}
 import sicfun.holdem.provider.*
-import sicfun.holdem.cfr.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.cli.*
 
 import sicfun.core.{Card, CardId, Deck, DiscreteDistribution, HandEvaluator}
+import sicfun.holdem.validation.{
+  ActionLine, EquityBasedStrategy, InjectedLeak, LeakInjectedVillain,
+  NoLeak, Overcalls, OverbluffsTurnBarrel, OverfoldsToAggression, PassiveInBigPots,
+  PreflopTooLoose, PreflopTooTight, SpotContext
+}
 
 import java.io.BufferedWriter
 import java.net.URLEncoder
@@ -19,31 +24,67 @@ import java.util.Locale
 import scala.collection.mutable
 import scala.util.Random
 
-/** Large-volume self-play hall:
-  *  - plays full hands (preflop -> river)
-  *  - runs Bayesian range inference + action recommendation for hero decisions
-  *  - logs hands + learning checkpoints
-  *  - periodically retrains villain action model from generated data
+/** Large-volume self-play simulation hall for Texas Hold'em poker.
+  *
+  * This is the main integration driver that orchestrates thousands (or hundreds of thousands) of
+  * full poker hands from preflop through river, combining multiple subsystems:
+  *
+  *  - '''Hand simulation:''' Each hand is dealt, played street-by-street with configurable action
+  *    orders (preflop positional order vs. postflop out-of-position-first order), and resolved
+  *    at showdown via [[sicfun.core.HandEvaluator]] with full side-pot logic for multiway pots.
+  *
+  *  - '''Hero decision engine:''' In ''Adaptive'' mode, hero uses [[RealTimeAdaptiveEngine]] which
+  *    performs Bayesian range inference on each villain, estimates equity against the inferred
+  *    posterior, and recommends the highest-EV action among candidates (fold/check/call/raise).
+  *    In ''GTO'' mode, hero uses [[sicfun.holdem.engine.GtoSolveEngine]] for Nash-equilibrium-
+  *    approximated decisions. An epsilon-greedy exploration rate injects random actions for
+  *    learning diversity.
+  *
+  *  - '''Villain modeling:''' Villains are drawn from a configurable pool with three modes:
+  *    ''Archetype'' (behavioral archetypes like Nit, TAG, LAG, CallingStation, Maniac),
+  *    ''GTO'' (equilibrium baseline), and ''LeakInjected'' (calibrated behavioral leaks
+  *    layered on top of an equity-based baseline for exploitation training).
+  *
+  *  - '''Multiway inference:''' When more than one villain is live,
+  *    [[sicfun.holdem.engine.MultiwayInferenceEngine]] runs per-opponent Bayesian updates
+  *    and multiway equity estimation, then recommends an action accounting for all opponents.
+  *
+  *  - '''Online learning:''' Every `learnEveryHands` hands, the hall retrains the
+  *    [[PokerActionModel]] (multinomial logistic) from accumulated villain decision samples,
+  *    validates against a held-out split, and hot-swaps the model into the inference engines
+  *    if it passes the Brier score gate.
+  *
+  *  - '''Logging and review:''' Outputs include a TSV hand log (hero/villain actions, net chips,
+  *    outcome per hand), a learning log (model retraining checkpoints), optional training-data
+  *    TSV, optional DDRE (Deep Distributional Range Estimation) training-data TSV, and optional
+  *    PokerStars-format hand history files for import into poker review tools.
+  *
+  *  - '''Table scaling:''' Supports 2-max through 9-max tables, with configurable hero position,
+  *    random villain selection from available seats, and optional full-ring mode where all
+  *    positions are always active.
+  *
+  * Entry point: `main(args)` or `run(args)` for programmatic use.
+  *
+  * @see [[HallRunner]] for the stateful orchestration loop
+  * @see [[HandResolver]] for single-hand street-by-street resolution
   */
 object TexasHoldemPlayingHall:
-  private enum HeroMode:
-    case Adaptive
-    case Gto
-
-  private enum GtoMode:
-    case Fast
-    case Exact
-
+  /** How a villain player makes decisions during the simulation. */
   private enum VillainMode:
     case Archetype(style: PlayerArchetype)
     case Gto
+    case LeakInjected(leakId: String, severity: Double)
 
+  /** A named villain with a decision mode and a human-readable label for logging. */
   private final case class VillainProfile(
       name: String,
       mode: VillainMode,
       label: String
   )
 
+  /** All CLI-parsed configuration for a playing hall run. Controls hand count, table geometry,
+    * hero/villain modes, learning schedule, raise sizing, inference budget, and output paths.
+    */
   private final case class Config(
       hands: Int,
       tableCount: Int,
@@ -64,9 +105,14 @@ object TexasHoldemPlayingHall:
       equityTrials: Int,
       saveTrainingTsv: Boolean,
       saveDdreTrainingTsv: Boolean,
-      saveReviewHandHistory: Boolean
+      saveReviewHandHistory: Boolean,
+      fullRing: Boolean
   )
 
+  /** Aggregate results from a completed playing hall run, exposed as the public return type.
+    * Includes win/loss/tie counts, net chips, bb/100 win-rate, action frequency breakdown,
+    * model retraining count, GTO cache statistics, and per-villain net chip breakdown.
+    */
   final case class HallSummary(
       handsPlayed: Int,
       tableCount: Int,
@@ -83,19 +129,30 @@ object TexasHoldemPlayingHall:
       exactGtoCacheHits: Long = 0L,
       exactGtoCacheMisses: Long = 0L,
       exactGtoSolvedByProvider: Map[String, Long] = Map.empty,
-      exactGtoServedByProvider: Map[String, Long] = Map.empty
+      exactGtoServedByProvider: Map[String, Long] = Map.empty,
+      perVillainNetChips: Map[String, Double] = Map.empty
   ):
     def exactGtoCacheTotal: Long = exactGtoCacheHits + exactGtoCacheMisses
     def exactGtoCacheHitRate: Double =
       if exactGtoCacheTotal > 0 then exactGtoCacheHits.toDouble / exactGtoCacheTotal.toDouble
       else 0.0
 
+  /** A dealt hand: hole cards for every modeled seat plus the full 5-card community board.
+    * The board is pre-dealt even though streets reveal cards incrementally — the resolver
+    * slices it as needed (flop = first 3, turn = first 4, river = all 5).
+    */
   private final case class Deal(
       holeCardsByPosition: Map[Position, HoleCards],
       board: Board
   ):
     def holeCardsFor(position: Position): HoleCards = holeCardsByPosition(position)
 
+  /** Describes the table layout for one hand: which positions are modeled, which are active
+    * (not pre-folded), which villain profile sits in each seat, seat numbers for bet history
+    * indexing, and player names for review hand history output. The `openerPosition` is the
+    * first active position in preflop action order (used to generate synthetic bunching folds
+    * when no real preflop folds have been observed yet).
+    */
   private final case class TableScenario(
       playerCount: Int,
       modeledPositions: Vector[Position],
@@ -132,6 +189,12 @@ object TexasHoldemPlayingHall:
           .filterNot(position => position == perspectivePosition || position == targetPosition)
           .map(PreflopFold(_))
 
+  /** The outcome of a single resolved hand. Carries hero's net chip result, win/loss/tie outcome,
+    * collected villain training samples (for online model retraining), DDRE training samples
+    * (for offline distributional range estimation training), raise response observations (for
+    * the adaptive engine's villain-response-to-raise tracker), the full action trace for both
+    * hero and villain, streets played count, and PokerStars-format review lines.
+    */
   private final case class HandResult(
       heroNet: Double,
       outcome: Int,
@@ -147,12 +210,18 @@ object TexasHoldemPlayingHall:
       maxLivePlayers: Int
   )
 
+  /** The amount of chips hero receives at showdown (before subtracting hero's own contribution). */
   private final case class ShowdownResolution(
       heroPayout: Double
   )
 
-  private final case class VillainStyleProfile(looseness: Double, aggression: Double)
-
+  /** A single training example for the Deep Distributional Range Estimation (DDRE) model.
+    * Captures the full inference context at a hero decision point: the game state, both
+    * players' hole cards (ground truth labels), the Bayesian prior (bunching-adjusted range),
+    * the Bayesian posterior (after updating on observed villain actions), and the log-evidence
+    * of the Bayesian update (a measure of how well the action model predicted villain's actual
+    * actions). These samples are written to a TSV for offline DDRE network training.
+    */
   private final case class DdreTrainingSample(
       decisionIndex: Int,
       state: GameState,
@@ -166,70 +235,30 @@ object TexasHoldemPlayingHall:
       bayesLogEvidence: Double
   )
 
-  private final case class GtoSolveCacheKey(
-      perspective: Int,
-      canonicalHeroPacked: Long,
-      streetOrdinal: Int,
-      canonicalBoardPacked: Long,
-      potBits: Long,
-      toCallBits: Long,
-      stackBits: Long,
-      candidateHash: Int,
-      baseEquityTrials: Int
-  )
-
-  private final case class GtoCachedPolicy(
-      orderedActionProbabilities: Vector[(PokerAction, Double)],
-      bestAction: PokerAction,
-      provider: String
-  )
-
-  private final case class GtoCacheStats(
-      var hits: Long = 0L,
-      var misses: Long = 0L,
-      servedByProvider: mutable.Map[String, Long] = mutable.HashMap.empty[String, Long].withDefaultValue(0L),
-      solvedByProvider: mutable.Map[String, Long] = mutable.HashMap.empty[String, Long].withDefaultValue(0L)
-  ):
-    def total: Long = hits + misses
-    def hitRate: Double = if total > 0 then hits.toDouble / total.toDouble else 0.0
-    def recordHit(provider: String): Unit =
-      hits += 1L
-      increment(servedByProvider, provider)
-    def recordMiss(provider: String): Unit =
-      misses += 1L
-      increment(servedByProvider, provider)
-      increment(solvedByProvider, provider)
-    def servedByProviderSnapshot: Map[String, Long] = servedByProvider.toMap
-    def solvedByProviderSnapshot: Map[String, Long] = solvedByProvider.toMap
-    private def increment(counter: mutable.Map[String, Long], provider: String): Unit =
-      counter.update(provider, counter(provider) + 1L)
-
+  /** Estimated fold/continue probabilities and the narrowed continuation range when a villain
+    * faces a hero raise. Used by the multiway inference engine to predict how the remaining
+    * opponents will respond to hero aggression.
+    */
   private[holdem] final case class RaiseResponseEstimate(
       foldProbability: Double,
       continueProbability: Double,
       continuationRange: DiscreteDistribution[HoleCards]
   )
 
-  private val MaxExactGtoCacheEntries = 500000
-  private val SmallBlindAmount = 0.5
+  // ---- Table and money constants ----
+  private val SmallBlindAmount = 0.5  // SB = 0.5 BB in standard no-limit structure
   private val BigBlindAmount = 1.0
-  private val ReviewUploadFileName = "review-upload-pokerstars.txt"
+  private val ReviewUploadFileName = "review-upload-pokerstars.txt"  // PokerStars HH export filename
   private val ReviewHeroName = "Hero"
-  private val ReviewStartingStack = 100.0
-  private val MoneyEpsilon = 1e-9
-  private val MultiwayExactMaxEvaluations = 250_000L
-  private val ReviewBaseTimestamp = LocalDateTime.of(2026, 3, 10, 12, 0, 0)
+  private val ReviewStartingStack = 100.0  // 100 BB effective starting stack per hand
+  private val MoneyEpsilon = 1e-9  // rounding tolerance for chip comparisons
+  private val MultiwayExactMaxEvaluations = 250_000L  // cap on exact multiway equity enumerations
+  private val ReviewBaseTimestamp = LocalDateTime.of(2026, 3, 10, 12, 0, 0)  // synthetic timestamp base for HH export
   private val ReviewTimestampFormatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
-  private val SuitPermutations: Array[Array[Int]] =
-    Array(
-      Array(0, 1, 2, 3), Array(0, 1, 3, 2), Array(0, 2, 1, 3), Array(0, 2, 3, 1),
-      Array(0, 3, 1, 2), Array(0, 3, 2, 1), Array(1, 0, 2, 3), Array(1, 0, 3, 2),
-      Array(1, 2, 0, 3), Array(1, 2, 3, 0), Array(1, 3, 0, 2), Array(1, 3, 2, 0),
-      Array(2, 0, 1, 3), Array(2, 0, 3, 1), Array(2, 1, 0, 3), Array(2, 1, 3, 0),
-      Array(2, 3, 0, 1), Array(2, 3, 1, 0), Array(3, 0, 1, 2), Array(3, 0, 2, 1),
-      Array(3, 1, 0, 2), Array(3, 1, 2, 0), Array(3, 2, 0, 1), Array(3, 2, 1, 0)
-    )
 
+  /** CLI entry point. Parses args, runs the hall, and prints the summary to stdout.
+    * Returns exit code 1 on failure (unless `--help` was requested).
+    */
   def main(args: Array[String]): Unit =
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
@@ -259,12 +288,25 @@ object TexasHoldemPlayingHall:
           System.err.println(error)
           sys.exit(1)
 
+  /** Programmatic entry point: parses CLI args and runs the full simulation.
+    * @return Right(summary) on success, Left(errorMessage) on argument parsing or runtime failure.
+    */
   def run(args: Array[String]): Either[String, HallSummary] =
     parseArgs(args).flatMap(runConfig)
 
   private def runConfig(config: Config): Either[String, HallSummary] =
     new HallRunner(config).run()
 
+  /** Stateful orchestrator for a single playing hall run. Owns the mutable accumulators
+    * (net chips, win/loss/tie counts, action frequencies, per-villain net tracking), the
+    * learning queue of villain training samples, the current model artifact, and the preflop
+    * and postflop inference engines. Lifecycle:
+    *
+    *  1. `run()` creates output directories, opens log writers, initializes the model artifact
+    *     (from a saved artifact or a uniform bootstrap), then plays all configured hands.
+    *  2. Each hand is dealt, resolved, logged, and optionally triggers a model retrain.
+    *  3. On completion, the GTO cache is trimmed and a [[HallSummary]] is returned.
+    */
   private final class HallRunner(config: Config):
     private val modelsRoot = config.outDir.resolve("models")
     private val handsPath = config.outDir.resolve("hands.tsv")
@@ -291,13 +333,16 @@ object TexasHoldemPlayingHall:
     private var activeArtifactOpt = Option.empty[TrainedPokerActionModel]
     private var preflopEngineOpt = Option.empty[RealTimeAdaptiveEngine]
     private var postflopEngineOpt = Option.empty[RealTimeAdaptiveEngine]
+    private var strategicEngineOpt = Option.empty[StrategicEngine]
     private var heroNet = 0.0
     private var heroWins = 0
     private var heroTies = 0
     private var heroLosses = 0
     private val actionCounts = mutable.Map.empty[String, Int].withDefaultValue(0)
     private var retrains = 0
+    private val perVillainNet = mutable.HashMap.empty[String, Double].withDefaultValue(0.0)
 
+    /** Main execution: opens writers, initializes model, plays all hands, returns summary. */
     def run(): Either[String, HallSummary] =
       try
         Files.createDirectories(config.outDir)
@@ -352,10 +397,15 @@ object TexasHoldemPlayingHall:
     private def postflopEngine: RealTimeAdaptiveEngine =
       postflopEngineOpt.getOrElse(throw new IllegalStateException("postflop engine not initialized"))
 
+    /** Loads or bootstraps the initial PokerActionModel and builds preflop/postflop engines.
+      * Initializes the strategic engine if heroMode is Strategic.
+      */
     private def initializeArtifact(): Unit =
       val (initialArtifact, _) = loadInitialArtifact(config, modelsRoot)
       activeArtifactOpt = Some(initialArtifact)
       rebuildEngines()
+      if config.heroMode == HeroMode.Strategic then
+        strategicEngineOpt = Some(new StrategicEngine(StrategicEngine.Config()))
 
     private def playHands(): Unit =
       var handNo = 1
@@ -363,16 +413,28 @@ object TexasHoldemPlayingHall:
         playHand(handNo)
         handNo += 1
 
+    /** Plays a single hand: builds table scenario, deals cards, resolves the hand through
+      * all streets, records training samples and outcomes, appends logs, and optionally
+      * triggers reporting and model retraining.
+      */
     private def playHand(handNo: Int): Unit =
       val tableId = ((handNo - 1) % config.tableCount) + 1
       val tableScenario = buildTableScenario(
         playerCount = config.playerCount,
         heroPosition = config.heroPosition,
         villainPool = config.villainPool,
-        headsUpOnly = config.saveReviewHandHistory,
+        headsUpOnly = config.saveReviewHandHistory && !config.fullRing,
+        forceAllActive = config.fullRing,
         rng = rng
       )
       val deal = dealHand(tableScenario.modeledPositions, rng)
+      strategicEngineOpt.foreach { engine =>
+        if !engine.isSessionInitialized then
+          val rivalIds = tableScenario.activePositions
+            .filterNot(_ == config.heroPosition)
+            .map(pos => sicfun.holdem.strategic.PlayerId(pos.toString))
+          engine.initSession(rivalIds)
+      }
       val result = resolveHand(
         deal = deal,
         preflopEngine = preflopEngine,
@@ -385,12 +447,13 @@ object TexasHoldemPlayingHall:
         collectVillainTraining = collectVillainTraining,
         collectDdreTraining = collectDdreTraining,
         exactGtoCache = exactGtoCache,
-        exactGtoCacheStats = exactGtoCacheStats
+        exactGtoCacheStats = exactGtoCacheStats,
+        strategicEngineOpt = strategicEngineOpt
       )
 
       recordTrainingSamples(handNo, tableId, result)
       raiseResponseHistory ++= result.raiseResponses
-      recordOutcome(result)
+      recordOutcome(result, tableScenario)
       recordHeroActions(result)
       appendHandLog(
         writer = handsWriter,
@@ -422,6 +485,9 @@ object TexasHoldemPlayingHall:
       maybeReport(handNo)
       maybeRetrain(handNo)
 
+    /** Enqueues villain training samples into the learning window (FIFO bounded queue) and
+      * writes them to the optional training/DDRE TSV files.
+      */
     private def recordTrainingSamples(handNo: Int, tableId: Int, result: HandResult): Unit =
       result.villainTrainingSamples.foreach { sample =>
         learningQueue.enqueue(sample)
@@ -433,11 +499,13 @@ object TexasHoldemPlayingHall:
         ddreWriter.foreach(w => appendDdreTrainingSample(w, handNo, tableId, sample))
       }
 
-    private def recordOutcome(result: HandResult): Unit =
+    private def recordOutcome(result: HandResult, tableScenario: TableScenario): Unit =
       heroNet += result.heroNet
       if result.outcome > 0 then heroWins += 1
       else if result.outcome < 0 then heroLosses += 1
       else heroTies += 1
+      val primaryName = tableScenario.primaryVillainProfile.name
+      perVillainNet.update(primaryName, perVillainNet(primaryName) + result.heroNet)
 
     private def recordHeroActions(result: HandResult): Unit =
       result.heroActions.foreach { action =>
@@ -452,6 +520,12 @@ object TexasHoldemPlayingHall:
           f"[hall] hand=$handNo%,d net=${heroNet}%.2f bb100=$bb100%.2f retrains=$retrains model=${activeArtifact.version.id}"
         )
 
+    /** Retrains the PokerActionModel from accumulated villain samples every `learnEveryHands`
+      * hands. Trains a new versioned model with validation split, saves the artifact to disk,
+      * logs the checkpoint, and hot-swaps the model into both engines if the Brier score gate
+      * passes. Also replays all accumulated raise-response observations into the fresh engines
+      * so the villain-response tracker stays current.
+      */
     private def maybeRetrain(handNo: Int): Unit =
       if config.learnEveryHands > 0 &&
         handNo % config.learnEveryHands == 0 &&
@@ -492,6 +566,10 @@ object TexasHoldemPlayingHall:
             postflopEngine.observeVillainResponseToRaise(response)
           }
 
+    /** Recreates the preflop and postflop RealTimeAdaptiveEngines with the current model.
+      * Postflop uses reduced bunching trials (1) and scaled-down equity trials since bunching
+      * effects are negligible after the flop.
+      */
     private def rebuildEngines(): Unit =
       preflopEngineOpt = Some(buildEngine(
         tableRanges = tableRanges,
@@ -507,7 +585,7 @@ object TexasHoldemPlayingHall:
       ))
 
     private def trimExactCacheIfNeeded(): Unit =
-      if exactGtoCache.size > MaxExactGtoCacheEntries then
+      if exactGtoCache.size > GtoSolveEngine.MaxGtoCacheEntries then
         exactGtoCache.clear()
 
     private def buildSummary(): HallSummary =
@@ -530,9 +608,13 @@ object TexasHoldemPlayingHall:
         exactGtoCacheHits = exactGtoCacheStats.hits,
         exactGtoCacheMisses = exactGtoCacheStats.misses,
         exactGtoSolvedByProvider = exactGtoCacheStats.solvedByProviderSnapshot,
-        exactGtoServedByProvider = exactGtoCacheStats.servedByProviderSnapshot
+        exactGtoServedByProvider = exactGtoCacheStats.servedByProviderSnapshot,
+        perVillainNetChips = perVillainNet.toMap
       )
 
+  /** Factory method that creates a [[HandResolver]] and plays a single hand to completion.
+    * All mutable per-hand state is encapsulated inside the resolver instance.
+    */
   private def resolveHand(
       deal: Deal,
       preflopEngine: RealTimeAdaptiveEngine,
@@ -545,7 +627,8 @@ object TexasHoldemPlayingHall:
       collectVillainTraining: Boolean,
       collectDdreTraining: Boolean,
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
-      exactGtoCacheStats: GtoCacheStats
+      exactGtoCacheStats: GtoCacheStats,
+      strategicEngineOpt: Option[StrategicEngine]
   ): HandResult =
     new HandResolver(
       deal = deal,
@@ -559,9 +642,25 @@ object TexasHoldemPlayingHall:
       collectVillainTraining = collectVillainTraining,
       collectDdreTraining = collectDdreTraining,
       exactGtoCache = exactGtoCache,
-      exactGtoCacheStats = exactGtoCacheStats
+      exactGtoCacheStats = exactGtoCacheStats,
+      strategicEngineOpt = strategicEngineOpt
     ).play()
 
+  /** Resolves a single hand from preflop through showdown. This class encapsulates all mutable
+    * per-hand state: chip stacks, pot, contribution tracking, fold/all-in sets, bet history,
+    * villain observations, action traces, and review history lines.
+    *
+    * The resolution flow is:
+    *  1. `play()` runs preflop, then each postflop street (flop, turn, river) unless the hand
+    *     ends early (everyone folds to one player).
+    *  2. If the hand reaches showdown, `showdownResolution()` evaluates all remaining hands
+    *     and distributes the pot (including side pots for multiway all-in scenarios).
+    *  3. The collected training samples, action traces, and review lines are packaged into a
+    *     [[HandResult]] for the caller.
+    *
+    * Hero and villain decisions are delegated to `decideHero()` and `decideVillain()` respectively,
+    * which dispatch to the appropriate decision engine based on the configured hero/villain modes.
+    */
   private final class HandResolver(
       deal: Deal,
       preflopEngine: RealTimeAdaptiveEngine,
@@ -574,7 +673,8 @@ object TexasHoldemPlayingHall:
       collectVillainTraining: Boolean,
       collectDdreTraining: Boolean,
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
-      exactGtoCacheStats: GtoCacheStats
+      exactGtoCacheStats: GtoCacheStats,
+      strategicEngineOpt: Option[StrategicEngine]
   ):
     private val heroPosition = tableScenario.heroPosition
     private val preflopOrder = tableScenario.modeledPositions
@@ -588,6 +688,8 @@ object TexasHoldemPlayingHall:
       mutable.HashMap.from(tableScenario.modeledPositions.map { position =>
         position -> (ReviewStartingStack - contributionByPosition(position))
       })
+    private val actionLineByPosition = mutable.HashMap.empty[Position, Vector[PokerAction]]
+      .withDefaultValue(Vector.empty)
     private val foldedPositions = mutable.HashSet.empty[Position]
     private val allInPositions = mutable.HashSet.empty[Position]
     private val preflopFoldedPositions = mutable.ArrayBuffer.empty[Position]
@@ -611,11 +713,17 @@ object TexasHoldemPlayingHall:
     private val flopBoard = Board.from(deal.board.cards.take(3).sortBy(CardId.toId))
     private val turnBoard = Board.from(deal.board.cards.take(4).sortBy(CardId.toId))
 
+    /** Runs the hand through all streets and produces the final result. Hero's net is computed
+      * as showdown payout minus hero's total contribution. The outcome sign (+1/0/-1) is set
+      * after the net is finalized.
+      */
     def play(): HandResult =
+      strategicEngineOpt.foreach(_.startHand(deal.holeCardsFor(heroPosition)))
       if !handOver then playPreflop()
       if !handOver then playPostflopStreet(Street.Flop)
       if !handOver then playPostflopStreet(Street.Turn)
       if !handOver then playPostflopStreet(Street.River)
+      strategicEngineOpt.foreach(_.endHand())
       val heroNet =
         if handOver && outcome > 0 then roundMoney(pot - contributionOf(heroPosition))
         else if handOver && outcome < 0 then -contributionOf(heroPosition)
@@ -667,6 +775,12 @@ object TexasHoldemPlayingHall:
     private def liveOpponentsFor(position: Position): Vector[Position] =
       liveContestants.filterNot(_ == position)
 
+    /** Asks the multiway inference engine for an action recommendation when more than one
+      * villain is live. Returns None for heads-up (single opponent) since the standard
+      * adaptive/GTO engines handle that case directly. Optional posterior overrides allow
+      * passing in a Bayesian posterior computed by the adaptive engine for the focus villain,
+      * avoiding redundant re-inference.
+      */
     private def multiwayRecommendationFor(
         actor: Position,
         state: GameState,
@@ -702,6 +816,10 @@ object TexasHoldemPlayingHall:
         )
         Some(result.recommendation)
 
+    /** Deducts up to `amount` chips from a position's stack, adds them to the pot and to
+      * that position's total contribution. Returns the actual amount paid (capped by stack).
+      * Marks the position as all-in if their remaining stack is zero.
+      */
     private def payPosition(position: Position, amount: Double): Double =
       val paid = roundMoney(math.max(0.0, math.min(amount, stackOf(position))))
       stackByPosition.update(position, roundMoney(stackOf(position) - paid))
@@ -710,6 +828,9 @@ object TexasHoldemPlayingHall:
       if stackOf(position) <= MoneyEpsilon then allInPositions += position
       paid
 
+    /** Appends a villain observation (action + game state) to the per-position observation buffer.
+      * These observations feed the Bayesian range inference engine's likelihood updates.
+      */
     private def recordObservation(
         position: Position,
         state: GameState,
@@ -718,6 +839,10 @@ object TexasHoldemPlayingHall:
       val buffer = observationsByPosition.getOrElseUpdate(position, mutable.ArrayBuffer.empty)
       buffer += VillainObservation(action, state)
 
+    /** Records a villain's decision for training data collection and observation tracking.
+      * Also captures the first villain decision of the hand (used for the hand log's primary
+      * villain action column).
+      */
     private def recordVillainDecision(
         position: Position,
         state: GameState,
@@ -728,6 +853,10 @@ object TexasHoldemPlayingHall:
       villainActions += action
       recordObservation(position, state, action)
       if firstVillainDecision.isEmpty then firstVillainDecision = Some((state, action))
+      strategicEngineOpt.foreach { engine =>
+        val rivalId = sicfun.holdem.strategic.PlayerId(position.toString)
+        engine.observeAction(rivalId, action, state)
+      }
 
     private def appendReviewLine(playerName: String, suffix: String): Unit =
       reviewHistoryLines += s"$playerName: $suffix"
@@ -783,6 +912,10 @@ object TexasHoldemPlayingHall:
           !foldedPositions.contains(position)
       )
 
+    /** Determines which villain to focus on for hero's Bayesian inference. Prefers the last
+      * aggressor (the most informative opponent), then the next live villain after hero in
+      * action order, then any live villain, and finally falls back to the primary villain.
+      */
     private def focusVillainForHero(
         lastAggressor: Option[Position],
         actionOrder: Vector[Position]
@@ -814,6 +947,13 @@ object TexasHoldemPlayingHall:
       if actual.nonEmpty then actual
       else tableScenario.fallbackFoldsFor(targetPosition, perspectivePosition)
 
+    /** Makes hero's action decision. In Adaptive mode: runs Bayesian inference on the focus
+      * villain via the adaptive engine, then asks the multiway engine for a recommendation
+      * (passing the inferred posterior as an override to avoid double-inference), and applies
+      * epsilon-greedy exploration. In GTO mode: uses the multiway engine or falls back to
+      * GtoSolveEngine for equilibrium play. The result is normalized (e.g., Check->Call if
+      * facing a bet) and recorded as an observation.
+      */
     private def decideHero(
         street: Street,
         board: Board,
@@ -865,21 +1005,25 @@ object TexasHoldemPlayingHall:
             candidateActions = candidates
           ).map(_.bestAction)
             .getOrElse(
-              gtoHeroResponds(
+              GtoSolveEngine.gtoResponds(
                 hand = deal.holeCardsFor(heroPosition),
                 state = state,
-                allowRaise = allowRaise,
-                raiseSize = config.raiseSize,
+                candidates = candidates,
                 mode = config.gtoMode,
-                tableRanges = tableRanges,
+                opponentPosterior = tableRanges.rangeFor(focusVillainPosition),
                 baseEquityTrials = config.equityTrials,
                 rng = rng,
                 perspective = 0,
-                villainPosition = focusVillainPosition,
                 exactGtoCache = exactGtoCache,
                 exactGtoCacheStats = exactGtoCacheStats
               )
             )
+        case HeroMode.Strategic =>
+          strategicEngineOpt match
+            case Some(engine) =>
+              engine.decide(state, candidates)
+            case None =>
+              candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
       val normalized = normalizeAction(
         action = sampled,
         toCall = toCall,
@@ -893,6 +1037,11 @@ object TexasHoldemPlayingHall:
       heroActions += normalized
       normalized
 
+    /** Captures a DDRE training sample at a hero decision point. Computes the prior range
+      * (bunching-adjusted, no observations), then the Bayesian posterior (after updating on
+      * all observed villain actions so far). The log-evidence measures how likely the observed
+      * actions were under the current action model — useful for DDRE calibration training.
+      */
     private def recordDdreTrainingSample(
         state: GameState,
         street: Street,
@@ -937,6 +1086,18 @@ object TexasHoldemPlayingHall:
         bayesLogEvidence = bayesLogEvidence
       )
 
+    /** Makes a villain's action decision based on their configured mode:
+      *  - ''Archetype:'' delegates to [[ArchetypeVillainResponder]] which samples from a
+      *    style-specific action distribution (e.g., Nit folds more, Maniac raises more).
+      *  - ''GTO:'' uses the multiway engine or falls back to [[GtoSolveEngine]] for
+      *    Nash-equilibrium play against the hero's range.
+      *  - ''LeakInjected:'' starts from an equity-based baseline decision, then passes it
+      *    through a [[LeakInjectedVillain]] that probabilistically distorts the action
+      *    according to the configured leak type and severity.
+      *
+      * If this villain is facing a hero raise (`facingHeroRaise=true`), their response is
+      * also recorded into the raise-response tracker for the adaptive engines.
+      */
     private def decideVillain(
         position: Position,
         street: Street,
@@ -967,7 +1128,7 @@ object TexasHoldemPlayingHall:
           case _ => None
       val sampled = villainProfile.mode match
         case VillainMode.Archetype(style) =>
-          villainResponds(
+          ArchetypeVillainResponder.villainResponds(
             hand = deal.holeCardsFor(position),
             style = style,
             state = state,
@@ -979,21 +1140,41 @@ object TexasHoldemPlayingHall:
           multiwayRecommendation
             .map(_.bestAction)
             .getOrElse(
-              gtoVillainResponds(
+              GtoSolveEngine.gtoResponds(
                 hand = deal.holeCardsFor(position),
                 state = state,
-                allowRaise = allowRaise,
-                raiseSize = config.raiseSize,
+                candidates = candidates,
                 mode = config.gtoMode,
-                tableRanges = tableRanges,
+                opponentPosterior = tableRanges.rangeFor(heroPosition),
                 baseEquityTrials = config.equityTrials,
                 rng = rng,
                 perspective = 1,
-                heroPosition = heroPosition,
                 exactGtoCache = exactGtoCache,
                 exactGtoCacheStats = exactGtoCacheStats
               )
             )
+        case VillainMode.LeakInjected(leakId, severity) =>
+          val villainHand = deal.holeCardsFor(position)
+          val equityVsRandom = estimateEquityVsRandom(villainHand, boardFor(state.street), 50, rng)
+          val equityStrategy = EquityBasedStrategy()
+          val gtoAction = equityStrategy.decide(villainHand, state, candidates, equityVsRandom, rng)
+          val leak = buildInjectedLeak(leakId, severity)
+          val injectedVillain = LeakInjectedVillain(
+            name = villainProfile.name,
+            leaks = Vector(leak),
+            baselineNoise = 0.03,
+            seed = rng.nextLong()
+          )
+          val line = ActionLine(actionLineByPosition(position))
+          val spot = SpotContext.build(
+            gs = state,
+            hero = villainHand,
+            line = line,
+            equityVsRandom = equityVsRandom,
+            facingAction = None
+          )
+          val result = injectedVillain.decide(gtoAction, spot)
+          result.action
       val action = normalizeAction(
         action = sampled,
         toCall = toCall,
@@ -1031,6 +1212,10 @@ object TexasHoldemPlayingHall:
             totalContributionAfterRaise(contributionOf(position), toCallBefore, amount)
           )
 
+    /** Marks a position as folded. If hero folds, the hand is over with outcome = -1.
+      * If all villains have folded, hero wins uncontested with outcome = +1.
+      * Preflop folds are tracked separately for bunching-fold inference.
+      */
     private def markFolded(position: Position, street: Street): Unit =
       if !foldedPositions.contains(position) then
         foldedPositions += position
@@ -1043,12 +1228,17 @@ object TexasHoldemPlayingHall:
         handOver = true
         outcome = 1
 
+    /** Mutates game state for the given action: folds mark the position out, calls pay the
+      * to-call amount, raises pay the to-call plus the raise increment. Appends to the
+      * per-position action line (used by LeakInjectedVillain's spot context).
+      */
     private def applyAction(
         position: Position,
         action: PokerAction,
         toCallBefore: Double,
         street: Street
     ): Unit =
+      actionLineByPosition.update(position, actionLineByPosition(position) :+ action)
       action match
         case PokerAction.Fold =>
           markFolded(position, street)
@@ -1113,6 +1303,12 @@ object TexasHoldemPlayingHall:
         )
       else PokerAction.Fold
 
+    /** Runs a single betting round for one street. Iterates through the action queue, asking
+      * each position to decide, applying their action, and re-queuing remaining players when
+      * a raise occurs. Enforces a raise cap (`maxRaises`) and tracks whether a raise is large
+      * enough to reopen action for players who have already acted (per poker rules, an
+      * under-minimum raise does not reopen betting for the original raiser or prior callers).
+      */
     private def playBettingRound(
         street: Street,
         board: Board,
@@ -1160,6 +1356,7 @@ object TexasHoldemPlayingHall:
               case _ =>
                 ()
 
+    /** Preflop betting round: uses positional order (UTG first), allows up to 2 raises. */
     private def playPreflop(): Unit =
       streetsPlayed += 1
       playBettingRound(
@@ -1169,6 +1366,7 @@ object TexasHoldemPlayingHall:
         maxRaises = 2
       )
 
+    /** Postflop betting round: uses OOP-first order (SB/BB act first), allows 1 raise. */
     private def playPostflopStreet(street: Street): Unit =
       if handOver then ()
       else
@@ -1182,6 +1380,11 @@ object TexasHoldemPlayingHall:
           maxRaises = 1
         )
 
+    /** Evaluates all remaining players' 7-card hands and distributes the pot via side-pot
+      * logic. Returns hero's payout (the total chips hero receives from all side pots).
+      * If hero is not among the remaining players (shouldn't happen at this call site,
+      * but defensive), returns zero payout.
+      */
     private def showdownResolution(): ShowdownResolution =
       val remainingPlayers = liveContestants
       if !remainingPlayers.contains(heroPosition) then ShowdownResolution(heroPayout = 0.0)
@@ -1206,9 +1409,18 @@ object TexasHoldemPlayingHall:
         )
         ShowdownResolution(heroPayout = payouts.getOrElse(heroPosition, 0.0))
 
+  /** Computes the amount a player must put in to match the current highest contribution.
+    * Returns 0 if they have already matched or exceeded it.
+    */
   private[holdem] def contributionGap(targetContribution: Double, currentContribution: Double): Double =
     math.max(0.0, targetContribution - currentContribution)
 
+  /** Combines static (pre-dealt table scenario) folds and observed preflop folds into a single
+    * deduped list of PreflopFold entries, excluding the perspective and target positions.
+    * Used to feed bunching-adjusted range inference — the inference engine needs to know which
+    * positions folded preflop to narrow the villain's range (folded hands are removed from the
+    * prior via the bunching effect).
+    */
   private[holdem] def mergedInferenceFolds(
       staticFoldedPositions: Seq[Position],
       preflopFoldedPositions: Seq[Position],
@@ -1221,6 +1433,9 @@ object TexasHoldemPlayingHall:
       .map(PreflopFold(_))
       .toVector
 
+  /** Estimates how an opponent with the given range distribution will respond to a hero raise.
+    * Delegates to the multiway inference engine and wraps the result in a local case class.
+    */
   private[holdem] def estimateRaiseResponseFromRange(
       range: DiscreteDistribution[HoleCards],
       responseState: GameState,
@@ -1248,6 +1463,10 @@ object TexasHoldemPlayingHall:
   private def postflopEquityTrials(configured: Int): Int =
     math.max(8, configured / 16)
 
+  /** Scales equity trial count for multiway pots. Later streets get fewer trials (the board
+    * reduces variance), and more opponents further reduce per-opponent trial allocation.
+    * A floor ensures a minimum quality of equity estimate even in very deep multiway pots.
+    */
   private def multiwayEquityTrials(
       street: Street,
       baseEquityTrials: Int,
@@ -1266,6 +1485,10 @@ object TexasHoldemPlayingHall:
         case _              => math.max(1, opponentCount - 1)
     math.max(floor, math.round(baseEquityTrials.toDouble / divisor.toDouble).toInt)
 
+  /** Estimates hero's equity against multiple opponent ranges via Monte Carlo simulation or
+    * exact enumeration (when the evaluation space is small enough). Delegates to the multiway
+    * inference engine.
+    */
   private[holdem] def estimateEquityAgainstOpponentRanges(
       hero: HoleCards,
       board: Board,
@@ -1283,6 +1506,10 @@ object TexasHoldemPlayingHall:
       exactMaxEvaluations = exactMaxEvaluations
     )
 
+  /** Recommends the highest-EV action from a set of candidates by computing hero's equity
+    * against multiple opponent ranges and evaluating each candidate's chip EV. Delegates to
+    * the multiway inference engine.
+    */
   private[holdem] def recommendActionAgainstOpponentRanges(
       hero: HoleCards,
       state: GameState,
@@ -1303,6 +1530,7 @@ object TexasHoldemPlayingHall:
       exactMaxEvaluations = MultiwayExactMaxEvaluations
     )
 
+  /** Constructs a RealTimeAdaptiveEngine with the given model and inference budgets. */
   private def buildEngine(
       tableRanges: TableRanges,
       model: PokerActionModel,
@@ -1317,460 +1545,6 @@ object TexasHoldemPlayingHall:
       minEquityTrials = minEquityTrials(equityTrials)
     )
 
-  private def villainResponds(
-      hand: HoleCards,
-      style: PlayerArchetype,
-      state: GameState,
-      allowRaise: Boolean,
-      raiseSize: Double,
-      rng: Random
-  ): PokerAction =
-    val profile = styleProfile(style)
-    val strength = streetStrength(hand, state.board, state.street, rng)
-
-    if state.toCall <= 0.0 then
-      if !allowRaise then PokerAction.Check
-      else
-        val betChance = clamp((strength - 0.35) * 0.9 + (profile.aggression * 0.35), 0.02, 0.92)
-        if rng.nextDouble() < betChance then PokerAction.Raise(raiseSize)
-        else PokerAction.Check
-    else
-      val potOdds = state.potOdds
-      val foldThreshold = clamp(potOdds + (0.35 - profile.looseness * 0.2), 0.05, 0.95)
-      val raiseThreshold = clamp(0.68 - profile.aggression * 0.12 + potOdds * 0.2, 0.35, 0.9)
-      if allowRaise && strength >= raiseThreshold && rng.nextDouble() < (0.15 + profile.aggression * 0.55) then
-        PokerAction.Raise(raiseSize)
-      else if strength < foldThreshold then PokerAction.Fold
-      else PokerAction.Call
-
-  private def gtoHeroResponds(
-      hand: HoleCards,
-      state: GameState,
-      allowRaise: Boolean,
-      raiseSize: Double,
-      mode: GtoMode,
-      tableRanges: TableRanges,
-      baseEquityTrials: Int,
-      rng: Random,
-      perspective: Int,
-      villainPosition: Position,
-      exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
-      exactGtoCacheStats: GtoCacheStats
-  ): PokerAction =
-    val candidates = heroCandidates(state, raiseSize, allowRaise)
-    if candidates.length <= 1 then candidates.head
-    else
-      mode match
-        case GtoMode.Fast =>
-          fastGtoResponds(
-            hand = hand,
-            state = state,
-            candidates = candidates,
-            allowRaise = allowRaise,
-            rng = rng
-          )
-        case GtoMode.Exact =>
-          val villainPosterior = villainPosteriorForHeroGto(
-            hero = hand,
-            board = state.board,
-            tableRanges = tableRanges,
-            villainPosition = villainPosition
-          )
-          solveGtoByCfr(
-            hand = hand,
-            state = state,
-            candidates = candidates,
-            villainPosterior = villainPosterior,
-            baseEquityTrials = baseEquityTrials,
-            rng = rng,
-            perspective = perspective,
-            exactGtoCache = exactGtoCache,
-            exactGtoCacheStats = exactGtoCacheStats
-          )
-
-  private def gtoVillainResponds(
-      hand: HoleCards,
-      state: GameState,
-      allowRaise: Boolean,
-      raiseSize: Double,
-      mode: GtoMode,
-      tableRanges: TableRanges,
-      baseEquityTrials: Int,
-      rng: Random,
-      perspective: Int,
-      heroPosition: Position,
-      exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
-      exactGtoCacheStats: GtoCacheStats
-  ): PokerAction =
-    val candidates = heroCandidates(state, raiseSize, allowRaise)
-    if candidates.length <= 1 then candidates.head
-    else
-      mode match
-        case GtoMode.Fast =>
-          fastGtoResponds(
-            hand = hand,
-            state = state,
-            candidates = candidates,
-            allowRaise = allowRaise,
-            rng = rng
-          )
-        case GtoMode.Exact =>
-          val heroPosterior = heroPosteriorForGto(
-            villain = hand,
-            board = state.board,
-            tableRanges = tableRanges,
-            heroPosition = heroPosition
-          )
-          solveGtoByCfr(
-            hand = hand,
-            state = state,
-            candidates = candidates,
-            villainPosterior = heroPosterior,
-            baseEquityTrials = baseEquityTrials,
-            rng = rng,
-            perspective = perspective,
-            exactGtoCache = exactGtoCache,
-            exactGtoCacheStats = exactGtoCacheStats
-          )
-
-  private def solveGtoByCfr(
-      hand: HoleCards,
-      state: GameState,
-      candidates: Vector[PokerAction],
-      villainPosterior: DiscreteDistribution[HoleCards],
-      baseEquityTrials: Int,
-      rng: Random,
-      perspective: Int,
-      exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
-      exactGtoCacheStats: GtoCacheStats
-  ): PokerAction =
-    val canonicalSignature = canonicalHeroBoardSignature(hand = hand, board = state.board)
-    val key = buildGtoSolveCacheKey(
-      perspective = perspective,
-      hand = hand,
-      state = state,
-      candidates = candidates,
-      baseEquityTrials = baseEquityTrials,
-      canonicalSignature = canonicalSignature
-    )
-    exactGtoCache.get(key) match
-      case Some(cached) =>
-        exactGtoCacheStats.recordHit(cached.provider)
-        sampleActionByPolicy(
-          ordered = cached.orderedActionProbabilities,
-          fallback = cached.bestAction,
-          rng = rng
-        )
-      case None =>
-        val config = HoldemCfrConfig(
-          iterations = gtoIterations(state.street, baseEquityTrials, candidates.length),
-          maxVillainHands = gtoMaxVillainHands(state.street, candidates.length),
-          equityTrials = gtoEquityTrials(state.street, baseEquityTrials, candidates.length),
-          rngSeed = exactEquitySeed(
-            perspective = perspective,
-            baseEquityTrials = baseEquityTrials,
-            boardSize = state.board.size,
-            canonicalSignature = canonicalSignature
-          )
-        )
-        try
-          val solution = HoldemCfrSolver.solveShallowDecisionPolicy(
-            hero = hand,
-            state = state,
-            villainPosterior = villainPosterior,
-            candidateActions = candidates,
-            config = config
-          )
-          val orderedActionProbabilities =
-            orderedPositiveProbabilities(
-              actions = candidates,
-              probabilities = solution.actionProbabilities
-            )
-          exactGtoCacheStats.recordMiss(solution.provider)
-          if exactGtoCache.size >= MaxExactGtoCacheEntries then exactGtoCache.clear()
-          exactGtoCache.update(
-            key,
-            GtoCachedPolicy(
-              orderedActionProbabilities = orderedActionProbabilities,
-              bestAction = solution.bestAction,
-              provider = solution.provider
-            )
-          )
-          sampleActionByPolicy(
-            ordered = orderedActionProbabilities,
-            fallback = solution.bestAction,
-            rng = rng
-          )
-        catch
-          case _: Throwable =>
-            // Preserve run continuity if a specific CFR solve fails.
-            exactGtoCacheStats.recordMiss("random-fallback")
-            candidates(rng.nextInt(candidates.length))
-
-  private def fastGtoResponds(
-      hand: HoleCards,
-      state: GameState,
-      candidates: Vector[PokerAction],
-      allowRaise: Boolean,
-      rng: Random
-  ): PokerAction =
-    val strength = fastGtoStrength(hand, state.board, state.street)
-    val raiseCandidate =
-      if allowRaise then candidates.collectFirst { case action @ PokerAction.Raise(_) => action }
-      else None
-    val callCandidate = candidates.find(_ == PokerAction.Call)
-    val foldCandidate = candidates.find(_ == PokerAction.Fold)
-    if state.toCall <= 0.0 then
-      raiseCandidate match
-        case None => PokerAction.Check
-        case Some(raiseAction) =>
-          val pureRaiseThreshold = fastGtoRaiseThreshold(state.street)
-          val mixRaiseThreshold = pureRaiseThreshold - 0.18
-          if strength >= pureRaiseThreshold then raiseAction
-          else if strength >= mixRaiseThreshold then
-            val mix = clamp(0.18 + ((strength - mixRaiseThreshold) * 1.7), 0.05, 0.80)
-            if rng.nextDouble() < mix then raiseAction else PokerAction.Check
-          else PokerAction.Check
-    else
-      val potOdds = state.potOdds
-      val foldThreshold = clamp(potOdds + fastGtoFoldMargin(state.street), 0.06, 0.95)
-      val raiseThreshold = clamp(foldThreshold + fastGtoRaiseGap(state.street), 0.24, 0.98)
-      if raiseCandidate.nonEmpty && strength >= raiseThreshold then
-        val raiseMix = clamp(0.20 + ((strength - raiseThreshold) * 1.3), 0.10, 0.92)
-        if rng.nextDouble() < raiseMix then raiseCandidate.get
-        else callCandidate.getOrElse(PokerAction.Call)
-      else if strength >= foldThreshold then
-        callCandidate.getOrElse(PokerAction.Call)
-      else
-        foldCandidate.getOrElse(PokerAction.Fold)
-
-  private def fastGtoStrength(hand: HoleCards, board: Board, street: Street): Double =
-    val pre = preflopStrength(hand)
-    if street == Street.Preflop || board.cards.isEmpty then pre
-    else
-      val madeWeight =
-        street match
-          case Street.Flop  => 0.50
-          case Street.Turn  => 0.56
-          case Street.River => 0.62
-          case _            => 0.50
-      val categoryScore = bestCategoryStrength(hand, board)
-      val drawBonus = drawPotential(hand, board)
-      clamp(((1.0 - madeWeight) * pre) + (madeWeight * categoryScore) + drawBonus)
-
-  private def fastGtoRaiseThreshold(street: Street): Double =
-    street match
-      case Street.Preflop => 0.78
-      case Street.Flop    => 0.74
-      case Street.Turn    => 0.71
-      case Street.River   => 0.68
-
-  private def fastGtoFoldMargin(street: Street): Double =
-    street match
-      case Street.Preflop => 0.05
-      case Street.Flop    => 0.03
-      case Street.Turn    => 0.01
-      case Street.River   => -0.01
-
-  private def fastGtoRaiseGap(street: Street): Double =
-    street match
-      case Street.Preflop => 0.27
-      case Street.Flop    => 0.24
-      case Street.Turn    => 0.22
-      case Street.River   => 0.20
-
-  private def villainPosteriorForHeroGto(
-      hero: HoleCards,
-      board: Board,
-      tableRanges: TableRanges,
-      villainPosition: Position
-  ): DiscreteDistribution[HoleCards] =
-    tableRanges.rangeFor(villainPosition)
-
-  private def heroPosteriorForGto(
-      villain: HoleCards,
-      board: Board,
-      tableRanges: TableRanges,
-      heroPosition: Position
-  ): DiscreteDistribution[HoleCards] =
-    tableRanges.rangeFor(heroPosition)
-
-  private def gtoIterations(
-      street: Street,
-      baseEquityTrials: Int,
-      candidateCount: Int
-  ): Int =
-    val base = math.max(72, math.min(224, math.round(baseEquityTrials / 3.0).toInt))
-    val streetBase =
-      street match
-        case Street.Preflop => base + 32
-        case Street.Flop    => base
-        case Street.Turn    => math.max(72, math.round(base * 0.85).toInt)
-        case Street.River   => math.max(56, math.round(base * 0.70).toInt)
-    if candidateCount <= 2 then
-      val floor =
-        street match
-          case Street.Preflop => 88
-          case Street.Flop    => 64
-          case Street.Turn    => 56
-          case Street.River   => 48
-      math.max(floor, math.round(streetBase * 0.60).toInt)
-    else
-      streetBase
-
-  private def gtoMaxVillainHands(
-      street: Street,
-      candidateCount: Int
-  ): Int =
-    val base =
-      street match
-        case Street.Preflop => 56
-        case Street.Flop    => 32
-        case Street.Turn    => 24
-        case Street.River   => 16
-    if candidateCount <= 2 then math.max(16, base - 12) else base
-
-  private def gtoEquityTrials(
-      street: Street,
-      baseEquityTrials: Int,
-      candidateCount: Int
-  ): Int =
-    val base =
-      street match
-        case Street.Preflop => math.max(80, baseEquityTrials / 3)
-        case Street.Flop    => math.max(48, baseEquityTrials / 6)
-        case Street.Turn    => math.max(32, baseEquityTrials / 8)
-        case Street.River   => 24
-    if candidateCount <= 2 then
-      val floor =
-        street match
-          case Street.Preflop => 64
-          case Street.Flop    => 36
-          case Street.Turn    => 24
-          case Street.River   => 16
-      math.max(floor, math.round(base * 0.65).toInt)
-    else
-      base
-
-  private def buildGtoSolveCacheKey(
-      perspective: Int,
-      hand: HoleCards,
-      state: GameState,
-      candidates: Vector[PokerAction],
-      baseEquityTrials: Int,
-      canonicalSignature: (Long, Long)
-  ): GtoSolveCacheKey =
-    val (canonicalHeroPacked, canonicalBoardPacked) = canonicalSignature
-    GtoSolveCacheKey(
-      perspective = perspective,
-      canonicalHeroPacked = canonicalHeroPacked,
-      streetOrdinal = state.street.ordinal,
-      canonicalBoardPacked = canonicalBoardPacked,
-      potBits = java.lang.Double.doubleToLongBits(state.pot),
-      toCallBits = java.lang.Double.doubleToLongBits(state.toCall),
-      stackBits = java.lang.Double.doubleToLongBits(state.stackSize),
-      candidateHash = hashActions(candidates),
-      baseEquityTrials = baseEquityTrials
-    )
-
-  private def exactEquitySeed(
-      perspective: Int,
-      baseEquityTrials: Int,
-      boardSize: Int,
-      canonicalSignature: (Long, Long)
-  ): Long =
-    val (canonicalHeroPacked, canonicalBoardPacked) = canonicalSignature
-    mix64(
-      canonicalHeroPacked ^
-        java.lang.Long.rotateLeft(canonicalBoardPacked, 11) ^
-        (perspective.toLong << 48) ^
-        (baseEquityTrials.toLong << 16) ^
-        boardSize.toLong
-    )
-
-  private def canonicalHeroBoardSignature(hand: HoleCards, board: Board): (Long, Long) =
-    val boardSize = board.cards.length
-    val remappedBoardIds = new Array[Int](boardSize)
-    var bestHeroPacked = Long.MaxValue
-    var bestBoardPacked = Long.MaxValue
-    var permIdx = 0
-    while permIdx < SuitPermutations.length do
-      val suitMap = SuitPermutations(permIdx)
-      val heroFirstId = remapCardId(hand.first, suitMap)
-      val heroSecondId = remapCardId(hand.second, suitMap)
-      val lowHero = math.min(heroFirstId, heroSecondId)
-      val highHero = math.max(heroFirstId, heroSecondId)
-      val heroPacked = ((lowHero.toLong << 6) | highHero.toLong) & 0xFFFL
-
-      var idx = 0
-      while idx < boardSize do
-        remappedBoardIds(idx) = remapCardId(board.cards(idx), suitMap)
-        idx += 1
-      java.util.Arrays.sort(remappedBoardIds)
-      var boardPacked = boardSize.toLong
-      idx = 0
-      while idx < boardSize do
-        boardPacked = (boardPacked << 6) | remappedBoardIds(idx).toLong
-        idx += 1
-
-      if heroPacked < bestHeroPacked || (heroPacked == bestHeroPacked && boardPacked < bestBoardPacked) then
-        bestHeroPacked = heroPacked
-        bestBoardPacked = boardPacked
-      permIdx += 1
-    (bestHeroPacked, bestBoardPacked)
-
-  private def remapCardId(card: Card, suitMap: Array[Int]): Int =
-    val mappedSuit = suitMap(card.suit.ordinal)
-    (mappedSuit * 13) + card.rank.ordinal
-
-  private def hashActions(actions: Vector[PokerAction]): Int =
-    var hash = 1
-    var idx = 0
-    while idx < actions.length do
-      hash = 31 * hash + hashAction(actions(idx))
-      idx += 1
-    hash
-
-  private def hashAction(action: PokerAction): Int =
-    action match
-      case PokerAction.Fold => 1
-      case PokerAction.Check => 2
-      case PokerAction.Call => 3
-      case PokerAction.Raise(amount) =>
-        31 * 4 + java.lang.Double.hashCode(amount)
-
-  private def orderedPositiveProbabilities(
-      actions: Vector[PokerAction],
-      probabilities: Map[PokerAction, Double]
-  ): Vector[(PokerAction, Double)] =
-    actions.flatMap { action =>
-      val probability = probabilities.getOrElse(action, 0.0)
-      if probability.isFinite && probability > 0.0 then Some(action -> probability)
-      else None
-    }
-
-  private def sampleActionByPolicy(
-      ordered: Vector[(PokerAction, Double)],
-      fallback: PokerAction,
-      rng: Random
-  ): PokerAction =
-    var total = 0.0
-    var i = 0
-    while i < ordered.length do
-      total += ordered(i)._2
-      i += 1
-    if total <= 0.0 then fallback
-    else
-      val target = rng.nextDouble() * total
-      var cumulative = 0.0
-      var idx = 0
-      while idx < ordered.length do
-        val (action, probability) = ordered(idx)
-        cumulative += probability
-        if target <= cumulative then return action
-        idx += 1
-      ordered.last._1
-
   private def formatLongCountMap(counts: Map[String, Long]): String =
     if counts.isEmpty then "{}"
     else
@@ -1779,110 +1553,22 @@ object TexasHoldemPlayingHall:
         .map { case (provider, count) => s"$provider:$count" }
         .mkString("{", ", ", "}")
 
-  private def mix64(value: Long): Long =
-    var z = value + 0x9E3779B97F4A7C15L
-    z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L
-    z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL
-    z ^ (z >>> 31)
-
-  private def preflopStrength(hand: HoleCards): Double =
-    val r1 = hand.first.rank.value
-    val r2 = hand.second.rank.value
-    val high = math.max(r1, r2).toDouble / 14.0
-    val low = math.min(r1, r2).toDouble / 14.0
-    val pairBonus = if r1 == r2 then 0.30 + (high * 0.20) else 0.0
-    val suitedBonus = if hand.first.suit == hand.second.suit then 0.06 else 0.0
-    val gap = math.abs(r1 - r2)
-    val connectorBonus =
-      if gap == 0 then 0.0
-      else if gap == 1 then 0.08
-      else if gap == 2 then 0.04
-      else 0.0
-    clamp((0.45 * high) + (0.18 * low) + pairBonus + suitedBonus + connectorBonus)
-
-  private def streetStrength(
-      hand: HoleCards,
-      board: Board,
-      street: Street,
-      rng: Random
-  ): Double =
-    val pre = preflopStrength(hand)
-    if street == Street.Preflop || board.cards.isEmpty then
-      clamp(pre + (rng.nextDouble() - 0.5) * 0.04)
-    else
-      val categoryScore = bestCategoryStrength(hand, board)
-      val drawBonus = drawPotential(hand, board)
-      val noise = (rng.nextDouble() - 0.5) * 0.05
-      clamp(0.45 * pre + 0.45 * categoryScore + drawBonus + noise)
-
-  private def bestCategoryStrength(hand: HoleCards, board: Board): Double =
-    val cards = hand.toVector ++ board.cards
-    cards.length match
-      case 5 =>
-        HandEvaluator.evaluate5Cached(cards).category.strength.toDouble / 8.0
-      case 6 =>
-        HoldemCombinator.combinations(cards.toIndexedSeq, 5).map { combo =>
-          HandEvaluator.evaluate5Cached(combo).category.strength.toDouble / 8.0
-        }.max
-      case 7 =>
-        HandEvaluator.evaluate7Cached(cards).category.strength.toDouble / 8.0
-      case _ =>
-        preflopStrength(hand)
-
-  private def drawPotential(hand: HoleCards, board: Board): Double =
-    if board.cards.isEmpty then 0.0
-    else
-      val all = hand.toVector ++ board.cards
-      val bySuit = all.groupBy(_.suit).view.mapValues(_.size).toMap
-      val maxSuit = bySuit.values.max
-      val flushDrawBonus =
-        if maxSuit >= 5 then 0.12
-        else if maxSuit == 4 then 0.08
-        else if maxSuit == 3 && board.size <= 3 then 0.03
-        else 0.0
-
-      val ranks = all.map(_.rank.value).distinct.sorted
-      val straightDrawBonus =
-        if ranks.length >= 4 && hasTightRun(ranks) then 0.05
-        else 0.0
-
-      val pairWithBoardBonus =
-        if board.cards.exists(card => card.rank == hand.first.rank || card.rank == hand.second.rank) then 0.04
-        else 0.0
-
-      flushDrawBonus + straightDrawBonus + pairWithBoardBonus
-
-  private def hasTightRun(sortedRanks: Seq[Int]): Boolean =
-    if sortedRanks.length < 4 then false
-    else
-      val span4 = HoldemCombinator.combinations(sortedRanks.toIndexedSeq, 4).exists { combo =>
-        combo.last - combo.head <= 4
-      }
-      val withWheelAce =
-        if sortedRanks.contains(14) then
-          val lowAce = sortedRanks.map(r => if r == 14 then 1 else r).sorted
-          HoldemCombinator.combinations(lowAce.toIndexedSeq, 4).exists { combo =>
-            combo.last - combo.head <= 4
-          }
-        else false
-      span4 || withWheelAce
-
-  private def styleProfile(archetype: PlayerArchetype): VillainStyleProfile =
-    archetype match
-      case PlayerArchetype.Nit            => VillainStyleProfile(looseness = 0.20, aggression = 0.18)
-      case PlayerArchetype.Tag            => VillainStyleProfile(looseness = 0.45, aggression = 0.40)
-      case PlayerArchetype.Lag            => VillainStyleProfile(looseness = 0.68, aggression = 0.66)
-      case PlayerArchetype.CallingStation => VillainStyleProfile(looseness = 0.86, aggression = 0.24)
-      case PlayerArchetype.Maniac         => VillainStyleProfile(looseness = 0.80, aggression = 0.92)
-
   private def villainModeLabel(mode: VillainMode): String =
     mode match
-      case VillainMode.Archetype(style) => style.toString
-      case VillainMode.Gto              => "gto"
+      case VillainMode.Archetype(style)             => style.toString
+      case VillainMode.Gto                          => "gto"
+      case VillainMode.LeakInjected(leakId, sev)    => s"Leak($leakId@$sev)"
 
   private def villainModeSlug(mode: VillainMode): String =
-    villainModeLabel(mode).toLowerCase(Locale.ROOT)
+    mode match
+      case VillainMode.Archetype(style)             => style.toString.toLowerCase(Locale.ROOT)
+      case VillainMode.Gto                          => "gto"
+      case VillainMode.LeakInjected(leakId, _)      => leakId.replace("-", "").take(12)
 
+  /** Parses the `--villainPool` option (comma-separated list of villain mode tokens) into a
+    * vector of VillainProfiles. If no pool is specified, creates a single-villain pool from
+    * the fallback mode. Each profile gets a unique name like "Villain01_tag".
+    */
   private def buildVillainPool(
       fallbackMode: VillainMode,
       rawPool: Option[String]
@@ -1915,8 +1601,80 @@ object TexasHoldemPlayingHall:
       case "station"        => Right(VillainMode.Archetype(PlayerArchetype.CallingStation))
       case "maniac"         => Right(VillainMode.Archetype(PlayerArchetype.Maniac))
       case "gto"            => Right(VillainMode.Gto)
+      case s if s.startsWith("leak:") =>
+        parseLeakToken(s)
       case _ =>
-        Left("style must be one of: nit, tag, lag, callingstation, station, maniac, gto")
+        Left("style must be one of: nit, tag, lag, callingstation, station, maniac, gto, leak:<type>:<severity>")
+
+  private def parseLeakToken(raw: String): Either[String, VillainMode] =
+    val parts = raw.split(":")
+    if parts.length != 3 then Left(s"leak token must be leak:<type>:<severity>, got: $raw")
+    else
+      val leakType = parts(1)
+      val severityStr = parts(2)
+      for
+        severity <- try Right(severityStr.toDouble) catch case _: NumberFormatException =>
+          Left(s"invalid severity: $severityStr")
+        leakId <- leakType match
+          case "overfold"      => Right("overfold-river-aggression")
+          case "overcall"      => Right("overcall-big-bets")
+          case "turnbluff"     => Right("overbluff-turn-barrel")
+          case "passive"       => Right("passive-big-pots")
+          case "prefloploose"  => Right("preflop-too-loose")
+          case "prefloptight"  => Right("preflop-too-tight")
+          case _               => Left(s"unknown leak type: $leakType (use: overfold, overcall, turnbluff, passive, prefloploose, prefloptight)")
+      yield VillainMode.LeakInjected(leakId, severity)
+
+  /** Quick Monte Carlo equity estimate of a hand against a random opponent, used as a baseline
+    * for the equity-based strategy in leak-injected villain mode. Shuffles remaining cards to
+    * deal a random opponent hand and random runout, then compares 7-card hand evaluations.
+    */
+  private def estimateEquityVsRandom(
+      hand: HoleCards,
+      board: Board,
+      trials: Int,
+      rng: Random
+  ): Double =
+    val handCards = hand.toVector
+    val available = Deck.full.filterNot(c => handCards.contains(c) || board.cards.contains(c))
+    if available.size < 2 then return 0.5
+    val boardSize = board.cards.size
+    val communityNeeded = 5 - boardSize
+    val needed = 2 + communityNeeded
+    var wins = 0
+    var total = 0
+    val arr = available.toArray
+    val n = arr.length
+    for _ <- 0 until trials do
+      var i = 0
+      while i < needed do
+        val j = i + rng.nextInt(n - i)
+        val tmp = arr(i); arr(i) = arr(j); arr(j) = tmp
+        i += 1
+      val fullBoard = if communityNeeded > 0 then
+        board.cards ++ (2 until needed).map(arr(_))
+      else board.cards
+      val heroAll = (handCards ++ fullBoard).take(7)
+      val oppAll = (Vector(arr(0), arr(1)) ++ fullBoard).take(7)
+      if heroAll.size >= 7 && oppAll.size >= 7 then
+        val heroRank = HandEvaluator.evaluate7(heroAll)
+        val oppRank = HandEvaluator.evaluate7(oppAll)
+        if heroRank > oppRank then wins += 1
+        total += 1
+    if total > 0 then wins.toDouble / total.toDouble else 0.5
+
+  /** Maps a leak ID string to the corresponding InjectedLeak instance with the given severity.
+    * Unknown leak IDs fall through to NoLeak (no behavioral distortion).
+    */
+  private def buildInjectedLeak(leakId: String, severity: Double): InjectedLeak =
+    leakId match
+      case "overfold-river-aggression" => OverfoldsToAggression(severity)
+      case "overcall-big-bets"         => Overcalls(severity)
+      case "overbluff-turn-barrel"     => OverbluffsTurnBarrel(severity)
+      case "passive-big-pots"          => PassiveInBigPots(severity)
+      case "preflop-too-loose"         => PreflopTooLoose(severity)
+      case "preflop-too-tight"         => PreflopTooTight(severity)
+      case _                           => NoLeak()
 
   private def bracketedCards(cards: Seq[Card]): String =
     s"[${cards.map(_.toToken).mkString(" ")}]"
@@ -1924,6 +1682,11 @@ object TexasHoldemPlayingHall:
   private def money(amount: Double): String =
     s"$$${fmt(roundMoney(amount), 2)}"
 
+  /** Builds the candidate action set for a decision point. When facing a bet: Fold + Call,
+    * plus Raise if allowed and the stack is deep enough. When not facing a bet: Check, plus
+    * Raise if allowed. The raise-eligibility stack threshold is 25% of the raise size or 0.2 BB,
+    * whichever is larger — preventing micro-raises with negligible stack behind.
+    */
   private def heroCandidates(
       state: GameState,
       raiseSize: Double,
@@ -1939,6 +1702,12 @@ object TexasHoldemPlayingHall:
         base :+ PokerAction.Raise(raiseSize)
       else base
 
+  /** Normalizes a raw action choice into a legal action given the current game state.
+    * Handles edge cases: Check when there's nothing to call becomes Check, Fold when there's
+    * nothing to call becomes Check, Raise when not allowed becomes Call/Check, Raise that
+    * exceeds stack is capped to an affordable amount, etc. This ensures the betting round
+    * never applies an illegal action.
+    */
   private[holdem] def normalizeAction(
       action: PokerAction,
       toCall: Double,
@@ -1969,12 +1738,22 @@ object TexasHoldemPlayingHall:
               else PokerAction.Raise(affordableRaise)
           else PokerAction.Raise(roundMoney(math.min(cleanAmount, effectiveStack)))
 
+  /** Returns true if the raise amount is at least the minimum raise size, meaning the raise
+    * reopens the action for all other players. An under-minimum raise (e.g., a short all-in)
+    * does not reopen — players who have already acted cannot re-raise.
+    */
   private[holdem] def raiseReopensAction(
       raiseAmount: Double,
       minimumRaiseAmount: Double
   ): Boolean =
     roundMoney(raiseAmount) + MoneyEpsilon >= roundMoney(minimumRaiseAmount)
 
+  /** Computes side-pot payouts for a multiway showdown. Iterates through distinct contribution
+    * levels (sorted ascending), and for each level computes the pot slice, identifies which
+    * remaining players are eligible to win that slice, finds the best hand among them, and
+    * splits the slice evenly among tied winners. This correctly handles scenarios where a
+    * short-stacked all-in player can only win up to their contribution level from each opponent.
+    */
   private[holdem] def sidePotPayouts(
       contributions: Map[Position, Double],
       remainingPlayers: Vector[Position],
@@ -2018,9 +1797,10 @@ object TexasHoldemPlayingHall:
         position -> roundMoney(amount)
       }.toMap
 
-  private def clamp(value: Double, lo: Double = 0.0, hi: Double = 1.0): Double =
-    math.max(lo, math.min(hi, value))
-
+  /** Deals hole cards to all modeled positions plus a 5-card board by shuffling a prefix
+    * of the deck array (Fisher-Yates partial shuffle for efficiency — only shuffles as many
+    * cards as needed, not the entire 52-card deck).
+    */
   private def dealHand(
       modeledPositions: Vector[Position],
       rng: Random
@@ -2035,6 +1815,9 @@ object TexasHoldemPlayingHall:
     val board = Board.from(cards.slice(holeCardsCount, holeCardsCount + 5).toVector.sortBy(CardId.toId))
     Deal(holeCardsByPosition, board)
 
+  /** Fisher-Yates partial shuffle: randomizes the first `count` elements of the array.
+    * O(count) time, O(1) extra space — much faster than shuffling the full deck.
+    */
   private def shufflePrefix[A](array: Array[A], count: Int, rng: Random): Unit =
     val limit = math.min(count, array.length)
     var i = 0
@@ -2045,6 +1828,9 @@ object TexasHoldemPlayingHall:
       array(j) = tmp
       i += 1
 
+  /** Maps player count (2-9) to the canonical vector of table positions in preflop action order.
+    * For 2-max: Button, BigBlind. For full ring (9-max): UTG through BigBlind.
+    */
   private def modeledPositionsForPlayerCount(playerCount: Int): Vector[Position] =
     playerCount match
       case 2 => Vector(Position.Button, Position.BigBlind)
@@ -2085,6 +1871,9 @@ object TexasHoldemPlayingHall:
     else if position == smallBlindPositionFor(playerCount) then SmallBlindAmount
     else 0.0
 
+  /** Sort key for postflop action order: SB acts first, then BB, then early positions through
+    * Button last. This is the standard out-of-position-first ordering for postflop streets.
+    */
   private def postflopOrderIndex(position: Position): Int =
     Vector(
       Position.SmallBlind,
@@ -2098,18 +1887,25 @@ object TexasHoldemPlayingHall:
       Position.Button
     ).indexOf(position)
 
+  /** Constructs the table layout for one hand. Randomly selects which villain positions are
+    * active (respecting heads-up-only and full-ring constraints), assigns villain profiles
+    * from the pool in round-robin order, and generates seat numbers and player names.
+    */
   private def buildTableScenario(
       playerCount: Int,
       heroPosition: Position,
       villainPool: Vector[VillainProfile],
       headsUpOnly: Boolean,
+      forceAllActive: Boolean,
       rng: Random
   ): TableScenario =
     val modeledPositions = modeledPositionsForPlayerCount(playerCount)
     require(modeledPositions.contains(heroPosition), s"hero position $heroPosition is not valid for playerCount=$playerCount")
     val availableVillains = modeledPositions.filterNot(_ == heroPosition)
     val activeVillainPositions =
-      if headsUpOnly then
+      if forceAllActive then
+        availableVillains.sortBy(modeledPositions.indexOf)
+      else if headsUpOnly then
         if heroPosition == Position.BigBlind then
           Vector(availableVillains(rng.nextInt(availableVillains.length)))
         else
@@ -2159,6 +1955,11 @@ object TexasHoldemPlayingHall:
       villainProfileByPosition = villainProfileByPosition
     )
 
+  /** Loads the initial PokerActionModel artifact. If `--modelArtifactDir` is specified, loads
+    * from that path. Otherwise, looks for a cached bootstrap artifact, or creates a new uniform
+    * (untrained) bootstrap model. The bootstrap is saved to disk for reuse unless learning is
+    * disabled (short-lived benchmark runs shouldn't pollute the model directory).
+    */
   private def loadInitialArtifact(config: Config, modelsRoot: Path): (TrainedPokerActionModel, Path) =
     config.modelArtifactDir match
       case Some(path) =>
@@ -2289,6 +2090,10 @@ object TexasHoldemPlayingHall:
     ).mkString("\t")
     writeLine(writer, row)
 
+  /** Writes a single hand in PokerStars hand history format for import into review tools.
+    * Includes the standard header, seat assignments, blind postings, hole card deal, all
+    * action lines collected during the hand, and a summary footer.
+    */
   private def appendReviewHandHistory(
       writer: BufferedWriter,
       hand: Int,
@@ -2374,6 +2179,10 @@ object TexasHoldemPlayingHall:
       "hand\ttableId\tdecisionIndex\tstreet\tboard\tpotBefore\ttoCall\theroPosition\tvillainPosition\theroStackBefore\tvillainStackBefore\tbetHistory\tvillainObservations\theroHole\tvillainHole\tbayesLogEvidence\tpriorSparse\tbayesPosteriorSparse"
     )
 
+  /** Writes one DDRE training row: full game context, both players' hole cards, Bayesian prior,
+    * Bayesian posterior (sparse representation), and log-evidence. Bet history and villain
+    * observations are serialized as pipe-delimited key=value pairs.
+    */
   private def appendDdreTrainingSample(
       writer: BufferedWriter,
       hand: Int,
@@ -2422,6 +2231,9 @@ object TexasHoldemPlayingHall:
         s"st=${observedState.street},a=${actionToken(item.action)},pot=${observedState.pot},call=${observedState.toCall},pos=${observedState.position},board=${boardToken(observedState.board)},stack=${observedState.stackSize},history=$encodedHistory"
       }.mkString("|")
 
+  /** Serializes a hole-card probability distribution as a sparse string: "id:prob|id:prob|..."
+    * where id is the canonical HoleCardsIndex integer. Zero-probability entries are omitted.
+    */
   private def serializePosteriorSparse(posterior: DiscreteDistribution[HoleCards]): String =
     val entries = posterior.weights.toVector
       .collect { case (hand, probability) if probability > 0.0 =>
@@ -2475,6 +2287,10 @@ object TexasHoldemPlayingHall:
       else Left(s"--heroPosition $position is not valid for playerCount=$playerCount")
     }
 
+  /** Parses CLI arguments into a validated Config. Uses a for-comprehension over Either to
+    * chain validation: each parameter is parsed with a typed helper, then range-checked.
+    * Returns Left(errorMessage) on the first validation failure.
+    */
   private def parseArgs(args: Array[String]): Either[String, Config] =
     if args.contains("--help") || args.contains("-h") then Left(usage)
     else
@@ -2512,6 +2328,7 @@ object TexasHoldemPlayingHall:
         saveTrainingTsv <- boolOpt(options, "saveTrainingTsv", true)
         saveDdreTrainingTsv <- boolOpt(options, "saveDdreTrainingTsv", false)
         saveReviewHandHistory <- boolOpt(options, "saveReviewHandHistory", false)
+        fullRing <- boolOpt(options, "fullRing", false)
       yield Config(
         hands = hands,
         tableCount = tableCount,
@@ -2532,7 +2349,8 @@ object TexasHoldemPlayingHall:
         equityTrials = equityTrials,
         saveTrainingTsv = saveTrainingTsv,
         saveDdreTrainingTsv = saveDdreTrainingTsv,
-        saveReviewHandHistory = saveReviewHandHistory
+        saveReviewHandHistory = saveReviewHandHistory,
+        fullRing = fullRing
       )
 
   private def intOpt(options: Map[String, String], key: String, default: Int): Either[String, Int] =
@@ -2630,4 +2448,5 @@ object TexasHoldemPlayingHall:
       |  --saveTrainingTsv=<bool>      default true
       |  --saveDdreTrainingTsv=<bool>  default false
       |  --saveReviewHandHistory=<bool> default false
+      |  --fullRing=<bool>             default false (all villains always active)
       |""".stripMargin

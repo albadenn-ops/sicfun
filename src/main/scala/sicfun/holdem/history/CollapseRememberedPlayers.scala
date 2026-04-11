@@ -2,7 +2,25 @@ package sicfun.holdem.history
 
 import sicfun.holdem.cli.CliHelpers
 
-/** Records a human assertion that two remembered players are the same entity. */
+/** CLI tool to assert that two remembered players are the same real-world entity.
+  *
+  * When the same player appears under different screen names (e.g., on different sites
+  * or after a name change), this tool collapses the alias into the canonical player
+  * identity in the opponent profile store. Optionally merges their profiles as well.
+  *
+  * The collapse is persisted to the store (JSON file or PostgreSQL) via
+  * [[OpponentProfileStorePersistence]]. The operation records a [[OpponentIdentity.PlayerCollapse]]
+  * that maps the alias's player UID to the canonical player UID.
+  *
+  * Usage:
+  * {{{
+  * runMain sicfun.holdem.history.CollapseRememberedPlayers \
+  *   --store=<path|jdbc:postgresql://...> \
+  *   --canonicalSite=PokerStars --canonicalName=PlayerA \
+  *   --aliasSite=GGPoker --aliasName=PlayerB \
+  *   [--collapseProfiles=true]
+  * }}}
+  */
 object CollapseRememberedPlayers:
   final case class RunSummary(
       canonicalPlayerUid: String,
@@ -34,6 +52,12 @@ object CollapseRememberedPlayers:
         println(s"aliasProfileUid: ${summary.aliasProfileUid}")
         println(s"collapseProfiles: ${summary.collapseProfiles}")
 
+  /** Execute the collapse operation.
+    *
+    * Loads the store, finds both players, performs the collapse, and saves the store.
+    * Returns Left with an error message if either player is not found or if argument
+    * parsing fails.
+    */
   def run(args: Array[String]): Either[String, RunSummary] =
     for
       config <- parseArgs(args)

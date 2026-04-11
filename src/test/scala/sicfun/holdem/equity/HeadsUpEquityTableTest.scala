@@ -5,6 +5,19 @@ import munit.FunSuite
 
 import scala.util.Random
 
+/**
+  * Tests for the full (non-canonical) heads-up equity table and its supporting infrastructure.
+  *
+  * Covers:
+  *   - HoleCardsIndex: correct total count (1326 = C(52,2))
+  *   - Key encoding: symmetry (keyFor is order-independent), overlap rejection
+  *   - HeadsUpEquityCache: correct perspective flipping when hero/villain are reversed,
+  *     including the case where the reverse lookup is cached first
+  *   - buildAll determinism: same seed produces identical values across parallelism levels
+  *   - Input validation: selectFullBatch rejects non-positive limits, computeBatchCpu
+  *     validates array shape and parallelism contracts
+  *   - ComputeBackend parser rejects unknown backend strings
+  */
 class HeadsUpEquityTableTest extends FunSuite:
   private val PreflopBackendProperty = "sicfun.holdem.preflopEquityBackend"
 

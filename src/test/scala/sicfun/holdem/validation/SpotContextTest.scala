@@ -4,6 +4,25 @@ import munit.FunSuite
 import sicfun.core.{Card, Rank, Suit}
 import sicfun.holdem.types.{Board, HoleCards, GameState, Position, Street, PokerAction}
 
+/** Tests for the [[SpotContext]] domain model and its component value types:
+  * [[BoardTexture]], [[PotGeometry]], [[HandCategory]], [[RangePosition]],
+  * and [[ActionLine]].
+  *
+  * These types encode the rich game context that [[InjectedLeak]] predicates
+  * use to decide whether a leak fires at a given decision point.
+  *
+  * Coverage:
+  *   - '''BoardTexture''': dry rainbow vs. wet connected suited boards,
+  *     paired boards, monotone boards, and the empty-board edge case
+  *   - '''PotGeometry''': SPR, pot odds, and bet-to-pot ratio derived from
+  *     a [[GameState]], including the zero-pot edge case (infinite SPR)
+  *   - '''HandCategory''': ordinal ordering (Nuts < Strong < ... < Air) and
+  *     equity-threshold classification
+  *   - '''RangePosition''': Capped from flat-call lines, Uncapped from 3-bet
+  *     lines, Polarized from check-raise lines, default for empty lines
+  *   - '''SpotContext.build''': end-to-end assembly from GameState, hero cards,
+  *     action line, and equity estimate, including facingAction/facingSizing
+  */
 class SpotContextTest extends FunSuite:
 
   // ── BoardTexture ──

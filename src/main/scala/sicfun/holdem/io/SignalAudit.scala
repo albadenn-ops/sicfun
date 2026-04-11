@@ -4,6 +4,32 @@ import sicfun.holdem.model.*
 
 import scala.util.hashing.MurmurHash3
 
+/**
+ * Signal audit domain model and risk-scoring builder for the sicfun poker analytics system.
+ *
+ * This file defines the data structures and factory logic for the signal audit subsystem.
+ * Signals are generated when the poker advisor evaluates a decision point and identifies
+ * notable risk characteristics. Each signal carries:
+ *   - A severity level (Info/Warning/Critical)
+ *   - A data payload with features, metrics, and model provenance
+ *   - A reconstruction path that allows offline reproduction of the exact state
+ *
+ * The signal audit system serves two purposes:
+ *   1. '''Real-time alerting''': Flagging high-risk decision points to the player
+ *   2. '''Offline analysis''': Providing a complete audit trail for post-session review,
+ *      model debugging, and calibration analysis
+ *
+ * Key design decisions:
+ *   - '''Deterministic signal IDs''': Signal IDs are computed via MurmurHash3 from the
+ *     identifying fields, ensuring idempotent generation (same input always yields same ID).
+ *   - '''Reconstruction paths''': Each signal records the snapshot directory and model artifact
+ *     directory used at generation time, enabling exact reproduction for debugging.
+ *   - '''Simple risk scoring''': The current risk score is a weighted combination of
+ *     `toCallOverStack` (70%) and `potOdds` (30%), designed to capture the player's
+ *     commitment level relative to their stack. This is intentionally simple and will
+ *     be replaced with model-based scoring as the system matures.
+ */
+
 /** Severity level assigned to a generated signal.
   *
   * Levels are ordered by increasing urgency: [[Info]] for routine observations,

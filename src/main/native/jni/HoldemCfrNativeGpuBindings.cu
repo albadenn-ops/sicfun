@@ -1,3 +1,22 @@
+/*
+ * HoldemCfrNativeGpuBindings.cu -- GPU JNI binding for CFR game-tree solving.
+ *
+ * Exposes four JNI entry points:
+ *   solveTree()      -- Full double-precision solve (runs on CPU via CfrNativeSolverCore).
+ *   solveTreeRoot()  -- Root-only double-precision solve.
+ *   solveTreeFixed() -- Fixed-point solve (runs on CPU via CfrNativeSolverCore).
+ *   solveTreeBatch() -- Batched float32 solve on GPU via CfrBatchCudaKernel.cuh.
+ *                       Multiple game trees with shared topology but different
+ *                       terminal utilities and chance weights are solved in parallel,
+ *                       one CUDA thread per tree.
+ *
+ * The first three entry points are identical to the CPU bindings (they run on CPU
+ * but report engine code 2=GPU). The solveTreeBatch() entry point is the only one
+ * that actually dispatches work to the GPU.
+ *
+ * Compiled into: sicfun_gpu_kernel.dll (requires nvcc / CUDA toolkit)
+ */
+
 #include <jni.h>
 
 #include <atomic>
@@ -13,6 +32,7 @@ constexpr jint kEngineGpu = 2;
 
 std::atomic<jint> g_last_engine_code(kEngineUnknown);
 
+/* Checks and clears any pending JNI exception. */
 bool clear_pending_jni_exception(JNIEnv* env) {
   if (!env->ExceptionCheck()) {
     return false;
@@ -117,6 +137,7 @@ int write_single_int(JNIEnv* env, jintArray array, const int value) {
   return cfrnative::kStatusOk;
 }
 
+/* Reads a JNI float array into a std::vector. Used by solveTreeBatch for float32 data. */
 int read_float_array(JNIEnv* env, jfloatArray array, std::vector<float>& out) {
   if (array == nullptr) return cfrnative::kStatusNullArray;
   const jsize length = env->GetArrayLength(array);
@@ -128,6 +149,7 @@ int read_float_array(JNIEnv* env, jfloatArray array, std::vector<float>& out) {
   return cfrnative::kStatusOk;
 }
 
+/* Writes a std::vector<float> back to a JNI float array. */
 int write_float_array(JNIEnv* env, jfloatArray array, const std::vector<float>& values) {
   if (array == nullptr) return cfrnative::kStatusNullArray;
   const jsize length = env->GetArrayLength(array);
@@ -203,6 +225,65 @@ Java_sicfun_holdem_HoldemCfrNativeGpuBindings_solveTree(
 }
 
 extern "C" JNIEXPORT jint JNICALL
+Java_sicfun_holdem_HoldemCfrNativeGpuBindings_solveTreeRoot(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jint iterations,
+    jint averagingDelay,
+    jboolean cfrPlus,
+    jboolean linearAveraging,
+    jint rootNodeId,
+    jint rootInfoSetIndex,
+    jintArray nodeTypesArray,
+    jintArray nodeStartsArray,
+    jintArray nodeCountsArray,
+    jintArray nodeInfosetsArray,
+    jintArray edgeChildIdsArray,
+    jdoubleArray edgeProbabilitiesArray,
+    jdoubleArray terminalUtilitiesArray,
+    jintArray infosetPlayersArray,
+    jintArray infosetActionCountsArray,
+    jdoubleArray outRootStrategyArray) {
+  cfrnative::TreeSpec spec;
+  spec.iterations = static_cast<int>(iterations);
+  spec.averaging_delay = static_cast<int>(averagingDelay);
+  spec.cfr_plus = (cfrPlus == JNI_TRUE);
+  spec.linear_averaging = (linearAveraging == JNI_TRUE);
+  spec.root_node_id = static_cast<int>(rootNodeId);
+
+  int status = read_int_array(env, nodeTypesArray, spec.node_types);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeStartsArray, spec.node_starts);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeCountsArray, spec.node_counts);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, nodeInfosetsArray, spec.node_infosets);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, edgeChildIdsArray, spec.edge_child_ids);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_double_array(env, edgeProbabilitiesArray, spec.edge_probabilities);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_double_array(env, terminalUtilitiesArray, spec.terminal_utilities);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, infosetPlayersArray, spec.infoset_players);
+  if (status != cfrnative::kStatusOk) return status;
+  status = read_int_array(env, infosetActionCountsArray, spec.infoset_action_counts);
+  if (status != cfrnative::kStatusOk) return status;
+
+  cfrnative::RootSolveOutput output;
+  status = cfrnative::solve_root(spec, static_cast<int>(rootInfoSetIndex), output);
+  if (status != cfrnative::kStatusOk) {
+    return status;
+  }
+
+  status = write_double_array(env, outRootStrategyArray, output.root_strategy);
+  if (status != cfrnative::kStatusOk) return status;
+
+  g_last_engine_code.store(kEngineGpu, std::memory_order_relaxed);
+  return cfrnative::kStatusOk;
+}
+
+extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemCfrNativeGpuBindings_solveTreeFixed(
     JNIEnv* env,
     jclass /*clazz*/,
@@ -263,6 +344,21 @@ Java_sicfun_holdem_HoldemCfrNativeGpuBindings_solveTreeFixed(
   return cfrnative::kStatusOk;
 }
 
+/*
+ * JNI entry point: HoldemCfrNativeGpuBindings.solveTreeBatch()
+ *
+ * Batched GPU CFR solve. All trees share the same topology (node types, starts,
+ * counts, infosets, edges, action counts, offsets) but differ in terminal utilities
+ * and chance weights. Data layout is [batchSize * perTreeSize] for varying arrays.
+ *
+ * Steps:
+ *   1. Read shared topology arrays and per-tree float arrays from JNI.
+ *   2. Validate dimensions: terminal_utilities must be B*N, chance_weights must be B*E.
+ *   3. Call cfrbatch::launch_batch_solve() which allocates GPU memory, copies topology
+ *      and per-tree data to device, launches the CUDA kernel (one thread per tree),
+ *      reads back strategies and EV, and frees GPU memory.
+ *   4. Write results back to JNI float arrays.
+ */
 extern "C" JNIEXPORT jint JNICALL
 Java_sicfun_holdem_HoldemCfrNativeGpuBindings_solveTreeBatch(
     JNIEnv* env,

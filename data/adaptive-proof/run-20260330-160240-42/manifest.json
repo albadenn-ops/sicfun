@@ -1,0 +1,57 @@
+{
+  "runDir": "C:\\Users\\alexl\\code\\math\\untitled\\data\\adaptive-proof\\run-20260330-160240-42",
+  "seed": 42,
+  "handsPerOpponent": 10000,
+  "legsPerOpponent": 2,
+  "opponentCount": 6,
+  "opponents": [
+    {
+      "name": "Villain01_overfold",
+      "role": "Leaker",
+      "directory": "Villain01_overfold",
+      "legButtonFile": "leg-button.txt",
+      "legBigBlindFile": "leg-bigblind.txt",
+      "combinedFile": "combined.txt"
+    },
+    {
+      "name": "Villain02_overcall",
+      "role": "Leaker",
+      "directory": "Villain02_overcall",
+      "legButtonFile": "leg-button.txt",
+      "legBigBlindFile": "leg-bigblind.txt",
+      "combinedFile": "combined.txt"
+    },
+    {
+      "name": "Villain03_turnbluff",
+      "role": "Leaker",
+      "directory": "Villain03_turnbluff",
+      "legButtonFile": "leg-button.txt",
+      "legBigBlindFile": "leg-bigblind.txt",
+      "combinedFile": "combined.txt"
+    },
+    {
+      "name": "Villain04_prefloploose",
+      "role": "Leaker",
+      "directory": "Villain04_prefloploose",
+      "legButtonFile": "leg-button.txt",
+      "legBigBlindFile": "leg-bigblind.txt",
+      "combinedFile": "combined.txt"
+    },
+    {
+      "name": "Villain05_prefloptight",
+      "role": "Leaker",
+      "directory": "Villain05_prefloptight",
+      "legButtonFile": "leg-button.txt",
+      "legBigBlindFile": "leg-bigblind.txt",
+      "combinedFile": "combined.txt"
+    },
+    {
+      "name": "Villain06_gto",
+      "role": "Control",
+      "directory": "Villain06_gto",
+      "legButtonFile": "leg-button.txt",
+      "legBigBlindFile": "leg-bigblind.txt",
+      "combinedFile": "combined.txt"
+    }
+  ]
+}

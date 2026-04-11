@@ -2,18 +2,36 @@ package sicfun.holdem.engine
 import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 import sicfun.holdem.equity.*
+import sicfun.holdem.history.ShowdownRecord
 
 import munit.FunSuite
 import sicfun.core.{Card, DiscreteDistribution}
 
 import scala.util.Random
 
+/** Tests for [[RangeInferenceEngine]], [[VillainResponseModel]], and [[ActionValueModel]].
+  *
+  * Validates the core Bayesian range inference and action recommendation pipeline:
+  *   - '''Posterior collapse''': after an informative villain action (trained model),
+  *     the posterior premium/trash ratio increases and collapse diagnostics are positive.
+  *   - '''Lazy collapse diagnostics''': PosteriorInferenceResult defers collapse computation.
+  *   - '''Showdown bias''': historical showdowns shift cached priors for premium combos.
+  *   - '''Action recommendation''': chip-EV model correctly prefers call over fold when +EV;
+  *     high fold-equity favors raise over check.
+  *   - '''Response-aware raise EV''': weak vs. strong villain posteriors produce different
+  *     raise EVs via the SB-vs-BB binary response model.
+  *   - '''Revealed cards''': produces a delta distribution with single-hand support.
+  *   - '''Validation''': rejects invalid trial counts and empty candidate sets.
+  */
 class RangeInferenceEngineTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
   private def hole(a: String, b: String): HoleCards =
     HoleCards.from(Vector(card(a), card(b)))
+
+  private def showdown(handId: String, a: String, b: String): ShowdownRecord =
+    ShowdownRecord(handId, hole(a, b))
 
   test("inferPosterior collapses range after informative villain action") {
     val hero = hole("Qc", "Qs")
@@ -100,6 +118,51 @@ class RangeInferenceEngineTest extends FunSuite:
     assert(!computed, "reading non-collapse fields should not force diagnostics")
     assertEquals(result.collapse.collapseRatio, 0.0)
     assert(computed, "collapse diagnostics should be computed on first access")
+  }
+
+  test("historical showdown bias shifts cached priors without stale reuse") {
+    RangeInferenceEngine.clearPosteriorCache()
+
+    val hero = hole("Jc", "Td")
+    val table = TableRanges.defaults(TableFormat.HeadsUp)
+    val premiumShowdowns = Vector(
+      showdown("sd-1", "Ah", "As"),
+      showdown("sd-2", "Ac", "Ad"),
+      showdown("sd-3", "Kh", "Ks"),
+      showdown("sd-4", "Kc", "Kd"),
+      showdown("sd-5", "Qh", "Qs")
+    )
+
+    val withoutHistory = RangeInferenceEngine.inferPosterior(
+      hero = hero,
+      board = Board.empty,
+      folds = Vector.empty,
+      tableRanges = table,
+      villainPos = Position.BigBlind,
+      observations = Seq.empty,
+      actionModel = PokerActionModel.uniform,
+      rng = new Random(71),
+      useCache = true
+    )
+    val withHistory = RangeInferenceEngine.inferPosterior(
+      hero = hero,
+      board = Board.empty,
+      folds = Vector.empty,
+      tableRanges = table,
+      villainPos = Position.BigBlind,
+      observations = Seq.empty,
+      actionModel = PokerActionModel.uniform,
+      rng = new Random(72),
+      useCache = true,
+      showdownHistory = premiumShowdowns
+    )
+
+    val exactCombo = hole("Ah", "As")
+    assert(
+      withHistory.prior.probabilityOf(exactCombo) > withoutHistory.prior.probabilityOf(exactCombo),
+      s"expected showdown-biased prior to increase exact premium combo weight: base=${withoutHistory.prior.probabilityOf(exactCombo)} biased=${withHistory.prior.probabilityOf(exactCombo)}"
+    )
+    assertNotEquals(withHistory.prior, withoutHistory.prior)
   }
 
   test("recommendAction default chip EV chooses call over fold when +EV") {

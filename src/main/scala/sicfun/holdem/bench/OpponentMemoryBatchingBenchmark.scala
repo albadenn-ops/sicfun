@@ -5,7 +5,7 @@ import sicfun.holdem.model.{PokerActionModel, PokerActionModelArtifactIO}
 import sicfun.holdem.runtime.AlwaysOnDecisionLoop
 import sicfun.holdem.types.*
 
-import sicfun.core.Card
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
 import java.nio.file.{Files, Path, StandardCopyOption}
 import scala.jdk.CollectionConverters.*
@@ -47,6 +47,11 @@ object OpponentMemoryBatchingBenchmark:
     def minMillis: Double = durationsMillis.min
     def maxMillis: Double = durationsMillis.max
 
+  /** Entry point. Parses CLI args and runs three scenarios: memory-off (no opponent store),
+    * memory-on with a small store (default 8 profiles), and memory-on with a large store
+    * (default 2000 profiles). Measures wall clock for each, then reports the overhead delta
+    * of opponent memory relative to the memory-off baseline.
+    */
   def main(args: Array[String]): Unit =
     parseArgs(args) match
       case Left(err) =>
@@ -111,6 +116,10 @@ object OpponentMemoryBatchingBenchmark:
     finally
       deleteRecursively(root)
 
+  /** Executes one full AlwaysOnDecisionLoop replay in an isolated temp directory.
+    * Copies the opponent store (if any) so each run starts from the same baseline.
+    * Returns elapsed wall time in milliseconds.
+    */
   private def timedRun(
       benchmarkRoot: Path,
       scenario: Scenario,
@@ -164,6 +173,9 @@ object OpponentMemoryBatchingBenchmark:
     finally
       deleteRecursively(runRoot)
 
+  /** Generates a synthetic event feed with `hands` hand pairs (hero event + villain event).
+    * Villain actions cycle through fold/call/raise to exercise all action paths.
+    */
   private def seedFeed(path: Path, hands: Int): Unit =
     val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
     (0 until hands).foreach { idx =>
@@ -237,6 +249,10 @@ object OpponentMemoryBatchingBenchmark:
     )
     PokerActionModelArtifactIO.save(modelDir, artifact)
 
+  /** Generates a synthetic opponent profile store with the specified number of profiles.
+    * Each profile has 3 recent events and 12 seen hand IDs. The first profile is always
+    * named "villain" (matching the benchmark's villainPlayerId).
+    */
   private def seedOpponentStore(path: Path, profiles: Int): Unit =
     val profileCount = math.max(1, profiles)
     val board = Board.from(Seq(card("Ts"), card("9h"), card("8d")))
@@ -343,12 +359,6 @@ object OpponentMemoryBatchingBenchmark:
     raw.toIntOption match
       case Some(value) if value >= 0 => Right(value)
       case _ => Left(s"$flag must be >= 0")
-
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card token: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
 
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then

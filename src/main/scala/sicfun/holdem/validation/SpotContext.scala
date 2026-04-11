@@ -18,6 +18,12 @@ final case class BoardTexture(
   def isDry: Boolean = !isWet
 
 object BoardTexture:
+  /** Classify a board's texture from its community cards.
+    *
+    * Analyzes suit distribution (flush draws, monotone), rank distribution (paired cards),
+    * and rank adjacency (straight draws, connectedness). Returns a default dry/unpaired
+    * texture for empty boards.
+    */
   def from(board: Board): BoardTexture =
     if board.cards.isEmpty then
       BoardTexture(
@@ -50,10 +56,12 @@ object BoardTexture:
         connected = conn
       )
 
+  /** Check if any `needed` cards fall within a 5-rank span (straight draw potential). */
   private def hasConnectedness(sortedRanks: Vector[Int], needed: Int): Boolean =
     if sortedRanks.size < needed then false
     else sortedRanks.sliding(needed).exists(window => window.last - window.head <= 4)
 
+  /** Check if any two adjacent ranks are within 2 of each other (connected board). */
   private def adjacentConnected(sortedRanks: Vector[Int]): Boolean =
     sortedRanks.sliding(2).exists:
       case Vector(a, b) => b - a <= 2

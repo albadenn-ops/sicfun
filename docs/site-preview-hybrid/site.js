@@ -11,11 +11,39 @@ const warningList = document.getElementById("warning-list");
 const decisionList = document.getElementById("decision-list");
 const opponentList = document.getElementById("opponent-list");
 const modelSource = document.getElementById("model-source");
+
+const authStatePanel = document.getElementById("auth-state");
+const authForm = document.getElementById("auth-form");
+const authEmail = document.getElementById("auth-email");
+const authPassword = document.getElementById("auth-password");
+const authDisplayName = document.getElementById("auth-display-name");
+const authLoginButton = document.getElementById("auth-login");
+const authRegisterButton = document.getElementById("auth-register");
+const googleLoginLink = document.getElementById("google-login-link");
+const profileCard = document.getElementById("profile-card");
+const profileSummary = document.getElementById("profile-summary");
+const profileForm = document.getElementById("profile-form");
+const profileDisplayName = document.getElementById("profile-display-name");
+const profileHeroName = document.getElementById("profile-hero-name");
+const profilePreferredSite = document.getElementById("profile-preferred-site");
+const profileTimeZone = document.getElementById("profile-time-zone");
+const authLogoutButton = document.getElementById("auth-logout");
+
 const MAX_POLL_WAIT_MS = 15 * 60 * 1000;
+
+let authState = normalizeAuthState({});
+
+void boot();
 
 if (form && fileInput && siteSelect && heroInput) {
   form.addEventListener("submit", async event => {
     event.preventDefault();
+
+    if (requiresPlatformSignIn() && !authState.authenticated) {
+      renderStatus("Sign in to queue a review job for this deployment.");
+      reviewResults.classList.add("hidden");
+      return;
+    }
 
     const file = fileInput.files && fileInput.files[0];
     if (!file) {
@@ -26,8 +54,8 @@ if (form && fileInput && siteSelect && heroInput) {
 
     const payload = {
       handHistoryText: await file.text(),
-      site: siteSelect.value || "auto",
-      heroName: heroInput.value.trim() || null
+      site: resolvedUploadSite(),
+      heroName: resolvedHeroName()
     };
 
     setSubmitting(true);
@@ -37,9 +65,8 @@ if (form && fileInput && siteSelect && heroInput) {
     try {
       const response = await fetch("/api/analyze-hand-history", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        credentials: "same-origin",
+        headers: jsonHeaders(true),
         body: JSON.stringify(payload)
       });
       const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
@@ -71,7 +98,378 @@ if (form && fileInput && siteSelect && heroInput) {
   });
 }
 
+if (authLoginButton) {
+  authLoginButton.addEventListener("click", () => {
+    void submitAuth("/api/auth/login", false);
+  });
+}
+
+if (authRegisterButton) {
+  authRegisterButton.addEventListener("click", () => {
+    void submitAuth("/api/auth/register", true);
+  });
+}
+
+if (profileForm) {
+  profileForm.addEventListener("submit", event => {
+    event.preventDefault();
+    void saveProfile();
+  });
+}
+
+if (authLogoutButton) {
+  authLogoutButton.addEventListener("click", () => {
+    void logout();
+  });
+}
+
+async function boot() {
+  await refreshAuthState();
+  renderAuthFlash();
+}
+
+async function refreshAuthState() {
+  try {
+    const response = await fetch("/api/auth/me", {
+      credentials: "same-origin",
+      headers: {
+        "Accept": "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Auth probe failed with status ${response.status}.`);
+    }
+
+    const body = await response.json();
+    applyAuthState(body);
+  } catch (error) {
+    authState = normalizeAuthState({});
+    updateAccountUi(`Account bootstrap failed: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
+}
+
+function applyAuthState(data, flashMessage = "") {
+  authState = normalizeAuthState(data);
+  hydrateUploadDefaults();
+  updateUploadAvailability();
+  updateAccountUi(flashMessage);
+}
+
+function normalizeAuthState(data) {
+  return {
+    authenticationEnabled: Boolean(data.authenticationEnabled),
+    authenticationMode: typeof data.authenticationMode === "string" ? data.authenticationMode : "none",
+    authenticated: Boolean(data.authenticated),
+    allowLocalRegistration: Boolean(data.allowLocalRegistration),
+    providers: Array.isArray(data.providers) ? data.providers : [],
+    user: data && typeof data.user === "object" && data.user ? data.user : null,
+    csrfToken: typeof data.csrfToken === "string" && data.csrfToken ? data.csrfToken : null
+  };
+}
+
+function requiresPlatformSignIn() {
+  return authState.authenticationMode === "users";
+}
+
+function resolvedUploadSite() {
+  if (siteSelect.value && siteSelect.value !== "auto") {
+    return siteSelect.value;
+  }
+  if (authState.user && authState.user.preferredSite) {
+    return authState.user.preferredSite;
+  }
+  return "auto";
+}
+
+function resolvedHeroName() {
+  const explicit = heroInput.value.trim();
+  if (explicit) {
+    return explicit;
+  }
+  if (authState.user && authState.user.heroName) {
+    return authState.user.heroName;
+  }
+  return null;
+}
+
+function hydrateUploadDefaults() {
+  if (!authState.user) {
+    return;
+  }
+
+  if (heroInput && !heroInput.value.trim() && authState.user.heroName) {
+    heroInput.value = authState.user.heroName;
+  }
+
+  if (siteSelect && siteSelect.value === "auto" && authState.user.preferredSite) {
+    siteSelect.value = authState.user.preferredSite;
+  }
+}
+
+function updateUploadAvailability() {
+  const locked = requiresPlatformSignIn() && !authState.authenticated;
+  [fileInput, siteSelect, heroInput].forEach(element => {
+    if (element) {
+      element.disabled = locked;
+    }
+  });
+  if (submitButton) {
+    submitButton.disabled = locked;
+    submitButton.textContent = locked ? "Sign In Required" : "Queue Review";
+  }
+  if (locked) {
+    renderStatus("Sign in to queue a review job for this deployment.");
+  }
+}
+
+function updateAccountUi(message = "") {
+  if (!authStatePanel) {
+    return;
+  }
+
+  const googleProvider = authState.providers.find(provider => provider.id === "google");
+  if (googleLoginLink) {
+    if (googleProvider && googleProvider.startPath && !authState.authenticated) {
+      googleLoginLink.href = googleProvider.startPath;
+      googleLoginLink.classList.remove("hidden");
+    } else {
+      googleLoginLink.classList.add("hidden");
+    }
+  }
+
+  if (authState.authenticationMode === "none") {
+    authStatePanel.innerHTML = accountPanel(
+      "Open access",
+      "This deployment does not require sign-in.",
+      message || "Upload review is open. User accounts are disabled for this instance."
+    );
+    toggleHidden(authForm, true);
+    toggleHidden(profileCard, true);
+    return;
+  }
+
+  if (authState.authenticationMode === "basic") {
+    authStatePanel.innerHTML = accountPanel(
+      "Basic auth",
+      "HTTP Basic auth is enforced upstream for this deployment.",
+      message || "Use the browser auth challenge configured by the operator. The platform-user module is not enabled here."
+    );
+    toggleHidden(authForm, true);
+    toggleHidden(profileCard, true);
+    return;
+  }
+
+  if (!authState.authenticated || !authState.user) {
+    authStatePanel.innerHTML = accountPanel(
+      "Sign in required",
+      "Queue review jobs behind a platform user session.",
+      message || "Use local registration/login or continue with a configured OIDC provider such as Google."
+    );
+    toggleHidden(authForm, false);
+    toggleHidden(profileCard, true);
+    if (authRegisterButton) {
+      authRegisterButton.disabled = !authState.allowLocalRegistration;
+    }
+    return;
+  }
+
+  authStatePanel.innerHTML = accountPanel(
+    "Signed in",
+    `${escapeHtml(authState.user.displayName)} is active for this browser.`,
+    message || `Email: ${escapeHtml(authState.user.email)}`
+  );
+  toggleHidden(authForm, true);
+  toggleHidden(profileCard, false);
+
+  if (profileSummary) {
+    const providers = Array.isArray(authState.user.linkedProviders) && authState.user.linkedProviders.length > 0
+      ? authState.user.linkedProviders.join(", ")
+      : "local";
+    profileSummary.innerHTML = `
+      <p class="card-kicker">Profile</p>
+      <h3>${escapeHtml(authState.user.displayName)}</h3>
+      <p class="section-note">
+        ${escapeHtml(authState.user.email)}<br>
+        Linked providers: ${escapeHtml(providers)}
+      </p>
+    `;
+  }
+
+  if (profileDisplayName) {
+    profileDisplayName.value = authState.user.displayName || "";
+  }
+  if (profileHeroName) {
+    profileHeroName.value = authState.user.heroName || "";
+  }
+  if (profilePreferredSite) {
+    profilePreferredSite.value = authState.user.preferredSite || "";
+  }
+  if (profileTimeZone) {
+    profileTimeZone.value = authState.user.timeZone || "";
+  }
+}
+
+async function submitAuth(path, includeDisplayName) {
+  if (authState.authenticationMode !== "users") {
+    return;
+  }
+
+  const email = authEmail ? authEmail.value.trim() : "";
+  const password = authPassword ? authPassword.value : "";
+  const displayName = authDisplayName ? authDisplayName.value.trim() : "";
+
+  if (!email || !password) {
+    updateAccountUi("Email and password are required.");
+    return;
+  }
+
+  const payload = {
+    email,
+    password
+  };
+  if (includeDisplayName && displayName) {
+    payload.displayName = displayName;
+  }
+
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: jsonHeaders(false),
+      body: JSON.stringify(payload)
+    });
+    const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
+    if (!response.ok) {
+      updateAccountUi(body.error || `Authentication request failed with status ${response.status}.`);
+      return;
+    }
+
+    if (authPassword) {
+      authPassword.value = "";
+    }
+    applyAuthState(body, includeDisplayName ? "Registration complete." : "Signed in.");
+  } catch (error) {
+    updateAccountUi(`Authentication request failed: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
+}
+
+async function saveProfile() {
+  if (!authState.authenticated || !authState.csrfToken) {
+    updateAccountUi("Sign in before saving a profile.");
+    return;
+  }
+
+  const payload = {
+    displayName: profileDisplayName ? profileDisplayName.value.trim() || null : null,
+    heroName: profileHeroName ? profileHeroName.value.trim() || null : null,
+    preferredSite: profilePreferredSite ? profilePreferredSite.value || null : null,
+    timeZone: profileTimeZone ? profileTimeZone.value.trim() || null : null
+  };
+
+  try {
+    const response = await fetch("/api/auth/profile", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: jsonHeaders(true),
+      body: JSON.stringify(payload)
+    });
+    const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
+    if (!response.ok) {
+      updateAccountUi(body.error || `Profile save failed with status ${response.status}.`);
+      return;
+    }
+
+    applyAuthState(body, "Profile saved.");
+  } catch (error) {
+    updateAccountUi(`Profile save failed: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
+}
+
+async function logout() {
+  if (!authState.authenticated || !authState.csrfToken) {
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: jsonHeaders(true),
+      body: "{}"
+    });
+    const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
+    if (!response.ok) {
+      updateAccountUi(body.error || `Sign out failed with status ${response.status}.`);
+      return;
+    }
+
+    if (authEmail) {
+      authEmail.value = "";
+    }
+    if (authDisplayName) {
+      authDisplayName.value = "";
+    }
+    applyAuthState(body, "Signed out.");
+  } catch (error) {
+    updateAccountUi(`Sign out failed: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
+}
+
+function renderAuthFlash() {
+  const params = new URLSearchParams(window.location.search);
+  const authResult = params.get("auth");
+  const authError = params.get("auth_error");
+
+  if (authResult === "success") {
+    updateAccountUi("OIDC sign-in completed.");
+  } else if (authError) {
+    updateAccountUi(`OIDC sign-in failed: ${authError.replaceAll("+", " ")}`);
+  } else {
+    return;
+  }
+
+  params.delete("auth");
+  params.delete("auth_error");
+  const nextQuery = params.toString();
+  const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+  window.history.replaceState({}, document.title, nextUrl);
+}
+
+function accountPanel(kicker, title, note) {
+  return `
+    <p class="card-kicker">${escapeHtml(kicker)}</p>
+    <h3>${escapeHtml(title)}</h3>
+    <p class="section-note">${escapeHtml(note)}</p>
+  `;
+}
+
+function toggleHidden(element, hidden) {
+  if (!element) {
+    return;
+  }
+  element.classList.toggle("hidden", hidden);
+}
+
+function jsonHeaders(includeCsrf) {
+  const headers = {
+    "Content-Type": "application/json"
+  };
+  if (includeCsrf && authState.csrfToken) {
+    headers["X-CSRF-Token"] = authState.csrfToken;
+  }
+  return headers;
+}
+
 function setSubmitting(isSubmitting) {
+  if (!submitButton) {
+    return;
+  }
+  if (requiresPlatformSignIn() && !authState.authenticated) {
+    submitButton.disabled = true;
+    submitButton.textContent = "Sign In Required";
+    return;
+  }
   submitButton.disabled = isSubmitting;
   submitButton.textContent = isSubmitting ? "Queueing Review..." : "Queue Review";
 }
@@ -99,6 +497,7 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
     await sleep(pollAfterMs);
 
     const response = await fetch(statusUrl, {
+      credentials: "same-origin",
       headers: {
         "Accept": "application/json"
       }
@@ -107,7 +506,7 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
 
     if (!response.ok) {
       if (response.status === 404) {
-        throw new Error("Review job expired or was purged before the page could load the result. Submit the upload again.");
+        throw new Error("Review job expired, was purged, or is not visible to this user session.");
       }
       throw new Error(body.error || `Status request failed with status ${response.status}.`);
     }
@@ -230,7 +629,7 @@ function renderDecisionCard(decision) {
 
 function renderOpponentCard(opponent) {
   const hints = Array.isArray(opponent.hints) && opponent.hints.length > 0
-    ? opponent.hints.map(hint => escapeHtml(hint)).join("<br>")
+    ? opponent.hints.map(renderHint).join("<br>")
     : "No exploit hints returned.";
 
   return `
@@ -245,6 +644,19 @@ function renderOpponentCard(opponent) {
       </p>
     </article>
   `;
+}
+
+function renderHint(hint) {
+  if (typeof hint === "string") {
+    return escapeHtml(hint);
+  }
+
+  const text = escapeHtml(hint && hint.text ? hint.text : "Unknown hint");
+  const metrics = Array.isArray(hint && hint.metrics)
+    ? `[${hint.metrics.map(formatMetric).join(", ")}]`
+    : "";
+
+  return metrics ? `${text}<br><span class="card-meta">${escapeHtml(metrics)}</span>` : text;
 }
 
 function decisionRow(label, value) {
@@ -275,6 +687,10 @@ function formatNumber(value) {
 function formatSigned(value) {
   const number = Number(value || 0);
   return `${number > 0 ? "+" : ""}${number.toFixed(2)}`;
+}
+
+function formatMetric(value) {
+  return Number(value || 0).toFixed(3);
 }
 
 function formatPercent(value) {

@@ -38,6 +38,10 @@ object RegisterSicfunPlayer:
         println(s"profileUid: ${summary.profileUid}")
         println(s"handsObserved: ${summary.handsObserved}")
 
+  /** Execute the registration: look up source profile, register under sicfun@localhost, save store.
+    *
+    * @return Right(summary) with the new player's UIDs and metadata, or Left(error message)
+    */
   def run(args: Array[String]): Either[String, RunSummary] =
     for
       config <- parseArgs(args)

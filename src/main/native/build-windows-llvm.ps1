@@ -174,3 +174,33 @@ if (-not (Test-Path $postflopDll)) {
 }
 
 Write-Host "Built: $postflopDll"
+
+$pomcpSrc = Join-Path $PSScriptRoot "jni\HoldemPomcpNativeBindings.cpp"
+$pomcpDll = Join-Path $OutDir "sicfun_pomcp_native.dll"
+$pomcpLib = Join-Path $OutDir "sicfun_pomcp_native.lib"
+$pomcpExp = Join-Path $OutDir "sicfun_pomcp_native.exp"
+
+if (Test-Path $pomcpDll) { Remove-Item $pomcpDll -Force }
+if (Test-Path $pomcpLib) { Remove-Item $pomcpLib -Force }
+if (Test-Path $pomcpExp) { Remove-Item $pomcpExp -Force }
+
+& $clang `
+  -std=c++17 `
+  -O3 `
+  -DNDEBUG `
+  -D_CRT_SECURE_NO_WARNINGS `
+  -shared `
+  "-I$jniInclude" `
+  "-I$jniWinInclude" `
+  -o $pomcpDll `
+  $pomcpSrc
+
+if ($LASTEXITCODE -ne 0) {
+  throw "Native POMCP CPU build failed with exit code $LASTEXITCODE"
+}
+
+if (-not (Test-Path $pomcpDll)) {
+  throw "Build did not produce $pomcpDll"
+}
+
+Write-Host "Built: $pomcpDll"

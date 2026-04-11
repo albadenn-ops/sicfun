@@ -3,6 +3,31 @@ package sicfun.holdem.history
 import munit.FunSuite
 import sicfun.holdem.engine.RaiseResponseCounts
 
+/** Tests for the [[OpponentIdentity]] module and the identity domain types
+  * ([[RememberedPlayer]], [[PlayerAlias]], [[PlayerCollapse]],
+  * [[ProfileCollapse]], [[BehaviorFingerprint]]).
+  *
+  * Coverage:
+  *   - '''Construction validation''': all identity types reject blank/empty
+  *     required fields (UIDs, sites, names) and negative timestamps
+  *   - '''Site normalization''': lowercasing and trimming via `normalizeSite`
+  *   - '''Player name normalization''': trimming but case-preserving
+  *   - '''Alias key derivation''': deterministic, case-insensitive composite
+  *     key using null separator
+  *   - '''SHA-256 hashing''': 64-char lowercase hex, deterministic, collision-
+  *     resistant for different inputs
+  *   - '''Default UID derivation''': non-SICFUN sites hash (site, name);
+  *     `sicfun@localhost` with a modelUid hashes (modelUid, behaviorUid);
+  *     without modelUid falls back to site hash
+  *   - '''Profile UID derivation''': SICFUN-local returns behaviorUid directly;
+  *     non-SICFUN sites hash (site, name)
+  *   - '''Behavior fingerprinting''': produces a non-empty deterministic
+  *     fingerprint containing signature, responses, and archetype data
+  *   - '''ensureProfileIdentity''': fills missing UIDs, normalizes site/name,
+  *     preserves existing non-blank UIDs
+  *   - '''defaultPlayer / normalizePlayer / normalizeAlias''': correct
+  *     derivation and normalization of identity fields
+  */
 class OpponentIdentityTest extends FunSuite:
 
   // ---------------------------------------------------------------------------

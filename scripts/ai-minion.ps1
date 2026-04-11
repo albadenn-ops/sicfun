@@ -43,6 +43,8 @@ param(
   [string[]]$ContextPath = @(),
   [string[]]$IncludeDirectories = @(),
   [string]$Model,
+  [ValidateRange(60, 7200)]
+  [int]$DelegateTimeoutSeconds = 900,
 
   [ValidateSet("text", "json")]
   [string]$OutputFormat = "text",
@@ -50,6 +52,7 @@ param(
   [string]$OutputPath,
   [switch]$InjectContext,
   [switch]$NoBrowser,
+  [switch]$Writable,
   [switch]$WhatIf
 )
 
@@ -61,6 +64,8 @@ $cacheRoot = Join-Path $repoRoot ".tool-cache\ai-minions"
 $geminiSettingsPath = [System.IO.Path]::Combine($HOME, ".gemini", "settings.json")
 $claudeProjectRoot = [System.IO.Path]::Combine($HOME, ".claude", "projects")
 $codexConfigPath = [System.IO.Path]::Combine($HOME, ".codex", "config.toml")
+$claudeSettingsPath = [System.IO.Path]::Combine($HOME, ".claude", "settings.json")
+$codexModelsCachePath = [System.IO.Path]::Combine($HOME, ".codex", "models_cache.json")
 
 function Write-Utf8NoBom {
   param(
@@ -205,6 +210,89 @@ function Get-DefaultArtifactPath {
   return Join-Path $providerDir ("$timestamp-$Mode.$Extension")
 }
 
+function Invoke-JobWithTimeout {
+  param(
+    [scriptblock]$ScriptBlock,
+    [object[]]$ArgumentList,
+    [int]$TimeoutSeconds,
+    [string]$TimeoutMessage
+  )
+
+  $job = Start-Job -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+  try {
+    if (-not (Wait-Job $job -Timeout $TimeoutSeconds)) {
+      Stop-Job -Job $job -Force -ErrorAction SilentlyContinue | Out-Null
+      throw $TimeoutMessage
+    }
+    return Receive-Job -Job $job -ErrorAction Stop
+  }
+  finally {
+    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue | Out-Null
+  }
+}
+
+function Get-PreferredGeminiModel {
+  return "auto-gemini-3"
+}
+
+function Get-PreferredClaudeModel {
+  if (-not (Test-Path $claudeSettingsPath)) {
+    return "opus"
+  }
+
+  try {
+    $settings = Get-Content -Raw $claudeSettingsPath | ConvertFrom-Json
+    $configuredModel = [string]$settings.model
+    if (-not [string]::IsNullOrWhiteSpace($configuredModel)) {
+      return $configuredModel
+    }
+  }
+  catch {
+  }
+
+  return "opus"
+}
+
+function Get-PreferredGptModel {
+  if (-not (Test-Path $codexModelsCachePath)) {
+    return "gpt-5.4"
+  }
+
+  try {
+    $cache = Get-Content -Raw $codexModelsCachePath | ConvertFrom-Json
+    $visibleModels = @($cache.models | Where-Object { $_.visibility -eq "list" })
+    if ($visibleModels.Count -eq 0) {
+      $visibleModels = @($cache.models)
+    }
+
+    if ($visibleModels.Count -gt 0) {
+      $best = $visibleModels | Sort-Object -Property @{ Expression = { [int]$_.priority } }, @{ Expression = { [string]$_.slug } } | Select-Object -First 1
+      if (-not [string]::IsNullOrWhiteSpace([string]$best.slug)) {
+        return [string]$best.slug
+      }
+    }
+  }
+  catch {
+  }
+
+  return "gpt-5.4"
+}
+
+function Resolve-DelegateModel {
+  param([string]$ProviderName)
+
+  if (-not [string]::IsNullOrWhiteSpace($Model)) {
+    return $Model.Trim()
+  }
+
+  switch ($ProviderName) {
+    "gemini" { return Get-PreferredGeminiModel }
+    "claude" { return Get-PreferredClaudeModel }
+    "gpt" { return Get-PreferredGptModel }
+    default { return $null }
+  }
+}
+
 function Get-ProviderContractPath {
   param([string]$ProviderName)
 
@@ -340,7 +428,8 @@ function New-DelegationPrompt {
     [string]$CurrentTask,
     [string[]]$ResolvedContextPaths,
     [switch]$InjectContextBlock,
-    [switch]$NoTools
+    [switch]$NoTools,
+    [switch]$WritableMode
   )
 
   $contextBlock = if ($InjectContextBlock -and $ResolvedContextPaths.Count -gt 0) {
@@ -383,7 +472,13 @@ Provider overlay:
 $providerContractBlock
 
 Rules:
-- Stay read-only. Do not edit files and do not claim to have edited files.
+$(if ($WritableMode) {
+"- You have WRITE and EXECUTE access. You may create files, edit files, create branches, and run shell commands.
+- Use write_file, edit_file, and run_shell_command tools to implement changes.
+- Commit your work to a dedicated branch. Do not push unless asked."
+} else {
+"- Stay read-only. Do not edit files and do not claim to have edited files."
+})
 - Prefer concrete repository evidence over guesses.
 - Keep the response concise and directly usable by another coding agent.
 - Use repo-relative file paths when you reference code or docs.
@@ -475,7 +570,8 @@ function Invoke-GeminiAuth {
 function Invoke-GeminiDelegate {
   param(
     [string]$ResolvedOutputPath,
-    [string[]]$ResolvedContextPaths
+    [string[]]$ResolvedContextPaths,
+    [string]$EffectiveModel
   )
 
   if ([string]::IsNullOrWhiteSpace($Task)) {
@@ -485,7 +581,7 @@ function Invoke-GeminiDelegate {
   if ($InjectContext) {
     $nodePath = Resolve-NodePath
     $entrypoint = Resolve-GeminiEntrypoint
-    $prompt = New-DelegationPrompt -ProviderName "gemini" -CurrentMode $Mode -CurrentTask $Task -ResolvedContextPaths $ResolvedContextPaths -InjectContextBlock
+    $prompt = New-DelegationPrompt -ProviderName "gemini" -CurrentMode $Mode -CurrentTask $Task -ResolvedContextPaths $ResolvedContextPaths -InjectContextBlock -WritableMode:$Writable
     $promptPath = [System.IO.Path]::ChangeExtension($ResolvedOutputPath, "prompt.txt")
     Write-Utf8NoBom -Path $promptPath -Value $prompt
 
@@ -495,8 +591,11 @@ function Invoke-GeminiDelegate {
       "--output-format", $OutputFormat,
       "-p", "Answer the task above."
     )
-    if (-not [string]::IsNullOrWhiteSpace($Model)) {
-      $cliArgs += @("-m", $Model)
+    if ($Writable) {
+      $cliArgs += @("--approval-mode", "yolo")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($EffectiveModel)) {
+      $cliArgs += @("-m", $EffectiveModel)
     }
 
     Write-Host "[ai-minion:gemini] mode: $Mode"
@@ -510,10 +609,29 @@ function Invoke-GeminiDelegate {
 
     Push-Location $repoRoot
     try {
-      # Pipe prompt via stdin; -p "" enables non-interactive mode
-      $prompt | & $nodePath @cliArgs | Tee-Object -FilePath $ResolvedOutputPath
-      if ($LASTEXITCODE -ne 0) {
-        throw "Gemini CLI exited with code $LASTEXITCODE."
+      $jobResult = Invoke-JobWithTimeout `
+        -ScriptBlock {
+          param($repoRootParam, $promptParam, $nodePathParam, $cliArgsParam)
+          Push-Location $repoRootParam
+          try {
+            $lines = @($promptParam | & $nodePathParam @cliArgsParam 2>&1 | ForEach-Object { [string]$_ })
+            [pscustomobject]@{
+              Lines = $lines
+              ExitCode = $LASTEXITCODE
+            }
+          }
+          finally {
+            Pop-Location
+          }
+        } `
+        -ArgumentList @($repoRoot, $prompt, $nodePath, $cliArgs) `
+        -TimeoutSeconds $DelegateTimeoutSeconds `
+        -TimeoutMessage "Gemini delegate timed out after $DelegateTimeoutSeconds seconds."
+
+      $jobLines = @($jobResult.Lines)
+      $jobLines | Tee-Object -FilePath $ResolvedOutputPath
+      if ([int]$jobResult.ExitCode -ne 0) {
+        throw "Gemini CLI exited with code $($jobResult.ExitCode)."
       }
     }
     finally {
@@ -542,16 +660,30 @@ function Invoke-GeminiDelegate {
   if ($expandedIncludeDirectories.Count -gt 0) {
     $invokeParams.IncludeDirectories = $expandedIncludeDirectories
   }
-  if (-not [string]::IsNullOrWhiteSpace($Model)) {
-    $invokeParams.Model = $Model
+  if (-not [string]::IsNullOrWhiteSpace($EffectiveModel)) {
+    $invokeParams.Model = $EffectiveModel
   }
   if ($WhatIf) {
     $invokeParams.WhatIf = $true
   }
 
-  & $scriptPath @invokeParams
-  if ($LASTEXITCODE -ne 0) {
-    throw "Gemini delegate failed with exit code $LASTEXITCODE."
+  $delegateResult = Invoke-JobWithTimeout `
+    -ScriptBlock {
+      param($scriptPathParam, $invokeParamsParam)
+      $lines = @(& $scriptPathParam @invokeParamsParam 2>&1 | ForEach-Object { [string]$_ })
+      [pscustomobject]@{
+        Lines = $lines
+        ExitCode = $LASTEXITCODE
+      }
+    } `
+    -ArgumentList @($scriptPath, $invokeParams) `
+    -TimeoutSeconds $DelegateTimeoutSeconds `
+    -TimeoutMessage "Gemini delegate timed out after $DelegateTimeoutSeconds seconds."
+
+  $delegateLines = @($delegateResult.Lines)
+  if ([int]$delegateResult.ExitCode -ne 0) {
+    $stderrTail = if ($delegateLines.Count -gt 0) { ($delegateLines | Select-Object -Last 20) -join [Environment]::NewLine } else { "<no delegate output>" }
+    throw "Gemini delegate failed with exit code $($delegateResult.ExitCode).`n$stderrTail"
   }
 }
 
@@ -703,7 +835,8 @@ function Invoke-ClaudeAuth {
 function Invoke-ClaudeDelegate {
   param(
     [string]$ResolvedOutputPath,
-    [string[]]$ResolvedContextPaths
+    [string[]]$ResolvedContextPaths,
+    [string]$EffectiveModel
   )
 
   if ([string]::IsNullOrWhiteSpace($Task)) {
@@ -724,8 +857,8 @@ function Invoke-ClaudeDelegate {
     "--tools", "",
     "--output-format", $OutputFormat
   )
-  if (-not [string]::IsNullOrWhiteSpace($Model)) {
-    $cliArgs += @("--model", $Model)
+  if (-not [string]::IsNullOrWhiteSpace($EffectiveModel)) {
+    $cliArgs += @("--model", $EffectiveModel)
   }
 
   Write-Host "[ai-minion:claude] session id: $sessionId"
@@ -740,15 +873,28 @@ function Invoke-ClaudeDelegate {
     return
   }
 
-  Push-Location $repoRoot
-  try {
-    $stdout = $prompt | & $claudePath @cliArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
-      throw "Claude delegate failed with exit code $LASTEXITCODE."
-    }
-  }
-  finally {
-    Pop-Location
+  $claudeResult = Invoke-JobWithTimeout `
+    -ScriptBlock {
+      param($repoRootParam, $promptParam, $claudePathParam, $cliArgsParam)
+      Push-Location $repoRootParam
+      try {
+        $lines = @($promptParam | & $claudePathParam @cliArgsParam 2>&1 | ForEach-Object { [string]$_ })
+        [pscustomobject]@{
+          Stdout = $lines
+          ExitCode = $LASTEXITCODE
+        }
+      }
+      finally {
+        Pop-Location
+      }
+    } `
+    -ArgumentList @($repoRoot, $prompt, $claudePath, $cliArgs) `
+    -TimeoutSeconds $DelegateTimeoutSeconds `
+    -TimeoutMessage "Claude delegate timed out after $DelegateTimeoutSeconds seconds."
+
+  $stdout = @($claudeResult.Stdout)
+  if ([int]$claudeResult.ExitCode -ne 0) {
+    throw "Claude delegate failed with exit code $($claudeResult.ExitCode)."
   }
 
   $assistantEvent = Get-ClaudeAssistantEvent -SessionId $sessionId
@@ -876,7 +1022,8 @@ function Get-CodexLastMessageText {
 function Invoke-GptDelegate {
   param(
     [string]$ResolvedOutputPath,
-    [string[]]$ResolvedContextPaths
+    [string[]]$ResolvedContextPaths,
+    [string]$EffectiveModel
   )
 
   if ([string]::IsNullOrWhiteSpace($Task)) {
@@ -895,10 +1042,11 @@ function Invoke-GptDelegate {
     "--json",
     "-C", $repoRoot,
     "-s", "read-only",
+    "-c", 'reasoning_effort="high"',
     "-"
   )
-  if (-not [string]::IsNullOrWhiteSpace($Model)) {
-    $cliArgs += @("-m", $Model)
+  if (-not [string]::IsNullOrWhiteSpace($EffectiveModel)) {
+    $cliArgs += @("-m", $EffectiveModel)
   }
 
   Write-Host "[ai-minion:gpt] output: $ResolvedOutputPath"
@@ -909,15 +1057,28 @@ function Invoke-GptDelegate {
     return
   }
 
-  Push-Location $repoRoot
-  try {
-    $rawLines = @(Get-Content -Raw $promptPath | & $nodePath @cliArgs 2>&1 | ForEach-Object { [string]$_ })
-    if ($LASTEXITCODE -ne 0) {
-      throw "Codex CLI exited with code $LASTEXITCODE."
-    }
-  }
-  finally {
-    Pop-Location
+  $gptResult = Invoke-JobWithTimeout `
+    -ScriptBlock {
+      param($repoRootParam, $promptPathParam, $nodePathParam, $cliArgsParam)
+      Push-Location $repoRootParam
+      try {
+        $lines = @(Get-Content -Raw $promptPathParam | & $nodePathParam @cliArgsParam 2>&1 | ForEach-Object { [string]$_ })
+        [pscustomobject]@{
+          Lines = $lines
+          ExitCode = $LASTEXITCODE
+        }
+      }
+      finally {
+        Pop-Location
+      }
+    } `
+    -ArgumentList @($repoRoot, $promptPath, $nodePath, $cliArgs) `
+    -TimeoutSeconds $DelegateTimeoutSeconds `
+    -TimeoutMessage "GPT delegate timed out after $DelegateTimeoutSeconds seconds."
+
+  $rawLines = @($gptResult.Lines)
+  if ([int]$gptResult.ExitCode -ne 0) {
+    throw "Codex CLI exited with code $($gptResult.ExitCode)."
   }
 
   $rawPath = "$ResolvedOutputPath.raw.jsonl"
@@ -947,7 +1108,7 @@ function Invoke-GptDelegate {
   if ($OutputFormat -eq "json") {
     $payload = [pscustomobject]@{
       provider = "gpt"
-      model = if ([string]::IsNullOrWhiteSpace($Model)) { $null } else { $Model }
+      model = if ([string]::IsNullOrWhiteSpace($EffectiveModel)) { $null } else { $EffectiveModel }
       text = $assistantText
       rawPath = $rawPath
     } | ConvertTo-Json -Depth 10
@@ -1014,13 +1175,16 @@ switch ($Action) {
 
     Write-Host "[ai-minion] provider: $Provider"
     Write-Host "[ai-minion] mode: $Mode"
+    Write-Host "[ai-minion] timeout seconds: $DelegateTimeoutSeconds"
+    $effectiveModel = Resolve-DelegateModel -ProviderName $Provider
+    Write-Host "[ai-minion] model: $(if ([string]::IsNullOrWhiteSpace($effectiveModel)) { '<none>' } else { $effectiveModel })"
     Write-Host "[ai-minion] output: $resolvedOutputPath"
     Write-Host "[ai-minion] context paths: $(if (@($resolvedContextPaths).Count -gt 0) { (@($resolvedContextPaths) | ForEach-Object { Get-RepoRelativePath -AbsolutePath $_ }) -join ', ' } else { '<none>' })"
 
     switch ($Provider) {
-      "gemini" { Invoke-GeminiDelegate -ResolvedOutputPath $resolvedOutputPath -ResolvedContextPaths $resolvedContextPaths }
-      "claude" { Invoke-ClaudeDelegate -ResolvedOutputPath $resolvedOutputPath -ResolvedContextPaths $resolvedContextPaths }
-      "gpt" { Invoke-GptDelegate -ResolvedOutputPath $resolvedOutputPath -ResolvedContextPaths $resolvedContextPaths }
+      "gemini" { Invoke-GeminiDelegate -ResolvedOutputPath $resolvedOutputPath -ResolvedContextPaths $resolvedContextPaths -EffectiveModel $effectiveModel }
+      "claude" { Invoke-ClaudeDelegate -ResolvedOutputPath $resolvedOutputPath -ResolvedContextPaths $resolvedContextPaths -EffectiveModel $effectiveModel }
+      "gpt" { Invoke-GptDelegate -ResolvedOutputPath $resolvedOutputPath -ResolvedContextPaths $resolvedContextPaths -EffectiveModel $effectiveModel }
     }
   }
 }

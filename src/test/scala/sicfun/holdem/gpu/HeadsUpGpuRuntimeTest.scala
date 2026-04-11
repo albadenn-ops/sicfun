@@ -6,6 +6,26 @@ import sicfun.holdem.equity.*
 import munit.FunSuite
 import java.nio.file.{Files, Paths}
 
+/** Tests for [[HeadsUpGpuRuntime]] -- the primary GPU batch equity computation abstraction.
+  *
+  * This suite covers:
+  *  - '''CPU-emulated provider''': verifies that the JVM-side emulation produces
+  *    identical results to the deterministic CPU batch, confirming that the GPU code
+  *    path's input/output marshalling is correct.
+  *  - '''Disabled provider''': confirms that the disabled provider reports unavailable
+  *    and rejects all compute requests.
+  *  - '''Native JNI provider''': integration tests that load the actual `sicfun_gpu_kernel.dll`
+  *    and verify telemetry, engine labels, and packed/legacy I/O paths. These tests
+  *    are skipped when the DLL is not present (CI without GPU hardware).
+  *  - '''OpenCL provider''': exercises the OpenCL backend for Monte Carlo and verifies
+  *    that exact mode is correctly rejected.
+  *  - '''Hybrid provider''': tests multi-device dispatch with per-device telemetry.
+  *  - '''Shape validation''': ensures mismatched packedKeys/keyMaterial lengths are caught.
+  *  - '''Unknown provider''': verifies graceful handling of misconfigured provider strings.
+  *
+  * All tests use `TestSystemPropertyScope.withSystemProperties` to temporarily override
+  * system properties, ensuring test isolation without polluting the global JVM state.
+  */
 class HeadsUpGpuRuntimeTest extends FunSuite:
   private val ProviderProperty = "sicfun.gpu.provider"
   private val NativePathProperty = "sicfun.gpu.native.path"
@@ -14,9 +34,13 @@ class HeadsUpGpuRuntimeTest extends FunSuite:
   private val NativeCudaMaxChunkMatchupsProperty = "sicfun.gpu.native.cuda.maxChunkMatchups"
   private val OpenCLPathProperty = "sicfun.opencl.native.path"
 
+  /** Temporarily overrides system properties for the duration of the thunk,
+    * restoring original values afterwards. Thread-safe via ScopedRuntimeProperties.
+    */
   private def withSystemProperties[A](updates: Seq[(String, Option[String])])(thunk: => A): A =
     TestSystemPropertyScope.withSystemProperties(updates)(thunk)
 
+  /** Convenience wrapper: sets only the GPU provider property. */
   private def withProvider[A](provider: String)(thunk: => A): A =
     withSystemProperties(Seq(ProviderProperty -> Some(provider)))(thunk)
 

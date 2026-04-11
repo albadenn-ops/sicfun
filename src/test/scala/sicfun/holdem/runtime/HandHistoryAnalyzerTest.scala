@@ -12,6 +12,23 @@ import sicfun.core.Card
 import java.nio.file.Files
 import scala.util.Random
 
+/** Tests for [[HandHistoryAnalyzer]] — the batch hand-history replay and decision evaluator.
+  *
+  * Covers:
+  *  - '''Single-hand analysis:''' Replaying a hand with known hero cards through
+  *    `analyzeWithHeroCards`, verifying that it produces the correct number of decisions
+  *    with valid equity estimates and action comparisons.
+  *  - '''Heads-up fallback:''' Ensuring button-hero analysis works without inventing
+  *    phantom small-blind folds.
+  *  - '''CLI integration:''' Running the full `run()` pipeline from a temp feed file,
+  *    verifying summary structure and decision count.
+  *  - '''Missing hero cards:''' Confirming that omitting `--heroCards` produces zero
+  *    decisions (no placeholder zeros).
+  *  - '''Mistake detection:''' Testing `countsAsMistake` with negative EV sizing gaps,
+  *    equal-EV category changes, and sub-cent rounding tolerance.
+  *  - '''EV fallback:''' Verifying `expectedValueForObservedAction` exact matching,
+  *    nearest-raise-size fallback, and category fallback.
+  */
 class HandHistoryAnalyzerTest extends FunSuite:
 
   private def card(t: String): Card =

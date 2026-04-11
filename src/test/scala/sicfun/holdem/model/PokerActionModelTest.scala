@@ -4,6 +4,26 @@ import sicfun.holdem.types.*
 import munit.FunSuite
 import sicfun.core.{Card, MultinomialLogistic}
 
+/**
+ * Comprehensive unit tests for the [[PokerActionModel]] and related domain types.
+ *
+ * Test coverage includes:
+ *   - '''PokerActionModel.uniform''': Correct category index, feature dimension,
+ *     uniform detection, and approximately equal predictions
+ *   - '''Construction validation''': Mismatched sizes, out-of-range indices, wrong dimensions
+ *   - '''predictFromFeatures''': Wrong feature count rejection, valid probability output
+ *   - '''categoryProbabilities''': Non-standard dimension rejection, sum-to-1 invariant
+ *   - '''likelihood''': MinLikelihood floor, unknown category rejection
+ *   - '''isEffectivelyUniform''': False for trained models
+ *   - '''train''': Correct dimension, trained model preferences
+ *   - '''defaultCategoryIndex''': Complete coverage, contiguous indices
+ *   - '''CalibrationSummary''': Input validation, brierSkillScore computation
+ *   - '''CalibrationGate''': Threshold comparison semantics
+ *   - '''CategoryMetrics''': Precision, recall, F1 edge cases
+ *   - '''ModelVersion''': Input validation for all fields
+ *   - '''TrainedPokerActionModel''': Lifecycle state transitions, retirement validation
+ *   - '''CrossValidationResult''': Data structure integrity
+ */
 class PokerActionModelTest extends FunSuite:
   private def card(token: String): Card =
     Card.parse(token).getOrElse(fail(s"invalid card: $token"))
@@ -320,6 +340,9 @@ class PokerActionModelTest extends FunSuite:
 
   // ---- TrainedPokerActionModel ----
 
+  /** Factory for creating test TrainedPokerActionModel instances with configurable
+   * calibration, gate threshold, and lifecycle state.
+   */
   private def makeTrainedModel(
       brierScore: Double = 0.3,
       maxBrier: Double = 0.5,

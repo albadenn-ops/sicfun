@@ -1,10 +1,23 @@
 package sicfun.holdem.bench
 
-import sicfun.core.{Card, DiscreteDistribution}
+import sicfun.core.DiscreteDistribution
 import sicfun.holdem.cfr.{HoldemCfrConfig, HoldemCfrNativeRuntime, HoldemCfrSolver}
 import sicfun.holdem.types.*
+import sicfun.holdem.bench.BenchSupport.{card, hole}
 
-/** Probes when fixed-point native CFR starts diverging from the JVM fixed baseline. */
+/** Probes when fixed-point native CFR starts diverging from the JVM fixed baseline.
+  *
+  * Fixed-point arithmetic (Int32) trades precision for speed in CFR regret accumulation.
+  * At low iteration counts, the rounding errors are negligible. As iterations increase,
+  * accumulated fixed-point rounding can cause the native solution to drift from the
+  * JVM Double baseline. This probe runs the same spot at increasing iteration counts
+  * and reports the maximum action probability difference between providers.
+  *
+  * Typical finding: divergence becomes visible around 500-1000 iterations, but the
+  * best action (argmax) usually remains stable much longer.
+  *
+  * Usage: sbt "runMain sicfun.holdem.bench.HoldemCfrFixedParityProbe [scenario] [operation] [iterations] [providers]"
+  */
 object HoldemCfrFixedParityProbe:
   private enum Operation:
     case Full
@@ -36,12 +49,6 @@ object HoldemCfrFixedParityProbe:
       bestAction: PokerAction,
       actionProbabilities: Map[PokerAction, Double]
   ) extends ProbeResult
-
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(throw new IllegalArgumentException(s"invalid card: $token"))
-
-  private def hole(a: String, b: String): HoleCards =
-    HoleCards.from(Vector(card(a), card(b)))
 
   def main(args: Array[String]): Unit =
     val scenario = if args.length > 0 then args(0).toLowerCase(java.util.Locale.ROOT) else "turn"

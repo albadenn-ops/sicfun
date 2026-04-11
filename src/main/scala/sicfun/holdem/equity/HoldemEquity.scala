@@ -9,24 +9,81 @@ import scala.util.Random
 import scala.annotation.targetName
 import scala.collection.mutable
 
+/**
+  * Core equity calculation engine for Texas Hold'em poker.
+  *
+  * Provides the primary API for computing hand equity (probability of winning) across
+  * multiple computation strategies:
+  *
+  * '''Exact enumeration''' (`equityExact`, `equityExactProb`, `equityExactMulti`):
+  *   Exhaustively evaluates all possible board run-outs. Practical for river (0 cards missing),
+  *   turn (1 card, ~45 run-outs), and flop (2 cards, ~990 run-outs). Uses the 7-card hand
+  *   evaluator to compare hero vs villain for each board completion. The `Prob` variant uses
+  *   fixed-point integer arithmetic (Int32 at 2^30 scale) for deterministic, cache-friendly
+  *   evaluation in the Bayes-to-equity hot path.
+  *
+  * '''Monte Carlo simulation''' (`equityMonteCarlo`, `equityMonteCarloMulti`):
+  *   Randomly samples villain hands from a weighted range and board run-outs, using
+  *   Welford's online algorithm for numerically stable variance/stderr estimation.
+  *   Supports optional GPU/native acceleration for preflop and postflop scenarios.
+  *
+  * '''Multi-villain''' (`equityExactMulti`, `equityMonteCarloMulti`):
+  *   Handles multi-way pots by iterating over all non-overlapping villain hand combinations,
+  *   computing hero's share (win = 1.0, tie = 1/(1+tied), loss = 0.0).
+  *
+  * '''GPU acceleration''':
+  *   Preflop equity can be accelerated via native CUDA/CPU range runtime (CSR format) or
+  *   batch GPU runtime. Postflop uses the native postflop Monte Carlo bridge. An acceleration
+  *   guard (ThreadLocal boolean) prevents recursive re-entry when GPU providers call back
+  *   into HoldemEquity.
+  *
+  * @see [[HeadsUpEquityTable]] for precomputed pairwise equity lookups
+  * @see [[RangeParser]] for parsing string-based range notation
+  * @see [[BunchingEffect]] for fold-conditioned range adjustment
+  */
 object HoldemEquity:
+  /** Maximum evaluation count for exact multi-villain enumeration before requiring explicit override. */
   private val DefaultExactMultiMaxEvaluations: Long = 5_000_000L
+
+  // -- System property / environment variable keys for configuring acceleration backends --
   private val PreflopEquityBackendProperty = "sicfun.holdem.preflopEquityBackend"
   private val PreflopEquityBackendEnv = "sicfun_HOLDEM_PREFLOP_EQUITY_BACKEND"
   private val GpuProviderProperty = "sicfun.gpu.provider"
   private val GpuProviderEnv = "sicfun_GPU_PROVIDER"
+
+  // -- Backend identifiers --
   private val PreflopEquityBackendAuto = "auto"
   private val PreflopEquityBackendCpu = "cpu"
   private val PreflopEquityBackendRange = "range"
   private val PreflopEquityBackendBatch = "batch"
-  // Prevent recursive acceleration when GPU providers call back into HoldemEquity.
+
+  /** Thread-local guard to prevent recursive GPU acceleration when GPU providers
+    * call back into HoldemEquity (e.g., native runtime computing equity internally).
+    */
   private val accelerationGuard = new ThreadLocal[java.lang.Boolean]:
     override def initialValue(): java.lang.Boolean = java.lang.Boolean.FALSE
+  /**
+    * Pre-processed villain range in flat-array form for cache-friendly Monte Carlo iteration.
+    * Hands are sorted by HoleCardsIndex ID for deterministic ordering.
+    *
+    * @param hands   concrete hole-card hands (dead-card filtered, canonicalized)
+    * @param weights normalized probability weights summing to 1.0
+    * @param handIds corresponding HoleCardsIndex integer IDs (for GPU key construction)
+    */
   private final case class PreparedRange(
       hands: Array[HoleCards],
       weights: Array[Double],
       handIds: Array[Int]
   )
+
+  /**
+    * Fixed-point variant of PreparedRange using Prob (Int32 @ 2^30 scale) weights.
+    * Used by equityExactProb for deterministic integer arithmetic in the Bayes hot path.
+    *
+    * @param hands   concrete hole-card hands
+    * @param weights Prob raw values (Int32 with 2^30 denominator), normalized
+    * @param size    number of valid entries (may be less than array length)
+    */
   private final case class PreparedRangeProb(
       hands: Array[HoleCards],
       weights: Array[Int], // Prob raw values (Int32 @ 2^30)
@@ -84,12 +141,30 @@ object HoldemEquity:
       i += 1
     new CompactPosterior(hands, weights, positiveCount)
 
+  /** Thread-local scratch array for weight accumulation during range preparation.
+    * Sized to HoleCardsIndex.size (1326) and zeroed after each use to avoid allocation per call.
+    */
   private val preparedRangeWeightScratch = new ThreadLocal[Array[Double]]:
     override def initialValue(): Array[Double] = new Array[Double](HoleCardsIndex.size)
+  /** Thread-local scratch array tracking which hand IDs were touched during range preparation.
+    * Used to efficiently zero out only the modified entries in the weight scratch array.
+    */
   private val preparedRangeTouchedIdsScratch = new ThreadLocal[Array[Int]]:
     override def initialValue(): Array[Int] = new Array[Int](HoleCardsIndex.size)
 
-  /** Fixed-point equity using CompactPosterior — bypasses Map entirely. */
+  /**
+    * Fixed-point exact equity using CompactPosterior — bypasses Map allocation entirely.
+    *
+    * Iterates the compact posterior's flat arrays directly, using integer (Long) accumulators
+    * for win/tie/loss to avoid floating-point drift. Weight per board is computed as
+    * `probWeight / boardCount` (integer division), introducing at most 1 LSB truncation
+    * per evaluation (~4e-8 relative error).
+    *
+    * @param hero    the hero's hole cards
+    * @param board   community cards (0-5 cards)
+    * @param compact flat-array posterior from Bayesian update
+    * @return exact equity result (win/tie/loss fractions summing to 1.0)
+    */
   def equityExactProb(
       hero: HoleCards,
       board: Board,
@@ -134,6 +209,20 @@ object HoldemEquity:
       val invTotal = 1.0 / total.toDouble
       EquityResult(winL * invTotal, tieL * invTotal, lossL * invTotal)
 
+  /**
+    * Exact equity computation against a villain range using floating-point accumulation.
+    *
+    * For each villain hand in the range (weighted by probability), enumerates all possible
+    * board completions, evaluates both 7-card hands, and accumulates weighted win/tie/loss.
+    * Each villain hand's contribution is weighted by `handWeight / boardCount` so that
+    * different villain hands are correctly weighted even when they produce different
+    * numbers of remaining board cards (due to card blocking).
+    *
+    * @param hero         the hero's hole cards
+    * @param board        community cards (0-5 cards)
+    * @param villainRange probability distribution over possible villain hole cards
+    * @return exact equity result
+    */
   def equityExact(
       hero: HoleCards,
       board: Board,
@@ -263,6 +352,23 @@ object HoldemEquity:
   ): EquityShareResult =
     equityExactMulti(hero, board, villainRanges, DefaultExactMultiMaxEvaluations)
 
+  /**
+    * Exact equity in a multi-villain pot.
+    *
+    * Recursively iterates over all non-overlapping villain hand assignments, then for each
+    * complete assignment enumerates board completions and evaluates the multi-way showdown.
+    * Hero's equity share accounts for ties: when hero ties with K villains, hero gets
+    * 1/(K+1) of the pot for that board.
+    *
+    * Only supports flop, turn, and river boards (3-5 cards) because preflop enumeration
+    * with multiple villains would be combinatorially infeasible.
+    *
+    * @param hero           the hero's hole cards
+    * @param board          community cards (3-5 cards)
+    * @param villainRanges  one distribution per villain seat
+    * @param maxEvaluations safety cap to prevent runaway computation
+    * @return equity share result with win/tie/loss/share fractions
+    */
   def equityExactMulti(
       hero: HoleCards,
       board: Board,
@@ -355,6 +461,22 @@ object HoldemEquity:
     val distributions = ranges.map(parseRangeOrThrow)
     equityExactMulti(hero, board, distributions, maxEvaluations)
 
+  /**
+    * Monte Carlo equity estimation against a single villain range.
+    *
+    * Each trial: sample a villain hand from the weighted range, sample missing board cards,
+    * evaluate both 7-card hands, and record the outcome. Uses Welford's online algorithm
+    * for numerically stable running mean and variance computation.
+    *
+    * For preflop boards, may delegate to GPU/native acceleration if configured.
+    *
+    * @param hero         the hero's hole cards
+    * @param board        community cards (0-5 cards)
+    * @param villainRange probability distribution over villain hands
+    * @param trials       number of Monte Carlo samples
+    * @param rng          random number generator (seeded for reproducibility)
+    * @return equity estimate with mean, variance, stderr, and win/tie/loss rates
+    */
   def equityMonteCarlo(
       hero: HoleCards,
       board: Board,
@@ -368,6 +490,18 @@ object HoldemEquity:
     val preparedRange = prepareRange(villainRange, deadMaskValue)
     equityMonteCarloPrepared(hero, board, preparedRange, deadMaskValue, trials, rng)
 
+  /**
+    * Inner Monte Carlo loop with prepared (flat-array) range data.
+    *
+    * First attempts GPU/native acceleration; falls back to the JVM-based loop if unavailable.
+    * The JVM loop is optimized for the common case:
+    *   - River (0 missing cards): directly evaluates with no board sampling or allocation.
+    *   - Pre-river: uses a reusable board array and rejection-sampled card drawing to
+    *     avoid per-trial allocations.
+    *
+    * Welford's online algorithm tracks mean and M2 (sum of squared deviations) for
+    * numerically stable variance estimation: variance = M2 / (n-1), stderr = sqrt(var/n).
+    */
   private def equityMonteCarloPrepared(
       hero: HoleCards,
       board: Board,
@@ -405,6 +539,9 @@ object HoldemEquity:
               k += 1
             arr
           else null
+        val sampledDeckIndexes =
+          if boardMissing > 0 then new Array[Int](boardMissing)
+          else null
 
         while i < trials do
           val villain = sampler.sample(rng)
@@ -420,15 +557,16 @@ object HoldemEquity:
               villain.first, villain.second, boardCards(0), boardCards(1), boardCards(2), boardCards(3), boardCards(4)
             )
           else
-            val remaining = deckMinusDead.filterNot(card => card == villain.first || card == villain.second)
-            val extra = sampleWithoutReplacement(remaining, boardMissing, rng)
-            // Fill sampled cards into reusable board array.
-            var k = boardCards.length
-            var extraIdx = 0
-            while k < 5 do
-              boardArr(k) = extra(extraIdx)
-              extraIdx += 1
-              k += 1
+            fillBoardWithRandomCards(
+              boardArr = boardArr,
+              knownBoardSize = boardCards.length,
+              deckMinusDead = deckMinusDead,
+              blockedFirst = villain.first,
+              blockedSecond = villain.second,
+              missing = boardMissing,
+              sampledDeckIndexes = sampledDeckIndexes,
+              rng = rng
+            )
             heroRank = HandEvaluator.evaluate7PackedDirect(
               hero.first, hero.second, boardArr(0), boardArr(1), boardArr(2), boardArr(3), boardArr(4)
             )
@@ -486,6 +624,20 @@ object HoldemEquity:
   def equityMonteCarlo(hero: HoleCards, board: Board, trials: Int): EquityEstimate =
     equityMonteCarlo(hero, board, fullRange(hero, board), trials)
 
+  /**
+    * Monte Carlo equity estimation in a multi-villain pot.
+    *
+    * Each trial: sample one hand per villain (rejecting overlapping samples), sample
+    * missing board cards, evaluate all hands, and compute hero's share. Uses rejection
+    * sampling to ensure no two villains hold the same card.
+    *
+    * @param hero          hero's hole cards
+    * @param board         community cards (0-5 cards)
+    * @param villainRanges one distribution per villain seat
+    * @param trials        number of Monte Carlo samples
+    * @param rng           random number generator
+    * @return equity estimate with mean share, variance, stderr, and rate breakdown
+    */
   def equityMonteCarloMulti(
       hero: HoleCards,
       board: Board,
@@ -575,12 +727,25 @@ object HoldemEquity:
   ): EquityEstimate =
     equityMonteCarloMulti(hero, board, ranges, trials, new Random())
 
+  /** Computes the expected value of calling a bet.
+    *
+    * Formula: EV(call) = equity * (pot + call) - call
+    * A positive EV means calling is profitable in the long run.
+    *
+    * @param potBeforeCall the pot size before hero's call (must be non-negative)
+    * @param callSize      the amount hero must call (must be non-negative)
+    * @param equity        hero's probability of winning the hand (0.0 to 1.0)
+    * @return the expected value in chips; positive = profitable call
+    */
   def evCall(potBeforeCall: Double, callSize: Double, equity: Double): Double =
     require(potBeforeCall >= 0.0, "potBeforeCall must be non-negative")
     require(callSize >= 0.0, "callSize must be non-negative")
     require(equity >= 0.0 && equity <= 1.0, "equity must be between 0 and 1")
     equity * (potBeforeCall + callSize) - callSize
 
+  /** Constructs a uniform distribution over all hole cards not blocked by hero or board.
+    * Used as the default "random hand" range when no specific villain range is provided.
+    */
   def fullRange(hero: HoleCards, board: Board): DiscreteDistribution[HoleCards] =
     val dead = hero.asSet ++ board.asSet
     val hands = allHoleCardsExcluding(dead)
@@ -1061,6 +1226,15 @@ object HoldemEquity:
       lossRate = normalizedLoss
     )
 
+  /**
+    * Filters and canonicalizes a villain range distribution by removing hands that
+    * overlap with dead cards (hero + board), canonicalizing hand ordering, and
+    * deduplicating entries that collapse to the same canonical hand.
+    *
+    * @param range the raw villain range distribution
+    * @param dead  set of cards that are already in play (hero + board)
+    * @return a clean, normalized distribution with no dead-card conflicts
+    */
   private def sanitizeRange(
       range: DiscreteDistribution[HoleCards],
       dead: Set[Card]
@@ -1080,6 +1254,10 @@ object HoldemEquity:
     require(collapsed.nonEmpty, "villain range is empty after filtering")
     DiscreteDistribution(collapsed.toMap).normalized
 
+  /** Safety check: estimates the total number of evaluations for exact multi-villain
+    * enumeration and rejects the request if it exceeds maxEvaluations. This prevents
+    * accidentally launching a computation that would take hours or days.
+    */
   private def ensureExactFeasible(
       board: Board,
       ranges: Seq[DiscreteDistribution[HoleCards]],
@@ -1097,11 +1275,16 @@ object HoldemEquity:
       s"exact enumeration upper bound $estimate exceeds maxEvaluations $maxEvaluations; use MonteCarlo or narrower ranges"
     )
 
+  /** Overflow-safe multiplication that clamps to limit+1 instead of wrapping on overflow. */
   private def safeMultiply(a: Long, b: Long, limit: Long): Long =
     if a == 0L || b == 0L then 0L
     else if a > limit / b then limit + 1L
     else a * b
 
+  /** Rejection-samples one hand per villain such that no two hands share any cards.
+    * Retries up to maxAttempts times; throws if no valid combination is found.
+    * This is necessary in multi-villain Monte Carlo to maintain physical consistency.
+    */
   private def sampleVillainsNoOverlap(
       samplers: Vector[WeightedSampler[HoleCards]],
       dead: Set[Card],
@@ -1128,6 +1311,10 @@ object HoldemEquity:
         attempt += 1
       throw new IllegalArgumentException("unable to sample non-overlapping villain hands; ranges may be too restrictive")
 
+  /** Sorts range weights by HoleCardsIndex ID for deterministic iteration order.
+    * This ensures exact multi-villain enumeration produces identical results regardless
+    * of Map iteration order.
+    */
   private def sortedWeights(weights: Map[HoleCards, Double]): Vector[(HoleCards, Double)] =
     if weights.isEmpty then Vector.empty
     else
@@ -1148,10 +1335,14 @@ object HoldemEquity:
         j += 1
       result.toVector
 
+  /** Generates all canonical hole cards from the deck excluding dead cards. */
   private def allHoleCardsExcluding(dead: Set[Card]): Vector[HoleCards] =
     val remaining = Deck.full.filterNot(dead.contains).toIndexedSeq
     HoldemCombinator.holeCardsFrom(remaining)
 
+  /** Computes C(n,k) = n! / (k! * (n-k)!) using iterative multiplication to avoid overflow.
+    * Uses the identity C(n,k) = C(n, n-k) to minimize the number of multiplications.
+    */
   private def combinationsCount(n: Int, k: Int): Long =
     require(k >= 0 && k <= n)
     if k == 0 || k == n then 1L
@@ -1166,6 +1357,9 @@ object HoldemEquity:
         i += 1
       numer / denom
 
+  /** Fisher-Yates partial shuffle to sample k items without replacement from the collection.
+    * Only shuffles the first k positions, then extracts them.
+    */
   private def sampleWithoutReplacement[A](items: IndexedSeq[A], k: Int, rng: Random): Vector[A] =
     require(k >= 0 && k <= items.length)
     val buffer = scala.collection.mutable.ArrayBuffer.from(items)
@@ -1186,7 +1380,45 @@ object HoldemEquity:
       i += 1
     result.result()
 
+  /** Fills the missing board cards by uniformly sampling without replacement from
+    * deckMinusDead while excluding the current villain hole cards.
+    * Uses a small fixed-size index scratch buffer to avoid per-trial allocations.
+    */
+  private def fillBoardWithRandomCards(
+      boardArr: Array[Card],
+      knownBoardSize: Int,
+      deckMinusDead: IndexedSeq[Card],
+      blockedFirst: Card,
+      blockedSecond: Card,
+      missing: Int,
+      sampledDeckIndexes: Array[Int],
+      rng: Random
+  ): Unit =
+    var draw = 0
+    while draw < missing do
+      var accepted = false
+      while !accepted do
+        val idx = rng.nextInt(deckMinusDead.length)
+        val card = deckMinusDead(idx)
+        if card != blockedFirst && card != blockedSecond then
+          var duplicate = false
+          var j = 0
+          while j < draw && !duplicate do
+            if sampledDeckIndexes(j) == idx then duplicate = true
+            j += 1
+          if !duplicate then
+            sampledDeckIndexes(draw) = idx
+            boardArr(knownBoardSize + draw) = card
+            accepted = true
+      draw += 1
+
+  /** Weighted random sampler using cumulative distribution function (CDF) with binary search.
+    * Constructed once per range preparation, then sampled O(log n) per trial.
+    */
   private object WeightedSampler:
+    /** Builds a sampler from parallel arrays of items and their probability weights.
+      * Constructs a cumulative weight array for O(log n) binary-search sampling.
+      */
     def fromArrays[A](items: Array[A], weights: Array[Double]): WeightedSampler[A] =
       require(items.nonEmpty, "cannot sample from empty range")
       require(items.length == weights.length, "sampler items/weights length mismatch")
@@ -1199,13 +1431,22 @@ object HoldemEquity:
         i += 1
       new WeightedSampler(items.asInstanceOf[Array[Any]], cumulative)
 
+  /**
+    * Weighted random sampler backed by a cumulative distribution array.
+    * Uses binary search over the CDF to achieve O(log n) sampling per call.
+    *
+    * @param values     the items to sample from (type-erased to Any for array covariance)
+    * @param cumulative running sum of weights; cumulative(i) = sum(weights[0..i])
+    */
   private final class WeightedSampler[A] private (
       values: Array[Any],
       cumulative: Array[Double]
   ):
     private val total: Double = cumulative.last
 
+    /** Draws one sample using inverse CDF method with binary search. */
     def sample(rng: Random): A =
+      // Draw uniform in [0, total), then find the first index where cumulative >= r
       val r = rng.nextDouble() * total
       var low = 0
       var high = cumulative.length - 1

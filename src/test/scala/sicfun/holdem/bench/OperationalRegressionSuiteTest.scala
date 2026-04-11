@@ -5,16 +5,26 @@ import sicfun.holdem.io.*
 import sicfun.holdem.model.*
 
 import munit.FunSuite
-import sicfun.core.Card
+import sicfun.holdem.bench.BenchSupport.card
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
 
+/** End-to-end operational regression test that exercises the full poker analytics
+  * pipeline: training data on disk -> model artifact -> hand-state snapshot ->
+  * signal audit log generation.
+  *
+  * This single test validates that:
+  *   1. [[TrainPokerActionModel.run]] trains and persists a model artifact with metadata
+  *   2. [[HandEngine]] / [[HandStateSnapshotIO]] correctly build and serialize hand state
+  *   3. [[GenerateSignals.run]] reads both artifacts and produces a correct audit log
+  *   4. Persisted signal fields (modelVersionId, generatedAtEpochMillis, paths) are accurate
+  *
+  * All artifacts are created in a temporary directory tree and cleaned up afterward.
+  */
 class OperationalRegressionSuiteTest extends FunSuite:
-  private def card(token: String): Card =
-    Card.parse(token).getOrElse(fail(s"invalid card: $token"))
-
+  /** Builds a synthetic [[PokerEvent]] on a fixed flop board (Ts 9h 8d). */
   private def event(
       handId: String,
       sequence: Long,
@@ -114,6 +124,7 @@ class OperationalRegressionSuiteTest extends FunSuite:
       deleteRecursively(tempRoot)
   }
 
+  /** Recursively deletes a directory tree (deepest paths first) for temp cleanup. */
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)

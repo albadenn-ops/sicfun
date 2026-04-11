@@ -10,6 +10,14 @@ import sicfun.holdem.gpu.*
   */
 object DeviceProofRun:
 
+  /** Entry point. Discovers all CUDA and OpenCL devices via JNI bindings, then executes
+    * a small batch of equity computations on each device to prove device selection works.
+    *
+    * Output includes device descriptors, JNI engine codes (confirming which kernel ran),
+    * and a hash-based checksum of results for quick parity verification across devices.
+    *
+    * @param args optional positional: maxMatchups (default 5000), trials (default 500), seedBase (default 42)
+    */
   def main(args: Array[String]): Unit =
     val maxMatchups = args.headOption.flatMap(v => scala.util.Try(v.toLong).toOption).getOrElse(5000L)
     val trials = args.lift(1).flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(500)
@@ -46,6 +54,8 @@ object DeviceProofRun:
       println(s"opencl[$idx]=$info")
     }
 
+    // Build a canonical batch of matchup pairs and unpack into parallel arrays
+    // for the low-level JNI batch API (which takes flat arrays, not objects).
     val batch = HeadsUpEquityCanonicalTable.selectCanonicalBatch(maxMatchups)
     val n = batch.packedKeys.length
     val low = new Array[Int](n)
@@ -59,9 +69,11 @@ object DeviceProofRun:
       seeds(i) = HeadsUpEquityTable.monteCarloSeed(seedBase, batch.keyMaterial(i))
       i += 1
 
+    // Extract device indices from the hybrid discovery layer's "kind:index" ID format.
     val cudaIdOpt = hybridDevices.find(_.kind == "cuda").flatMap(d => deviceIndexFromId(d.id))
     val openclIdOpt = hybridDevices.find(_.kind == "opencl").flatMap(d => deviceIndexFromId(d.id))
 
+    /** Runs a single CUDA batch and prints status, elapsed time, engine code, and checksum. */
     def runCuda(label: String, deviceIndex: Int): Unit =
       val wins = new Array[Double](n)
       val ties = new Array[Double](n)
@@ -79,6 +91,7 @@ object DeviceProofRun:
           s"lastEngineCode=$engineCode checksum=$checksum"
       )
 
+    /** Runs a single OpenCL batch and prints status, elapsed time, engine code, and checksum. */
     def runOpenCL(label: String, deviceIndex: Int): Unit =
       val wins = new Array[Double](n)
       val ties = new Array[Double](n)
@@ -115,11 +128,17 @@ object DeviceProofRun:
 
     println("=== Done ===")
 
+  /** Parses the numeric device index from a hybrid device ID string like "cuda:0" or "opencl:1". */
   private def deviceIndexFromId(id: String): Option[Int] =
     id.split(":", 2) match
       case Array(_, raw) => scala.util.Try(raw.toInt).toOption
       case _ => None
 
+  /** Computes a non-cryptographic 64-bit hash over all result arrays for quick parity checks.
+    *
+    * Uses a variant of the Fibonacci hashing constant (golden ratio * 2^64) combined with
+    * bit shifts for mixing. The same checksum on two devices means identical results.
+    */
   private def checksum64(
       wins: Array[Double],
       ties: Array[Double],
