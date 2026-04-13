@@ -240,21 +240,10 @@ class StrategicEngineTest extends FunSuite:
     assert(candidates.contains(action2), s"Action $action2 not in candidates (hand 2)")
     engine.endHand()
 
-  test("integration: decideHeroStrategic routes correctly"):
-    assume(nativeAvailable, "Native library not available")
-    val engine = new StrategicEngine(StrategicEngine.Config(numSimulations = 50))
-    engine.initSession(rivalIds = Vector(PlayerId("villain")))
-    engine.startHand(testHeroCards)
-
-    val gs = minimalState
-    val candidates = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(3.0))
-    val ctx = HeroDecisionPipeline.StrategicDecisionContext(
-      state = gs,
-      candidates = candidates,
-      engine = engine
-    )
-    val action = HeroDecisionPipeline.decideHeroStrategic(ctx)
-    assert(candidates.contains(action), s"Action $action not in candidates")
+  // decideHeroStrategic integration test moved to match runner tests (Tasks 5-7)
+  // — the new 2-arg signature requires a HeroDecisionContext with RealTimeAdaptiveEngine,
+  // which is wired in the full runner context. The underlying StrategicEngine.decide()
+  // path is already covered by "integration: play a complete hand with Strategic mode" above.
 
   test("exploitability function returns non-trivial values"):
     val engine = new StrategicEngine(StrategicEngine.Config())

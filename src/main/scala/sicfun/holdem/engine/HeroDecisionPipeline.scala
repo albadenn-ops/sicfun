@@ -2,6 +2,7 @@ package sicfun.holdem.engine
 
 import sicfun.holdem.engine.inference.{VillainObservation, RangeInferenceEngine}
 import sicfun.holdem.engine.villain.{RealTimeAdaptiveEngine, EquilibriumBaselineConfig}
+import sicfun.holdem.runtime.StrategicLifecycleHelper
 import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 import sicfun.holdem.equity.*
@@ -53,7 +54,7 @@ private[holdem] object HeroDecisionPipeline:
   final case class StrategicDecisionContext(
       state: GameState,
       candidates: Vector[PokerAction],
-      engine: StrategicEngine
+      helper: StrategicLifecycleHelper  // was: engine: StrategicEngine
   )
 
   /** Context for a hero decision. Bundles all parameters needed by both Adaptive and GTO modes. */
@@ -145,12 +146,39 @@ private[holdem] object HeroDecisionPipeline:
         )
       case HeroMode.Strategic =>
         throw new UnsupportedOperationException(
-          "Strategic mode requires StrategicDecisionContext — use decideHeroStrategic()")
+          "Strategic mode in decideHero requires StrategicDecisionContext — use decideHeroStrategic()")
 
-  /** Strategic mode decision dispatch. */
-  @scala.annotation.nowarn("msg=deprecated")
-  def decideHeroStrategic(ctx: StrategicDecisionContext): PokerAction =
-    ctx.engine.decide(ctx.state, ctx.candidates)
+  /** Strategic overlay decision dispatch.
+    *
+    * Runs the adaptive engine for upstream EVs (via heroCtx.engine, a
+    * RealTimeAdaptiveEngine), then filters through the strategic overlay
+    * (via strategicCtx.helper, a StrategicLifecycleHelper wrapping StrategicEngine).
+    *
+    * Returns the overlay-selected action. The full OverlayResult is stored
+    * in strategicCtx.helper.engine.lastOverlayResult for diagnostics.
+    */
+  def decideHeroStrategic(
+      strategicCtx: StrategicDecisionContext,
+      heroCtx: HeroDecisionContext
+  ): PokerAction =
+    // 1. Run adaptive engine for upstream EVs
+    val adaptiveResult = heroCtx.engine.decide(
+      hero = heroCtx.hero,
+      state = heroCtx.state,
+      folds = heroCtx.folds,
+      villainPos = heroCtx.villainPos,
+      observations = heroCtx.observations,
+      candidateActions = heroCtx.candidates,
+      decisionBudgetMillis = heroCtx.decisionBudgetMillis,
+      rng = new Random(heroCtx.rng.nextLong())
+    )
+    // 2. Overlay: filter adaptive EVs through strategic beliefs
+    val overlayResult = strategicCtx.helper.decideWithOverlay(
+      heroCtx.state,
+      heroCtx.candidates,
+      adaptiveResult.decision.recommendation
+    )
+    overlayResult.selectedAction
 
   /** Computes legal raise sizes based on the protocol game state.
     *
