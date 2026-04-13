@@ -33,11 +33,18 @@ certification in real EVs is deferred to a follow-up.
 
 ### Phase 1: Overlay Rerank + Diagnostics + Soft Veto
 
+- Upstream source: adaptive (heads-up) or multiway (>2 players) only. GTO
+  upstream deferred — the current GTO path (`solveShallowDecisionPolicy`)
+  returns sampled actions, not per-action EVs.
 - StrategicEngine accepts upstream EVs and applies belief-weighted penalties
 - Soft veto: flag actions where robust lower bounds (if available from existing
   certification) fall below a threshold, but don't hard-block
 - Distinct `OverlayResult` trace (not DecisionEvaluationBundle)
 - Wire into hall, ACPC, Slumbot with shared lifecycle helper
+- Update StrategicAdvisorBridge to use overlay path and OverlayResult diagnostics
+- Stable rival identity contract: callers supply PlayerId, not position-derived
+- CLI flags: camelCase to match existing `heroMode` convention in all three
+  runners
 - Benchmarks: mbb/hand, action distribution, veto rate
 
 ### Phase 2: Baseline/Exploit Blending + Hard Safety Veto (follow-up)
@@ -46,6 +53,8 @@ certification in real EVs is deferred to a follow-up.
 - True baseline vs exploit EV blending with beta interpolation
 - Hard safety veto using profile-conditioned worst-case values
 - Ground certification path in real EVs
+- GTO upstream: add EV-producing API to CFR solver path, then wire as upstream
+  option
 
 This spec covers Phase 1 only.
 
@@ -56,8 +65,7 @@ This spec covers Phase 1 only.
 ```scala
 final case class OverlayInput(
     gameState: GameState,
-    exploitEvs: Vector[ActionEvaluation],     // from upstream engine (belief-adapted)
-    baselineEvs: Vector[ActionEvaluation],     // from equilibrium baseline if available
+    upstreamEvs: Vector[ActionEvaluation],     // from adaptive or multiway engine
     rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
     exploitationStates: Map[PlayerId, ExploitationState],
     robustLowerBounds: Option[Array[Double]],  // from existing certification if run
@@ -65,16 +73,13 @@ final case class OverlayInput(
 )
 ```
 
-- `exploitEvs`: Per-action chip EVs from the adaptive engine's exploit
-  recommendation (archetype-adapted posterior). Uses existing
+- `upstreamEvs`: Per-action chip EVs from the upstream engine's recommendation
+  (adaptive for heads-up, multiway for >2 players). Uses existing
   `ActionEvaluation(action, expectedValue)` from `RangeInferenceEngine.scala:51`.
-- `baselineEvs`: Per-action chip EVs from the equilibrium baseline path (when
-  `EquilibriumBaselineConfig` is active in adaptive engine). Empty vector when
-  baseline is unavailable.
 - `robustLowerBounds`: Optional per-action worst-case EVs from existing
   certification solvers. Phase 1 uses these for soft veto only when the caller
-  has already run certification. Phase 2 will compute them from
-  profile-conditioned upstream queries.
+  has already run certification. Phase 2 will add `baselineEvs` and
+  `profileEvs` for true blending and hard veto.
 
 ### OverlayResult
 
@@ -104,17 +109,18 @@ This is **not** a DecisionEvaluationBundle. The overlay trace describes what the
 filter did to upstream EVs, not what a POMDP solver computed. The existing bundle
 remains available if certification is also run.
 
-### StrategicUpstreamMode
+### Upstream Source
 
-```scala
-enum StrategicUpstreamMode:
-  case Adaptive  // always use adaptive engine as upstream
-  case Gto       // always use GTO (posterior + CFR) as upstream
-  case Auto      // adaptive for production, gto for offline analysis
-```
+Phase 1 upstream is always adaptive (heads-up) or multiway (>2 players). The
+caller determines which path runs and passes the resulting
+`ActionRecommendation` to the overlay.
 
-Added to `StrategicEngine.Config`. Determines which upstream engine produces the
-EVs that the overlay filters. Default: `Auto`.
+GTO upstream is deferred to Phase 2 because the current GTO path
+(`HoldemCfrSolver.solveShallowDecisionPolicy`) returns action probabilities,
+not per-action EVs. Adding an EV-producing CFR API is Phase 2 scope.
+
+No `StrategicUpstreamMode` enum in Phase 1. When Phase 2 adds GTO upstream,
+the enum and config field will be introduced then.
 
 ## Component Design
 
@@ -126,24 +132,24 @@ StrategicOverlay.filter(input: OverlayInput): OverlayResult
 
 Phase 1 filter logic:
 
-1. **Start with exploit EVs** as the action ranking.
+1. **Start with upstream EVs** as the action ranking.
 2. **Belief-weighted penalty**: For each action `a`, compute penalty =
    `sum over rivals R of (beliefMass(R, Bluff) * aggressionPenalty(a))` where
    `aggressionPenalty(Call) = -0.1 * potFraction`, `aggressionPenalty(Check) =
    -0.05 * potFraction`, `aggressionPenalty(Raise) = 0`, `aggressionPenalty(Fold)
    = 0`. The intuition: against likely-aggressive opponents, passive actions lose
-   more value than the exploit EV suggests because the opponent will barrel.
+   more value than the upstream EV suggests because the opponent will barrel.
    These coefficients are initial values — calibrate from benchmark data.
-3. **Baseline anchoring**: When baseline EVs are available, for each action
-   compute `adjustedEv = (1 - blendWeight) * exploitEv + blendWeight *
-   baselineEv` where `blendWeight` is derived from the minimum beta across
-   exploitation states (low beta = stay close to baseline).
-4. **Soft veto**: When `robustLowerBounds` are present, flag any action whose
+3. **Soft veto**: When `robustLowerBounds` are present, flag any action whose
    robust lower bound is below `-(epsilonBase + epsilonAdapt)`. Mark as soft
    vetoed in diagnostics but do not remove from ranking.
-5. **Re-rank** remaining actions by adjusted EV. Select top action.
-6. **Fallback**: If all actions are soft-vetoed, select the action with the
+4. **Re-rank** remaining actions by adjusted EV. Select top action.
+5. **Fallback**: If all actions are soft-vetoed, select the action with the
    highest robust lower bound (most defensive).
+
+**Explicitly deferred to Phase 2**: Baseline/exploit EV blending with beta
+interpolation. Phase 1 has no `baselineEvs` field — the upstream engine's
+recommendation is used as-is before penalty/veto.
 
 ### 2. StrategicEngine.decide() — new overload
 
@@ -151,17 +157,17 @@ Phase 1 filter logic:
 def decide(
     gameState: GameState,
     candidateActions: Vector[PokerAction],
-    exploitEvs: Vector[ActionEvaluation],
-    baselineEvs: Vector[ActionEvaluation] = Vector.empty
+    upstreamEvs: Vector[ActionEvaluation]
 ): OverlayResult
 ```
 
 Flow:
 1. Build `OverlayInput` from session state + arguments
-2. Optionally run existing certification (if `config.runCertification` is true)
-   to populate `robustLowerBounds`
+2. If existing certification was previously run for this decision (via the
+   deprecated path or external call), attach `robustLowerBounds` from
+   `_lastBundle`. Otherwise `None`.
 3. Call `StrategicOverlay.filter(input)`
-4. Store `OverlayResult` for diagnostics
+4. Store `OverlayResult` in `_lastOverlayResult` for diagnostics
 5. Update deployment tracking from overlay result
 6. Return result
 
@@ -178,14 +184,34 @@ private[holdem] object StrategicLifecycleHelper:
 
   def initEngine(config: StrategicEngine.Config): StrategicEngine
 
+  /** Callers supply stable rival IDs, NOT position-derived IDs.
+    *
+    * Identity contract: In heads-up match play, the remote opponent flips
+    * between Button and BigBlind each hand. Converting Position.toString →
+    * PlayerId would split one opponent into multiple belief tracks. Callers
+    * must provide a stable ID per physical opponent:
+    *   - ACPC/Slumbot: PlayerId("villain") (single remote opponent)
+    *   - Hall: PlayerId from VillainProfile name (stable across seat rotation)
+    *   - Advisor: PlayerId("villain") (as StrategicAdvisorBridge already does)
+    *
+    * The positionMapping tracks which seat each rival currently occupies so
+    * that observeAction can route by position to the correct stable ID.
+    */
   def initSession(
       engine: StrategicEngine,
-      rivalPositions: Vector[Position],
+      rivalIds: Vector[PlayerId],
+      positionMapping: Map[Position, PlayerId],
       seatInfo: Map[PlayerId, StrategicEngine.RivalSeatInfo] = Map.empty
+  ): Unit
+
+  /** Update position → rivalId mapping at hand start (seats rotate). */
+  def updatePositionMapping(
+      positionMapping: Map[Position, PlayerId]
   ): Unit
 
   def startHand(engine: StrategicEngine, heroCards: HoleCards): Unit
 
+  /** Routes villain action to the correct stable rival ID via position mapping. */
   def observeVillainAction(
       engine: StrategicEngine,
       villainPosition: Position,
@@ -195,19 +221,18 @@ private[holdem] object StrategicLifecycleHelper:
 
   def endHand(engine: StrategicEngine): Unit
 
-  /** Run upstream engine then overlay filter. */
+  /** Extract EVs from upstream recommendation and run overlay filter. */
   def decideWithOverlay(
       engine: StrategicEngine,
       gameState: GameState,
       candidates: Vector[PokerAction],
-      upstreamRecommendation: ActionRecommendation,
-      baselineRecommendation: Option[ActionRecommendation] = None
+      upstreamRecommendation: ActionRecommendation
   ): OverlayResult
 ```
 
 All three callers (hall, ACPC, Slumbot) delegate to this helper. The helper
-handles PlayerId conversion (`Position.toString` → `PlayerId`) and EV
-extraction from `ActionRecommendation`.
+owns the `Position → PlayerId` mapping and EV extraction from
+`ActionRecommendation`.
 
 ### 4. PlayingHall Integration
 
@@ -228,16 +253,14 @@ To:
 case HeroMode.Strategic =>
   strategicEngineOpt match
     case Some(engine) =>
-      // 1. Run adaptive/multiway to get real EVs
+      // 1. Run adaptive (heads-up) or multiway (>2 players) to get real EVs
       val recommendation = if livePlayers > 2 then
         multiwayRecommendation(state, candidates, ...)
       else
         adaptiveRecommendation(state, candidates, ...)
-      // 2. Get baseline if available
-      val baseline = equilibriumBaseline(state, candidates, ...)
-      // 3. Overlay
+      // 2. Overlay: filter upstream EVs through strategic beliefs
       val result = StrategicLifecycleHelper.decideWithOverlay(
-        engine, state, candidates, recommendation, baseline
+        engine, state, candidates, recommendation
       )
       result.selectedAction
     case None => /* fallback to adaptive */
@@ -252,19 +275,39 @@ Both runners are heads-up only. Integration via `HeroDecisionPipeline`:
 
 **HeroDecisionPipeline changes:**
 - Remove the `throw UnsupportedOperationException` for Strategic mode
-- `decideHeroStrategic()` updated to accept upstream context:
+- `decideHeroStrategic()` updated signature:
 
 ```scala
 def decideHeroStrategic(
-    ctx: StrategicDecisionContext,
+    strategicCtx: StrategicDecisionContext,
     heroCtx: HeroDecisionContext
 ): OverlayResult =
-  // 1. Run adaptive engine for upstream EVs
-  val adaptiveResult = ctx.engine.decide(...) // upstream adaptive
-  // ... extract recommendation
-  // 2. Overlay
-  StrategicLifecycleHelper.decideWithOverlay(...)
+  // 1. Run adaptive engine for upstream EVs via heroCtx.engine (RealTimeAdaptiveEngine)
+  //    NOT strategicCtx.engine (which is StrategicEngine — that would recurse)
+  val adaptiveResult = heroCtx.engine.decide(
+    hero = heroCtx.hero,
+    state = heroCtx.state,
+    folds = heroCtx.folds,
+    villainPos = heroCtx.villainPos,
+    observations = heroCtx.observations,
+    candidateActions = heroCtx.candidates,
+    decisionBudgetMillis = heroCtx.decisionBudgetMillis,
+    rng = new Random(heroCtx.rng.nextLong())
+  )
+  // 2. Overlay — filter adaptive EVs through strategic beliefs
+  StrategicLifecycleHelper.decideWithOverlay(
+    strategicCtx.engine,
+    heroCtx.state,
+    heroCtx.candidates,
+    adaptiveResult.decision.recommendation
+  )
 ```
+
+Note: `strategicCtx.engine` is the `StrategicEngine` (overlay).
+`heroCtx.engine` is the `RealTimeAdaptiveEngine` (upstream EV source).
+These are different types — the old sketch incorrectly called
+`ctx.engine.decide(...)` which would have invoked the strategic engine
+as its own upstream.
 
 **AcpcMatchRunner changes:**
 - Add `strategicEngineOpt: Option[StrategicEngine]` to `Runner`
@@ -277,12 +320,11 @@ def decideHeroStrategic(
 
 ### 6. CLI / Config Wiring
 
-- `TexasHoldemPlayingHall.Config`: already has `heroMode: HeroMode` — no change
-  needed, but verify the CLI parser accepts "strategic"
-- `AcpcMatchRunner`: add `--hero-mode` flag parsing to accept
-  `adaptive|gto|strategic`
-- `SlumbotMatchRunner`: same
-- `StrategicEngine.Config`: add `upstreamMode: StrategicUpstreamMode = Auto`
+- `TexasHoldemPlayingHall.Config`: already has `heroMode: HeroMode` — verify
+  the CLI parser accepts "strategic" (it uses camelCase `heroMode` flag)
+- `AcpcMatchRunner`: add `heroMode` flag parsing to accept
+  `adaptive|gto|strategic` (camelCase, matching existing convention)
+- `SlumbotMatchRunner`: same pattern as ACPC
 
 ## What Does NOT Change
 
@@ -294,7 +336,17 @@ def decideHeroStrategic(
   certification and the deprecated decide() path
 - The `strategic` sub-packages (bridge/, solver/, all the belief/dynamics/kernel
   types)
-- StrategicAdvisorBridge — advisor session integration stays as-is
+
+## What Gets Updated (Not Deprecated, Not Unchanged)
+
+- `StrategicAdvisorBridge` — currently calls the deprecated two-arg
+  `engine.decide(gameState, candidates)` and prints `lastDecisionBundle`
+  diagnostics from the toy solver path. Must be updated to:
+  1. Call the new overlay `decide()` overload with upstream EVs
+  2. Print `OverlayResult` diagnostics instead of `DecisionEvaluationBundle`
+  3. Continue using `PlayerId("villain")` (already correct for stable identity)
+  Without this update, the advisor would silently report different logic than
+  the actual player, creating a user-visible divergence.
 
 ## What Gets Deprecated
 
@@ -315,6 +367,7 @@ def decideHeroStrategic(
 | `runtime/TexasHoldemPlayingHall.scala` | Modify | Strategic branch runs adaptive/multiway first |
 | `runtime/AcpcMatchRunner.scala` | Modify | Add strategic engine lifecycle + dispatch |
 | `runtime/SlumbotMatchRunner.scala` | Modify | Add strategic engine lifecycle + dispatch |
+| `runtime/StrategicAdvisorBridge.scala` | Modify | Use overlay decide() + OverlayResult diagnostics |
 | `types/HeroMode.scala` | No change | Strategic already exists in enum |
 | `types/PokerFormatting.scala` | No change | Already formats "strategic" |
 
