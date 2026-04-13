@@ -1,10 +1,11 @@
-package sicfun.holdem.runtime
+package sicfun.holdem.runtime.protocol
 
 import sicfun.core.{Card, HandEvaluator}
 import sicfun.holdem.cli.CliHelpers
 import sicfun.holdem.engine.HeroDecisionPipeline
 import sicfun.holdem.engine.inference.VillainObservation
 import sicfun.holdem.model.{CalibrationGate, CalibrationSummary, ModelVersion, PokerActionModel, PokerActionModelArtifactIO, TrainedPokerActionModel}
+import sicfun.holdem.runtime.HeadsUpMatchDefaults
 import sicfun.holdem.types.*
 
 import java.io.{BufferedReader, BufferedWriter, InputStreamReader, OutputStreamWriter}
@@ -1186,7 +1187,7 @@ object AcpcMatchRunner:
 
   private val usage =
     """Usage:
-      |  runMain sicfun.holdem.runtime.AcpcMatchRunner [--key=value ...]
+      |  runMain sicfun.holdem.runtime.protocol.AcpcMatchRunner [--key=value ...]
       |
       |Notes:
       |  Supports ACPC heads-up no-limit reverse-blinds with 50/100 blinds and 200bb stacks.

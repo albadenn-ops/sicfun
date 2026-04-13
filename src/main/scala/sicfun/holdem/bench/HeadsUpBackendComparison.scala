@@ -5,6 +5,7 @@ import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.cli.*
 import sicfun.holdem.bench.BenchSupport.{BatchData, loadBatch}
+import sicfun.holdem.bench.tuner.HeadsUpBackendAutoTuner
 
 import sicfun.core.HandEvaluator
 

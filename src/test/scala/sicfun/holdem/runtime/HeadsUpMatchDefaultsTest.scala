@@ -2,6 +2,7 @@ package sicfun.holdem.runtime
 
 import munit.FunSuite
 import sicfun.holdem.equity.TableFormat
+import sicfun.holdem.runtime.protocol.{AcpcMatchRunner, SlumbotMatchRunner}
 import sicfun.holdem.types.Position
 
 class HeadsUpMatchDefaultsTest extends FunSuite:

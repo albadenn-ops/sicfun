@@ -1,4 +1,4 @@
-package sicfun.holdem.runtime
+package sicfun.holdem.runtime.protocol
 
 import sicfun.holdem.types.*
 

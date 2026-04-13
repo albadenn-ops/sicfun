@@ -2,7 +2,7 @@ package sicfun.holdem.tablegen
 import sicfun.holdem.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
-import sicfun.holdem.bench.*
+import sicfun.holdem.bench.tuner.HeadsUpBackendAutoTuner
 
 import scala.util.Random
 

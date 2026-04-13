@@ -1,4 +1,4 @@
-package sicfun.holdem.runtime
+package sicfun.holdem.runtime.protocol
 
 import sicfun.core.{Card, Deck, HandEvaluator}
 import sicfun.holdem.cli.CliHelpers
@@ -870,7 +870,7 @@ object AcpcHeadsUpDealer:
 
   private val usage =
     """Usage:
-      |  runMain sicfun.holdem.runtime.AcpcHeadsUpDealer [--key=value ...]
+      |  runMain sicfun.holdem.runtime.protocol.AcpcHeadsUpDealer [--key=value ...]
       |
       |Options:
       |  --hands=100

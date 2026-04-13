@@ -1,4 +1,4 @@
-package sicfun.holdem.runtime
+package sicfun.holdem.runtime.protocol
 
 import sicfun.core.Card
 import sicfun.holdem.cli.CliHelpers
@@ -6,6 +6,7 @@ import sicfun.holdem.engine.HeroDecisionPipeline
 import sicfun.holdem.engine.inference.VillainObservation
 import sicfun.holdem.engine.villain.EquilibriumBaselineConfig
 import sicfun.holdem.model.{CalibrationGate, CalibrationSummary, ModelVersion, PokerActionModel, PokerActionModelArtifactIO, TrainedPokerActionModel}
+import sicfun.holdem.runtime.HeadsUpMatchDefaults
 import sicfun.holdem.types.*
 
 import java.io.BufferedWriter
@@ -1018,7 +1019,7 @@ object SlumbotMatchRunner:
 
   private val usage =
     """Usage:
-      |  runMain sicfun.holdem.runtime.SlumbotMatchRunner [--key=value ...]
+      |  runMain sicfun.holdem.runtime.protocol.SlumbotMatchRunner [--key=value ...]
       |
       |Options:
       |  --hands=100                 Number of Slumbot hands to play

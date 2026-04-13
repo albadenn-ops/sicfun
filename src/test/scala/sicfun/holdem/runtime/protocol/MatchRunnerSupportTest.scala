@@ -1,4 +1,4 @@
-package sicfun.holdem.runtime
+package sicfun.holdem.runtime.protocol
 
 import munit.FunSuite
 import sicfun.holdem.types.*
