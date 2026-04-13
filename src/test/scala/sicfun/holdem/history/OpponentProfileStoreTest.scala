@@ -144,7 +144,7 @@ class OpponentProfileStoreTest extends FunSuite:
     assertEquals(villain.handsObserved, 4)
     assertEquals(villain.raiseResponses.folds, 4)
     assertEquals(villain.raiseResponses.calls, 1)
-    assertEquals(villain.archetypePosterior.mapEstimate, sicfun.holdem.engine.PlayerArchetype.Nit)
+    assertEquals(villain.archetypePosterior.mapEstimate, sicfun.holdem.engine.villain.PlayerArchetype.Nit)
     assert(villain.exploitHints.exists(_.contains("bluff pressure")), s"missing exploit hint: ${villain.exploitHints}")
 
     val once = OpponentProfileStore.empty.upsertAll(profiles)

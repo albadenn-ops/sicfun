@@ -115,7 +115,7 @@ class OpponentProfileStorePostgresIntegrationTest extends FunSuite:
       firstSeenEpochMillis = 1_700_000_000_000L,
       lastSeenEpochMillis = 1_700_000_000_500L,
       actionSummary = OpponentActionSummary(folds = 10, raises = 2, calls = 6, checks = 2),
-      raiseResponses = sicfun.holdem.engine.RaiseResponseCounts(folds = 4, calls = 1, raises = 0),
+      raiseResponses = sicfun.holdem.engine.villain.RaiseResponseCounts(folds = 4, calls = 1, raises = 0),
       recentEvents = Vector.empty,
       seenHandIds = Vector("a-1", "a-2", "a-3")
     )
@@ -126,7 +126,7 @@ class OpponentProfileStorePostgresIntegrationTest extends FunSuite:
       firstSeenEpochMillis = 1_700_000_001_000L,
       lastSeenEpochMillis = 1_700_000_001_500L,
       actionSummary = OpponentActionSummary(folds = 2, raises = 7, calls = 4, checks = 2),
-      raiseResponses = sicfun.holdem.engine.RaiseResponseCounts(folds = 0, calls = 2, raises = 3),
+      raiseResponses = sicfun.holdem.engine.villain.RaiseResponseCounts(folds = 0, calls = 2, raises = 3),
       recentEvents = Vector.empty,
       seenHandIds = Vector("b-1", "b-2")
     )
