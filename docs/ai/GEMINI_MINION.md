@@ -9,7 +9,7 @@ This repository now includes an optional Gemini CLI sidecar for delegated read-h
 
 The default path is read-only delegation. The sidecar is meant to reduce prompt load on the primary coding agent, not replace final verification.
 
-If you want the unified multi-provider front door for Gemini, Claude, and GPT/Codex, use `scripts/ai-minion.ps1` and see `docs/ai/AI_MINIONS.md`.
+If you want the unified multi-provider front door for Gemini, Claude, and GPT/Codex, use `scripts/ai/ai-minion.ps1` and see `docs/ai/AI_MINIONS.md`.
 
 ## One-Time Setup
 
@@ -22,13 +22,13 @@ npm install -g @google/gemini-cli
 Start Google login from the repository:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/gemini-sidecar.ps1 -Action auth
+powershell -ExecutionPolicy Bypass -File scripts/ai/gemini-sidecar.ps1 -Action auth
 ```
 
 If Gemini hits the browser consent bug or the browser does not open, the wrapper now retries manual auth automatically. You can still force manual auth yourself:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/gemini-sidecar.ps1 -Action auth -NoBrowser
+powershell -ExecutionPolicy Bypass -File scripts/ai/gemini-sidecar.ps1 -Action auth -NoBrowser
 ```
 
 Notes:
@@ -45,7 +45,7 @@ Notes:
 Inspect local setup:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/gemini-sidecar.ps1 -Action doctor
+powershell -ExecutionPolicy Bypass -File scripts/ai/gemini-sidecar.ps1 -Action doctor
 ```
 
 This reports:
@@ -62,7 +62,7 @@ This reports:
 Read-only analysis:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/gemini-sidecar.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ai/gemini-sidecar.ps1 `
   -Action delegate `
   -Mode analysis `
   -Task "Summarize the latest exact-mode hall benchmark changes." `
@@ -73,22 +73,22 @@ powershell -ExecutionPolicy Bypass -File scripts/gemini-sidecar.ps1 `
 Code review pass:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/gemini-sidecar.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ai/gemini-sidecar.ps1 `
   -Action delegate `
   -Mode review `
   -Task "Review the hall max runner changes for regressions or unsafe assumptions." `
-  -ContextPath scripts/run-playing-hall-max.ps1,src/main/scala/sicfun/holdem/runtime/TexasHoldemPlayingHall.scala `
+  -ContextPath scripts/match/run-playing-hall-max.ps1,src/main/scala/sicfun/holdem/runtime/TexasHoldemPlayingHall.scala `
   -OutputFormat json
 ```
 
 Draft patch planning only:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/gemini-sidecar.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ai/gemini-sidecar.ps1 `
   -Action delegate `
   -Mode draft-patch `
   -Task "Propose the smallest patch to make the hall runner emit a more useful failure summary." `
-  -ContextPath scripts/run-playing-hall-max.ps1 `
+  -ContextPath scripts/match/run-playing-hall-max.ps1 `
   -OutputFormat text
 ```
 

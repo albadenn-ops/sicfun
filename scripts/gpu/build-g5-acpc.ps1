@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $repoDirAbs = Join-Path $repoRoot $RepoDir
 $runtimeDirAbs = Join-Path $repoRoot $RuntimeDir
 $dotnetDirAbs = Join-Path $repoRoot $DotnetDir
@@ -76,4 +76,4 @@ Write-Output "G5 ACPC runtime ready:"
 Write-Output "  dotnet:  $dotnet"
 Write-Output "  runtime: $runtimeDirAbs"
 Write-Output "  note:    G5 source, generated runtime, and local toolchains under data/tmp/ are developer-local assets."
-Write-Output "  start:   powershell -ExecutionPolicy Bypass -File scripts/start-g5-acpc.ps1 127.0.0.1 12345"
+Write-Output "  start:   powershell -ExecutionPolicy Bypass -File scripts/match/start-g5-acpc.ps1 127.0.0.1 12345"

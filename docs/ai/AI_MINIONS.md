@@ -10,7 +10,7 @@ This repository now includes a unified sidecar dispatcher for delegated read-hea
 The unified entrypoint is:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1
 ```
 
 Available providers:
@@ -32,21 +32,21 @@ Shared contract:
 Health check across all providers:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action doctor
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action doctor
 ```
 
 Provider-specific auth:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action auth -Provider gemini
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action auth -Provider gemini
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action auth -Provider claude
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action auth -Provider claude
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action auth -Provider gpt
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action auth -Provider gpt
 ```
 
 No-browser auth is supported for:
@@ -57,7 +57,7 @@ No-browser auth is supported for:
 Example:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action auth -Provider gpt -NoBrowser
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action auth -Provider gpt -NoBrowser
 ```
 
 Claude currently exposes browser login only through its CLI. If your Claude/Anthropic account uses Google SSO, complete that step in the browser during `claude auth login`.
@@ -67,7 +67,7 @@ Claude currently exposes browser login only through its CLI. If your Claude/Anth
 Analysis:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 `
   -Action delegate `
   -Provider gemini `
   -Mode analysis `
@@ -79,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
 Review:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 `
   -Action delegate `
   -Provider gpt `
   -Mode review `
@@ -91,13 +91,13 @@ powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
 Claude with injected context:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 `
   -Action delegate `
   -Provider claude `
   -Mode analysis `
   -InjectContext `
   -Task "Summarize the relevant implementation and risks for this task." `
-  -ContextPath AGENTS.md,scripts/ai-minion.ps1 `
+  -ContextPath AGENTS.md,scripts/ai/ai-minion.ps1 `
   -OutputFormat text
 ```
 
@@ -122,8 +122,8 @@ Each delegated run stores:
 
 Gemini:
 
-- The existing provider-specific wrapper remains `scripts/gemini-sidecar.ps1`.
-- `scripts/ai-minion.ps1` forwards auth and normal delegated runs to that wrapper.
+- The existing provider-specific wrapper remains `scripts/ai/gemini-sidecar.ps1`.
+- `scripts/ai/ai-minion.ps1` forwards auth and normal delegated runs to that wrapper.
 - Gemini-specific setup details remain in `docs/ai/GEMINI_MINION.md`.
 - Use Gemini for bounded exploration, extraction, summarization, and support execution. Treat its inference as low-trust and verify it elsewhere.
 

@@ -1,4 +1,4 @@
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $defaultJCodeMunchRepo = "local/{0}" -f (Split-Path -Leaf $repoRoot)
 
 function Resolve-NavigationCommand {

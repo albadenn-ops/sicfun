@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $heroMode = if ($env:SICFUN_ACPC_HERO_MODE) { $env:SICFUN_ACPC_HERO_MODE } else { "adaptive" }
 $outDir = if ($env:SICFUN_ACPC_OUT_DIR) { $env:SICFUN_ACPC_OUT_DIR } else { "data/acpc-match-runner" }
 $bunchingTrials = if ($env:SICFUN_ACPC_BUNCHING_TRIALS) { $env:SICFUN_ACPC_BUNCHING_TRIALS } else { "1" }

@@ -10,16 +10,16 @@
   Artifacts are stored under .tool-cache/ai-minions/<provider>/.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action doctor
+  powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action doctor
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
+  powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 `
     -Action auth `
     -Provider gpt `
     -NoBrowser
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
+  powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 `
     -Action delegate `
     -Provider gemini `
     -Mode analysis `

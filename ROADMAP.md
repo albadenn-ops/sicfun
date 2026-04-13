@@ -68,9 +68,9 @@ Status note: a checked box means code landed in the repo. It does not automatica
 - [x] Scheduled retraining hook in always-on loop (artifact retrain + hot reload)
 - [x] Playing hall simulator (`TexasHoldemPlayingHall`) for large-volume play + periodic model retraining
 - [x] Multi-table hall load model (`--tableCount`) with per-table traceability in outputs (`tableId` in hand/training/DDRE logs)
-- [x] Parallel hall saturation runner with optional auto-tuning of profile/worker count (`scripts/run-playing-hall-max.ps1`)
+- [x] Parallel hall saturation runner with optional auto-tuning of profile/worker count (`scripts/match/run-playing-hall-max.ps1`)
 - [x] Consolidated operator command runbook (`docs/OPERATOR_RUNBOOK.md`) for day-to-day execution flow
-- [x] Interactive runbook launcher (`scripts/runbook.ps1`) for one-command access to top operational actions
+- [x] Interactive runbook launcher (`scripts/validation/runbook.ps1`) for one-command access to top operational actions
 - [x] Append-only AI context archive (`docs/AI_CONTEXT_ARCHIVE.md`) for future bounded-context sessions
 - [x] Context append helper script (`scripts/archive-context.ps1`) with git metadata
 - [ ] True autonomous gameplay integration (real table adapter + action executor)
@@ -108,9 +108,9 @@ Status note: a checked box means code landed in the repo. It does not automatica
 - [x] Adaptive CFR safety guardrails: added explicit CFR trust/action-regret thresholds plus decision attribution telemetry so adaptive recommendations can prove when they blended with baseline versus being clamped back to it (`RealTimeAdaptiveEngine`, `AlwaysOnDecisionLoop`, `AdvisorSession`, `PokerAdvisor`)
 - [x] First-class multiway inferred-play engine: extracted hall-local multi-opponent posterior aggregation and multiway EV/recommendation logic into reusable engine APIs (`MultiwayInferenceEngine`, `TexasHoldemPlayingHall`)
 - [x] Hand-history analyzer correctness: removed placeholder zero-EV recommendations; now runs model-backed analysis when `--heroCards` is supplied and uses `--model` artifact when present (`HandHistoryAnalyzer`)
-- [x] Hand-history web access-control hardening: optional in-process HTTP Basic auth now protects the review UI plus submit/status routes while leaving `/api/health` and `/api/ready` available for service management (`HandHistoryReviewServer`, `scripts/start-hand-history-web.ps1`, `scripts/release-hand-history-web.ps1`)
-- [x] Hand-history web abuse hardening: added per-client in-process rate limiting for review submission and job-status polling, surfaced the configured caps in health/readiness, and wired the launchers/package env through the new knobs (`HandHistoryReviewServer`, `scripts/start-hand-history-web.ps1`, `scripts/release-hand-history-web.ps1`)
+- [x] Hand-history web access-control hardening: optional in-process HTTP Basic auth now protects the review UI plus submit/status routes while leaving `/api/health` and `/api/ready` available for service management (`HandHistoryReviewServer`, `scripts/packaged-hand-history-web/start-hand-history-web.ps1`, `scripts/release-hand-history-web.ps1`)
+- [x] Hand-history web abuse hardening: added per-client in-process rate limiting for review submission and job-status polling, surfaced the configured caps in health/readiness, and wired the launchers/package env through the new knobs (`HandHistoryReviewServer`, `scripts/packaged-hand-history-web/start-hand-history-web.ps1`, `scripts/release-hand-history-web.ps1`)
 - [x] Hybrid dispatcher adaptive-weight concurrency guard: added regression coverage proving lossless concurrent adaptive calibration updates (`HeadsUpHybridDispatcherPlanningTest`)
-- [x] Hall launcher classpath resilience: hardened Java classpath export/parsing against noisy `sbt` output for stable long-running scripted runs (`scripts/run-playing-hall.ps1`, `scripts/run-playing-hall-max.ps1`)
+- [x] Hall launcher classpath resilience: hardened Java classpath export/parsing against noisy `sbt` output for stable long-running scripted runs (`scripts/match/run-playing-hall.ps1`, `scripts/match/run-playing-hall-max.ps1`)
 - [x] Exact GTO hall throughput uplift (correctness-preserving): added decision-only CFR root-policy path and batched postflop villain equity evaluation in `HoldemCfrSolver`, then wired `TexasHoldemPlayingHall` exact mode to the lightweight solver path
 - [x] Runtime/tooling maintainability sweep: extracted shared CLI decoding/helpers and reduced orchestration hotspots across hall, CFR/DDRE benchmarks, heads-up autotuners, analyzer/advisor loops, and postflop benchmark/tuner surfaces (`CliHelpers`, `TexasHoldemPlayingHall`, `HoldemCfrSolver`, `HeadsUpBackendAutoTuner`, `HoldemDdreParityBenchmark`, `AlwaysOnDecisionLoop`, `PokerAdvisor`, `HandHistoryAnalyzer`, `HoldemPostflop*`)

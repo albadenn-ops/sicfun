@@ -21,6 +21,8 @@ param(
   [string]$DrainSignalFile = "",
   [string]$BasicAuthUser = "",
   [string]$BasicAuthPassword = "",
+  [bool]$AllowUnauthenticatedPublicBind = $false,
+  [bool]$AllowInsecureUserAuth = $false,
   [string]$UserStorePath = "",
   [bool]$UserAuthAllowRegistration = $true,
   [long]$UserAuthSessionTtlMs = 43200000,
@@ -83,7 +85,7 @@ function Set-Or-ClearEnv {
   }
 }
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $resolvedStaticDir = Resolve-AppPath -PathValue $StaticDir
 $resolvedModel = ""
 if (-not [string]::IsNullOrWhiteSpace($Model)) {
@@ -115,6 +117,8 @@ $previousEnv = @{
   DRAIN_SIGNAL_FILE = $env:DRAIN_SIGNAL_FILE
   BASIC_AUTH_USER = $env:BASIC_AUTH_USER
   BASIC_AUTH_PASSWORD = $env:BASIC_AUTH_PASSWORD
+  ALLOW_UNAUTHENTICATED_PUBLIC_BIND = $env:ALLOW_UNAUTHENTICATED_PUBLIC_BIND
+  ALLOW_INSECURE_USER_AUTH = $env:ALLOW_INSECURE_USER_AUTH
   USER_STORE_PATH = $env:USER_STORE_PATH
   USER_AUTH_ALLOW_REGISTRATION = $env:USER_AUTH_ALLOW_REGISTRATION
   USER_AUTH_SESSION_TTL_MS = $env:USER_AUTH_SESSION_TTL_MS
@@ -157,6 +161,8 @@ try {
   Set-Or-ClearEnv -Name "DRAIN_SIGNAL_FILE" -Value $resolvedDrainSignalFile
   Set-Or-ClearEnv -Name "BASIC_AUTH_USER" -Value $BasicAuthUser
   Set-Or-ClearEnv -Name "BASIC_AUTH_PASSWORD" -Value $BasicAuthPassword
+  Set-Or-ClearEnv -Name "ALLOW_UNAUTHENTICATED_PUBLIC_BIND" -Value $AllowUnauthenticatedPublicBind
+  Set-Or-ClearEnv -Name "ALLOW_INSECURE_USER_AUTH" -Value $AllowInsecureUserAuth
   Set-Or-ClearEnv -Name "USER_STORE_PATH" -Value $resolvedUserStorePath
   Set-Or-ClearEnv -Name "USER_AUTH_ALLOW_REGISTRATION" -Value $UserAuthAllowRegistration
   Set-Or-ClearEnv -Name "USER_AUTH_SESSION_TTL_MS" -Value $UserAuthSessionTtlMs

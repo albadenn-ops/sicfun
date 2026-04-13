@@ -14,7 +14,7 @@ Prefer repo-local navigation tools before broad raw file reads, especially to av
 - If your current client or toolchain exposes `jdocmunch`, use it for docs; otherwise use focused doc reads/searches instead of loading large documents wholesale.
 - Use `rg` first for cheap literal search when shell access is available and you are looking for plain text rather than broad repo orientation.
 - Prefer targeted retrieval over reading entire large files or large directory sweeps when the narrower tool can answer the question.
-- Do not assume tool-specific repo-local wrapper scripts exist in the current checkout. `scripts/import-ai-nav.ps1` is only a PowerShell convenience layer for CLI-based sessions when `repomapper` and `jcodemunch` are installed on `PATH`.
+- Do not assume tool-specific repo-local wrapper scripts exist in the current checkout. `scripts/ai/import-ai-nav.ps1` is only a PowerShell convenience layer for CLI-based sessions when `repomapper` and `jcodemunch` are installed on `PATH`.
 - If `.jcodemunch-index/` or `.tool-cache/repomapper/` exist, treat them as local caches only; do not assume they are present, fresh, or shared across chats.
 - If a native MCP client is not exposed but `uvx` is available, use the `.mcp.json` commands directly from the shell:
   - `uvx jcodemunch-mcp index <repo-root> --no-ai-summaries`
@@ -23,7 +23,7 @@ Prefer repo-local navigation tools before broad raw file reads, especially to av
 See [`docs/ai/ai-code-navigation.md`](docs/ai/ai-code-navigation.md) for workflow guidance and repo-specific notes.
 
 Default rule:
-- Use [`scripts/ai-minion.ps1`](scripts/ai-minion.ps1) for second-pass review, benchmark/result summarization, and patch planning after local navigation has narrowed the scope.
+- Use [`scripts/ai/ai-minion.ps1`](scripts/ai/ai-minion.ps1) for second-pass review, benchmark/result summarization, and patch planning after local navigation has narrowed the scope.
 - Available linked workers are `gemini`, `claude`, and `gpt`.
 - Treat every provider as a read-only helper. Codex remains responsible for edits, verification, and final judgment.
 - Prefer `claude` for planning, scope control, contradiction hunting, and fact-checking when available.
@@ -34,7 +34,7 @@ Default rule:
 
 Suggested workflow:
 1. Inspect the repo slice yourself first and identify the smallest useful context files.
-2. Run `scripts/ai-minion.ps1` in the matching mode on a narrow context:
+2. Run `scripts/ai/ai-minion.ps1` in the matching mode on a narrow context:
    - `analysis` for exploration or summarization
    - `review` for bug/regression hunting
    - `draft-patch` for change planning
@@ -45,7 +45,7 @@ Suggested workflow:
 Canonical commands:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 `
   -Action delegate `
   -Provider gemini `
   -Mode analysis `
@@ -55,7 +55,7 @@ powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 `
   -Action delegate `
   -Provider gpt `
   -Mode review `
@@ -67,7 +67,7 @@ powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
 Notes:
 - The unified dispatcher writes prompts and outputs under `.tool-cache/ai-minions/<provider>/`.
 - Shared sidecar rules live in `AI_ENTRYPOINT.md`. Provider-specific role overlays live in `GEMINI.md`, `CLAUDE.md`, and `GPT.md`.
-- `scripts/gemini-sidecar.ps1` still exists for Gemini-specific auth/setup details; the unified dispatcher forwards normal Gemini flows to it.
+- `scripts/ai/gemini-sidecar.ps1` still exists for Gemini-specific auth/setup details; the unified dispatcher forwards normal Gemini flows to it.
 - Claude inlines requested `-ContextPath` file contents for delegated runs, even without `-InjectContext`, because its delegated path runs without file-reading tools. Passing `-InjectContext` to Claude is currently redundant but still useful for making that intent explicit in the command line. The dispatcher prints a note when it has to force that behavior.
 - Prefer focused `-ContextPath` inputs over broad directory dumps.
 - Best signal usually comes from 1-5 files. Large context sets are more likely to time out or produce vague summaries.

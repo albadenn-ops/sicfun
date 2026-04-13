@@ -19,7 +19,7 @@ If `.tool-cache/repomapper` or `.jcodemunch-index/` exist, treat them as opportu
 
 ## Local helper
 
-- `scripts/import-ai-nav.ps1` defines PowerShell aliases that forward to external `repomapper` and `jcodemunch` commands. Missing commands are reported when you invoke the alias.
+- `scripts/ai/import-ai-nav.ps1` defines PowerShell aliases that forward to external `repomapper` and `jcodemunch` commands. Missing commands are reported when you invoke the alias.
 - There are no guaranteed repo-local wrappers such as `scripts/repomap.ps1` or `scripts/jcodemunch.ps1` in the current checkout.
 
 ## When to use which
@@ -97,7 +97,7 @@ The practical takeaway is:
 ## Repo-specific notes
 
 - Commit `8ced6f7` removed the vendored RepoMapper and jCodeMunch sources and their wrapper scripts.
-- `scripts/import-ai-nav.ps1` is a thin convenience layer over externally provided `repomapper` and `jcodemunch` CLIs.
+- `scripts/ai/import-ai-nav.ps1` is a thin convenience layer over externally provided `repomapper` and `jcodemunch` CLIs.
 - `.mcp.json` is the preferred source of truth for MCP-backed navigation in this checkout.
 - In shell-only sessions, prefer the `uvx jcodemunch-mcp ...` and `uvx jdocmunch-mcp ...` commands from `.mcp.json` over ad hoc tool discovery.
 - Cache directories may exist from prior local runs, but treat them as stale until verified.

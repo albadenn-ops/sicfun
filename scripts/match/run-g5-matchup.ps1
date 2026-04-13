@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $dealerOutDir = Join-Path $repoRoot $OutDir
 $sicfunClientOutDir = Join-Path $dealerOutDir "sicfun-client"
 $classpathCache = Join-Path $repoRoot "data/runtime-classpath.txt"
@@ -77,7 +77,7 @@ function Resolve-SicfunClasspath {
 }
 
 if (-not $SkipBuildG5) {
-  & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "build-g5-acpc.ps1")
+  & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "../gpu/build-g5-acpc.ps1")
 }
 
 $env:SICFUN_ACPC_CLASSPATH = Resolve-SicfunClasspath
@@ -99,8 +99,8 @@ try {
     "--outDir=$OutDir",
     "--playerAName=sicfun",
     "--playerBName=g5",
-    "--playerAScript=scripts/start-sicfun-acpc.cmd",
-    "--playerBScript=scripts/start-g5-acpc.cmd"
+    "--playerAScript=scripts/match/start-sicfun-acpc.cmd",
+    "--playerBScript=scripts/match/start-g5-acpc.cmd"
   ) -join " "
 
   & sbt --error $command

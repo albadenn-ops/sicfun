@@ -30,48 +30,48 @@ $actions = [ordered]@{}
 $actions["quick-proof"] = New-RunbookAction `
   -Key "quick-proof" `
   -Label "Quick proof pipeline (core smoke)" `
-  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1 -Quick" `
-  -Command { & powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1 -Quick }
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/validation/prove-pipeline.ps1 -Quick" `
+  -Command { & powershell -ExecutionPolicy Bypass -File scripts/validation/prove-pipeline.ps1 -Quick }
 
 $actions["full-proof"] = New-RunbookAction `
   -Key "full-proof" `
   -Label "Full proof pipeline with hand-history review E2E" `
-  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1" `
-  -Command { & powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1 }
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/validation/prove-pipeline.ps1" `
+  -Command { & powershell -ExecutionPolicy Bypass -File scripts/validation/prove-pipeline.ps1 }
 
 $actions["gpu-global-tune"] = New-RunbookAction `
   -Key "gpu-global-tune" `
   -Label "Global GPU/native tuning pass" `
-  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/run-global-tuning.ps1 --targets=runtime" `
-  -Command { & powershell -ExecutionPolicy Bypass -File scripts/run-global-tuning.ps1 --targets=runtime } `
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/gpu/run-global-tuning.ps1 --targets=runtime" `
+  -Command { & powershell -ExecutionPolicy Bypass -File scripts/gpu/run-global-tuning.ps1 --targets=runtime } `
   -Heavy $true
 
 $actions["gpu-prereqs-check"] = New-RunbookAction `
   -Key "gpu-prereqs-check" `
   -Label "Check GPU build prerequisites" `
-  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1" `
-  -Command { & powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1 }
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/gpu/ensure-gpu-build-prereqs.ps1" `
+  -Command { & powershell -ExecutionPolicy Bypass -File scripts/gpu/ensure-gpu-build-prereqs.ps1 }
 
 $actions["gpu-prereqs-install"] = New-RunbookAction `
   -Key "gpu-prereqs-install" `
   -Label "Install missing GPU build prerequisites" `
-  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1 -InstallMissing" `
-  -Command { & powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1 -InstallMissing } `
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/gpu/ensure-gpu-build-prereqs.ps1 -InstallMissing" `
+  -Command { & powershell -ExecutionPolicy Bypass -File scripts/gpu/ensure-gpu-build-prereqs.ps1 -InstallMissing } `
   -Heavy $true
 
 $actions["gpu-global-tune-proof"] = New-RunbookAction `
   -Key "gpu-global-tune-proof" `
   -Label "Global GPU tuning portability proof" `
-  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/prove-global-gpu-tuning-portability.ps1" `
-  -Command { & powershell -ExecutionPolicy Bypass -File scripts/prove-global-gpu-tuning-portability.ps1 } `
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/gpu/prove-global-gpu-tuning-portability.ps1" `
+  -Command { & powershell -ExecutionPolicy Bypass -File scripts/gpu/prove-global-gpu-tuning-portability.ps1 } `
   -Heavy $true
 
 $actions["hall-max-autotune"] = New-RunbookAction `
   -Key "hall-max-autotune" `
   -Label "Hall max run with autotune (recommended)" `
-  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 -AutoTune -AutoTuneHands 500000 -AutoTuneProfiles auto,cpu,gpu -AutoTuneWorkerCandidates 8,12,16,20,24 -Hands 100000000 -TableCountPerWorker 8 -ReportEvery 500000 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -OutDir data/bench-hall-max" `
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/match/run-playing-hall-max.ps1 -AutoTune -AutoTuneHands 500000 -AutoTuneProfiles auto,cpu,gpu -AutoTuneWorkerCandidates 8,12,16,20,24 -Hands 100000000 -TableCountPerWorker 8 -ReportEvery 500000 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -OutDir data/bench-hall-max" `
   -Command {
-    & powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 `
+    & powershell -ExecutionPolicy Bypass -File scripts/match/run-playing-hall-max.ps1 `
       -AutoTune `
       -AutoTuneHands 500000 `
       -AutoTuneProfiles auto,cpu,gpu `
@@ -89,9 +89,9 @@ $actions["hall-max-autotune"] = New-RunbookAction `
 $actions["hall-max-gpu"] = New-RunbookAction `
   -Key "hall-max-gpu" `
   -Label "Hall max run with fixed GPU profile" `
-  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 -Hands 100000000 -Workers 0 -TableCountPerWorker 8 -NativeProfile gpu -ReportEvery 500000 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -JvmOption \"-Xms2g\" \"-Xmx2g\" -OutDir data/bench-hall-max" `
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/match/run-playing-hall-max.ps1 -Hands 100000000 -Workers 0 -TableCountPerWorker 8 -NativeProfile gpu -ReportEvery 500000 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -JvmOption \"-Xms2g\" \"-Xmx2g\" -OutDir data/bench-hall-max" `
   -Command {
-    & powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 `
+    & powershell -ExecutionPolicy Bypass -File scripts/match/run-playing-hall-max.ps1 `
       -Hands 100000000 `
       -Workers 0 `
       -TableCountPerWorker 8 `
@@ -108,9 +108,9 @@ $actions["hall-max-gpu"] = New-RunbookAction `
 $actions["hall-single"] = New-RunbookAction `
   -Key "hall-single" `
   -Label "Single-process hall run" `
-  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall.ps1 -Hands 1000000 -TableCount 8 -ReportEvery 50000 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -OutDir data/bench-hall-single" `
+  -CommandText "powershell -ExecutionPolicy Bypass -File scripts/match/run-playing-hall.ps1 -Hands 1000000 -TableCount 8 -ReportEvery 50000 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -OutDir data/bench-hall-single" `
   -Command {
-    & powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall.ps1 `
+    & powershell -ExecutionPolicy Bypass -File scripts/match/run-playing-hall.ps1 `
       -Hands 1000000 `
       -TableCount 8 `
       -ReportEvery 50000 `

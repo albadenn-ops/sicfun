@@ -61,6 +61,7 @@ Runtime configuration:
     - env var: `sicfun_GPU_AUTOTUNE_CACHE_PATH=<file>`
     - system property: `-Dsicfun.gpu.autotune.cachePath=<file>`
   - default cache file: `data/headsup-backend-autotune.properties`
+  - cache files are generated machine-local outputs; do not treat them as repository source
   - skipped automatically when engine/block/chunk are explicitly set (property or env)
 - Native engine selection (CUDA-enabled JNI build):
   - system property: `-Dsicfun.gpu.native.engine=auto|cpu|cuda`
@@ -340,6 +341,7 @@ Runtime controls:
     - property: `-Dsicfun.postflop.autotune.cachePath=<file>`
     - env: `sicfun_POSTFLOP_AUTOTUNE_CACHE_PATH`
     - default: `data/postflop-autotune.properties`
+    - cache files are generated machine-local outputs; do not treat them as repository source
   - cache is skipped when either CUDA override is explicitly set:
     - `sicfun.postflop.native.cuda.blockSize`
     - `sicfun.postflop.native.cuda.maxChunkMatchups`
@@ -359,13 +361,13 @@ powershell -ExecutionPolicy Bypass -File src/main/native/build-windows-cuda11.ps
 Machine prerequisite check:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1
+powershell -ExecutionPolicy Bypass -File scripts/gpu/ensure-gpu-build-prereqs.ps1
 ```
 
 Machine prerequisite auto-install:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1 -InstallMissing
+powershell -ExecutionPolicy Bypass -File scripts/gpu/ensure-gpu-build-prereqs.ps1 -InstallMissing
 ```
 
 Build script discovery/override notes:
@@ -413,6 +415,8 @@ sbt "runMain sicfun.holdem.HoldemPostflopNativeBenchmark --warmupRuns=2 --measur
 
 Postflop CUDA auto-tuner (writes `data/postflop-autotune.properties` by default):
 
+That cache file is a generated local artifact, not checked-in source content.
+
 ```bash
 sbt "runMain sicfun.holdem.HoldemPostflopGpuAutoTuner --villains=1024 --trials=2000 --warmupRuns=1 --runs=3 --cachePath=data/postflop-autotune.properties"
 ```
@@ -446,8 +450,8 @@ sbt gpuExactParityGate
 PowerShell wrappers:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/gpu-smoke-gate.ps1
-powershell -ExecutionPolicy Bypass -File scripts/gpu-exact-parity-gate.ps1
+powershell -ExecutionPolicy Bypass -File scripts/gpu/gpu-smoke-gate.ps1
+powershell -ExecutionPolicy Bypass -File scripts/gpu/gpu-exact-parity-gate.ps1
 ```
 
 Windows release packaging with startup verification from the packaged layout:

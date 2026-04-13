@@ -9,19 +9,19 @@ Scope note:
 Optional interactive launcher (menu for top 5 runbook actions):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/runbook.ps1
+powershell -ExecutionPolicy Bypass -File scripts/validation/runbook.ps1
 ```
 
 One-shot launcher mode:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/runbook.ps1 -Action quick-proof
+powershell -ExecutionPolicy Bypass -File scripts/validation/runbook.ps1 -Action quick-proof
 ```
 
 Dry run preview (prints command without executing):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/runbook.ps1 -Action hall-max-autotune -WhatIf
+powershell -ExecutionPolicy Bypass -File scripts/validation/runbook.ps1 -Action hall-max-autotune -WhatIf
 ```
 
 ## 1. Daily Start
@@ -29,7 +29,7 @@ powershell -ExecutionPolicy Bypass -File scripts/runbook.ps1 -Action hall-max-au
 Quick health check:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1 -Quick
+powershell -ExecutionPolicy Bypass -File scripts/validation/prove-pipeline.ps1 -Quick
 ```
 
 - Covers the core engine/runtime smoke path.
@@ -38,7 +38,7 @@ powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1 -Quick
 Full validation sweep:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1
+powershell -ExecutionPolicy Bypass -File scripts/validation/prove-pipeline.ps1
 ```
 
 - Includes the hand-history review end-to-end proof: playing-hall export -> import -> analysis service -> async HTTP job completion.
@@ -48,7 +48,7 @@ powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1
 Single-process hall run (good for functional checks and controlled experiments):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/match/run-playing-hall.ps1 `
   -Hands 1000000 `
   -TableCount 8 `
   -ReportEvery 50000 `
@@ -61,7 +61,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall.ps1 `
 Maximum hardware saturation (recommended for long stress runs):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/match/run-playing-hall-max.ps1 `
   -Hands 100000000 `
   -Workers 0 `
   -TableCountPerWorker 8 `
@@ -77,7 +77,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 `
 Auto-tuned hardware run (recommended default when machine load is variable):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/match/run-playing-hall-max.ps1 `
   -AutoTune `
   -AutoTuneHands 500000 `
   -AutoTuneProfiles auto,cpu,gpu `
@@ -102,7 +102,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 `
 Short-run cache override example:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/match/run-playing-hall-max.ps1 `
   -Hands 1000 `
   -Workers 1 `
   -TableCountPerWorker 1 `
@@ -117,13 +117,13 @@ powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 `
 
 ## 3. Hall Output Locations
 
-`scripts/run-playing-hall.ps1` output:
+`scripts/match/run-playing-hall.ps1` output:
 - `<outDir>/hands.tsv`
 - `<outDir>/learning.tsv`
 - `<outDir>/training-selfplay.tsv` (if enabled)
 - `<outDir>/ddre-training-selfplay.tsv` (if enabled)
 
-`scripts/run-playing-hall-max.ps1` output:
+`scripts/match/run-playing-hall-max.ps1` output:
 - `<outDir>/run-*/aggregate-summary.txt`
 - `<outDir>/run-*/worker-*/stdout.log`
 - `<outDir>/run-*/worker-*/stderr.log`
@@ -179,13 +179,13 @@ powershell -ExecutionPolicy Bypass -File src/main/native/build-windows-cuda11.ps
 GPU build prerequisite checker:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1
+powershell -ExecutionPolicy Bypass -File scripts/gpu/ensure-gpu-build-prereqs.ps1
 ```
 
 GPU build prerequisite auto-installer:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1 -InstallMissing
+powershell -ExecutionPolicy Bypass -File scripts/gpu/ensure-gpu-build-prereqs.ps1 -InstallMissing
 ```
 
 - Checks the machine-wide prerequisites the CUDA DLL build actually needs:
@@ -203,7 +203,7 @@ powershell -ExecutionPolicy Bypass -File scripts/ensure-gpu-build-prereqs.ps1 -I
 Global GPU/native tuning pass (recommended default):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run-global-tuning.ps1 --targets=runtime
+powershell -ExecutionPolicy Bypass -File scripts/gpu/run-global-tuning.ps1 --targets=runtime
 ```
 
 - Automatically builds missing runtime CUDA DLLs under `src/main/native/build/` before tuning:
@@ -226,7 +226,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run-global-tuning.ps1 --targets
 - To let the global tuning path auto-install missing machine prerequisites before building native DLLs, run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run-global-tuning.ps1 -InstallMissingPrerequisites --targets=runtime
+powershell -ExecutionPolicy Bypass -File scripts/gpu/run-global-tuning.ps1 -InstallMissingPrerequisites --targets=runtime
 ```
 
 - Reuses existing persisted cache entries when the cache still matches the current hardware and native library identity.
@@ -237,7 +237,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run-global-tuning.ps1 -InstallM
 Windows portability proof for the operator path:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/prove-global-gpu-tuning-portability.ps1
+powershell -ExecutionPolicy Bypass -File scripts/gpu/prove-global-gpu-tuning-portability.ps1
 ```
 
 - Runs from a temp working directory outside the repo root.
@@ -262,7 +262,7 @@ sbt "runMain sicfun.holdem.bench.HoldemPostflopGpuAutoTuner --villains=1024 --tr
 Source-mode launcher:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/start-hand-history-web.ps1
+powershell -ExecutionPolicy Bypass -File scripts/packaged-hand-history-web/start-hand-history-web.ps1
 ```
 
 Packaged release:
@@ -364,10 +364,10 @@ The minimal set most operators need:
 
 ```powershell
 # 1) quick health
-powershell -ExecutionPolicy Bypass -File scripts/prove-pipeline.ps1 -Quick
+powershell -ExecutionPolicy Bypass -File scripts/validation/prove-pipeline.ps1 -Quick
 
 # 2) auto-tuned max run
-powershell -ExecutionPolicy Bypass -File scripts/run-playing-hall-max.ps1 -AutoTune -AutoTuneHands 500000 -AutoTuneProfiles auto,cpu,gpu -Hands 100000000 -TableCountPerWorker 8 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -OutDir data/bench-hall-max
+powershell -ExecutionPolicy Bypass -File scripts/match/run-playing-hall-max.ps1 -AutoTune -AutoTuneHands 500000 -AutoTuneProfiles auto,cpu,gpu -Hands 100000000 -TableCountPerWorker 8 -LearnEveryHands 0 -SaveTrainingTsv false -SaveDdreTrainingTsv false -OutDir data/bench-hall-max
 
 # 3) inspect result
 Get-Content data/bench-hall-max/autotune/autotune-selection.txt
@@ -381,37 +381,37 @@ Optional delegated analysis/review helpers for read-heavy tasks:
 Unified health check:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action doctor
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action doctor
 ```
 
 One-time auth:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action auth -Provider gemini
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action auth -Provider gemini
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action auth -Provider claude
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action auth -Provider claude
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action auth -Provider gpt
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action auth -Provider gpt
 ```
 
 Manual/no-browser auth is available for Gemini and GPT:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action auth -Provider gemini -NoBrowser
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action auth -Provider gemini -NoBrowser
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 -Action auth -Provider gpt -NoBrowser
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 -Action auth -Provider gpt -NoBrowser
 ```
 
 Read-only delegation example:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ai/ai-minion.ps1 `
   -Action delegate `
   -Provider gpt `
   -Mode analysis `
@@ -423,7 +423,7 @@ powershell -ExecutionPolicy Bypass -File scripts/ai-minion.ps1 `
 Notes:
 
 - Shared sidecar rules live in `AI_ENTRYPOINT.md`, with provider-specific overlays in `GEMINI.md`, `CLAUDE.md`, and `GPT.md`.
-- Gemini keeps its provider-specific wrapper at `scripts/gemini-sidecar.ps1`.
+- Gemini keeps its provider-specific wrapper at `scripts/ai/gemini-sidecar.ps1`.
 - Claude login is browser-based through `claude auth login`.
 - GPT uses the official OpenAI Codex CLI and ChatGPT/device auth.
 
