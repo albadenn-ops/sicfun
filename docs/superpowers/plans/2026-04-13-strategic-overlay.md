@@ -1051,27 +1051,27 @@ import sicfun.holdem.runtime.StrategicLifecycleHelper
 
 - [ ] **Step 2: Add strategic lifecycle calls in the hand loop**
 
-Find where each hand starts (look for the hand-processing loop). At hand start, add:
-
+**Hand start (line ~891)** — after `liveHandOpt = Some(created)` / when a new LiveHand is created:
 ```scala
         strategicHelperOpt.foreach { helper =>
           helper.updatePositionMapping(
-            Map(villainPosition -> PlayerId("villain"))
+            Map(created.villainPosition -> PlayerId("villain"))
           )
-          helper.startHand(hero)
+          helper.startHand(created.heroHole)
         }
 ```
 
-After villain actions are observed, add:
+**Villain actions (line ~948)** — inside `processSteps`, in the `if step.relativeActor == 1` branch
+(villain actions), add after the existing `villainObservations :+` line:
 ```scala
-        strategicHelperOpt.foreach { helper =>
-          helper.observeVillainAction(villainPosition, action, gameState)
-        }
+          strategicHelperOpt.foreach(_.observeVillainAction(
+            liveHand.villainPosition, step.action, step.stateBefore
+          ))
 ```
 
-At hand end, add:
+**Hand end (line ~894)** — inside the `if matchState.parsed.handOver` block, before `recordOutcome`:
 ```scala
-        strategicHelperOpt.foreach(_.endHand())
+          strategicHelperOpt.foreach(_.endHand())
 ```
 
 - [ ] **Step 3: Update decideHero for Strategic mode**
@@ -1179,15 +1179,116 @@ git commit -m "feat(protocol): add strategic mode support to AcpcMatchRunner"
 **Files:**
 - Modify: `src/main/scala/sicfun/holdem/runtime/protocol/SlumbotMatchRunner.scala`
 
-Same pattern as Task 6 for ACPC. The changes are identical in structure.
+Same structure as Task 6 but targeting Slumbot's different loop shape and local variables.
 
-- [ ] **Step 1: Add strategic engine field, lifecycle calls, and decideHero dispatch**
+- [ ] **Step 1: Add strategic helper field and initialization**
 
-Follow the exact same pattern as Task 6, Steps 1-3, applied to `SlumbotMatchRunner.scala`. The key differences:
-- The villain position variable may be named differently (check the existing code)
-- The hand loop structure may differ slightly
+Same as Task 6 Step 1: add `strategicHelperOpt` field with init/session, and imports for
+`PlayerId` and `StrategicLifecycleHelper`.
 
-- [ ] **Step 2: Update CLI parser to accept "strategic"**
+```scala
+    private val strategicHelperOpt: Option[StrategicLifecycleHelper] =
+      if config.heroMode == HeroMode.Strategic then
+        val helper = StrategicLifecycleHelper.create()
+        helper.initSession(
+          rivalIds = Vector(PlayerId("villain")),
+          positionMapping = Map.empty
+        )
+        Some(helper)
+      else None
+```
+
+- [ ] **Step 2: Add strategic lifecycle calls in playHand()**
+
+Slumbot's `playHand()` uses local vars (not a LiveHand instance). The key locals are
+`heroHole`, `villainPosition`, `step.action`, `step.stateBefore`.
+
+**Hand start (line ~689)** — after `var pendingHeroRaise = false`, add:
+```scala
+        strategicHelperOpt.foreach { helper =>
+          helper.updatePositionMapping(
+            Map(villainPosition -> PlayerId("villain"))
+          )
+          helper.startHand(heroHole)
+        }
+```
+
+**Villain actions (line ~702)** — inside `newSteps.foreach`, in the `if step.relativeActor == 1`
+branch, add after the existing `villainObservations = villainObservations :+` line:
+```scala
+          strategicHelperOpt.foreach(_.observeVillainAction(
+            villainPosition, step.action, step.stateBefore
+          ))
+```
+
+**Hand end (line ~715)** — inside `response.winnings match { case Some(winnings) =>`,
+before `return HandOutcome(...)`:
+```scala
+          strategicHelperOpt.foreach(_.endHand())
+```
+
+- [ ] **Step 3: Update decideHero for Strategic mode**
+
+Same pattern as Task 6 Step 3: add a `HeroMode.Strategic` branch that delegates to
+`HeroDecisionPipeline.decideHeroStrategic(strategicCtx, heroCtx)`. The `decideHero`
+signature is identical to ACPC's:
+
+```scala
+    private def decideHero(
+        hero: HoleCards,
+        state: GameState,
+        villainPosition: Position,
+        villainObservations: Vector[VillainObservation],
+        candidates: Vector[PokerAction]
+    ): PokerAction =
+      config.heroMode match
+        case HeroMode.Strategic =>
+          strategicHelperOpt match
+            case Some(helper) =>
+              HeroDecisionPipeline.decideHeroStrategic(
+                HeroDecisionPipeline.StrategicDecisionContext(state, candidates, helper),
+                HeroDecisionPipeline.HeroDecisionContext(
+                  hero = hero,
+                  state = state,
+                  folds = folds,
+                  tableRanges = tableRanges,
+                  villainPos = villainPosition,
+                  observations = villainObservations,
+                  candidates = candidates,
+                  engine = engine,
+                  actionModel = artifact.model,
+                  bunchingTrials = config.bunchingTrials,
+                  cfrIterations = config.cfrIterations,
+                  cfrVillainHands = config.cfrVillainHands,
+                  cfrEquityTrials = config.cfrEquityTrials,
+                  rng = rng
+                )
+              )
+            case None =>
+              candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
+        case _ =>
+          HeroDecisionPipeline.decideHero(
+            config.heroMode,
+            HeroDecisionPipeline.HeroDecisionContext(
+              hero = hero,
+              state = state,
+              folds = folds,
+              tableRanges = tableRanges,
+              villainPos = villainPosition,
+              observations = villainObservations,
+              candidates = candidates,
+              engine = engine,
+              actionModel = artifact.model,
+              bunchingTrials = config.bunchingTrials,
+              cfrIterations = config.cfrIterations,
+              cfrVillainHands = config.cfrVillainHands,
+              cfrEquityTrials = config.cfrEquityTrials,
+              rng = rng
+            )
+          )
+```
+
+- [ ] **Step 4: Update CLI parser to accept "strategic"**
 
 Find the `heroModeOption` method (around line 1007):
 
@@ -1214,12 +1315,12 @@ With:
       |  --heroMode=adaptive         adaptive|gto|strategic
 ```
 
-- [ ] **Step 3: Compile check**
+- [ ] **Step 5: Compile check**
 
 Run: `sbt compile`
 Expected: Compiles cleanly.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/main/scala/sicfun/holdem/runtime/protocol/SlumbotMatchRunner.scala
