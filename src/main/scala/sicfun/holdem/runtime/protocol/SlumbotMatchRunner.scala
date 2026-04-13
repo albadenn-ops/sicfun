@@ -6,7 +6,8 @@ import sicfun.holdem.engine.HeroDecisionPipeline
 import sicfun.holdem.engine.inference.VillainObservation
 import sicfun.holdem.engine.villain.EquilibriumBaselineConfig
 import sicfun.holdem.model.{CalibrationGate, CalibrationSummary, ModelVersion, PokerActionModel, PokerActionModelArtifactIO, TrainedPokerActionModel}
-import sicfun.holdem.runtime.HeadsUpMatchDefaults
+import sicfun.holdem.runtime.{HeadsUpMatchDefaults, StrategicLifecycleHelper}
+import sicfun.holdem.strategic.types.PlayerId
 import sicfun.holdem.types.*
 
 import java.io.BufferedWriter
@@ -626,6 +627,16 @@ object SlumbotMatchRunner:
       equityTrials = config.equityTrials,
       equilibriumBaselineConfig = baselineConfig
     )
+    private val strategicHelperOpt: Option[StrategicLifecycleHelper] =
+      if config.heroMode == HeroMode.Strategic then
+        val helper = StrategicLifecycleHelper.create()
+        helper.initSession(
+          rivalIds = Vector(PlayerId("villain")),
+          positionMapping = Map.empty
+        )
+        Some(helper)
+      else None
+
     private val api = new SlumbotApiClient(config.baseUrl, config.timeoutMillis)
 
     def run(): Either[String, MatchRunnerSupport.RunSummary] =
@@ -688,6 +699,13 @@ object SlumbotMatchRunner:
       var decisionIndex = 0
       var pendingHeroRaise = false
 
+      strategicHelperOpt.foreach { helper =>
+        helper.updatePositionMapping(
+          Map(villainPosition -> PlayerId("villain"))
+        )
+        helper.startHand(heroHole)
+      }
+
       while true do
         val board = parseBoard(response.board)
         val parsed =
@@ -700,6 +718,9 @@ object SlumbotMatchRunner:
         newSteps.foreach { step =>
           if step.relativeActor == 1 then
             villainObservations = villainObservations :+ VillainObservation(step.action, step.stateBefore)
+            strategicHelperOpt.foreach(_.observeVillainAction(
+              villainPosition, step.action, step.stateBefore
+            ))
             if pendingHeroRaise then
               step.action match
                 case PokerAction.Fold | PokerAction.Call | PokerAction.Raise(_) =>
@@ -714,6 +735,7 @@ object SlumbotMatchRunner:
 
         response.winnings match
           case Some(winnings) =>
+            strategicHelperOpt.foreach(_.endHand())
             val villainHole =
               if response.oppHoleCards.length == 2 then
                 Some(parseHoleCards(response.oppHoleCards))
@@ -761,26 +783,35 @@ object SlumbotMatchRunner:
         villainObservations: Vector[VillainObservation],
         candidates: Vector[PokerAction]
     ): PokerAction =
-      HeroDecisionPipeline.decideHero(
-        config.heroMode,
-        HeroDecisionPipeline.HeroDecisionContext(
-          hero = hero,
-          state = state,
-          folds = folds,
-          tableRanges = tableRanges,
-          villainPos = villainPosition,
-          observations = villainObservations,
-          candidates = candidates,
-          engine = engine,
-          actionModel = artifact.model,
-          bunchingTrials = config.bunchingTrials,
-          cfrIterations = config.cfrIterations,
-          cfrVillainHands = config.cfrVillainHands,
-          cfrEquityTrials = config.cfrEquityTrials,
-          rng = rng,
-          decisionBudgetMillis = Some(config.decisionBudgetMillis)
-        )
+      val heroCtx = HeroDecisionPipeline.HeroDecisionContext(
+        hero = hero,
+        state = state,
+        folds = folds,
+        tableRanges = tableRanges,
+        villainPos = villainPosition,
+        observations = villainObservations,
+        candidates = candidates,
+        engine = engine,
+        actionModel = artifact.model,
+        bunchingTrials = config.bunchingTrials,
+        cfrIterations = config.cfrIterations,
+        cfrVillainHands = config.cfrVillainHands,
+        cfrEquityTrials = config.cfrEquityTrials,
+        rng = rng,
+        decisionBudgetMillis = Some(config.decisionBudgetMillis)
       )
+      config.heroMode match
+        case HeroMode.Strategic =>
+          strategicHelperOpt match
+            case Some(helper) =>
+              HeroDecisionPipeline.decideHeroStrategic(
+                HeroDecisionPipeline.StrategicDecisionContext(state, candidates, helper),
+                heroCtx
+              )
+            case None =>
+              candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
+        case mode =>
+          HeroDecisionPipeline.decideHero(mode, heroCtx)
 
     private def heroCandidates(parsed: SlumbotActionCodec.ParsedActionState): Vector[PokerAction] =
       val raises = legalRaiseCandidates(parsed)
@@ -1015,7 +1046,8 @@ object SlumbotMatchRunner:
         raw.trim.toLowerCase(Locale.ROOT) match
           case "adaptive" => Right(HeroMode.Adaptive)
           case "gto" => Right(HeroMode.Gto)
-          case _ => Left("--heroMode must be one of: adaptive, gto")
+          case "strategic" => Right(HeroMode.Strategic)
+          case _ => Left("--heroMode must be one of: adaptive, gto, strategic")
 
   private val usage =
     """Usage:
@@ -1026,7 +1058,7 @@ object SlumbotMatchRunner:
       |  --reportEvery=10            Progress report interval (0 disables)
       |  --outDir=data/slumbot-match-runner
       |  --model=<dir>               Optional saved action-model artifact directory
-      |  --heroMode=adaptive         adaptive|gto
+      |  --heroMode=adaptive         adaptive|gto|strategic
       |  --baseUrl=https://slumbot.com
       |  --bunchingTrials=1          Posterior bunching trials
       |  --equityTrials=600          Equity trials for adaptive recommendations
