@@ -5,7 +5,8 @@ import sicfun.holdem.cli.CliHelpers
 import sicfun.holdem.engine.HeroDecisionPipeline
 import sicfun.holdem.engine.inference.VillainObservation
 import sicfun.holdem.model.{CalibrationGate, CalibrationSummary, ModelVersion, PokerActionModel, PokerActionModelArtifactIO, TrainedPokerActionModel}
-import sicfun.holdem.runtime.HeadsUpMatchDefaults
+import sicfun.holdem.runtime.{HeadsUpMatchDefaults, StrategicLifecycleHelper}
+import sicfun.holdem.strategic.types.PlayerId
 import sicfun.holdem.types.*
 
 import java.io.{BufferedReader, BufferedWriter, InputStreamReader, OutputStreamWriter}
@@ -823,6 +824,16 @@ object AcpcMatchRunner:
       equityTrials = config.equityTrials
     )
 
+    private val strategicHelperOpt: Option[StrategicLifecycleHelper] =
+      if config.heroMode == HeroMode.Strategic then
+        val helper = StrategicLifecycleHelper.create()
+        helper.initSession(
+          rivalIds = Vector(PlayerId("villain")),
+          positionMapping = Map.empty
+        )
+        Some(helper)
+      else None
+
     def run(): Either[String, MatchRunnerSupport.RunSummary] =
       var socket: Socket | Null = null
       var reader: BufferedReader | Null = null
@@ -888,6 +899,12 @@ object AcpcMatchRunner:
                   heroHole = matchState.heroHole
                 )
                 liveHandOpt = Some(created)
+                strategicHelperOpt.foreach { helper =>
+                  helper.updatePositionMapping(
+                    Map(created.villainPosition -> PlayerId("villain"))
+                  )
+                  helper.startHand(created.heroHole)
+                }
                 created
           liveHand.villainHole = matchState.villainHole.orElse(liveHand.villainHole)
           processSteps(matchState, liveHand)
@@ -909,6 +926,7 @@ object AcpcMatchRunner:
                 villainObservationCount = liveHand.villainObservations.length
               )
               liveHand.completed = true
+              strategicHelperOpt.foreach(_.endHand())
               recordOutcome(outcome)
               appendHandLog(outcome)
               maybeReport()
@@ -946,6 +964,9 @@ object AcpcMatchRunner:
       newSteps.foreach { step =>
         if step.relativeActor == 1 then
           liveHand.villainObservations = liveHand.villainObservations :+ VillainObservation(step.action, step.stateBefore)
+          strategicHelperOpt.foreach(_.observeVillainAction(
+            liveHand.villainPosition, step.action, step.stateBefore
+          ))
           if liveHand.pendingHeroRaise then
             step.action match
               case PokerAction.Fold | PokerAction.Call | PokerAction.Raise(_) =>
@@ -958,11 +979,12 @@ object AcpcMatchRunner:
             case _ => ()
       }
 
-    /** Invoke the hero decision pipeline (Adaptive or Gto) to select an action.
+    /** Invoke the hero decision pipeline to select an action.
       *
-      * Delegates to [[HeroDecisionPipeline.decideHero]] with the full decision context
-      * including hero's cards, the current game state, villain observations for range
-      * inference, legal action candidates, and engine/model configuration.
+      * For Adaptive/GTO modes: delegates to [[HeroDecisionPipeline.decideHero]].
+      * For Strategic mode: delegates to [[HeroDecisionPipeline.decideHeroStrategic]]
+      * which runs the adaptive engine for upstream EVs then filters through the
+      * strategic overlay.
       */
     private def decideHero(
         hero: HoleCards,
@@ -971,25 +993,34 @@ object AcpcMatchRunner:
         villainObservations: Vector[VillainObservation],
         candidates: Vector[PokerAction]
     ): PokerAction =
-      HeroDecisionPipeline.decideHero(
-        config.heroMode,
-        HeroDecisionPipeline.HeroDecisionContext(
-          hero = hero,
-          state = state,
-          folds = folds,
-          tableRanges = tableRanges,
-          villainPos = villainPosition,
-          observations = villainObservations,
-          candidates = candidates,
-          engine = engine,
-          actionModel = artifact.model,
-          bunchingTrials = config.bunchingTrials,
-          cfrIterations = config.cfrIterations,
-          cfrVillainHands = config.cfrVillainHands,
-          cfrEquityTrials = config.cfrEquityTrials,
-          rng = rng
-        )
+      val heroCtx = HeroDecisionPipeline.HeroDecisionContext(
+        hero = hero,
+        state = state,
+        folds = folds,
+        tableRanges = tableRanges,
+        villainPos = villainPosition,
+        observations = villainObservations,
+        candidates = candidates,
+        engine = engine,
+        actionModel = artifact.model,
+        bunchingTrials = config.bunchingTrials,
+        cfrIterations = config.cfrIterations,
+        cfrVillainHands = config.cfrVillainHands,
+        cfrEquityTrials = config.cfrEquityTrials,
+        rng = rng
       )
+      config.heroMode match
+        case HeroMode.Strategic =>
+          strategicHelperOpt match
+            case Some(helper) =>
+              HeroDecisionPipeline.decideHeroStrategic(
+                HeroDecisionPipeline.StrategicDecisionContext(state, candidates, helper),
+                heroCtx
+              )
+            case None =>
+              candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
+        case mode =>
+          HeroDecisionPipeline.decideHero(mode, heroCtx)
 
     /** Build the legal action candidate list from the current parsed state.
       * Combines fold/check/call with legal raise sizes computed from stack and pot geometry.
@@ -1183,7 +1214,8 @@ object AcpcMatchRunner:
         raw.trim.toLowerCase(Locale.ROOT) match
           case "adaptive" => Right(HeroMode.Adaptive)
           case "gto" => Right(HeroMode.Gto)
-          case _ => Left("--heroMode must be one of: adaptive, gto")
+          case "strategic" => Right(HeroMode.Strategic)
+          case _ => Left("--heroMode must be one of: adaptive, gto, strategic")
 
   private val usage =
     """Usage:
@@ -1198,7 +1230,7 @@ object AcpcMatchRunner:
       |  --reportEvery=50            Progress report interval in completed hands (0 disables)
       |  --outDir=data/acpc-match-runner
       |  --model=<dir>               Optional saved action-model artifact directory
-      |  --heroMode=adaptive         adaptive|gto
+      |  --heroMode=adaptive         adaptive|gto|strategic
       |  --bunchingTrials=1          Posterior bunching trials
       |  --equityTrials=600          Equity trials for adaptive recommendations
       |  --cfrIterations=180         CFR iterations for heroMode=gto
