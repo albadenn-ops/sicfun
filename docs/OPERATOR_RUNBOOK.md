@@ -248,13 +248,13 @@ powershell -ExecutionPolicy Bypass -File scripts/gpu/prove-global-gpu-tuning-por
 Heads-up range CUDA auto-tuner:
 
 ```powershell
-sbt "runMain sicfun.holdem.bench.HeadsUpRangeGpuAutoTuner --heroes=256 --entriesPerHero=128 --trials=256 --warmupRuns=1 --runs=3 --cachePath=data/headsup-range-autotune.properties"
+sbt "runMain sicfun.holdem.bench.tuner.HeadsUpRangeGpuAutoTuner --heroes=256 --entriesPerHero=128 --trials=256 --warmupRuns=1 --runs=3 --cachePath=data/headsup-range-autotune.properties"
 ```
 
 Postflop CUDA auto-tuner:
 
 ```powershell
-sbt "runMain sicfun.holdem.bench.HoldemPostflopGpuAutoTuner --villains=1024 --trials=2000 --warmupRuns=1 --runs=3 --cachePath=data/postflop-autotune.properties"
+sbt "runMain sicfun.holdem.bench.tuner.HoldemPostflopGpuAutoTuner --villains=1024 --trials=2000 --warmupRuns=1 --runs=3 --cachePath=data/postflop-autotune.properties"
 ```
 
 ## 5A. Hand-History Web Review
