@@ -20,16 +20,10 @@ object BaselineBridge:
   def toRealBaseline(equityEv: Double): BridgeResult[Ev] =
     BridgeResult.Approximate(Ev(equityEv), "Monte Carlo equity approximation")
 
-  /** Convert per-rival equity contributions to attributed baselines.
-    * @param perRivalEquity map from rival id to their contribution to hero's baseline
+  /** Bridge an AttributedBaseline into the bridge result layer.
+    *
+    * The bridge annotates fidelity; it no longer transforms the data.
+    * The baseline is kernel-coupled via PosteriorAttributedBaseline.
     */
-  def toAttributedBaselines(
-      perRivalEquity: Map[PlayerId, Double]
-  ): BridgeResult[Map[PlayerId, Ev]] =
-    if perRivalEquity.isEmpty then
-      BridgeResult.Absent("no per-rival equity data available")
-    else
-      BridgeResult.Approximate(
-        perRivalEquity.map((pid, eq) => pid -> Ev(eq)),
-        "attributed baseline from engine equity split; not formal kernel-based attribution"
-      )
+  def toAttributedBaseline(baseline: AttributedBaseline): BridgeResult[AttributedBaseline] =
+    BridgeResult.Approximate(baseline, "kernel-coupled posterior-predictive attribution; per-rival via PosteriorAttributedBaseline")

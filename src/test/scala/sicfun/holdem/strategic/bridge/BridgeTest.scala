@@ -289,37 +289,18 @@ class BridgeTest extends munit.FunSuite:
   test("BaselineBridge.toRealBaseline fidelity is Approximate"):
     assertEquals(BaselineBridge.toRealBaseline(0.5).fidelity, Fidelity.Approximate)
 
-  test("BaselineBridge.toAttributedBaselines empty map returns Absent"):
-    val result = BaselineBridge.toAttributedBaselines(Map.empty)
+  test("BaselineBridge.toAttributedBaseline returns Approximate with baseline pass-through"):
+    val baseline = new PosteriorAttributedBaseline(StrategicEngine.defaultActionPriors)
+    val result = BaselineBridge.toAttributedBaseline(baseline)
     result match
-      case BridgeResult.Absent(reason) => assert(reason.nonEmpty)
-      case other => fail(s"expected Absent, got $other")
-
-  test("BaselineBridge.toAttributedBaselines non-empty returns Approximate"):
-    val input = Map(PlayerId("v1") -> 0.60, PlayerId("v2") -> 0.40)
-    val result = BaselineBridge.toAttributedBaselines(input)
-    result match
-      case BridgeResult.Approximate(evMap, _) =>
-        assertEqualsDouble(evMap(PlayerId("v1")).value, 0.60, Tol)
-        assertEqualsDouble(evMap(PlayerId("v2")).value, 0.40, Tol)
+      case BridgeResult.Approximate(b, note) =>
+        assert(b eq baseline, "should return the same baseline instance")
+        assert(note.contains("kernel-coupled"), s"note should mention kernel coupling: $note")
       case other => fail(s"expected Approximate, got $other")
 
-  test("BaselineBridge.toAttributedBaselines single rival"):
-    val input = Map(PlayerId("hero") -> 1.0)
-    val result = BaselineBridge.toAttributedBaselines(input)
-    result match
-      case BridgeResult.Approximate(evMap, _) =>
-        assertEqualsDouble(evMap(PlayerId("hero")).value, 1.0, Tol)
-      case other => fail(s"expected Approximate, got $other")
-
-  test("BaselineBridge.toAttributedBaselines fidelity is Absent for empty"):
-    assertEquals(BaselineBridge.toAttributedBaselines(Map.empty).fidelity, Fidelity.Absent)
-
-  test("BaselineBridge.toAttributedBaselines fidelity is Approximate for non-empty"):
-    assertEquals(
-      BaselineBridge.toAttributedBaselines(Map(PlayerId("v") -> 0.5)).fidelity,
-      Fidelity.Approximate
-    )
+  test("BaselineBridge.toAttributedBaseline fidelity is Approximate"):
+    val baseline = new PosteriorAttributedBaseline(StrategicEngine.defaultActionPriors)
+    assertEquals(BaselineBridge.toAttributedBaseline(baseline).fidelity, Fidelity.Approximate)
 
   test("AttributedBaseline trait accepts PublicState"):
     val baseline: AttributedBaseline = new PosteriorAttributedBaseline(
