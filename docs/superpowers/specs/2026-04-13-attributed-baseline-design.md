@@ -121,28 +121,72 @@ trait AttributedBaseline:
   def probability(cls, action, sizing, publicState: PublicState, rivalState: RivalBeliefState): Double
 ```
 
+**`publicState` is threaded but unused in v1.** The `PosteriorAttributedBaseline`
+implementation (§4.1) depends only on `actionPriors` and `rivalState.typePosterior` —
+it does not read `publicState`. The parameter is present for forward compatibility
+with spot-conditioned attribution (e.g., street-dependent or pot-dependent baselines)
+but is explicitly unused in the initial implementation.
+
 Call sites to migrate:
 - `OpponentModelState.attributedBaseline: Option[AttributedBaseline]` — type unchanged, `None` callers unaffected
 - `BaselineBridge.toAttributedBaselines` — reworked (see §4.4)
 - Test fixtures in `AugmentedStateTest`, `DynamicsTest` — pass `None`, no change needed
 - `BridgeTest` — `toAttributedBaselines` tests updated
 
-### 4.3 Per-rival attrib likelihood in buildKernelProfile
+### 4.3 Attrib likelihood replacement
 
 `src/main/scala/sicfun/holdem/engine/StrategicEngine.scala`
+
+**Type clarification:** `TemperedLikelihoodFn` is
+`(ActionSignal, PublicState, RivalBeliefState) => DiscreteDistribution[StrategicClass]`.
+It takes an observed signal and returns a class-space posterior — NOT a per-class
+action probability. The helper must transpose from the baseline's action-space
+`hat_pi(a | c, ...)` to the class-space posterior that `TemperedLikelihood.updatePosterior`
+produces.
 
 **New helper:**
 ```
 buildAttribLikelihoodFromBaseline(baseline: AttributedBaseline): TemperedLikelihoodFn
 ```
 
-Returns a `TemperedLikelihoodFn` whose `logLikelihood(cls, signal)` calls through to
-the attributed baseline at call time. The returned closure captures only the baseline
-(stateless); `PublicState` and `RivalBeliefState` arrive at call time via the
-`TemperedLikelihoodFn` interface.
+Implementation:
+```scala
+(signal: ActionSignal, pubState: PublicState, rivalState: RivalBeliefState) =>
+  val classes = StrategicClass.values
+  val eta = TemperedLikelihood.defaultEta(classes.length)
+  // Transpose: for each class c, compute basePr(c) = baseline.probability(c, signal, pubState, rivalState)
+  val basePr = classes.map { cls =>
+    baseline.probability(cls, signal.action, signal.sizing, pubState, rivalState)
+  }
+  val prior = rivalState match
+    case srb: StrategicRivalBelief => classes.map(c => srb.typePosterior.probabilityOf(c))
+    case _ => classes.map(_ => 1.0 / classes.length)
+  val posterior = TemperedLikelihood.updatePosterior(prior, basePr, eta, config.temperedConfig)
+  DiscreteDistribution(classes.zip(posterior).toMap)
+```
+
+The only difference from the current `buildAttribLikelihoodFn()` is that `basePr(c)` comes
+from `baseline.probability(...)` instead of `actionPrior(cls, signal.action)`. The
+tempering machinery (`kappa`, `delta`, `updatePosterior`) is unchanged.
+
+**Replacement strategy for `buildAttribLikelihoodFn()`:**
+
+The existing `buildAttribLikelihoodFn()` is called in two places:
+1. `buildKernelProfile()` (line 1076) — kernel construction
+2. `PosteriorDivergencePolarization` in `decidePftDpw` (line 624) — spot polarization
+
+`buildAttribLikelihoodFn()` is **rewritten** as a thin wrapper:
+```scala
+private def buildAttribLikelihoodFn(): TemperedLikelihoodFn =
+  buildAttribLikelihoodFromBaseline(_attributedBaseline)
+```
+
+where `_attributedBaseline` is the engine's `PosteriorAttributedBaseline` instance.
+Both call sites automatically use the attributed baseline. No deprecated wrapper,
+no divergent implementations.
 
 **In `buildKernelProfile()`:**
-- Single shared attrib likelihood from `buildAttribLikelihoodFromBaseline`
+- Single shared attrib likelihood from the rewritten `buildAttribLikelihoodFn()`
 - Only the attrib likelihood varies by rival at call time (via `rivalState`)
 - Per-rival differentiation in the interpolated kernel assembly is from beta (exploitation), not from different likelihood instances
 
@@ -161,17 +205,21 @@ The bridge annotates fidelity; it no longer transforms the data.
 
 `src/main/scala/sicfun/holdem/strategic/bridge/StrategicSnapshot.scala`
 
-New field:
+New field with default:
 ```scala
-attributionEnabled: Boolean  // whether the engine used kernel-coupled attributed baselines
+attributionEnabled: Boolean = false  // whether the engine used kernel-coupled attributed baselines
 ```
 
-Simple boolean flag reflecting engine configuration. Not derived from posterior shape.
-The flag means "the decision was made with `PosteriorAttributedBaseline` wired into the
-attrib kernel path."
+The default `false` preserves backward compatibility for both construction paths:
+1. **`StrategicEngine.buildSnapshot()`** (line ~890) — sets `attributionEnabled = true`
+   once the feature is wired
+2. **`StrategicSnapshot.build(...)`** (static factory, line ~68) — uses default `false`
+   since this path has no access to engine state and does not use attributed baselines
 
-`buildSnapshot()` sets this flag based on whether the engine has an attributed baseline
-configured (always true once wired; false only if the feature is explicitly disabled).
+The flag means "the decision was made with `PosteriorAttributedBaseline` wired into the
+attrib kernel path." It is not a config toggle — once the feature lands, the engine path
+always sets it to `true`. No explicit disable path is defined; the flag exists for
+snapshot consumers to distinguish engine-produced vs. static-factory-produced snapshots.
 
 ### 4.6 BridgeManifest downgrade
 
