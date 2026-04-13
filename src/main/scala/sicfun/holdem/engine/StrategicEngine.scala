@@ -3,7 +3,8 @@ package sicfun.holdem.engine
 import sicfun.core.DiscreteDistribution
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.*
-import sicfun.holdem.strategic.solver.{WPomcpRuntime, PftDpwRuntime, PftDpwConfig, PftDpwResult, TabularGenerativeModel, ParticleBelief}
+import sicfun.holdem.strategic.{bridge => strategicBridge}
+import sicfun.holdem.strategic.solver.{WPomcpRuntime, PftDpwRuntime, PftDpwConfig, PftDpwResult, TabularGenerativeModel, ParticleBelief, WassersteinDroRuntime}
 
 /** Session/hand orchestrator for the Strategic decision mode.
   *
@@ -18,6 +19,10 @@ import sicfun.holdem.strategic.solver.{WPomcpRuntime, PftDpwRuntime, PftDpwConfi
   *   5. Call [[endHand]] when the hand concludes.
   */
 class StrategicEngine(val config: StrategicEngine.Config):
+
+  /** Kernel-coupled attributed baseline (Def 10). Config-only, stateless. */
+  private val _attributedBaseline: PosteriorAttributedBaseline =
+    new PosteriorAttributedBaseline(config.actionPriors)
 
   private var _sessionState: StrategicEngine.SessionState | Null = null
   private var _handActive: Boolean = false
@@ -54,11 +59,15 @@ class StrategicEngine(val config: StrategicEngine.Config):
     val exploitStates = rivalIds.map { id =>
       id -> ExploitationState.initial(config.exploitConfig)
     }.toMap
+    val cpdStates = config.cpdConfig match
+      case Some(cpd) => rivalIds.map(id => id -> cpd.initial).toMap
+      case None => Map.empty[PlayerId, ChangepointState]
     _sessionState = StrategicEngine.SessionState(
       rivalBeliefs = beliefs,
       exploitationStates = exploitStates,
       rivalSeats = rivalSeats,
-      deploymentSet = EmpiricalDeploymentSet(Vector.empty, maxSize = config.deploymentSetSize)
+      deploymentSet = EmpiricalDeploymentSet(Vector.empty, maxSize = config.deploymentSetSize),
+      cpdStates = cpdStates
     )
 
   /** Start a new hand. Resets hand-local state, preserves session beliefs.
@@ -106,24 +115,57 @@ class StrategicEngine(val config: StrategicEngine.Config):
     val kernelProfile = buildKernelProfile()
     val exploitConfigs = session.rivalBeliefs.keys.map(id => id -> config.exploitConfig).toMap
 
-    val result = Dynamics.fullStep[StrategicRivalBelief](
-      rivalStates = session.rivalBeliefs,
-      exploitStates = session.exploitationStates,
-      signal = signal,
-      publicState = pubState,
-      kernelProfile = kernelProfile,
-      exploitConfigs = exploitConfigs,
-      detector = config.detector,
-      exploitabilityFn = beta => computeExploitabilityEstimate(beta),
-      epsilonNE = config.epsilonBase
-    )
-
-    _sessionState = StrategicEngine.SessionState(
-      rivalBeliefs = result.updatedRivals,
-      exploitationStates = result.updatedExploitation,
-      rivalSeats = session.rivalSeats,
-      deploymentSet = session.deploymentSet
-    )
+    config.cpdConfig match
+      case Some(cpd) =>
+        // Dynamics.fullStepWithCPD: rival update + CPD detection + prior reset (Defs 22-28)
+        val cpdConfigs = session.rivalBeliefs.keys.map { id =>
+          id -> RivalCPDConfig(cpd, StrategicRivalBelief.uniform.typePosterior)
+        }.toMap
+        val updaters = session.rivalBeliefs.keys.map { id =>
+          id -> StrategicRivalBelief.updater
+        }.toMap
+        val result = Dynamics.fullStepWithCPD[StrategicRivalBelief](
+          rivalStates = session.rivalBeliefs,
+          exploitStates = session.exploitationStates,
+          signal = signal,
+          publicState = pubState,
+          kernelProfile = kernelProfile,
+          exploitConfigs = exploitConfigs,
+          detector = config.detector,
+          exploitabilityFn = beta => computeExploitabilityEstimate(beta),
+          epsilonNE = config.epsilonBase,
+          cpdConfigs = cpdConfigs,
+          cpdStates = session.cpdStates,
+          posteriorExtractor = (_, m) => m.typePosterior,
+          updaters = updaters,
+          predictiveProbFn = (_, _) => (r: Int) => 1.0 / math.max(1, r + 1)
+        )
+        _sessionState = StrategicEngine.SessionState(
+          rivalBeliefs = result.updatedRivals,
+          exploitationStates = result.updatedExploitation,
+          rivalSeats = session.rivalSeats,
+          deploymentSet = session.deploymentSet,
+          cpdStates = result.updatedCpdStates
+        )
+      case None =>
+        val result = Dynamics.fullStep[StrategicRivalBelief](
+          rivalStates = session.rivalBeliefs,
+          exploitStates = session.exploitationStates,
+          signal = signal,
+          publicState = pubState,
+          kernelProfile = kernelProfile,
+          exploitConfigs = exploitConfigs,
+          detector = config.detector,
+          exploitabilityFn = beta => computeExploitabilityEstimate(beta),
+          epsilonNE = config.epsilonBase
+        )
+        _sessionState = StrategicEngine.SessionState(
+          rivalBeliefs = result.updatedRivals,
+          exploitationStates = result.updatedExploitation,
+          rivalSeats = session.rivalSeats,
+          deploymentSet = session.deploymentSet,
+          cpdStates = session.cpdStates
+        )
 
     // Advisory Bellman clamp from last evaluation bundle (design doc §6).
     // Uses cached budget estimate as an advisory bound — NOT formal B*.
@@ -430,8 +472,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
         _lastBundle = Some(makeFallbackBundle(numActions, s"PftDpw solver status: ${pftResult.status}"))
         return failClosedAction(candidateActions)
 
-      // 3. Four-world grid solve (V^{1,0}, V^{0,1}, V^{0,0}) — Theorem 4
-      val fourWorldOpt: Option[FourWorld] = try
+      // 3. Four-world grid solve + signal decomposition (Theorem 4, Defs 40-43, 47, 50)
+      val (fourWorldOpt, deltaVocabOpt, chainWorldQs, riskProfileOpt): (Option[FourWorld], Option[DeltaVocabulary], Map[ChainWorld, Ev], Option[RiskDecomposition.ChainRiskProfile]) = try
         val fwModels = StrategicEngine.buildFourWorldModels(
           gameState, session.rivalBeliefs, candidateActions, heroBucket, config.actionPriors
         )
@@ -439,15 +481,111 @@ class StrategicEngine(val config: StrategicEngine.Config):
         val blindResult = PftDpwRuntime.solve(fwModels.blind, belief, pftConfig)
         val blindOlResult = PftDpwRuntime.solve(fwModels.blindOpenLoop, belief, pftConfig)
         if olResult.isSuccess && blindResult.isSuccess && blindOlResult.isSuccess then
-          Some(StrategicEngine.extractFourWorldValues(
-            baselineQ = pftResult.qValues,
-            openLoopQ = olResult.qValues,
-            blindQ = blindResult.qValues,
-            blindOpenLoopQ = blindOlResult.qValues
-          ))
-        else None
+          val fw = FourWorldDecomposition.compute(
+            vAttribClosedLoop = Ev(pftResult.qValues.max),
+            vAttribOpenLoop = Ev(olResult.qValues.max),
+            vBlindClosedLoop = Ev(blindResult.qValues.max),
+            vBlindOpenLoop = Ev(blindOlResult.qValues.max)
+          )
+
+          // Ref-kernel solve for per-rival signal decomposition (Defs 40-42)
+          val refResultOpt: Option[PftDpwResult] = try
+            val uniformBeliefs = session.rivalBeliefs.map((id, _) => id -> StrategicRivalBelief.uniform)
+            val refModel = PokerPftFormulation.buildTabularModel(
+              gameState, uniformBeliefs, candidateActions, heroBucket, config.actionPriors
+            )
+            val r = PftDpwRuntime.solve(refModel, belief, pftConfig)
+            if r.isSuccess then Some(r) else None
+          catch case _: Exception => None
+
+          // Design-kernel solve for signaling sub-decomposition (Defs 48-49)
+          val designResultOpt: Option[PftDpwResult] = try
+            val designModel = PokerPftFormulation.buildDesignKernelModel(
+              gameState, session.rivalBeliefs, candidateActions, heroBucket, config.actionPriors
+            )
+            val r = PftDpwRuntime.solve(designModel, belief, pftConfig)
+            if r.isSuccess then Some(r) else None
+          catch case _: Exception => None
+
+          val perRivalDeltas: Map[PlayerId, PerRivalDelta] = refResultOpt match
+            case Some(refResult) =>
+              session.rivalBeliefs.keys.map { rivalId =>
+                rivalId -> SignalDecomposition.computePerRivalDelta(
+                  qAttrib = Ev(pftResult.qValues.max),
+                  qRef = Ev(refResult.qValues.max),
+                  qBlind = Ev(blindResult.qValues.max)
+                )
+              }.toMap
+            case None => Map.empty
+
+          // Per-rival signaling sub-decomposition (Defs 48-49, Theorem 3A)
+          val perRivalSubDecomps: Map[PlayerId, PerRivalSignalSubDecomposition] =
+            designResultOpt match
+              case Some(designResult) =>
+                session.rivalBeliefs.keys.map { rivalId =>
+                  rivalId -> SignalingSubDecomposition.compute(
+                    qAttrib = Ev(pftResult.qValues.max),
+                    qDesign = Ev(designResult.qValues.max),
+                    qBlind = Ev(blindResult.qValues.max)
+                  )
+                }.toMap
+              case None => Map.empty
+
+          val deltaSigAgg = SignalDecomposition.deltaSigAggregate(
+            qAttribAll = Ev(pftResult.qValues.max),
+            qBlindAll = Ev(blindResult.qValues.max)
+          )
+
+          // Chain world Q-values (Def 47A) — mapped from grid/ref solves
+          import LearningChannel.*, ShowdownMode.*
+          val cwQs: Map[ChainWorld, Ev] = {
+            val base = Map(
+              ChainWorld(Blind, Off)  -> fw.v00,
+              ChainWorld(Attrib, Off) -> fw.v10,
+              ChainWorld(Attrib, On)  -> fw.v11
+            )
+            val withRef = refResultOpt match
+              case Some(refResult) => base + (ChainWorld(Ref, Off) -> Ev(refResult.qValues.max))
+              case None => base
+            designResultOpt match
+              case Some(designResult) => withRef + (ChainWorld(Design, Off) -> Ev(designResult.qValues.max))
+              case None => withRef
+          }
+
+          // Chain edge deltas (Def 47B, Proposition 8.1)
+          val chainEdgeDeltas =
+            if cwQs.size >= ChainWorld.canonicalChain.size then
+              ChainBaselineQ(cwQs).canonicalEdgeDeltas
+            else IndexedSeq.empty[ChainEdgeDelta]
+
+          // Chain risk profile (Defs 67-69, Proposition 9.7)
+          val chainForRisk = ChainWorld.canonicalChain.filter(cwQs.contains)
+          val chainRiskProfile = if chainForRisk.size >= 2 then
+            val baselineEvs = IndexedSeq(Ev(pftResult.qValues.max))
+            val qsByWorld = chainForRisk.map(w => IndexedSeq(cwQs(w)))
+            val profile = RiskDecomposition.computeProfile(chainForRisk, baselineEvs, qsByWorld)
+            val riskDeltas = profile.riskIncrements
+            val efficiencies = if chainEdgeDeltas.nonEmpty && riskDeltas.size == chainEdgeDeltas.size then
+              RiskDecomposition.edgeEfficiencies(chainEdgeDeltas, riskDeltas)
+            else IndexedSeq.empty
+            Some(profile.copy() -> (riskDeltas, efficiencies))
+          else None
+
+          val vocab = FourWorldDecomposition.buildDeltaVocabulary(
+            fourWorld = fw,
+            perRivalDeltas = perRivalDeltas,
+            deltaSigAggregate = deltaSigAgg,
+            perRivalSubDecomps = perRivalSubDecomps
+          ).copy(
+            chainEdgeDeltas = chainEdgeDeltas,
+            chainRiskDeltas = chainRiskProfile.map(_._2._1).getOrElse(IndexedSeq.empty),
+            edgeEfficiencies = chainRiskProfile.map(_._2._2).getOrElse(IndexedSeq.empty)
+          )
+
+          (Some(fw), Some(vocab), cwQs, chainRiskProfile.map(_._1))
+        else (Option.empty[FourWorld], Option.empty[DeltaVocabulary], Map.empty[ChainWorld, Ev], Option.empty[RiskDecomposition.ChainRiskProfile])
       catch
-        case _: Exception => None
+        case _: Exception => (Option.empty[FourWorld], Option.empty[DeltaVocabulary], Map.empty[ChainWorld, Ev], Option.empty[RiskDecomposition.ChainRiskProfile])
 
       // 4. Build profile models and certify
       val profileModels = (0 until StrategicClass.values.length).map { p =>
@@ -462,9 +600,69 @@ class StrategicEngine(val config: StrategicEngine.Config):
         candidateActions, config.bellmanGamma,
         config.epsilonBase, config.exploitConfig.epsilonAdapt,
         rootState = gameState.street.ordinal,
-        fourWorld = fourWorldOpt
+        fourWorld = fourWorldOpt,
+        deltaVocabulary = deltaVocabOpt,
+        chainWorldValues = chainWorldQs,
+        ambiguityRadius = config.ambiguityRadius
       )
-      _lastBundle = Some(bundle)
+
+      // 5. Bluff annotations (Defs 35-39)
+      val heroClass = StrategicEngine.estimateHeroClass(heroBucket)
+      val annotations = candidateActions.zipWithIndex.map { (act, idx) =>
+        val isStructural = BluffFramework.isStructuralBluff(heroClass, act)
+        val gain = if isStructural && idx < bundle.baselineActionValues.length then
+          val nonBluffQs = candidateActions.zipWithIndex
+            .filterNot((a, _) => BluffFramework.isStructuralBluff(heroClass, a))
+            .collect { case (_, i) if i < bundle.baselineActionValues.length => bundle.baselineActionValues(i) }
+          val bestNonBluff = if nonBluffQs.nonEmpty then Ev(nonBluffQs.max) else Ev(0.0)
+          Some(BluffFramework.bluffGain(Ev(bundle.baselineActionValues(idx)), bestNonBluff))
+        else None
+        BluffAnnotation(isStructural, gain, BluffFramework.isExploitativeBluff(heroClass, act, gain.getOrElse(Ev.Zero)))
+      }
+      // 6. SpotPolarization (Def 25, A9) — per-action information disclosure
+      val pubState = bridgePublicState(gameState)
+      val polProfile: Map[Int, Double] = session.rivalBeliefs.values.headOption match
+        case Some(rivalBelief) =>
+          val polarization = new PosteriorDivergencePolarization(
+            rivalBelief.typePosterior,
+            Some(buildAttribLikelihoodFn())
+          )
+          candidateActions.zipWithIndex.collect {
+            case (PokerAction.Raise(amount), idx) =>
+              val sizing = Sizing(
+                Chips(amount),
+                PotFraction(if gameState.pot > 0 then amount / gameState.pot else 1.0)
+              )
+              idx -> polarization.polarization(
+                PokerAction.Category.Raise, sizing, pubState, rivalBelief
+              )
+          }.toMap
+        case None => Map.empty
+
+      // 7. RevealSchedule (Def 51) — hero information disclosure decision
+      val revealDec = config.revealSchedule.flatMap { schedule =>
+        val equity = Ev(heroBucket / 9.0)
+        session.rivalBeliefs.keys.headOption.map { rivalId =>
+          schedule.classify(rivalId, gameState.street, equity)
+        }
+      }
+
+      // 8. OperationalBaseline (A10) — compose from config + deployment set
+      val opBaseline = Some(OperationalBaseline(
+        epsilonBase = config.epsilonBase,
+        deploymentSet = session.deploymentSet,
+        description = s"PftDpw formal path, ${session.deploymentSet.entries.size} deployment entries"
+      ))
+
+      val annotatedBundle = bundle.copy(
+        bluffAnnotations = annotations,
+        chainRiskProfile = riskProfileOpt,
+        polarizationProfile = polProfile,
+        revealDecision = revealDec,
+        operationalBaseline = opBaseline
+      )
+
+      _lastBundle = Some(annotatedBundle)
       action
 
     catch
@@ -501,7 +699,10 @@ class StrategicEngine(val config: StrategicEngine.Config):
       epsilonBase: Double,
       epsilonAdapt: Double,
       rootState: Int = 0,
-      fourWorld: Option[FourWorld] = None
+      fourWorld: Option[FourWorld] = None,
+      deltaVocabulary: Option[DeltaVocabulary] = None,
+      chainWorldValues: Map[ChainWorld, Ev] = Map.empty,
+      ambiguityRadius: Double = 0.0
   ): (PokerAction, DecisionEvaluationBundle) =
     val numActions = candidateActions.size
     val numProfiles = profileModels.size
@@ -524,22 +725,43 @@ class StrategicEngine(val config: StrategicEngine.Config):
       a += 1
     val baselineValue = if baselineValues.length > rootState then baselineValues(rootState) else 0.0
 
-    // Robust action lower bounds: min over profiles of Q^π_σ(rootState, a)
+    // Robust action lower bounds: Wasserstein DRO over profile space (Def 34)
     val robustActionLowerBounds = new Array[Double](numActions)
-    a = 0
-    while a < numActions do
-      var minQ = Double.PositiveInfinity
-      var p = 0
-      while p < numProfiles do
-        val model = profileModels(p)
-        val idx = rootState * model.numActions + a
-        val reward = model.rewardTable(idx)
-        val successor = model.transitionTable(idx)
-        val qsa = reward + gamma * profileValueArrays(p)(successor)
-        if qsa < minQ then minQ = qsa
-        p += 1
-      robustActionLowerBounds(a) = minQ
-      a += 1
+    if ambiguityRadius > 0.0 && numProfiles > 1 then
+      val profileBelief = Array.fill(numProfiles)(1.0 / numProfiles)
+      val profileCostMatrix = Array.tabulate(numProfiles * numProfiles) { idx =>
+        if idx / numProfiles == idx % numProfiles then 0.0 else 1.0
+      }
+      a = 0
+      while a < numActions do
+        val qPerProfile = new Array[Double](numProfiles)
+        var p = 0
+        while p < numProfiles do
+          val model = profileModels(p)
+          val idx = rootState * model.numActions + a
+          val reward = model.rewardTable(idx)
+          val successor = model.transitionTable(idx)
+          qPerProfile(p) = reward + gamma * profileValueArrays(p)(successor)
+          p += 1
+        WassersteinDroRuntime.robustQValue(profileBelief, qPerProfile, ambiguityRadius, profileCostMatrix) match
+          case Right(robustQ) => robustActionLowerBounds(a) = robustQ
+          case Left(_) => robustActionLowerBounds(a) = qPerProfile.min
+        a += 1
+    else
+      a = 0
+      while a < numActions do
+        var minQ = Double.PositiveInfinity
+        var p = 0
+        while p < numProfiles do
+          val model = profileModels(p)
+          val idx = rootState * model.numActions + a
+          val reward = model.rewardTable(idx)
+          val successor = model.transitionTable(idx)
+          val qsa = reward + gamma * profileValueArrays(p)(successor)
+          if qsa < minQ then minQ = qsa
+          p += 1
+        robustActionLowerBounds(a) = minQ
+        a += 1
 
     // Per-profile results with actual per-profile Q-values at rootState
     val profileResultMap: Map[JointRivalProfileId, SolverResult] =
@@ -560,9 +782,10 @@ class StrategicEngine(val config: StrategicEngine.Config):
     // Compute robust losses from profile models
     val robustLosses = PerStateLossEvaluator.computeRobustLosses(profileModels, refPolicy, gamma)
 
-    // Build transitions function from profile models
-    val transitions: (Int, Int, Int) => Int = (s, a, p) =>
-      profileModels(p).transitionTable(s * baselineModel.numActions + a)
+    // Build transitions function from profile models (deterministic wrapper for Def 60)
+    val transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)] = SafetyBellman.deterministicTransition(
+      (s, a, p) => profileModels(p).transitionTable(s * baselineModel.numActions + a)
+    )
 
     // Compute B*
     val bStar = SafetyBellman.computeBStar(robustLosses, gamma, transitions, numProfiles)
@@ -628,8 +851,9 @@ class StrategicEngine(val config: StrategicEngine.Config):
       pointwiseExploitability = Some(pwExploit),
       deploymentExploitability = None,
       certification = certification,
-      chainWorldValues = Map.empty,
+      chainWorldValues = chainWorldValues,
       fourWorld = fourWorld,
+      deltaVocabulary = deltaVocabulary,
       notes = Vector(
         s"PftDpw formal path: B*_max=$requiredBudget, safeActions=${safeActions.mkString(",")}"
       ) ++ (if !certificateValid then Vector("Certificate invalid — fail-closed to reference policy")
@@ -659,6 +883,62 @@ class StrategicEngine(val config: StrategicEngine.Config):
       chainWorldValues = Map.empty,
       notes = Vector(s"BaselineFallback: $reason")
     )
+
+  /** Build a StrategicSnapshot from the last decision bundle and current session state.
+    *
+    * Populates v0.31.1 optional fields (gridWorldValues, securityValue,
+    * safetyCertificateSummary) from the bundle's certification data.
+    *
+    * @return None if no decision bundle is available
+    */
+  def buildSnapshot(gameState: GameState, heroAction: PokerAction): Option[strategicBridge.StrategicSnapshot] =
+    _lastBundle.map { bundle =>
+      val street = gameState.street
+      val heroBucket = estimateHeroBucket(gameState)
+      val heroClass = StrategicEngine.estimateHeroClass(heroBucket)
+      val baseline = Ev(bundle.baselineValue)
+      val fw = bundle.fourWorld.getOrElse(
+        FourWorld(v11 = baseline, v10 = baseline, v01 = baseline, v00 = baseline)
+      )
+
+      val session = _sessionState.nn
+      val opponentPosterior = session.rivalBeliefs.values.headOption.map(_.typePosterior)
+
+      // v0.31.1 optional fields from certification data
+      val gridWorldValues = bundle.fourWorld.map { fwv =>
+        GridWorld.all.map(gw => gw -> BridgeResult.Exact(fwv(gw))).toMap
+      }
+      val securityValue = bundle.certification match
+        case CertificationResult.TabularCertification(bStar, _, _, _, _) =>
+          if bStar.nonEmpty then Some(Ev(bStar.min)) else None
+        case _ => None
+      val safetyCertSummary = bundle.certification match
+        case CertificationResult.TabularCertification(_, budget, _, valid, _) =>
+          Some((budget, valid))
+        case _ => None
+
+      // Reputation views for all rivals (ReputationalProjection)
+      val reputationViews = session.rivalBeliefs.map { case (id, belief) =>
+        id -> StrategicEngine.PosteriorReputationalProjection.project(belief)
+      }
+
+      strategicBridge.StrategicSnapshot(
+        street = street,
+        pot = Chips(gameState.pot),
+        heroStack = Chips(gameState.stackSize),
+        toCall = Chips(gameState.toCall),
+        actionSignal = bridgeActionSignal(heroAction, gameState),
+        strategicClass = heroClass,
+        fourWorld = fw,
+        baseline = baseline,
+        opponentClassPosterior = opponentPosterior,
+        gridWorldValues = gridWorldValues,
+        securityValue = securityValue,
+        safetyCertificateSummary = safetyCertSummary,
+        reputationViews = reputationViews,
+        bridgeFidelityNotes = Vector("snapshot from StrategicEngine decision bundle")
+      )
+    }
 
   /** End the current hand. If showdown data is provided, applies ShowdownKernel
     * to update rival beliefs based on revealed hands.
@@ -753,16 +1033,18 @@ class StrategicEngine(val config: StrategicEngine.Config):
   private def actionPrior(cls: StrategicClass, cat: PokerAction.Category): Double =
     config.actionPriors.getOrElse((cls, cat), 0.25)
 
-  /** Build the attrib tempered likelihood function (Def 18: hat{pi}^{0,S,i}).
-    * Conditions on rival belief state — uses rival's current posterior as Bayesian prior.
+  /** Build an attrib likelihood from an AttributedBaseline (Def 18 spec-literal).
+    *
+    * Transposes from action-space hat_pi(a | c, ...) to class-space posterior
+    * via TemperedLikelihood.updatePosterior.
     */
-  private def buildAttribLikelihoodFn(): TemperedLikelihoodFn =
+  private def buildAttribLikelihoodFromBaseline(baseline: AttributedBaseline): TemperedLikelihoodFn =
     (signal: ActionSignal, pubState: PublicState, rivalState: RivalBeliefState) =>
       val classes = StrategicClass.values
       val eta = TemperedLikelihood.defaultEta(classes.length)
 
       val basePr = classes.map { cls =>
-        actionPrior(cls, signal.action)
+        baseline.probability(cls, signal.action, signal.sizing, pubState, rivalState)
       }
 
       val prior = rivalState match
@@ -771,6 +1053,13 @@ class StrategicEngine(val config: StrategicEngine.Config):
 
       val posterior = TemperedLikelihood.updatePosterior(prior, basePr, eta, config.temperedConfig)
       DiscreteDistribution(classes.zip(posterior).toMap)
+
+  /** Build the attrib tempered likelihood function (Def 18: hat{pi}^{0,S,i}).
+    * Thin wrapper: delegates to buildAttribLikelihoodFromBaseline using the engine's
+    * PosteriorAttributedBaseline instance.
+    */
+  private def buildAttribLikelihoodFn(): TemperedLikelihoodFn =
+    buildAttribLikelihoodFromBaseline(_attributedBaseline)
 
   /** Build the ref tempered likelihood function (Def 18: pi^{0,S}).
     * Does NOT condition on rival state — uses uniform prior for all rivals.
@@ -868,7 +1157,9 @@ object StrategicEngine:
       adversarialRootGap: Option[Ev] = None,
       safeActionCount: Option[Int] = None,
       totalActionCount: Int = 0,
-      certificationKind: String = "none"
+      certificationKind: String = "none",
+      assumptionSummary: String = AssumptionManifest.summary,
+      changepointDetected: Set[PlayerId] = Set.empty
   )
 
   /** Default action priors P(action_category | strategic_class).
@@ -916,7 +1207,13 @@ object StrategicEngine:
       /** Default hero hand-strength bucket when no hole cards are available.
         * 5 = neutral middle bucket in [0, 9] range. Pending calibration.
         */
-      defaultHeroBucket: Int = 5
+      defaultHeroBucket: Int = 5,
+      /** Optional changepoint detector for rival belief dynamics (Defs 26-28).
+        * When set, observeAction uses Dynamics.fullStepWithCPD instead of fullStep.
+        */
+      cpdConfig: Option[ChangepointDetector] = None,
+      /** Optional reveal schedule for hero information disclosure (Def 51). */
+      revealSchedule: Option[RevealSchedule] = None
   )
 
   /** Rival seat information provided at session init. */
@@ -927,7 +1224,8 @@ object StrategicEngine:
       rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
       exploitationStates: Map[PlayerId, ExploitationState],
       rivalSeats: Map[PlayerId, RivalSeatInfo] = Map.empty,
-      deploymentSet: EmpiricalDeploymentSet = EmpiricalDeploymentSet(Vector.empty, maxSize = 50)
+      deploymentSet: EmpiricalDeploymentSet = EmpiricalDeploymentSet(Vector.empty, maxSize = 50),
+      cpdStates: Map[PlayerId, ChangepointState] = Map.empty
   )
 
   /** Four tabular models for the four-world grid solve (Theorem 4). */
@@ -981,3 +1279,43 @@ object StrategicEngine:
       v01 = Ev(blindQ.max),
       v00 = Ev(blindOpenLoopQ.max)
     )
+
+  /** Concrete ReputationalProjection that derives reputation from type posterior.
+    *
+    * Maps strategic class probabilities to behavioral dimensions:
+    * - perceivedTightness: P(Value) (value players are selective)
+    * - perceivedAggression: P(Bluff) + P(StructuralBluff) (aggressive wager tendency)
+    * - perceivedBluffFrequency: P(Bluff) (pure bluff frequency)
+    */
+  private[engine] object PosteriorReputationalProjection extends ReputationalProjection:
+    def project(rivalState: RivalBeliefState): ReputationView =
+      rivalState match
+        case srb: StrategicRivalBelief =>
+          val pValue = srb.typePosterior.probabilityOf(StrategicClass.Value)
+          val pBluff = srb.typePosterior.probabilityOf(StrategicClass.Bluff)
+          val pStructBluff = srb.typePosterior.probabilityOf(StrategicClass.StructuralBluff)
+          val pMixed = srb.typePosterior.probabilityOf(StrategicClass.Mixed)
+          ReputationView(
+            perceivedTightness = PotFraction(pValue),
+            perceivedAggression = PotFraction(pBluff + pStructBluff),
+            perceivedBluffFrequency = PotFraction(pBluff),
+            raw = Map(
+              "pValue" -> pValue, "pBluff" -> pBluff,
+              "pStructBluff" -> pStructBluff, "pMixed" -> pMixed
+            )
+          )
+        case _ =>
+          ReputationView(
+            perceivedTightness = PotFraction(0.25),
+            perceivedAggression = PotFraction(0.25),
+            perceivedBluffFrequency = PotFraction(0.25)
+          )
+
+  /** Estimate hero's strategic class from hand-strength bucket (Def 35 support).
+    * Maps [0,9] bucket to the most likely class for bluff annotation.
+    */
+  private[engine] def estimateHeroClass(heroBucket: Int): StrategicClass =
+    if heroBucket >= 7 then StrategicClass.Value
+    else if heroBucket <= 2 then StrategicClass.Bluff
+    else if heroBucket <= 4 then StrategicClass.StructuralBluff
+    else StrategicClass.Mixed

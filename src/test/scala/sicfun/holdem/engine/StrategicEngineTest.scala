@@ -1,7 +1,7 @@
 package sicfun.holdem.engine
 
 import munit.FunSuite
-import sicfun.core.Card
+import sicfun.core.{Card, DiscreteDistribution}
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.*
 import sicfun.holdem.strategic.solver.WPomcpRuntime
@@ -444,3 +444,48 @@ class StrategicEngineTest extends FunSuite:
     // Second call: deployment set has entries from first call
     assert(bundle2.get.deploymentExploitability.isDefined,
       "deploymentExploitability should be Some after prior entries accumulated")
+
+  test("attributed baseline: uniform belief produces same posterior as old path"):
+    val engine = new StrategicEngine(StrategicEngine.Config())
+    engine.initSession(rivalIds = Vector(PlayerId("v1")))
+    engine.startHand(testHeroCards)
+
+    val beforeValue = engine.sessionState.rivalBeliefs(PlayerId("v1"))
+      .typePosterior.probabilityOf(StrategicClass.Value)
+
+    engine.observeAction(PlayerId("v1"), PokerAction.Raise(50.0), minimalState)
+    val afterBelief = engine.sessionState.rivalBeliefs(PlayerId("v1"))
+
+    assert(afterBelief.typePosterior.probabilityOf(StrategicClass.Bluff) > 0.25,
+      "Raise should shift belief toward Bluff class")
+    assert(afterBelief.typePosterior.probabilityOf(StrategicClass.Value) < beforeValue,
+      "Value posterior should decrease after Raise observation")
+
+  test("attributed baseline: non-uniform belief differs from uniform baseline update"):
+    val uniformEngine = new StrategicEngine(StrategicEngine.Config())
+    uniformEngine.initSession(rivalIds = Vector(PlayerId("v1")))
+    uniformEngine.startHand(testHeroCards)
+
+    val skewedEngine = new StrategicEngine(StrategicEngine.Config())
+    val skewedBelief = StrategicRivalBelief(DiscreteDistribution(Map(
+      StrategicClass.Value -> 0.85,
+      StrategicClass.Bluff -> 0.05,
+      StrategicClass.StructuralBluff -> 0.05,
+      StrategicClass.Mixed -> 0.05
+    )))
+    skewedEngine.initSession(
+      rivalIds = Vector(PlayerId("v1")),
+      existingBeliefs = Map(PlayerId("v1") -> skewedBelief)
+    )
+    skewedEngine.startHand(testHeroCards)
+
+    uniformEngine.observeAction(PlayerId("v1"), PokerAction.Raise(50.0), minimalState)
+    skewedEngine.observeAction(PlayerId("v1"), PokerAction.Raise(50.0), minimalState)
+
+    val uniformPost = uniformEngine.sessionState.rivalBeliefs(PlayerId("v1")).typePosterior
+    val skewedPost = skewedEngine.sessionState.rivalBeliefs(PlayerId("v1")).typePosterior
+
+    val uniformBluff = uniformPost.probabilityOf(StrategicClass.Bluff)
+    val skewedBluff = skewedPost.probabilityOf(StrategicClass.Bluff)
+    assert(math.abs(uniformBluff - skewedBluff) > 1e-6,
+      s"Posteriors should differ: uniform Bluff=$uniformBluff, skewed Bluff=$skewedBluff")
