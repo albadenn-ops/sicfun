@@ -1,6 +1,7 @@
 package sicfun.holdem.strategic.bridge
 
 import sicfun.holdem.strategic.*
+import sicfun.holdem.engine.StrategicEngine
 import sicfun.holdem.types.{Board, GameState, PokerAction, Position, Street}
 
 class BridgeTest extends munit.FunSuite:
@@ -319,6 +320,26 @@ class BridgeTest extends munit.FunSuite:
       BaselineBridge.toAttributedBaselines(Map(PlayerId("v") -> 0.5)).fidelity,
       Fidelity.Approximate
     )
+
+  test("AttributedBaseline trait accepts PublicState"):
+    val baseline: AttributedBaseline = new PosteriorAttributedBaseline(
+      StrategicEngine.defaultActionPriors
+    )
+    val hero = PlayerId("__test__")
+    val pubState = PublicState(
+      street = Street.Flop,
+      board = Board.empty,
+      pot = Chips(100.0),
+      stacks = TableMap(
+        hero = hero,
+        seats = Vector(Seat(hero, Position.SmallBlind, SeatStatus.Active, Chips(500.0)))
+      ),
+      actionHistory = Vector.empty
+    )
+    val p = baseline.probability(
+      StrategicClass.Value, PokerAction.Category.Call, None, pubState, StrategicRivalBelief.uniform
+    )
+    assert(p > 0.0 && p <= 1.0)
 
   // ---------------------------------------------------------------------------
   // ValueBridge

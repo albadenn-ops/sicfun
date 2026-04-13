@@ -1,6 +1,6 @@
 package sicfun.holdem.strategic
 
-import sicfun.holdem.types.{PokerAction, Street}
+import sicfun.holdem.types.PokerAction
 
 /** Trait for real-world baseline strategies derived from empirical play data.
   *
@@ -9,11 +9,17 @@ import sicfun.holdem.types.{PokerAction, Street}
   * reference point for deviation analysis and exploit identification.
   */
 trait RealBaseline:
+  /** Action probability under the reference baseline (Def 9).
+    *
+    * pi^{0,S}(a, lambda | c, x^pub)
+    *
+    * @param publicState full public state context (street, board, pot, stacks, history)
+    */
   def probability(
       cls: StrategicClass,
       action: PokerAction.Category,
       sizing: Option[Sizing],
-      street: Street
+      publicState: PublicState
   ): Double
 
 /** Attributed baseline: per-rival, state-conditioned policy (Def 10).
@@ -28,6 +34,6 @@ trait AttributedBaseline:
       cls: StrategicClass,
       action: PokerAction.Category,
       sizing: Option[Sizing],
-      street: Street,
+      publicState: PublicState,
       rivalState: RivalBeliefState
   ): Double
