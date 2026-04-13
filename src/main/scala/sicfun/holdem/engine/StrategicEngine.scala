@@ -936,7 +936,8 @@ class StrategicEngine(val config: StrategicEngine.Config):
         securityValue = securityValue,
         safetyCertificateSummary = safetyCertSummary,
         reputationViews = reputationViews,
-        bridgeFidelityNotes = Vector("snapshot from StrategicEngine decision bundle")
+        bridgeFidelityNotes = Vector("snapshot from StrategicEngine decision bundle"),
+        attributionEnabled = true
       )
     }
 

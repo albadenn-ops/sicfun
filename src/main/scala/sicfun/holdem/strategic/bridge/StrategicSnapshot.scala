@@ -39,8 +39,12 @@ final case class StrategicSnapshot(
     securityValue: Option[Ev] = None,
     /** Safety certificate summary: (required budget, is valid). */
     safetyCertificateSummary: Option[(Double, Boolean)] = None,
+    /** Per-rival reputation views from ReputationalProjection. */
+    reputationViews: Map[PlayerId, ReputationView] = Map.empty,
     /** Fidelity notes for v0.31.1-only objects. */
-    bridgeFidelityNotes: Vector[String] = Vector.empty
+    bridgeFidelityNotes: Vector[String] = Vector.empty,
+    /** Whether the engine used kernel-coupled attributed baselines (Def 10). */
+    attributionEnabled: Boolean = false
 ):
   /** Human-readable fidelity summary from BridgeManifest. */
   def fidelitySummary: String = BridgeManifest.summary

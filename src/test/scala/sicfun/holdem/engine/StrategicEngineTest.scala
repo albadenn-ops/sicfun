@@ -489,3 +489,40 @@ class StrategicEngineTest extends FunSuite:
     val skewedBluff = skewedPost.probabilityOf(StrategicClass.Bluff)
     assert(math.abs(uniformBluff - skewedBluff) > 1e-6,
       s"Posteriors should differ: uniform Bluff=$uniformBluff, skewed Bluff=$skewedBluff")
+
+  test("buildSnapshot sets attributionEnabled = true"):
+    val engine = new StrategicEngine(StrategicEngine.Config())
+    engine.initSession(rivalIds = Vector(PlayerId("v1")))
+    engine.startHand(testHeroCards)
+    val gs = minimalState
+    engine.injectTestBundle(DecisionEvaluationBundle(
+      profileResults = Map.empty,
+      robustActionLowerBounds = Array(0.0),
+      baselineActionValues = Array(0.5, 0.3),
+      baselineValue = 0.5,
+      adversarialRootGap = None,
+      pointwiseExploitability = None,
+      deploymentExploitability = None,
+      certification = CertificationResult.LocalRobustScreening(
+        rootLosses = Array(0.1),
+        budgetEstimate = 0.5,
+        withinTolerance = true
+      ),
+      chainWorldValues = Map.empty,
+      notes = Vector("test: attribution snapshot")
+    ))
+    val snapshot = engine.buildSnapshot(gs, PokerAction.Call)
+    assert(snapshot.isDefined, "snapshot should be defined")
+    assert(snapshot.get.attributionEnabled, "attributionEnabled should be true")
+
+  test("StrategicSnapshot.build static factory has attributionEnabled = false"):
+    import sicfun.holdem.strategic.{bridge => strategicBridge}
+    val snap = strategicBridge.StrategicSnapshot.build(
+      gameState = minimalState,
+      heroAction = PokerAction.Call,
+      heroEquity = 0.5,
+      engineEv = 0.5,
+      staticEquity = 0.4,
+      hasDrawPotential = false
+    )
+    assert(!snap.attributionEnabled, "static factory should default to attributionEnabled = false")
