@@ -8,7 +8,7 @@ param(
   [string]$Files = "",
   [string]$Validation = "",
   [string]$Risks = "",
-  [string]$ArchivePath = "docs/AI_CONTEXT_ARCHIVE.md"
+  [string]$ArchivePath = "docs/ai/AI_CONTEXT_ARCHIVE.md"
 )
 
 Set-StrictMode -Version Latest

@@ -27,7 +27,7 @@ Apply this shared contract first, then apply the provider overlay.
 ## Repository Truth Sources
 
 - Start with `README.md`, `ROADMAP.md`, `docs/OPERATOR_RUNBOOK.md`, and the relevant source/test files.
-- Treat `docs/AI_CONTEXT_ARCHIVE.md` as internal working memory, not product-facing truth.
+- Treat `docs/ai/AI_CONTEXT_ARCHIVE.md` as internal working memory, not product-facing truth.
 - Do not use internal memory files as a substitute for checking current code and tests.
 
 ## Working Standard

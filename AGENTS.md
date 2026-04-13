@@ -8,15 +8,19 @@ For any non-trivial task in this repository, use one delegated sidecar before fi
 
 Prefer repo-local navigation tools before broad raw file reads, especially to avoid RAM-heavy exploration:
 
+- Prefer the MCP servers declared in `.mcp.json` when they are usable in the current client or shell.
 - If your current client or toolchain exposes `repomapper`, use it for cheap broad orientation when you do not yet know where to look.
 - If your current client or toolchain exposes `jcodemunch`, use it for file trees, symbol lookup, targeted text search, and focused retrieval.
 - If your current client or toolchain exposes `jdocmunch`, use it for docs; otherwise use focused doc reads/searches instead of loading large documents wholesale.
-- Use `rg` first for cheap literal search when shell access is available.
+- Use `rg` first for cheap literal search when shell access is available and you are looking for plain text rather than broad repo orientation.
 - Prefer targeted retrieval over reading entire large files or large directory sweeps when the narrower tool can answer the question.
 - Do not assume tool-specific repo-local wrapper scripts exist in the current checkout. `scripts/import-ai-nav.ps1` is only a PowerShell convenience layer for CLI-based sessions when `repomapper` and `jcodemunch` are installed on `PATH`.
 - If `.jcodemunch-index/` or `.tool-cache/repomapper/` exist, treat them as local caches only; do not assume they are present, fresh, or shared across chats.
+- If a native MCP client is not exposed but `uvx` is available, use the `.mcp.json` commands directly from the shell:
+  - `uvx jcodemunch-mcp index <repo-root> --no-ai-summaries`
+  - `uvx jdocmunch-mcp index-local --path docs --name <repo-id>`
 
-See [`docs/ai-code-navigation.md`](docs/ai-code-navigation.md) for workflow guidance and repo-specific notes.
+See [`docs/ai/ai-code-navigation.md`](docs/ai/ai-code-navigation.md) for workflow guidance and repo-specific notes.
 
 Default rule:
 - Use [`scripts/ai-minion.ps1`](scripts/ai-minion.ps1) for second-pass review, benchmark/result summarization, and patch planning after local navigation has narrowed the scope.

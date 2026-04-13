@@ -124,7 +124,7 @@ Gemini:
 
 - The existing provider-specific wrapper remains `scripts/gemini-sidecar.ps1`.
 - `scripts/ai-minion.ps1` forwards auth and normal delegated runs to that wrapper.
-- Gemini-specific setup details remain in `docs/GEMINI_MINION.md`.
+- Gemini-specific setup details remain in `docs/ai/GEMINI_MINION.md`.
 - Use Gemini for bounded exploration, extraction, summarization, and support execution. Treat its inference as low-trust and verify it elsewhere.
 
 Claude:

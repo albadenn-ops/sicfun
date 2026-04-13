@@ -304,17 +304,23 @@ powershell -ExecutionPolicy Bypass -File dist/hand-history-web/bin/uninstall-han
 
 Operator notes:
 - The packaged release serves the upload UI from `dist/hand-history-web/static`.
+- The packaged release now includes a handoff guide at `dist/hand-history-web/README.md`. Give operators the packaged directory, not repo-only docs.
 - The packaged release writes a config template to `dist/hand-history-web/conf/hand-history-web.env`. Keep long-lived runtime settings there instead of baking them into a service command line.
+- Run `powershell -ExecutionPolicy Bypass -File dist/hand-history-web/bin/verify-release-manifest.ps1` after copying the bundle to a target machine to confirm it still matches `manifest.sha256`.
 - `bin/run-hand-history-web.ps1` now loads `conf/hand-history-web.env` by default. Override with `-ConfigFile <path>` or `CONFIG_FILE=<path>` when you need a different config file.
 - The source and packaged launchers bind to `127.0.0.1` by default. Pass `-Host 0.0.0.0` only if you intentionally want network exposure.
 - Optional built-in HTTP Basic auth now protects `/`, `/api/analyze-hand-history`, and `/api/analyze-hand-history/jobs/{id}` while leaving `/api/health` and `/api/ready` open for service managers and probes. Set `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD` in `conf/hand-history-web.env` or via process env. Prefer config/env over CLI flags so credentials do not appear in the Java command line.
+- To reduce accidental exposure, non-loopback binds now require `BASIC_AUTH_*`, `USER_STORE_PATH`, or an explicit `ALLOW_UNAUTHENTICATED_PUBLIC_BIND=true` / `--allowUnauthenticatedPublicBind=true` override for a trusted private network.
 - Platform-user auth is available as a separate mode. Set `USER_STORE_PATH` to enable persistent local users, profile defaults, browser sessions, and per-user job ownership. Leave `BASIC_AUTH_*` unset when using platform-user auth; the modes are mutually exclusive.
-- Google OIDC can be enabled on top of platform-user auth with `GOOGLE_OIDC_CLIENT_ID`, `GOOGLE_OIDC_CLIENT_SECRET`, and `GOOGLE_OIDC_REDIRECT_URI`. For HTTPS deployments, also set `USER_AUTH_COOKIE_SECURE=true`.
+- Non-loopback platform-user auth now also requires `USER_AUTH_COOKIE_SECURE=true` unless you explicitly set `ALLOW_INSECURE_USER_AUTH=true` / `--allowInsecureUserAuth=true` for trusted private-network testing.
+- Google OIDC can be enabled on top of platform-user auth with `GOOGLE_OIDC_CLIENT_ID`, `GOOGLE_OIDC_CLIENT_SECRET`, and `GOOGLE_OIDC_REDIRECT_URI`. On non-loopback binds, the redirect URI must use `https://...` unless you explicitly set the same insecure-user-auth override for trusted private-network testing.
 - In-process rate limiting now caps the expensive API routes. Use `RATE_LIMIT_SUBMITS_PER_MINUTE` and `RATE_LIMIT_STATUS_PER_MINUTE` to tune submit and job-status polling caps independently; set either to `0` to disable that limiter.
 - By default the limiter buckets by the remote socket address. If you deploy behind a trusted reverse proxy, set `RATE_LIMIT_CLIENT_IP_HEADER` to a proxy-populated single-value client-IP header such as `X-Real-IP`. Same-host loopback proxies are trusted automatically; for proxies on other hosts, also set `RATE_LIMIT_TRUSTED_PROXY_IPS` to a comma-separated list of exact proxy peer IP literals. Do not enable the header knob on a directly exposed app because clients can spoof those headers.
 - The packaged launcher now requires `java` on `PATH`, checks `java -version` before startup, accepts Java 17+, and recommends JDK 21 for operator parity.
 - The packaged service helper scripts assume a Windows host and use NSSM as the service wrapper. Service install/uninstall requires an elevated PowerShell session.
 - The service install script configures stdout/stderr capture under `dist/hand-history-web/logs/` and enables basic Windows service restart-on-failure recovery.
+- `bin/start-hand-history-web-service.ps1` now fails fast if the service stops during startup and includes the latest readiness/health summary plus recent stdout/stderr tail when readiness does not come up cleanly.
+- `bin/drain-stop-hand-history-web-service.ps1` now includes the last readiness/health probe summary when drain mode does not flip or jobs do not fully drain before the forced stop.
 - Uploads are accepted quickly and processed as background jobs; the page polls `/api/analyze-hand-history/jobs/{id}` until the review finishes.
 - Analysis admission is now bounded. Use `-MaxConcurrentJobs`, `-MaxQueuedJobs`, and `-ShutdownGraceMs` or the matching `MAX_CONCURRENT_JOBS`, `MAX_QUEUED_JOBS`, and `SHUTDOWN_GRACE_MS` environment variables to control saturation and shutdown drain behavior.
 - Use `-AnalysisTimeoutMs` or `ANALYSIS_TIMEOUT_MS` to cap a single analysis job. `0` disables the timeout, but the deployment-safe default is a bounded run so one stuck review cannot pin the worker pool indefinitely.
@@ -327,8 +333,8 @@ Operator notes:
 - Under platform-user auth, account/profile data persists in `USER_STORE_PATH`, but browser sessions and in-flight review jobs remain in-memory only. A restart signs users out and drops queued/running jobs.
 - The raw server now emits baseline security headers (`Content-Security-Policy`, `X-Content-Type-Options`, `X-Frame-Options`, and `Referrer-Policy`), can enforce built-in Basic auth, and applies a best-effort in-process rate limiter on the expensive API routes, but that is still not a substitute for TLS termination or edge rate limiting.
 - Do not expose the raw app directly to the public internet without HTTPS in front of it. Built-in Basic auth and the in-process limiter help with access control and abuse containment, but you still want a reverse proxy / ingress layer for TLS termination, network policy, and stronger rate limiting.
-- `scripts/release-hand-history-web.ps1` validates the required static assets and smoke-checks auth-enabled `/`, `/api/health`, `/api/ready`, async `/api/analyze-hand-history`, drain-mode readiness, and oversized-upload rejection before declaring the build ready.
-- The web server supports `CONFIG_FILE`, `HOST`, `PORT`, `STATIC_DIR`, `MODEL_DIR`, `MAX_UPLOAD_BYTES`, `ANALYSIS_TIMEOUT_MS`, `MAX_CONCURRENT_JOBS`, `MAX_QUEUED_JOBS`, `SHUTDOWN_GRACE_MS`, `RATE_LIMIT_SUBMITS_PER_MINUTE`, `RATE_LIMIT_STATUS_PER_MINUTE`, `RATE_LIMIT_CLIENT_IP_HEADER`, `RATE_LIMIT_TRUSTED_PROXY_IPS`, `DRAIN_SIGNAL_FILE`, `BASIC_AUTH_USER`, and `BASIC_AUTH_PASSWORD` environment-variable overrides in addition to CLI flags.
+- `scripts/release-hand-history-web.ps1` validates the required static assets and smoke-checks packaged fail-closed non-loopback config rejection, auth-enabled `/`, `/api/health`, `/api/ready`, async `/api/analyze-hand-history`, trusted-header submit rate limiting, drain-mode readiness, oversized-upload rejection, and packaged manifest verification before declaring the build ready.
+- The web server supports `CONFIG_FILE`, `HOST`, `PORT`, `STATIC_DIR`, `MODEL_DIR`, `MAX_UPLOAD_BYTES`, `ANALYSIS_TIMEOUT_MS`, `MAX_CONCURRENT_JOBS`, `MAX_QUEUED_JOBS`, `SHUTDOWN_GRACE_MS`, `RATE_LIMIT_SUBMITS_PER_MINUTE`, `RATE_LIMIT_STATUS_PER_MINUTE`, `RATE_LIMIT_CLIENT_IP_HEADER`, `RATE_LIMIT_TRUSTED_PROXY_IPS`, `DRAIN_SIGNAL_FILE`, `BASIC_AUTH_USER`, `BASIC_AUTH_PASSWORD`, `ALLOW_UNAUTHENTICATED_PUBLIC_BIND`, and `ALLOW_INSECURE_USER_AUTH` environment-variable overrides in addition to CLI flags.
 
 ## 6. Troubleshooting
 
@@ -421,4 +427,4 @@ Notes:
 - Claude login is browser-based through `claude auth login`.
 - GPT uses the official OpenAI Codex CLI and ChatGPT/device auth.
 
-For setup details and more examples, see `docs/AI_MINIONS.md` and `docs/GEMINI_MINION.md`.
+For setup details and more examples, see `docs/ai/AI_MINIONS.md` and `docs/ai/GEMINI_MINION.md`.

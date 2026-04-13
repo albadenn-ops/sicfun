@@ -9,7 +9,7 @@ This repository now includes an optional Gemini CLI sidecar for delegated read-h
 
 The default path is read-only delegation. The sidecar is meant to reduce prompt load on the primary coding agent, not replace final verification.
 
-If you want the unified multi-provider front door for Gemini, Claude, and GPT/Codex, use `scripts/ai-minion.ps1` and see `docs/AI_MINIONS.md`.
+If you want the unified multi-provider front door for Gemini, Claude, and GPT/Codex, use `scripts/ai-minion.ps1` and see `docs/ai/AI_MINIONS.md`.
 
 ## One-Time Setup
 

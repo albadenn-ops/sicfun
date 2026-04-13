@@ -10,6 +10,11 @@ Primary tools when they are available in the current client or toolchain:
 
 The repo no longer vendors RepoMapper or jCodeMunch source trees or tool-specific wrapper scripts. Use the interface your current client provides, such as MCP tools or external CLIs on `PATH`.
 
+This checkout also provides MCP server definitions in `.mcp.json` for:
+
+- `jcodemunch` via `uvx jcodemunch-mcp`
+- `jdocmunch` via `uvx jdocmunch-mcp`
+
 If `.tool-cache/repomapper` or `.jcodemunch-index/` exist, treat them as opportunistic local caches, not durable agent memory.
 
 ## Local helper
@@ -19,17 +24,29 @@ If `.tool-cache/repomapper` or `.jcodemunch-index/` exist, treat them as opportu
 
 ## When to use which
 
-- Use `RepoMapper` when you do not yet know where to look.
+- Use `RepoMapper` when you do not yet know where to look and your current client or toolchain exposes it.
 - Use `jCodeMunch` when you know a symbol name or want symbol-level retrieval.
 - Use `jDocMunch` for doc-section search and outlines when it is available.
 - Use `rg` first for the cheapest literal/text search when shell access is available.
+- If `RepoMapper` is unavailable, fall back to `jCodeMunch` or `rg` instead of broad raw file reads.
 
 ## Recommended workflow
 
-1. Start with a broad map if the area is unfamiliar.
-2. Narrow with `file-tree`, `search-symbols`, or an equivalent targeted query.
+1. Start with a broad map if the area is unfamiliar and a repo-map tool is available.
+2. If no broad map tool is available, use `jCodeMunch` or `rg` to narrow the area before reading files.
 3. Read only the specific implementation or section you need.
 4. Use targeted text search for strings, errors, comments, and other non-symbol text.
+
+If your session does not expose MCP calls directly but `uvx` is installed, initialize the local indexes from the shell first:
+
+```powershell
+uvx jcodemunch-mcp index C:\Users\alexl\code\math\untitled --no-ai-summaries
+uvx jdocmunch-mcp index-local --path C:\Users\alexl\code\math\untitled\docs --name untitled-docs
+```
+
+The current local repo index created from this checkout reports as `local/untitled-a84ca850`.
+
+Those shell commands refresh the local indexes and caches declared by `.mcp.json`. If your session still does not expose query-time MCP tools after indexing, fall back to `rg` plus focused file reads rather than loading large files wholesale.
 
 ## PowerShell helpers
 
@@ -81,4 +98,6 @@ The practical takeaway is:
 
 - Commit `8ced6f7` removed the vendored RepoMapper and jCodeMunch sources and their wrapper scripts.
 - `scripts/import-ai-nav.ps1` is a thin convenience layer over externally provided `repomapper` and `jcodemunch` CLIs.
+- `.mcp.json` is the preferred source of truth for MCP-backed navigation in this checkout.
+- In shell-only sessions, prefer the `uvx jcodemunch-mcp ...` and `uvx jdocmunch-mcp ...` commands from `.mcp.json` over ad hoc tool discovery.
 - Cache directories may exist from prior local runs, but treat them as stale until verified.
