@@ -271,9 +271,19 @@ because the hall has direct access to engines and multiway infrastructure.
 
 ### 5. Match Runner Integration (ACPC + Slumbot)
 
-Both runners are heads-up only. Integration via `HeroDecisionPipeline`:
+Both runners live under `runtime/protocol/` and are heads-up only.
 
-**HeroDecisionPipeline changes:**
+**Blockers** (these are not partially landed — they are all future work):
+- `HeroDecisionPipeline` currently hard-blocks Strategic mode with
+  `throw UnsupportedOperationException` and routes `decideHeroStrategic()`
+  to the old two-arg `engine.decide()` toy path. This is the first-class
+  blocker for ACPC/Slumbot integration.
+- Both protocol runners (`AcpcMatchRunner`, `SlumbotMatchRunner`) reject
+  "strategic" at the CLI and only build the adaptive engine. The success
+  criteria requiring `--hero-mode strategic` acceptance are entirely
+  future work.
+
+**HeroDecisionPipeline changes** (`engine/HeroDecisionPipeline.scala`):
 - Remove the `throw UnsupportedOperationException` for Strategic mode
 - `decideHeroStrategic()` updated signature:
 
@@ -309,22 +319,23 @@ These are different types — the old sketch incorrectly called
 `ctx.engine.decide(...)` which would have invoked the strategic engine
 as its own upstream.
 
-**AcpcMatchRunner changes:**
+**AcpcMatchRunner changes** (`runtime/protocol/AcpcMatchRunner.scala`):
 - Add `strategicEngineOpt: Option[StrategicEngine]` to `Runner`
+- Add `heroMode` CLI flag parsing to accept `adaptive|gto|strategic`
 - Initialize via `StrategicLifecycleHelper.initEngine()` when mode is Strategic
 - Call lifecycle methods in hand loop (same as hall pattern)
 - Strategic branch in `decideHero()` calls pipeline
 
-**SlumbotMatchRunner changes:**
+**SlumbotMatchRunner changes** (`runtime/protocol/SlumbotMatchRunner.scala`):
 - Same pattern as ACPC
 
 ### 6. CLI / Config Wiring
 
 - `TexasHoldemPlayingHall.Config`: already has `heroMode: HeroMode` — verify
   the CLI parser accepts "strategic" (it uses camelCase `heroMode` flag)
-- `AcpcMatchRunner`: add `heroMode` flag parsing to accept
+- `runtime/protocol/AcpcMatchRunner`: add `heroMode` flag parsing to accept
   `adaptive|gto|strategic` (camelCase, matching existing convention)
-- `SlumbotMatchRunner`: same pattern as ACPC
+- `runtime/protocol/SlumbotMatchRunner`: same pattern as ACPC
 
 ## What Does NOT Change
 
@@ -339,12 +350,17 @@ as its own upstream.
 
 ## What Gets Updated (Not Deprecated, Not Unchanged)
 
-- `StrategicAdvisorBridge` — currently calls the deprecated two-arg
-  `engine.decide(gameState, candidates)` and prints `lastDecisionBundle`
-  diagnostics from the toy solver path. Must be updated to:
-  1. Call the new overlay `decide()` overload with upstream EVs
-  2. Print `OverlayResult` diagnostics instead of `DecisionEvaluationBundle`
-  3. Continue using `PlayerId("villain")` (already correct for stable identity)
+- `StrategicAdvisorBridge` (`runtime/StrategicAdvisorBridge.scala`) — currently
+  calls the deprecated two-arg `engine.decide(gameState, candidates)` and
+  prints `lastDecisionBundle` diagnostics from the toy solver path. Phase 1
+  scope: migrate to the overlay `decide()` overload and `OverlayResult`
+  diagnostics. The advisor needs an upstream `ActionRecommendation` to feed
+  the overlay, which means `AdvisorSession` must run the adaptive engine
+  before calling the overlay. Specifically:
+  1. `onAdvise()` must obtain upstream EVs from `RealTimeAdaptiveEngine`
+  2. Call the new overlay `decide()` overload with those EVs
+  3. Print `OverlayResult` diagnostics instead of `DecisionEvaluationBundle`
+  4. Continue using `PlayerId("villain")` (already correct for stable identity)
   Without this update, the advisor would silently report different logic than
   the actual player, creating a user-visible divergence.
 
@@ -365,8 +381,9 @@ as its own upstream.
 | `engine/HeroDecisionPipeline.scala` | Modify | Strategic dispatch with upstream EVs |
 | `runtime/StrategicLifecycleHelper.scala` | **New** | Shared lifecycle helper |
 | `runtime/TexasHoldemPlayingHall.scala` | Modify | Strategic branch runs adaptive/multiway first |
-| `runtime/AcpcMatchRunner.scala` | Modify | Add strategic engine lifecycle + dispatch |
-| `runtime/SlumbotMatchRunner.scala` | Modify | Add strategic engine lifecycle + dispatch |
+| `runtime/protocol/AcpcMatchRunner.scala` | Modify | Add strategic engine lifecycle + dispatch + CLI flag |
+| `runtime/protocol/SlumbotMatchRunner.scala` | Modify | Add strategic engine lifecycle + dispatch + CLI flag |
+| `runtime/StrategicAdvisorBridge.scala` | Modify | Use overlay decide() + OverlayResult diagnostics |
 | `runtime/StrategicAdvisorBridge.scala` | Modify | Use overlay decide() + OverlayResult diagnostics |
 | `types/HeroMode.scala` | No change | Strategic already exists in enum |
 | `types/PokerFormatting.scala` | No change | Already formats "strategic" |
