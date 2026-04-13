@@ -369,20 +369,13 @@ Then add the new overlay decide method. Place it right after the existing `decid
 
     val session = _sessionState.nn
 
-    // Attach robust lower bounds from certification if previously run
+    // Attach robust lower bounds from certification if previously run.
+    // The bundle carries per-action lower bounds directly in robustActionLowerBounds
+    // (computed as min_profile Q[a] in StrategicEngine.decideWPomcp).
+    // Do NOT use rootLosses — those are non-negative losses (baselineValue - lowerBound).
     val robustBounds = _lastBundle.flatMap { bundle =>
-      bundle.certification match
-        case cert: CertificationResult.LocalRobustScreening =>
-          Some(cert.rootLosses) // rootLosses are per-action
-        case cert: CertificationResult.TabularCertification =>
-          // Convert safe action indices to a bounds array
-          val bounds = new Array[Double](candidateActions.size)
-          java.util.Arrays.fill(bounds, Double.NegativeInfinity)
-          cert.safeActionIndices.foreach { idx =>
-            if idx >= 0 && idx < bounds.length then bounds(idx) = 0.0
-          }
-          Some(bounds)
-        case _ => None
+      val bounds = bundle.robustActionLowerBounds
+      if bounds != null && bounds.nonEmpty then Some(bounds) else None
     }
 
     val input = OverlayInput(
@@ -518,10 +511,12 @@ git commit -m "feat(engine): add overlay decide() overload to StrategicEngine"
 package sicfun.holdem.runtime
 
 import sicfun.holdem.types.*
-import sicfun.holdem.engine.{StrategicEngine, ActionRecommendation, ActionEvaluation, OverlayResult, UpstreamSource, StrategicOverlay}
+import sicfun.holdem.engine.{StrategicEngine, OverlayResult, UpstreamSource, StrategicOverlay}
+import sicfun.holdem.engine.inference.{ActionRecommendation, ActionEvaluation}
 import sicfun.holdem.strategic.types.*
 
-/** Shared strategic engine lifecycle to prevent drift across hall, ACPC, and Slumbot.
+/** Per-engine strategic lifecycle helper. Each caller (hall, ACPC, Slumbot, advisor)
+  * creates its own instance so position mapping state does not bleed across runners.
   *
   * Identity contract: Callers supply stable PlayerId per physical opponent, NOT
   * position-derived IDs. In heads-up match play the remote opponent flips between
@@ -531,16 +526,16 @@ import sicfun.holdem.strategic.types.*
   *   - Hall: PlayerId from VillainProfile name
   *   - Advisor: PlayerId("villain")
   */
-private[holdem] object StrategicLifecycleHelper:
+private[holdem] final class StrategicLifecycleHelper(
+    val engine: StrategicEngine
+):
 
   /** Mutable position→rivalId mapping, updated each hand as seats rotate. */
   private var _positionMapping: Map[Position, PlayerId] = Map.empty
 
-  def initEngine(config: StrategicEngine.Config = StrategicEngine.Config()): StrategicEngine =
-    new StrategicEngine(config)
+  def positionMapping: Map[Position, PlayerId] = _positionMapping
 
   def initSession(
-      engine: StrategicEngine,
       rivalIds: Vector[PlayerId],
       positionMapping: Map[Position, PlayerId],
       seatInfo: Map[PlayerId, StrategicEngine.RivalSeatInfo] = Map.empty
@@ -551,16 +546,13 @@ private[holdem] object StrategicLifecycleHelper:
   def updatePositionMapping(positionMapping: Map[Position, PlayerId]): Unit =
     _positionMapping = positionMapping
 
-  def currentPositionMapping: Map[Position, PlayerId] = _positionMapping
-
-  def startHand(engine: StrategicEngine, heroCards: HoleCards): Unit =
+  def startHand(heroCards: HoleCards): Unit =
     engine.startHand(heroCards)
 
   /** Routes villain action to the correct stable rival ID via position mapping.
     * Silently ignores if the position has no mapping (e.g., hero's own position).
     */
   def observeVillainAction(
-      engine: StrategicEngine,
       villainPosition: Position,
       action: PokerAction,
       gameState: GameState
@@ -569,12 +561,11 @@ private[holdem] object StrategicLifecycleHelper:
       engine.observeAction(rivalId, action, gameState)
     }
 
-  def endHand(engine: StrategicEngine): Unit =
+  def endHand(): Unit =
     engine.endHand()
 
   /** Extract EVs from upstream ActionRecommendation and run overlay filter. */
   def decideWithOverlay(
-      engine: StrategicEngine,
       gameState: GameState,
       candidates: Vector[PokerAction],
       upstreamRecommendation: ActionRecommendation,
@@ -587,6 +578,10 @@ private[holdem] object StrategicLifecycleHelper:
       result.copy(upstreamSource = upstreamSource)
     else
       result
+
+private[holdem] object StrategicLifecycleHelper:
+  def create(config: StrategicEngine.Config = StrategicEngine.Config()): StrategicLifecycleHelper =
+    new StrategicLifecycleHelper(new StrategicEngine(config))
 ```
 
 - [ ] **Step 2: Write tests for StrategicLifecycleHelper**
@@ -597,9 +592,10 @@ package sicfun.holdem.runtime
 
 import munit.FunSuite
 import sicfun.holdem.types.*
-import sicfun.holdem.engine.{StrategicEngine, ActionRecommendation, ActionEvaluation, OverlayResult, UpstreamSource}
+import sicfun.holdem.engine.{StrategicEngine, OverlayResult, UpstreamSource}
+import sicfun.holdem.engine.inference.{ActionRecommendation, ActionEvaluation}
 import sicfun.holdem.strategic.types.*
-import sicfun.holdem.equity.EquityEstimate
+import sicfun.holdem.types.EquityEstimate
 
 class StrategicLifecycleHelperTest extends FunSuite:
 
@@ -620,49 +616,44 @@ class StrategicLifecycleHelperTest extends FunSuite:
     )
 
   test("position mapping routes villain actions to stable rival ID"):
-    val engine = StrategicLifecycleHelper.initEngine()
     val villainId = PlayerId("villain")
-    StrategicLifecycleHelper.initSession(
-      engine,
+    val helper = StrategicLifecycleHelper.create()
+    helper.initSession(
       rivalIds = Vector(villainId),
       positionMapping = Map(Position.BigBlind -> villainId)
     )
-    StrategicLifecycleHelper.startHand(engine, testHeroCards)
+    helper.startHand(testHeroCards)
 
     // Observe action at BigBlind position — should route to "villain"
-    StrategicLifecycleHelper.observeVillainAction(
-      engine, Position.BigBlind, PokerAction.Call, minimalState
-    )
+    helper.observeVillainAction(Position.BigBlind, PokerAction.Call, minimalState)
     // Verify belief was updated (not an error)
-    assert(engine.sessionState.rivalBeliefs.contains(villainId))
+    assert(helper.engine.sessionState.rivalBeliefs.contains(villainId))
 
   test("position mapping update reflects seat rotation"):
-    val engine = StrategicLifecycleHelper.initEngine()
     val villainId = PlayerId("villain")
-    StrategicLifecycleHelper.initSession(
-      engine,
+    val helper = StrategicLifecycleHelper.create()
+    helper.initSession(
       rivalIds = Vector(villainId),
       positionMapping = Map(Position.BigBlind -> villainId)
     )
     // Rotate: villain now on Button
-    StrategicLifecycleHelper.updatePositionMapping(Map(Position.Button -> villainId))
+    helper.updatePositionMapping(Map(Position.Button -> villainId))
     assertEquals(
-      StrategicLifecycleHelper.currentPositionMapping,
+      helper.positionMapping,
       Map(Position.Button -> villainId)
     )
 
   test("decideWithOverlay extracts EVs and returns OverlayResult"):
-    val engine = StrategicLifecycleHelper.initEngine()
     val villainId = PlayerId("villain")
-    StrategicLifecycleHelper.initSession(
-      engine,
+    val helper = StrategicLifecycleHelper.create()
+    helper.initSession(
       rivalIds = Vector(villainId),
       positionMapping = Map(Position.BigBlind -> villainId)
     )
-    StrategicLifecycleHelper.startHand(engine, testHeroCards)
+    helper.startHand(testHeroCards)
 
     val recommendation = ActionRecommendation(
-      heroEquity = EquityEstimate(0.6, 1000),
+      heroEquity = EquityEstimate(mean = 0.6, variance = 0.01, stderr = 0.003, trials = 1000, winRate = 0.5, tieRate = 0.1, lossRate = 0.4),
       actionEvaluations = Vector(
         ActionEvaluation(PokerAction.Call, 5.0),
         ActionEvaluation(PokerAction.Raise(2.0), 10.0)
@@ -670,28 +661,25 @@ class StrategicLifecycleHelperTest extends FunSuite:
       bestAction = PokerAction.Raise(2.0)
     )
     val candidates = Vector(PokerAction.Call, PokerAction.Raise(2.0))
-    val result = StrategicLifecycleHelper.decideWithOverlay(
-      engine, minimalState, candidates, recommendation
-    )
+    val result = helper.decideWithOverlay(minimalState, candidates, recommendation)
     assertEquals(result.upstreamAction, PokerAction.Raise(2.0))
     assertEquals(result.upstreamSource, UpstreamSource.Adaptive)
 
   test("decideWithOverlay respects multiway upstream source"):
-    val engine = StrategicLifecycleHelper.initEngine()
-    StrategicLifecycleHelper.initSession(
-      engine,
+    val helper = StrategicLifecycleHelper.create()
+    helper.initSession(
       rivalIds = Vector(PlayerId("v1"), PlayerId("v2")),
       positionMapping = Map(Position.BigBlind -> PlayerId("v1"), Position.UTG -> PlayerId("v2"))
     )
-    StrategicLifecycleHelper.startHand(engine, testHeroCards)
+    helper.startHand(testHeroCards)
 
     val recommendation = ActionRecommendation(
-      heroEquity = EquityEstimate(0.5, 1000),
+      heroEquity = EquityEstimate(mean = 0.5, variance = 0.01, stderr = 0.003, trials = 1000, winRate = 0.4, tieRate = 0.1, lossRate = 0.5),
       actionEvaluations = Vector(ActionEvaluation(PokerAction.Check, 0.0)),
       bestAction = PokerAction.Check
     )
-    val result = StrategicLifecycleHelper.decideWithOverlay(
-      engine, minimalState, Vector(PokerAction.Check), recommendation,
+    val result = helper.decideWithOverlay(
+      minimalState, Vector(PokerAction.Check), recommendation,
       upstreamSource = UpstreamSource.Multiway(2)
     )
     assertEquals(result.upstreamSource, UpstreamSource.Multiway(2))
@@ -751,21 +739,32 @@ Replace the existing `decideHeroStrategic` method (around line 152):
 
 With:
 
+First, update `StrategicDecisionContext` to hold a `StrategicLifecycleHelper` instead of a raw `StrategicEngine`:
+
+```scala
+  case class StrategicDecisionContext(
+      state: GameState,
+      candidates: Vector[PokerAction],
+      helper: StrategicLifecycleHelper  // was: engine: StrategicEngine
+  )
+```
+
+Then replace the method:
+
 ```scala
   /** Strategic overlay decision dispatch.
     *
     * Runs the adaptive engine for upstream EVs (via heroCtx.engine, a
     * RealTimeAdaptiveEngine), then filters through the strategic overlay
-    * (via strategicCtx.engine, a StrategicEngine).
+    * (via strategicCtx.helper, a StrategicLifecycleHelper wrapping StrategicEngine).
     *
     * Returns the overlay-selected action. The full OverlayResult is stored
-    * in strategicCtx.engine.lastOverlayResult for diagnostics.
+    * in strategicCtx.helper.engine.lastOverlayResult for diagnostics.
     */
   def decideHeroStrategic(
       strategicCtx: StrategicDecisionContext,
       heroCtx: HeroDecisionContext
   ): PokerAction =
-    import sicfun.holdem.runtime.StrategicLifecycleHelper
     // 1. Run adaptive engine for upstream EVs
     val adaptiveResult = heroCtx.engine.decide(
       hero = heroCtx.hero,
@@ -778,8 +777,7 @@ With:
       rng = new Random(heroCtx.rng.nextLong())
     )
     // 2. Overlay: filter adaptive EVs through strategic beliefs
-    val overlayResult = StrategicLifecycleHelper.decideWithOverlay(
-      strategicCtx.engine,
+    val overlayResult = strategicCtx.helper.decideWithOverlay(
       heroCtx.state,
       heroCtx.candidates,
       adaptiveResult.decision.recommendation
@@ -828,8 +826,8 @@ Replace:
 With:
 ```scala
         case HeroMode.Strategic =>
-          strategicEngineOpt match
-            case Some(engine) =>
+          strategicHelperOpt match
+            case Some(helper) =>
               // Run adaptive/multiway upstream, then overlay
               val adaptiveEngine = if street == Street.Preflop then preflopEngine else postflopEngine
               val upstreamRec = multiwayRecommendationFor(
@@ -853,8 +851,8 @@ With:
               val source = if livePlayers > 2 then
                 UpstreamSource.Multiway(livePlayers - 1)
               else UpstreamSource.Adaptive
-              StrategicLifecycleHelper.decideWithOverlay(
-                engine, state, candidates, upstreamRec, source
+              helper.decideWithOverlay(
+                state, candidates, upstreamRec, source
               ).selectedAction
             case None =>
               candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
@@ -883,7 +881,7 @@ Replace:
 With:
 ```scala
       if config.heroMode == HeroMode.Strategic then
-        strategicEngineOpt = Some(StrategicLifecycleHelper.initEngine())
+        strategicHelperOpt = Some(StrategicLifecycleHelper.create())
 ```
 
 - [ ] **Step 3: Update session initialization in playHand to use helper**
@@ -895,20 +893,19 @@ Replace the existing `strategicEngineOpt.foreach { engine => ... }` block that c
 The existing code builds `rivalIds` from position strings — this is the identity bug. Replace with:
 
 ```scala
-      strategicEngineOpt.foreach { engine =>
-        if !engine.isSessionInitialized then
-          val villainPositions = tableScenario.activePositions
-            .filterNot(_ == config.heroPosition)
-          val rivalIds = tableScenario.villainProfiles.map(vp => PlayerId(vp.name))
-          val posMapping = villainPositions.zip(rivalIds).toMap
-          StrategicLifecycleHelper.initSession(engine, rivalIds, posMapping)
+      strategicHelperOpt.foreach { helper =>
+        // Build stable rival IDs from VillainProfile names (not position strings)
+        val villainPositions = tableScenario.activePositions
+          .filterNot(_ == config.heroPosition)
+        val posMapping = villainPositions.map { pos =>
+          pos -> PlayerId(tableScenario.villainProfileByPosition(pos).name)
+        }.toMap
+        val rivalIds = posMapping.values.toVector.distinct
+        if !helper.engine.isSessionInitialized then
+          helper.initSession(rivalIds, posMapping)
         else
           // Update position mapping for seat rotation
-          val villainPositions = tableScenario.activePositions
-            .filterNot(_ == config.heroPosition)
-          val rivalIds = tableScenario.villainProfiles.map(vp => PlayerId(vp.name))
-          val posMapping = villainPositions.zip(rivalIds).toMap
-          StrategicLifecycleHelper.updatePositionMapping(posMapping)
+          helper.updatePositionMapping(posMapping)
       }
 ```
 
@@ -951,21 +948,19 @@ git commit -m "feat(runtime): wire PlayingHall strategic branch to overlay via S
 In `AcpcMatchRunner.scala`, find the `Runner` class fields (look for `private val engine` and `private val artifact`). Add after them:
 
 ```scala
-    private val strategicEngineOpt: Option[StrategicEngine] =
+    private val strategicHelperOpt: Option[StrategicLifecycleHelper] =
       if config.heroMode == HeroMode.Strategic then
-        val se = StrategicLifecycleHelper.initEngine()
-        StrategicLifecycleHelper.initSession(
-          se,
+        val helper = StrategicLifecycleHelper.create()
+        helper.initSession(
           rivalIds = Vector(PlayerId("villain")),
           positionMapping = Map.empty // updated per hand
         )
-        Some(se)
+        Some(helper)
       else None
 ```
 
 Add imports at the top:
 ```scala
-import sicfun.holdem.engine.{StrategicEngine, UpstreamSource}
 import sicfun.holdem.strategic.types.PlayerId
 import sicfun.holdem.runtime.StrategicLifecycleHelper
 ```
@@ -975,24 +970,24 @@ import sicfun.holdem.runtime.StrategicLifecycleHelper
 Find where each hand starts (look for the hand-processing loop). At hand start, add:
 
 ```scala
-        strategicEngineOpt.foreach { se =>
-          StrategicLifecycleHelper.updatePositionMapping(
+        strategicHelperOpt.foreach { helper =>
+          helper.updatePositionMapping(
             Map(villainPosition -> PlayerId("villain"))
           )
-          StrategicLifecycleHelper.startHand(se, hero)
+          helper.startHand(hero)
         }
 ```
 
 After villain actions are observed, add:
 ```scala
-        strategicEngineOpt.foreach { se =>
-          StrategicLifecycleHelper.observeVillainAction(se, villainPosition, action, gameState)
+        strategicHelperOpt.foreach { helper =>
+          helper.observeVillainAction(villainPosition, action, gameState)
         }
 ```
 
 At hand end, add:
 ```scala
-        strategicEngineOpt.foreach(StrategicLifecycleHelper.endHand)
+        strategicHelperOpt.foreach(_.endHand())
 ```
 
 - [ ] **Step 3: Update decideHero for Strategic mode**
@@ -1009,10 +1004,10 @@ Replace the existing `decideHero` method:
     ): PokerAction =
       config.heroMode match
         case HeroMode.Strategic =>
-          strategicEngineOpt match
-            case Some(se) =>
+          strategicHelperOpt match
+            case Some(helper) =>
               HeroDecisionPipeline.decideHeroStrategic(
-                HeroDecisionPipeline.StrategicDecisionContext(state, candidates, se),
+                HeroDecisionPipeline.StrategicDecisionContext(state, candidates, helper),
                 HeroDecisionPipeline.HeroDecisionContext(
                   hero = hero,
                   state = state,
@@ -1162,7 +1157,8 @@ Replace the entire `StrategicAdvisorBridge.scala`:
 package sicfun.holdem.runtime
 
 import sicfun.holdem.types.*
-import sicfun.holdem.engine.{StrategicEngine, ActionRecommendation, ActionEvaluation, OverlayResult, UpstreamSource, RealTimeAdaptiveEngine}
+import sicfun.holdem.engine.{StrategicEngine, OverlayResult, UpstreamSource}
+import sicfun.holdem.engine.inference.{ActionRecommendation, ActionEvaluation}
 import sicfun.holdem.strategic.types.PlayerId
 
 /** Adapts AdvisorSession lifecycle commands to StrategicEngine operations.
@@ -1170,6 +1166,9 @@ import sicfun.holdem.strategic.types.PlayerId
   * Centralizes the mapping between the interactive session model (HandSnapshot-based)
   * and the StrategicEngine API (GameState/PlayerId-based) so that AdvisorSession
   * stays focused on user interaction.
+  *
+  * The bridge works directly with StrategicEngine (not StrategicLifecycleHelper) because
+  * the advisor uses PlayerId("villain") for all rivals and doesn't need position mapping.
   */
 object StrategicAdvisorBridge:
 
@@ -1178,11 +1177,7 @@ object StrategicAdvisorBridge:
   /** Called at the start of each new hand. Initializes session if needed, then starts a new hand. */
   def onNewHand(engine: StrategicEngine): Unit =
     if !engine.isSessionInitialized then
-      StrategicLifecycleHelper.initSession(
-        engine,
-        rivalIds = Vector(VillainId),
-        positionMapping = Map.empty // advisor doesn't track position mapping
-      )
+      engine.initSession(rivalIds = Vector(VillainId))
     engine.startHand()
 
   /** Called when a villain action is observed. Feeds the action to the strategic engine. */
@@ -1193,29 +1188,22 @@ object StrategicAdvisorBridge:
     )
     engine.observeAction(VillainId, action, gameState)
 
-  /** Called during advise to get strategic engine diagnostics.
+  /** Called during advise to get strategic overlay diagnostics.
     *
-    * Runs the overlay decide path: builds a synthetic ActionRecommendation from
-    * the candidates (using zero EVs as baseline — the advisor doesn't have an
-    * adaptive engine), then prints OverlayResult diagnostics.
-    *
-    * When an adaptiveEngine is provided, uses its EVs as the upstream source
-    * for proper overlay filtering.
+    * Accepts the upstream ActionRecommendation that AdvisorSession already computed
+    * via its adaptive engine (lines 603-614 of AdvisorSession.scala). When provided,
+    * the overlay filters real EVs. When None (legacy callers), falls back to zero EVs.
     */
   def onAdvise(
       engine: StrategicEngine,
       gameState: GameState,
       candidates: Vector[PokerAction],
-      adaptiveEngine: Option[RealTimeAdaptiveEngine] = None
+      upstreamRecommendation: Option[ActionRecommendation] = None
   ): Vector[String] =
     try
-      val upstreamEvs: Vector[ActionEvaluation] = adaptiveEngine match
-        case Some(ae) =>
-          // TODO: Phase 2 — wire actual adaptive decision with proper hero cards/observations
-          // For now, use uniform zero EVs as a baseline
-          candidates.map(a => ActionEvaluation(a, 0.0))
-        case None =>
-          candidates.map(a => ActionEvaluation(a, 0.0))
+      val upstreamEvs: Vector[ActionEvaluation] = upstreamRecommendation match
+        case Some(rec) => rec.actionEvaluations
+        case None      => candidates.map(a => ActionEvaluation(a, 0.0))
 
       val result = engine.decide(gameState, candidates, upstreamEvs)
       val out = Vector.newBuilder[String]
@@ -1240,18 +1228,33 @@ object StrategicAdvisorBridge:
     engine.endHand(Some(Map(VillainId -> cards)))
 ```
 
-- [ ] **Step 2: Check that AdvisorSession compiles with the updated bridge**
+- [ ] **Step 2: Update AdvisorSession to pass the adaptive result**
 
-The `onAdvise` signature changed (added optional `adaptiveEngine` param with default `None`). Existing callers that pass `(engine, gameState, candidates)` will still compile because the new parameter has a default value.
+In `AdvisorSession.scala`, find the `onAdvise` call site (around line 617-619) where it currently calls:
+```scala
+StrategicAdvisorBridge.onAdvise(se, gameState, candidates)
+```
+
+The adaptive result is already available from line ~603-614 as `result.decision.recommendation`. Update to:
+```scala
+StrategicAdvisorBridge.onAdvise(se, gameState, candidates, Some(result.decision.recommendation))
+```
+
+This wires real upstream EVs from the adaptive engine into the overlay — no zero-EV fallback needed.
+
+- [ ] **Step 3: Check that AdvisorSession compiles with the updated bridge**
+
+The `onAdvise` signature changed (added optional `upstreamRecommendation` param with default `None`). Any callers that pass `(engine, gameState, candidates)` still compile because the new parameter has a default value.
 
 Run: `sbt compile`
 Expected: Compiles cleanly.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/main/scala/sicfun/holdem/runtime/StrategicAdvisorBridge.scala
-git commit -m "feat(runtime): migrate StrategicAdvisorBridge to overlay decide with OverlayResult diagnostics"
+git add src/main/scala/sicfun/holdem/runtime/StrategicAdvisorBridge.scala \
+        src/main/scala/sicfun/holdem/runtime/AdvisorSession.scala
+git commit -m "feat(runtime): migrate StrategicAdvisorBridge to overlay decide with real upstream EVs"
 ```
 
 ---
