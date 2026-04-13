@@ -432,7 +432,7 @@ object TexasHoldemPlayingHall:
         if !engine.isSessionInitialized then
           val rivalIds = tableScenario.activePositions
             .filterNot(_ == config.heroPosition)
-            .map(pos => sicfun.holdem.strategic.PlayerId(pos.toString))
+            .map(pos => sicfun.holdem.strategic.types.PlayerId(pos.toString))
           engine.initSession(rivalIds)
       }
       val result = resolveHand(
@@ -854,7 +854,7 @@ object TexasHoldemPlayingHall:
       recordObservation(position, state, action)
       if firstVillainDecision.isEmpty then firstVillainDecision = Some((state, action))
       strategicEngineOpt.foreach { engine =>
-        val rivalId = sicfun.holdem.strategic.PlayerId(position.toString)
+        val rivalId = sicfun.holdem.strategic.types.PlayerId(position.toString)
         engine.observeAction(rivalId, action, state)
       }
 

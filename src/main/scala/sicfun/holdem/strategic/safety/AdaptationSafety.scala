@@ -1,4 +1,5 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.safety
+import sicfun.holdem.strategic.types.*
 
 /** Adaptation safety framework (Defs 52-53 legacy + Defs 57/57A-C v0.31.1).
   *

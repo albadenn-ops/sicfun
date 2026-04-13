@@ -1,4 +1,4 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.types
 
 /** Fidelity of a formal-to-engine correspondence. */
 enum Fidelity:

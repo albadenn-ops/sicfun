@@ -1,4 +1,5 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.state
+import sicfun.holdem.strategic.types.*
 
 import sicfun.holdem.types.{PokerAction, Street}
 

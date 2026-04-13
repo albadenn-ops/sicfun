@@ -1,6 +1,8 @@
 package sicfun.holdem.strategic.bridge
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.safety.AttributedBaseline
 
-import sicfun.holdem.strategic.*
+
 
 /** Bridge: engine equity calculations -> RealBaseline, AttributedBaseline.
   *

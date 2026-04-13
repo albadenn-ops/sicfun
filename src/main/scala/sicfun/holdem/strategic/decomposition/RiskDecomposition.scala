@@ -1,4 +1,5 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.decomposition
+import sicfun.holdem.strategic.types.*
 
 /** World-aware risk decomposition (Wave 5 — v0.31.1 formal closure).
   *
@@ -85,6 +86,9 @@ object RiskDecomposition:
     * @param riskDelta risk increment at this chain edge (from ChainRiskDelta)
     */
   def marginalEfficiency(valueDelta: Ev, riskDelta: Ev): Option[Double] =
+    // The 1e-15 epsilon guard is a numerical choice to avoid division by near-zero risk.
+    // This threshold should be small enough to not suppress genuine risk signals
+    // but large enough to filter floating-point noise.
     if riskDelta <= Ev(1e-15) then None // [.]_+ guard: only defined when risk > 0 (Def 69)
     else Some(valueDelta.value / riskDelta.value)
 

@@ -1,6 +1,8 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.kernel
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
 
-import sicfun.holdem.strategic.TemperedLikelihood.*
+import sicfun.holdem.strategic.kernel.TemperedLikelihood.*
 
 class TemperedLikelihoodTest extends munit.FunSuite:
 

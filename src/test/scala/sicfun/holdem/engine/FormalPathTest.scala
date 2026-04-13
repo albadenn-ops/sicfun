@@ -2,7 +2,12 @@ package sicfun.holdem.engine
 
 import sicfun.core.Card
 import sicfun.holdem.types.*
-import sicfun.holdem.strategic.*
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.kernel.*
+import sicfun.holdem.strategic.safety.*
+import sicfun.holdem.strategic.exploitation.*
+import sicfun.holdem.strategic.decomposition.*
 import sicfun.holdem.strategic.solver.PftDpwResult
 
 class FormalPathTest extends munit.FunSuite:
@@ -114,8 +119,9 @@ class FormalPathTest extends munit.FunSuite:
     // B* is zero when transitions are identical and policy action is always safe,
     // because min_a picks the zero-loss policy action at every state.
     // This is correct: no adaptation budget needed when the policy is always available.
-    val transitions: (Int, Int, Int) => Int = (s, a, p) =>
-      profileModels(p).transitionTable(s * profileModels(0).numActions + a)
+    val transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)] = SafetyBellman.deterministicTransition(
+      (s, a, p) => profileModels(p).transitionTable(s * profileModels(0).numActions + a)
+    )
     val bStar = SafetyBellman.computeBStar(robustLosses, gamma, transitions, numProfiles)
     for s <- bStar.indices do
       assertEqualsDouble(bStar(s), 0.0, 1e-10)

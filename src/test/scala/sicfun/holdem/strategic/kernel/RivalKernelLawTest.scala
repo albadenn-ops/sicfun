@@ -1,8 +1,16 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.kernel
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.kernel.*
+import sicfun.holdem.strategic.safety.*
+import sicfun.holdem.strategic.exploitation.*
+import sicfun.holdem.strategic.decomposition.*
 
+import scala.annotation.nowarn
 import sicfun.holdem.types.{Position, Street, Board}
 import sicfun.core.DiscreteDistribution
 
+@nowarn("cat=deprecation")
 class RivalKernelLawTest extends munit.FunSuite:
 
   private val dummyPublicState = PublicState(

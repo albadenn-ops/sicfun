@@ -1,6 +1,8 @@
 package sicfun.holdem.strategic.bridge
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
 
-import sicfun.holdem.strategic.*
+
 import sicfun.holdem.types.{PokerAction, Street}
 
 /** Bridge: PokerAction -> ActionSignal, TotalSignal.

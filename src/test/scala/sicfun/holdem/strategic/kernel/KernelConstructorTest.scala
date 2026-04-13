@@ -1,8 +1,16 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.kernel
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.kernel.*
+import sicfun.holdem.strategic.safety.*
+import sicfun.holdem.strategic.exploitation.*
+import sicfun.holdem.strategic.decomposition.*
 
+import scala.annotation.nowarn
 import sicfun.core.DiscreteDistribution
 import sicfun.holdem.types.{Board, PokerAction, Position, Street}
 
+@nowarn("cat=deprecation")
 class KernelConstructorTest extends munit.FunSuite:
 
   private inline val Tol = 1e-12

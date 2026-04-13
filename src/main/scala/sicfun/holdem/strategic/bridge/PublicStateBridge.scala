@@ -1,6 +1,7 @@
 package sicfun.holdem.strategic.bridge
+import sicfun.holdem.strategic.types.*
 
-import sicfun.holdem.strategic.*
+
 import sicfun.holdem.types.{GameState, Street}
 
 /** Bridge: GameState -> formal layer components.

@@ -1,4 +1,5 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.safety
+import sicfun.holdem.strategic.types.*
 
 final case class DeploymentBeliefSummary(
     beliefEntropy: Double,

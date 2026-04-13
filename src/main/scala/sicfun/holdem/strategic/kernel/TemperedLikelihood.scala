@@ -1,4 +1,4 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.kernel
 
 /** Two-layer tempered likelihood and posterior update (Defs 15, 15A, 15B).
   *

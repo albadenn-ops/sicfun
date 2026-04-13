@@ -2,7 +2,12 @@ package sicfun.holdem.engine
 
 import sicfun.core.Card
 import sicfun.holdem.types.*
-import sicfun.holdem.strategic.*
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.kernel.*
+import sicfun.holdem.strategic.safety.*
+import sicfun.holdem.strategic.exploitation.*
+import sicfun.holdem.strategic.decomposition.*
 
 class ApproximatePathTest extends munit.FunSuite:
 

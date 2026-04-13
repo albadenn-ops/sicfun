@@ -1,6 +1,9 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.types
 
 import sicfun.holdem.types.PokerAction
+import sicfun.holdem.strategic.decomposition.{FourWorld, DeltaVocabulary, RiskDecomposition}
+import sicfun.holdem.strategic.exploitation.RevealDecision
+import sicfun.holdem.strategic.safety.OperationalBaseline
 
 /** Opaque identifier for a joint rival profile (all rivals assigned one
   * StrategicClass). Distinct from StrategicClass to prevent misuse.
@@ -38,6 +41,13 @@ enum CertificationResult:
   )
   case Unavailable(reason: String)
 
+/** Per-action bluff annotation (Defs 35-39). */
+final case class BluffAnnotation(
+    isStructuralBluff: Boolean,
+    bluffGain: Option[Ev],
+    isExploitativeBluff: Boolean
+)
+
 /** Decision outcome from the certification pipeline. */
 enum DecisionOutcome:
   case Certified(action: PokerAction, bundle: DecisionEvaluationBundle)
@@ -55,5 +65,11 @@ final case class DecisionEvaluationBundle(
     certification: CertificationResult,
     chainWorldValues: Map[ChainWorld, Ev],
     fourWorld: Option[FourWorld] = None,
+    deltaVocabulary: Option[DeltaVocabulary] = None,
+    bluffAnnotations: Vector[BluffAnnotation] = Vector.empty,
+    chainRiskProfile: Option[RiskDecomposition.ChainRiskProfile] = None,
+    polarizationProfile: Map[Int, Double] = Map.empty,
+    revealDecision: Option[RevealDecision] = None,
+    operationalBaseline: Option[OperationalBaseline] = None,
     notes: Vector[String]
 )

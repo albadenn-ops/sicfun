@@ -1,9 +1,15 @@
 package sicfun.holdem.strategic
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.kernel.*
+import sicfun.holdem.strategic.safety.*
+import sicfun.holdem.strategic.exploitation.*
+import sicfun.holdem.strategic.decomposition.*
 
 class TheoremValidationTest extends munit.FunSuite:
 
   private inline val Tol = 1e-12
-  private val selfLoop: (Int, Int, Int) => Int = (s, _, _) => s
+  private val selfLoop: (Int, Int, Int) => IndexedSeq[(Int, Double)] = (s, _, _) => IndexedSeq((s, 1.0))
   private val numProfilesOne = 1
 
   // ========================================================================

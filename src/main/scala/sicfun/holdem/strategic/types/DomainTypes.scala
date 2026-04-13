@@ -1,4 +1,4 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.types
 
 /** Domain-specific opaque types for the formal strategic layer.
   *

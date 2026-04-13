@@ -1,4 +1,10 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.state
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.kernel.*
+import sicfun.holdem.strategic.safety.*
+import sicfun.holdem.strategic.exploitation.*
+import sicfun.holdem.strategic.decomposition.*
 
 import sicfun.holdem.types.{Position, Street, Board, HoleCards}
 import sicfun.core.{CardId, DiscreteDistribution}
@@ -31,7 +37,7 @@ class AugmentedStateTest extends munit.FunSuite:
     def update(signal: ActionSignal, publicState: PublicState): RivalBeliefState = this
 
   private val dummyOMS = OpponentModelState(
-    typeDistribution = DiscreteDistribution.uniform(Seq("TAG", "LAG")),
+    typePosterior = DiscreteDistribution.uniform(Seq("TAG", "LAG")),
     beliefState = dummyBeliefState,
     attributedBaseline = None
   )
@@ -108,5 +114,5 @@ class AugmentedStateTest extends munit.FunSuite:
 
   test("OpponentModelState has no playerId field (identity in RivalMap)"):
     val oms = dummyOMS
-    assertEquals(oms.typeDistribution.support.size, 2)
+    assertEquals(oms.typePosterior.support.size, 2)
     assertEquals(oms.attributedBaseline, None)

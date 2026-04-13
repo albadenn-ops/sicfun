@@ -1,6 +1,8 @@
 package sicfun.holdem.strategic.bridge
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
 
-import sicfun.holdem.strategic.*
+
 import sicfun.core.DiscreteDistribution
 
 /** Bridge: engine opponent profiles -> formal RivalMap[OperativeBelief].

@@ -1,4 +1,4 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.types
 
 import sicfun.holdem.types.Position
 

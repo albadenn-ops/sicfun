@@ -1,8 +1,16 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.kernel
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.kernel.*
+import sicfun.holdem.strategic.safety.*
+import sicfun.holdem.strategic.exploitation.*
+import sicfun.holdem.strategic.decomposition.*
 
+import scala.annotation.nowarn
 import sicfun.core.{CardId, DiscreteDistribution}
 import sicfun.holdem.types.{Board, HoleCards, PokerAction, Position, Street}
 
+@nowarn("cat=deprecation")
 class DynamicsTest extends munit.FunSuite:
 
   private inline val Tol = 1e-12
@@ -55,7 +63,7 @@ class DynamicsTest extends munit.FunSuite:
       def update(signal: ActionSignal, publicState: PublicState): RivalBeliefState = this
 
     val dummyOMS = OpponentModelState(
-      typeDistribution = DiscreteDistribution.uniform(Seq("TAG", "LAG")),
+      typePosterior = DiscreteDistribution.uniform(Seq("TAG", "LAG")),
       beliefState = dummyBeliefState,
       attributedBaseline = None
     )
@@ -187,7 +195,7 @@ class DynamicsTest extends munit.FunSuite:
     val pol = UniformPolarization
     val sizing = Sizing(Chips(50.0), PotFraction(0.5))
     val rivalState = TestRivalState(uniformPrior)
-    val result = pol.polarization(sizing, dummyPublicState, rivalState)
+    val result = pol.polarization(PokerAction.Category.Raise, sizing, dummyPublicState, rivalState)
     assertEqualsDouble(result, 0.5, Tol) // uniform returns 0.5
 
   test("Def 25: PosteriorDivergencePolarization varies with sizing extremity"):
@@ -197,9 +205,9 @@ class DynamicsTest extends munit.FunSuite:
     val fullPot = Sizing(Chips(100.0), PotFraction(1.0))
     val minBet = Sizing(Chips(2.0), PotFraction(0.02))
 
-    val polHalf = pol.polarization(halfPot, dummyPublicState, rivalState)
-    val polFull = pol.polarization(fullPot, dummyPublicState, rivalState)
-    val polMin = pol.polarization(minBet, dummyPublicState, rivalState)
+    val polHalf = pol.polarization(PokerAction.Category.Raise, halfPot, dummyPublicState, rivalState)
+    val polFull = pol.polarization(PokerAction.Category.Raise, fullPot, dummyPublicState, rivalState)
+    val polMin = pol.polarization(PokerAction.Category.Raise, minBet, dummyPublicState, rivalState)
 
     // Extreme sizings should be more polarizing than half-pot
     assert(polFull > polHalf, s"full pot ($polFull) should be more polarizing than half pot ($polHalf)")
@@ -228,8 +236,8 @@ class DynamicsTest extends munit.FunSuite:
     val smallSizing = Sizing(Chips(30.0), PotFraction(0.3))
     val largeSizing = Sizing(Chips(100.0), PotFraction(1.0))
 
-    val polSmall = pol.polarization(smallSizing, dummyPublicState, rivalState)
-    val polLarge = pol.polarization(largeSizing, dummyPublicState, rivalState)
+    val polSmall = pol.polarization(PokerAction.Category.Raise, smallSizing, dummyPublicState, rivalState)
+    val polLarge = pol.polarization(PokerAction.Category.Raise, largeSizing, dummyPublicState, rivalState)
 
     // Large sizing should have higher polarization (more KL divergence)
     assert(polLarge > polSmall, s"large ($polLarge) should be more polarizing than small ($polSmall)")
@@ -255,7 +263,7 @@ class DynamicsTest extends munit.FunSuite:
     // Should still compute via proxy without error
     val rivalState = TestRivalState(uniformPrior)
     val sizing = Sizing(Chips(50.0), PotFraction(0.5))
-    val result = pol.polarization(sizing, dummyPublicState, rivalState)
+    val result = pol.polarization(PokerAction.Category.Raise, sizing, dummyPublicState, rivalState)
     assert(result >= 0.0 && result <= 1.0)
 
   test("Def 25: polarization profile computes for all candidates"):
@@ -266,7 +274,7 @@ class DynamicsTest extends munit.FunSuite:
       Sizing(Chips(50.0), PotFraction(0.5)),
       Sizing(Chips(100.0), PotFraction(1.0))
     )
-    val profile = pol.profile(candidates, dummyPublicState, rivalState)
+    val profile = pol.profile(PokerAction.Category.Raise, candidates, dummyPublicState, rivalState)
     assertEquals(profile.size, 3)
 
   // ---- Multiway: Dynamics must handle |R| > 1 ----
@@ -391,7 +399,7 @@ class DynamicsTest extends munit.FunSuite:
     assertEquals(resultOff(PlayerId("v1")).updateCount, 1)
     assertEquals(resultOn(PlayerId("v1")).updateCount, 101)
 
-  test("counterfactualReferenceWorld with explicit ChainWorld(Ref, Off) produces expected result"):
+  test("counterfactualReferenceWorld with ChainWorld(Ref, On) produces expected result"):
     val v1State = TestRivalState(uniformPrior, 0, "v1")
 
     val actionKernel = new ActionKernel[TestRivalState]:
@@ -406,11 +414,11 @@ class DynamicsTest extends munit.FunSuite:
       def apply(state: TestRivalState, showdown: ShowdownSignal): TestRivalState =
         TestRivalState(state.posterior, state.updateCount + 100, state.label + "+sd")
 
-    val refOff = ChainWorld(LearningChannel.Ref, ShowdownMode.Off)
-    val refKernel = KernelConstructor.composeFullKernelForWorld(refOff, actionKernel, actionKernel, designKernel, sdKernel)
+    val refOn = ChainWorld(LearningChannel.Ref, ShowdownMode.On)
+    val refKernel = KernelConstructor.composeFullKernelForWorld(refOn, actionKernel, actionKernel, designKernel, sdKernel)
 
     val worldProfile = WorldIndexedKernelProfile(Map(
-      (PlayerId("v1"), refOff) -> refKernel
+      (PlayerId("v1"), refOn) -> refKernel
     ))
 
     val states = Map(PlayerId("v1") -> v1State)
@@ -418,12 +426,12 @@ class DynamicsTest extends munit.FunSuite:
     val signalWithSd = TotalSignal(raiseSignal, Some(showdownSig))
 
     val cfResult = Dynamics.counterfactualReferenceWorld(
-      states, signalWithSd, dummyPublicState, worldProfile, refOff
+      states, signalWithSd, dummyPublicState, worldProfile, refOn
     )
 
-    // Ref + Off: action only, showdown gated off
-    assertEquals(cfResult(PlayerId("v1")).updateCount, 1)
-    assertEquals(cfResult(PlayerId("v1")).label, "ref-action")
+    // Ref + On: action + showdown (1 + 100 = 101)
+    assertEquals(cfResult(PlayerId("v1")).updateCount, 101)
+    assertEquals(cfResult(PlayerId("v1")).label, "ref-action+sd")
 
   // ---- Backward compatibility (v0.30.2 §12.2) ----
 

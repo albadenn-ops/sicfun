@@ -1,4 +1,6 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.kernel
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
 
 import sicfun.core.DiscreteDistribution
 import sicfun.holdem.types.{Board, Position}
@@ -50,10 +52,10 @@ object KernelConstructor:
     * sizing=None, timing=None. The likelihood function is responsible
     * for summing over (lambda, tau) internally if needed.
     *
-    * Note: uses a minimal zero-state PublicState internally for backward
-    * compatibility with chain-world composition. For production use where
-    * real public state context matters, use `buildDesignKernelFull`.
+    * @deprecated Use [[buildDesignKernelFull]] instead; this variant drops PublicState
+    *   by substituting a zero-state placeholder, which loses street/pot/stack context.
     */
+  @deprecated("Use buildDesignKernelFull to preserve PublicState context", "v0.31.1")
   def buildDesignKernel[M <: RivalBeliefState](
       updater: StateEmbeddingUpdater[M],
       likelihood: TemperedLikelihoodFn
@@ -108,6 +110,11 @@ object KernelConstructor:
     *     action(m, Y^act)
     *   if bullet == blind:
     *     m
+    *
+    * Note: showdown gating is determined by the presence/absence of `signal.showdown`
+    * in the [[TotalSignal]], NOT by the omega^sd parameter of the enclosing world.
+    * The omega^sd axis controls which _callers_ populate the showdown field;
+    * ForWorld wrappers (e.g. [[composeFullKernelForWorld]]) gate at the call site.
     */
   def composeFullKernel[M <: RivalBeliefState](
       actionKernel: ActionKernel[M],
@@ -146,40 +153,28 @@ object KernelConstructor:
 
   /** Compose a design full kernel: design action kernel + showdown kernel (Def 20, bullet=design).
     *
-    * Parallel to [[composeFullKernel]] but uses a design action kernel that strips
+    * Parallel to [[composeFullKernelFromFull]] but uses a design action kernel that strips
     * sizing and timing from the signal before computing the likelihood.
+    * Accepts [[ActionKernelFull]] to thread PublicState through to the design kernel.
     */
   def composeDesignFullKernel[M <: RivalBeliefState](
-      designActionKernel: ActionKernel[M],
+      designActionKernel: ActionKernelFull[M],
       showdownKernel: ShowdownKernel[M]
   ): FullKernel[M] =
     new FullKernel[M]:
       def apply(state: M, signal: TotalSignal, publicState: PublicState): M =
-        val afterAction = designActionKernel.apply(state, signal.actionSignal)
+        val afterAction = designActionKernel.apply(state, signal.actionSignal, publicState)
         signal.showdown match
           case Some(sd) => showdownKernel.apply(afterAction, sd)
           case None     => afterAction
 
   /** Compose a full kernel for a specific [[ChainWorld]].
     *
-    * Routes the (LearningChannel, ShowdownMode) pair to the correct kernel composition:
-    *   - (Blind, Off) and (Blind, On) -> blind full kernel (identity)
-    *   - (Ref, Off)                   -> action kernel only (showdown gated off)
-    *   - (Ref, On)                    -> action + showdown
-    *   - (Attrib, Off)                -> action kernel only (showdown gated off)
-    *   - (Attrib, On)                 -> action + showdown
-    *   - (Design, Off)                -> design kernel only (showdown gated off)
-    *   - (Design, On)                 -> design kernel + showdown
-    *
-    * Per Def 18, Ref and Attrib channels use DISTINCT kernels:
-    *   Ref uses BuildRivalKernel(pi^{0,S}); Attrib uses BuildRivalKernel(hat{pi}^{0,S,i}).
-    *
-    * @param world the chain world determining kernel variant and showdown gating
-    * @param refActionKernel the action kernel for the Ref channel (built from pi^{0,S})
-    * @param attribActionKernel the action kernel for the Attrib channel (built from hat{pi}^{0,S,i})
-    * @param designActionKernel the design action kernel (strips sizing/timing)
-    * @param showdownKernel the showdown kernel for On worlds
+    * @deprecated Use [[composeFullKernelForWorldFull]] instead; this variant accepts
+    *   [[ActionKernel]] (no PublicState threading) and drops public state context
+    *   in the design channel.
     */
+  @deprecated("Use composeFullKernelForWorldFull to preserve PublicState context", "v0.31.1")
   def composeFullKernelForWorld[M <: RivalBeliefState](
       world: ChainWorld,
       refActionKernel: ActionKernel[M],
@@ -198,7 +193,13 @@ object KernelConstructor:
               def apply(state: M, signal: TotalSignal, publicState: PublicState): M =
                 designActionKernel.apply(state, signal.actionSignal)
           case ShowdownMode.On =>
-            composeDesignFullKernel(designActionKernel, showdownKernel)
+            // Inline: design kernel drops PublicState (legacy behavior)
+            new FullKernel[M]:
+              def apply(state: M, signal: TotalSignal, publicState: PublicState): M =
+                val afterAction = designActionKernel.apply(state, signal.actionSignal)
+                signal.showdown match
+                  case Some(sd) => showdownKernel.apply(afterAction, sd)
+                  case None     => afterAction
 
       case LearningChannel.Ref =>
         world.showdown match

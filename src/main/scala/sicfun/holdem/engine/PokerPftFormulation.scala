@@ -1,7 +1,8 @@
 package sicfun.holdem.engine
 
 import sicfun.holdem.types.*
-import sicfun.holdem.strategic.*
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
 import sicfun.holdem.strategic.solver.{TabularGenerativeModel, ParticleBelief}
 
 /** Builds tabular POMDP models from poker game state for PftDpw solver. */
@@ -212,6 +213,44 @@ object PokerPftFormulation:
       blindModel.numStates * blindModel.numActions * numObs
     )(1.0 / numObs)
     blindModel.copy(obsLikelihood = uniformObs)
+
+  /** Build a model for design-kernel world (Def 19A / Defs 48-49).
+    *
+    * Uses attrib obs likelihoods (normal learning) but sizing-insensitive rewards:
+    * all raises are priced at a standardized 0.5× pot fraction, stripping the
+    * sizing/timing signal while preserving the action-category signal.
+    *
+    * Used for SignalingSubDecomposition: delta_sig = delta_sig,design + delta_sig,real.
+    */
+  def buildDesignKernelModel(
+      gameState: GameState,
+      rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
+      heroActions: Vector[PokerAction],
+      heroBucket: Int,
+      actionPriors: Map[(StrategicClass, PokerAction.Category), Double]
+  ): TabularGenerativeModel =
+    // Build normal attrib model, then override raise rewards to use standardized sizing
+    val attribModel = buildTabularModel(
+      gameState, rivalBeliefs, heroActions, heroBucket, actionPriors, profileClass = None
+    )
+    val numStates = attribModel.numStates
+    val numActions = attribModel.numActions
+    val equity = heroBucket / 9.0
+    val designRewards = attribModel.rewardTable.clone()
+    var s = 0
+    while s < numStates do
+      val eqRealization = (s + 1).toDouble / numStates
+      var a = 0
+      while a < numActions do
+        heroActions(a) match
+          case _: PokerAction.Raise =>
+            // Design kernel: standardized raise at 0.5× pot fraction (sizing-insensitive)
+            val standardRaiseFraction = 0.5 * gameState.pot / math.max(gameState.stackSize, 1.0)
+            designRewards(s * numActions + a) = (equity - 0.3) * standardRaiseFraction * eqRealization
+          case _ => () // non-raise actions unchanged
+        a += 1
+      s += 1
+    attribModel.copy(rewardTable = designRewards)
 
   /** Build a ParticleBelief from rival beliefs.
     *

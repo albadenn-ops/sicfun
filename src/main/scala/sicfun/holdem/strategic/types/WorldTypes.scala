@@ -1,4 +1,4 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.types
 
 /** World algebra types (Wave 1 — v0.31.1 formal closure).
   *
@@ -44,8 +44,9 @@ object ChainWorld:
       sd <- ShowdownMode.values.toIndexedSeq
     yield ChainWorld(ch, sd)
 
-  /** The 6 effectively distinct chain worlds (Def 20 cardinality note).
+  /** The 7 effectively distinct chain worlds (Def 20 cardinality note).
     * Collapses (Blind,Off)/(Blind,On) to a single representative (Blind,Off).
+    * Filter removes only (Blind,On) from 8 nominal worlds → 7 effective.
     */
   val effectivelyDistinct: IndexedSeq[ChainWorld] =
     all.filterNot(w => w.channel == LearningChannel.Blind && w.showdown == ShowdownMode.On)

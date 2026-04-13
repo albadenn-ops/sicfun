@@ -1,4 +1,5 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.decomposition
+import sicfun.holdem.strategic.types.*
 
 /** Signaling sub-decomposition (Defs 48-49).
   *

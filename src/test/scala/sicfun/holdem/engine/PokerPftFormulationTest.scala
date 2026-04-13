@@ -1,7 +1,7 @@
 package sicfun.holdem.engine
 
 import sicfun.holdem.types.*
-import sicfun.holdem.strategic.StrategicClass
+import sicfun.holdem.strategic.types.StrategicClass
 
 class PokerPftFormulationTest extends munit.FunSuite:
 

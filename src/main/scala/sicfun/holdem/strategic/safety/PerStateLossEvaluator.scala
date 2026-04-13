@@ -1,4 +1,4 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.safety
 
 import sicfun.holdem.strategic.solver.TabularGenerativeModel
 

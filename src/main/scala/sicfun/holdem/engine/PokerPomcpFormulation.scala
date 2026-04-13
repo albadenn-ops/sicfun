@@ -1,8 +1,8 @@
 package sicfun.holdem.engine
 
 import sicfun.holdem.types.*
-import sicfun.holdem.strategic.*
-import sicfun.holdem.strategic.StrategicClass
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
 import sicfun.holdem.strategic.solver.WPomcpRuntime
 
 /** Builds flat array inputs for the WPomcp V2 factored tabular model.

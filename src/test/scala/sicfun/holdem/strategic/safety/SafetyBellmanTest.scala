@@ -1,9 +1,15 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.safety
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.kernel.*
+import sicfun.holdem.strategic.safety.*
+import sicfun.holdem.strategic.exploitation.*
+import sicfun.holdem.strategic.decomposition.*
 
 class SafetyBellmanTest extends munit.FunSuite:
 
   private inline val Tol = 1e-10
-  private val selfLoop: (Int, Int, Int) => Int = (s, _, _) => s
+  private val selfLoop: (Int, Int, Int) => IndexedSeq[(Int, Double)] = (s, _, _) => IndexedSeq((s, 1.0))
   private val numProfilesOne = 1
 
   // ---- Def 58: Baseline loss ------------------------------------------------
@@ -53,16 +59,18 @@ class SafetyBellmanTest extends munit.FunSuite:
 
   test("tSafe uses min_a with transition-aware futures"):
     // 2 states, 2 actions, 2 profiles
-    val transitions: (Int, Int, Int) => Int = (s, a, p) => (s, a, p) match
-      case (0, 0, 0) => 0
-      case (0, 1, 0) => 1
-      case (1, 0, 0) => 1
-      case (1, 1, 0) => 0
-      case (0, 0, 1) => 1
-      case (0, 1, 1) => 0
-      case (1, 0, 1) => 0
-      case (1, 1, 1) => 1
-      case _ => 0
+    val transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)] = SafetyBellman.deterministicTransition {
+      (s, a, p) => (s, a, p) match
+        case (0, 0, 0) => 0
+        case (0, 1, 0) => 1
+        case (1, 0, 0) => 1
+        case (1, 1, 0) => 0
+        case (0, 0, 1) => 1
+        case (0, 1, 1) => 0
+        case (1, 0, 1) => 0
+        case (1, 1, 1) => 1
+        case _ => 0
+    }
     val numProfiles = 2
     val currentBound = Array(2.0, 5.0)
     val robustLosses = Array(Array(1.0, 3.0), Array(0.5, 2.0))
@@ -320,7 +328,7 @@ class SafetyBellmanTest extends munit.FunSuite:
 
   test("computeBStar: terminal state with transition-dependent futures"):
     // 2 states, 1 action, transitions: action at state 0 goes to state 1
-    val transitions: (Int, Int, Int) => Int = (s, _, _) => 1 - s // state 0->1, 1->0
+    val transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)] = SafetyBellman.deterministicTransition((s, _, _) => 1 - s) // state 0->1, 1->0
     val robustLosses = Array(Array(2.0), Array(5.0))
     val gamma = 0.5
     // State 1 is terminal => B(1) = 0
@@ -349,16 +357,18 @@ class SafetyBellmanTest extends munit.FunSuite:
       s"contraction violated: ||T(B1)-T(B2)||=$outputDiff > gamma*||B1-B2||=${gamma * inputDiff}")
 
   test("Proposition 9.5: contraction holds with non-trivial transitions and multiple profiles"):
-    val transitions: (Int, Int, Int) => Int = (s, a, p) => (s, a, p) match
-      case (0, 0, 0) => 1
-      case (0, 1, 0) => 0
-      case (1, 0, 0) => 0
-      case (1, 1, 0) => 1
-      case (0, 0, 1) => 0
-      case (0, 1, 1) => 1
-      case (1, 0, 1) => 1
-      case (1, 1, 1) => 0
-      case _ => 0
+    val transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)] = SafetyBellman.deterministicTransition {
+      (s, a, p) => (s, a, p) match
+        case (0, 0, 0) => 1
+        case (0, 1, 0) => 0
+        case (1, 0, 0) => 0
+        case (1, 1, 0) => 1
+        case (0, 0, 1) => 0
+        case (0, 1, 1) => 1
+        case (1, 0, 1) => 1
+        case (1, 1, 1) => 0
+        case _ => 0
+    }
     val robustLosses = Array(Array(2.0, 1.0), Array(0.5, 3.0))
     val gamma = 0.8
     val b1 = Array(10.0, 2.0)

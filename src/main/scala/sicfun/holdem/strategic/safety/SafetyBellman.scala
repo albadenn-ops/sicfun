@@ -1,4 +1,6 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.safety
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.exploitation.DeploymentBaseline
 
 /** Bellman-safe certificates and local safety operators (Wave 4 — v0.31.1 formal closure).
   *
@@ -14,6 +16,14 @@ package sicfun.holdem.strategic
   *   - Certificate validation and dominance (Def 66)
   */
 object SafetyBellman:
+
+  /** Wrap a deterministic transition function as stochastic with probability 1.0.
+    *
+    * Convenience adapter so existing deterministic callers can pass their
+    * `(s, a, p) => successor` function to the stochastic API.
+    */
+  def deterministicTransition(f: (Int, Int, Int) => Int): (Int, Int, Int) => IndexedSeq[(Int, Double)] =
+    (s, a, p) => IndexedSeq((f(s, a, p), 1.0))
 
   /** One-step baseline loss (Def 58).
     *
@@ -49,17 +59,17 @@ object SafetyBellman:
 
   /** Safe Bellman operator T_safe (Def 60).
     *
-    * (T_safe B)(s) = min_a [ L_robust(s, a) + gamma * max_σ B(T_σ(s, a)) ]
+    * (T_safe B)(s) = min_a [ L_robust(s, a) + gamma * max_σ E_{s'~T_σ(s,a)}[B(s')] ]
     *
-    * The future term uses transition-aware successor bounds:
-    * for each (s, a), the worst-case successor state reachable under any
-    * profile σ determines the future cost. This is exact for deterministic
-    * transitions; for stochastic transitions, use expectation inside max_σ.
+    * The future term computes the expected safety bound over stochastic
+    * successor beliefs for each profile σ, then takes the worst case (max)
+    * across profiles. For deterministic transitions, wrap with
+    * [[deterministicTransition]].
     *
     * @param currentBound current safety bound per state B(s)
     * @param robustLosses robust one-step losses, indexed [state][action]
     * @param gamma discount factor
-    * @param transitions (stateIdx, actionIdx, profileIdx) => successor stateIdx
+    * @param transitions (stateIdx, actionIdx, profileIdx) => successor (stateIdx, probability) pairs
     * @param numProfiles number of rival profiles σ
     * @return updated bound per state
     */
@@ -67,7 +77,7 @@ object SafetyBellman:
       currentBound: Array[Double],
       robustLosses: Array[Array[Double]],
       gamma: Double,
-      transitions: (Int, Int, Int) => Int,
+      transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)],
       numProfiles: Int,
       terminalStates: Set[Int] = Set.empty
   ): Array[Double] =
@@ -106,7 +116,7 @@ object SafetyBellman:
   def computeBStar(
       robustLosses: Array[Array[Double]],
       gamma: Double,
-      transitions: (Int, Int, Int) => Int,
+      transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)],
       numProfiles: Int,
       maxIterations: Int = 200,
       tolerance: Double = 1e-10,
@@ -140,7 +150,7 @@ object SafetyBellman:
       bound: Array[Double],
       robustLosses: Array[Array[Double]],
       gamma: Double,
-      transitions: (Int, Int, Int) => Int,
+      transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)],
       numProfiles: Int
   ): IndexedSeq[Int] =
     val threshold = bound(stateIndex)
@@ -150,19 +160,28 @@ object SafetyBellman:
       losses(a) + gamma * maxFuture <= threshold + 1e-12
     }
 
-  /** max_σ B(T_σ(s, a)): worst-case future bound across profiles. */
+  /** max_σ E_{s'~T_σ(s,a)}[B(s')]: worst-case expected future bound across profiles.
+    *
+    * For each profile σ, computes the expected safety bound over stochastic
+    * successor states, then returns the maximum across profiles.
+    */
   private def worstCaseFuture(
       bound: Array[Double],
       s: Int, a: Int,
-      transitions: (Int, Int, Int) => Int,
+      transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)],
       numProfiles: Int
   ): Double =
     var maxFuture = Double.NegativeInfinity
     var p = 0
     while p < numProfiles do
-      val successor = transitions(s, a, p)
-      val futureVal = bound(successor)
-      if futureVal > maxFuture then maxFuture = futureVal
+      val successors = transitions(s, a, p)
+      var expected = 0.0
+      var i = 0
+      while i < successors.size do
+        val (successor, prob) = successors(i)
+        expected += prob * bound(successor)
+        i += 1
+      if expected > maxFuture then maxFuture = expected
       p += 1
     maxFuture
 
@@ -226,7 +245,7 @@ object SafetyBellman:
     def satisfiesMonotonicity(
         robustLosses: Array[Array[Double]],
         gamma: Double,
-        transitions: (Int, Int, Int) => Int,
+        transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)],
         numProfiles: Int
     ): Boolean =
       val tSafeResult = SafetyBellman.tSafe(values, robustLosses, gamma, transitions, numProfiles, terminalStates)
@@ -237,7 +256,7 @@ object SafetyBellman:
         robustLosses: Array[Array[Double]],
         gamma: Double,
         maxBound: Double,
-        transitions: (Int, Int, Int) => Int,
+        transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)],
         numProfiles: Int
     ): Boolean =
       satisfiesTerminality &&
@@ -245,9 +264,11 @@ object SafetyBellman:
         satisfiesGlobalBound(maxBound) &&
         satisfiesMonotonicity(robustLosses, gamma, transitions, numProfiles)
 
-  /** Certificate dominance (Def 66).
+  /** Certificate dominance (Proposition 9.6).
     *
     * B_beta dominates B* iff B_beta(s) >= B*(s) for all s.
+    * Note: Def 66 is the structural certificate conditions (C1-C4),
+    * validated by [[Certificate.satisfiesMonotonicity]] et al.
     */
   def certificateDominates(
       certificate: Array[Double],
@@ -274,7 +295,7 @@ object SafetyBellman:
       currentBound: Array[Double],
       robustLosses: Array[Array[Double]],
       gamma: Double,
-      transitions: (Int, Int, Int) => Int,
+      transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)],
       numProfiles: Int,
       terminalStates: Set[Int] = Set.empty
   ): Array[Double] =
@@ -288,7 +309,7 @@ object SafetyBellman:
       world: ChainWorld,
       robustLosses: Array[Array[Double]],
       gamma: Double,
-      transitions: (Int, Int, Int) => Int,
+      transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)],
       numProfiles: Int,
       maxIterations: Int = 200,
       tolerance: Double = 1e-10,
@@ -303,7 +324,7 @@ object SafetyBellman:
       bound: Array[Double],
       robustLosses: Array[Array[Double]],
       gamma: Double,
-      transitions: (Int, Int, Int) => Int,
+      transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)],
       numProfiles: Int
   ): IndexedSeq[Int] =
     safeActionSet(stateIndex, bound, robustLosses, gamma, transitions, numProfiles)
@@ -328,7 +349,7 @@ object SafetyBellman:
     * @param bStar B* per latent state
     * @param robustLosses [state][action]
     * @param gamma discount factor
-    * @param transitions (s, a, profileIdx) => successor state
+    * @param transitions (s, a, profileIdx) => successor (stateIdx, probability) pairs
     * @param numProfiles number of profiles
     * @return indices of safe actions at the belief level
     */
@@ -337,7 +358,7 @@ object SafetyBellman:
       bStar: Array[Double],
       robustLosses: Array[Array[Double]],
       gamma: Double,
-      transitions: (Int, Int, Int) => Int,
+      transitions: (Int, Int, Int) => IndexedSeq[(Int, Double)],
       numProfiles: Int
   ): IndexedSeq[Int] =
     require(belief.length == bStar.length, "belief and bStar must match in size")

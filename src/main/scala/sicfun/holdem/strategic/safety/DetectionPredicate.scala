@@ -1,4 +1,6 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.safety
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
 
 /** Detection predicate for rival modeling awareness (A6').
   *
@@ -51,19 +53,22 @@ object AlwaysDetect extends DetectionPredicate:
   *
   * This is a concrete implementation suitable for initial deployment.
   * Looks at the last `window` actions and checks if the fraction of
-  * counter-exploitative adjustments exceeds `threshold`.
+  * counter-exploitative adjustments exceeds the baseline frequency by
+  * more than `threshold` (spec condition ii: detection fires only when
+  * observed frequency exceeds baseline tolerance).
   *
-  * A "counter-exploitative adjustment" is detected when the rival's
-  * action frequency shifts toward actions that specifically counter
-  * SICFUN's current strategy (e.g., increased 3-bet frequency when
-  * SICFUN has been opening wide).
+  * @param window number of recent actions to consider
+  * @param threshold detection margin above baseline (fires when observed - baseline > threshold)
+  * @param baselineFrequency expected baseline aggressive frequency under non-modeling play
   */
 final class FrequencyAnomalyDetection(
     window: Int,
-    threshold: Double
+    threshold: Double,
+    baselineFrequency: Double = 0.0
 ) extends DetectionPredicate:
   require(window > 0, "window must be positive")
   require(threshold > 0.0 && threshold <= 1.0, "threshold must be in (0, 1]")
+  require(baselineFrequency >= 0.0 && baselineFrequency <= 1.0, "baselineFrequency must be in [0, 1]")
 
   def detectModeling(
       rivalId: PlayerId,
@@ -79,4 +84,6 @@ final class FrequencyAnomalyDetection(
         // Count aggressive actions (raises/reraises) as proxy for counter-exploitation
         val aggressiveCount = rivalActions.count(_.signal.isAggressiveWager)
         val aggressiveFraction = aggressiveCount.toDouble / rivalActions.size.toDouble
-        aggressiveFraction > threshold
+        // Spec condition ii: compare against baseline, not absolute threshold.
+        // Returns false (no detection) when observed frequency is within baseline tolerance.
+        aggressiveFraction - baselineFrequency > threshold

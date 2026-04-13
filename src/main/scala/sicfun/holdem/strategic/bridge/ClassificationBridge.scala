@@ -1,6 +1,7 @@
 package sicfun.holdem.strategic.bridge
+import sicfun.holdem.strategic.types.*
 
-import sicfun.holdem.strategic.*
+
 
 /** Bridge: hand strength -> StrategicClass.
   *

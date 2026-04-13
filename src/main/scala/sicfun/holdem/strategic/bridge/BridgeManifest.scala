@@ -1,6 +1,7 @@
 package sicfun.holdem.strategic.bridge
+import sicfun.holdem.strategic.types.*
 
-import sicfun.holdem.strategic.{Fidelity, Severity}
+
 
 /** Fidelity declaration for a single formal object in the bridge. */
 final case class BridgeEntry(

@@ -1,4 +1,6 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.state
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.kernel.StateEmbeddingUpdater
 
 import sicfun.core.DiscreteDistribution
 

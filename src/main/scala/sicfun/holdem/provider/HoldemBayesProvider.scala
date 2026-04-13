@@ -3,7 +3,7 @@ import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.equity.*
-import sicfun.holdem.strategic.TemperedLikelihood.TemperedConfig
+import sicfun.holdem.strategic.kernel.TemperedLikelihood.TemperedConfig
 
 import sicfun.core.{Deck, DiscreteDistribution, MultinomialLogistic, Probability}
 

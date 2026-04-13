@@ -1,4 +1,6 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.decomposition
+
+import sicfun.holdem.strategic.types.*
 
 // STATUS (post-Wave 7 — v0.31.1 formal closure complete)
 // -------------------------------------------------------

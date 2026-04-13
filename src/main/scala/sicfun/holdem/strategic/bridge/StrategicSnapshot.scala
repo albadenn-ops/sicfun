@@ -1,6 +1,10 @@
 package sicfun.holdem.strategic.bridge
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.exploitation.*
+import sicfun.holdem.strategic.decomposition.*
 
-import sicfun.holdem.strategic.*
+
 import sicfun.holdem.types.{GameState, PokerAction, Street}
 import sicfun.core.DiscreteDistribution
 

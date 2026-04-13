@@ -1,4 +1,8 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.kernel
+import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.exploitation.*
+import sicfun.holdem.strategic.safety.DetectionPredicate
 
 import sicfun.core.DiscreteDistribution
 
@@ -30,12 +34,17 @@ object Dynamics:
 
   /** Belief update (Def 22).
     *
-    * b_{t+1} = tau_tilde(b_t, u_t, Z_{t+1})
+    * b_{t+1} = τ̃(b_t, u_t, Z_{t+1})
     *
     * The belief update is parameterized by an updater function that
     * transforms the operative belief given the observed signal and
-    * public state. This is abstract because the specific Bayesian
-    * update depends on the state representation.
+    * public state. This is a formal placeholder for the unfactored
+    * representation; the concrete Bayesian update is implemented by
+    * [[Dynamics.fullStep]] → per-rival kernel pipeline
+    * ([[TemperedLikelihoodFn]] → [[StateEmbeddingUpdater]]).
+    * The joint belief update factorizes into independent per-rival
+    * updates because SICFUN tracks per-rival posteriors independently
+    * in [[OpponentModelState.typePosterior]].
     */
   def beliefUpdate(
       belief: OperativeBelief,
@@ -98,8 +107,10 @@ object Dynamics:
 
   /** Counterfactual reference world with explicit ChainWorld (Def 24, world-aware overload).
     *
-    * Uses ChainWorld(Ref, Off) or ChainWorld(Ref, On) to select the correct
-    * reference kernel from a WorldIndexedKernelProfile.
+    * Uses the specified ChainWorld to select the correct reference kernel
+    * from a WorldIndexedKernelProfile. The world must have ShowdownMode.On
+    * because the counterfactual reference world requires full information
+    * (showdown signals are part of the reference information set).
     */
   def counterfactualReferenceWorld[M <: RivalBeliefState](
       rivalStates: Map[PlayerId, M],
@@ -108,6 +119,8 @@ object Dynamics:
       worldProfile: WorldIndexedKernelProfile[M],
       world: ChainWorld
   ): Map[PlayerId, M] =
+    require(world.showdown == ShowdownMode.On,
+      s"counterfactual reference world requires ShowdownMode.On, got ${world.showdown}")
     fullRivalUpdate(rivalStates, signal, publicState, worldProfile, world)
 
   /** Full dynamics step: rival update + exploitation update.

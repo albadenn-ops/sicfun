@@ -1,4 +1,5 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.decomposition
+import sicfun.holdem.strategic.types.*
 
 /** Four-world aggregate decomposition (Defs 44-47 implementation).
   *

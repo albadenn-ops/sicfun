@@ -1,4 +1,5 @@
-package sicfun.holdem.strategic
+package sicfun.holdem.strategic.decomposition
+import sicfun.holdem.strategic.types.*
 
 /** Per-rival signal decomposition operators (Defs 40-43).
   *
