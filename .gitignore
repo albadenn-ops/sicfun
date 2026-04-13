@@ -4,12 +4,15 @@ target/
 !**/src/test/**/target/
 
 ### IntelliJ IDEA ###
+.idea/
 .idea/modules.xml
 .idea/jarRepositories.xml
 .idea/compiler.xml
 .idea/libraries/
 .idea/vcs.xml
 .idea/copilot.data.migration.ask2agent.xml
+.idea/copilot.data.migration.agent.xml
+.idea/dataSources.xml
 *.iws
 *.iml
 *.ipr
@@ -95,6 +98,8 @@ src/main/native.rar
 validation-output/
 
 ### Generated test/benchmark data ###
+data/adaptive-proof/
+data/slumbot-*/
 data/playing-hall-*/
 data/benchmarks/
 data/manual-bench-auto/
@@ -118,6 +123,10 @@ third_party/**/*.pyc
 
 ### JVM crash logs ###
 hs_err_pid*.log
+replay_pid*.log
+
+### Temp logs ###
+tmp-*.log
 
 ### Agent system state ###
 .agent-system/
@@ -127,4 +136,3 @@ hs_err_pid*.log
 test-output*.txt
 test-run*.txt
 code-review-*.md
-replay_pid*.log
