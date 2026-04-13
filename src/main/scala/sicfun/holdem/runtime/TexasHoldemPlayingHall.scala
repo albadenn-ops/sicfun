@@ -8,6 +8,7 @@ import sicfun.holdem.engine.GtoSolveEngine.{GtoMode, GtoSolveCacheKey, GtoCached
 import sicfun.holdem.provider.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.cli.*
+import sicfun.holdem.strategic.types.PlayerId
 
 import sicfun.core.{Card, CardId, Deck, DiscreteDistribution, HandEvaluator}
 import sicfun.holdem.validation.{
@@ -335,7 +336,7 @@ object TexasHoldemPlayingHall:
     private var activeArtifactOpt = Option.empty[TrainedPokerActionModel]
     private var preflopEngineOpt = Option.empty[RealTimeAdaptiveEngine]
     private var postflopEngineOpt = Option.empty[RealTimeAdaptiveEngine]
-    private var strategicEngineOpt = Option.empty[StrategicEngine]
+    private var strategicHelperOpt = Option.empty[StrategicLifecycleHelper]
     private var heroNet = 0.0
     private var heroWins = 0
     private var heroTies = 0
@@ -407,7 +408,10 @@ object TexasHoldemPlayingHall:
       activeArtifactOpt = Some(initialArtifact)
       rebuildEngines()
       if config.heroMode == HeroMode.Strategic then
-        strategicEngineOpt = Some(new StrategicEngine(StrategicEngine.Config()))
+        val helper = StrategicLifecycleHelper.create()
+        val allRivalIds = config.villainPool.map(p => PlayerId(p.name)).distinct.toVector
+        helper.initSession(rivalIds = allRivalIds, positionMapping = Map.empty)
+        strategicHelperOpt = Some(helper)
 
     private def playHands(): Unit =
       var handNo = 1
@@ -430,12 +434,13 @@ object TexasHoldemPlayingHall:
         rng = rng
       )
       val deal = dealHand(tableScenario.modeledPositions, rng)
-      strategicEngineOpt.foreach { engine =>
-        if !engine.isSessionInitialized then
-          val rivalIds = tableScenario.activePositions
-            .filterNot(_ == config.heroPosition)
-            .map(pos => sicfun.holdem.strategic.types.PlayerId(pos.toString))
-          engine.initSession(rivalIds)
+      strategicHelperOpt.foreach { helper =>
+        val villainPositions = tableScenario.activePositions
+          .filterNot(_ == config.heroPosition)
+        val posMapping = villainPositions.map { pos =>
+          pos -> PlayerId(tableScenario.villainProfileByPosition(pos).name)
+        }.toMap
+        helper.updatePositionMapping(posMapping)
       }
       val result = resolveHand(
         deal = deal,
@@ -450,7 +455,7 @@ object TexasHoldemPlayingHall:
         collectDdreTraining = collectDdreTraining,
         exactGtoCache = exactGtoCache,
         exactGtoCacheStats = exactGtoCacheStats,
-        strategicEngineOpt = strategicEngineOpt
+        strategicHelperOpt = strategicHelperOpt
       )
 
       recordTrainingSamples(handNo, tableId, result)
@@ -630,7 +635,7 @@ object TexasHoldemPlayingHall:
       collectDdreTraining: Boolean,
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
       exactGtoCacheStats: GtoCacheStats,
-      strategicEngineOpt: Option[StrategicEngine]
+      strategicHelperOpt: Option[StrategicLifecycleHelper]
   ): HandResult =
     new HandResolver(
       deal = deal,
@@ -645,7 +650,7 @@ object TexasHoldemPlayingHall:
       collectDdreTraining = collectDdreTraining,
       exactGtoCache = exactGtoCache,
       exactGtoCacheStats = exactGtoCacheStats,
-      strategicEngineOpt = strategicEngineOpt
+      strategicHelperOpt = strategicHelperOpt
     ).play()
 
   /** Resolves a single hand from preflop through showdown. This class encapsulates all mutable
@@ -676,7 +681,7 @@ object TexasHoldemPlayingHall:
       collectDdreTraining: Boolean,
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
       exactGtoCacheStats: GtoCacheStats,
-      strategicEngineOpt: Option[StrategicEngine]
+      strategicHelperOpt: Option[StrategicLifecycleHelper]
   ):
     private val heroPosition = tableScenario.heroPosition
     private val preflopOrder = tableScenario.modeledPositions
@@ -720,12 +725,12 @@ object TexasHoldemPlayingHall:
       * after the net is finalized.
       */
     def play(): HandResult =
-      strategicEngineOpt.foreach(_.startHand(deal.holeCardsFor(heroPosition)))
+      strategicHelperOpt.foreach(_.startHand(deal.holeCardsFor(heroPosition)))
       if !handOver then playPreflop()
       if !handOver then playPostflopStreet(Street.Flop)
       if !handOver then playPostflopStreet(Street.Turn)
       if !handOver then playPostflopStreet(Street.River)
-      strategicEngineOpt.foreach(_.endHand())
+      strategicHelperOpt.foreach(_.endHand())
       val heroNet =
         if handOver && outcome > 0 then roundMoney(pot - contributionOf(heroPosition))
         else if handOver && outcome < 0 then -contributionOf(heroPosition)
@@ -855,10 +860,7 @@ object TexasHoldemPlayingHall:
       villainActions += action
       recordObservation(position, state, action)
       if firstVillainDecision.isEmpty then firstVillainDecision = Some((state, action))
-      strategicEngineOpt.foreach { engine =>
-        val rivalId = sicfun.holdem.strategic.types.PlayerId(position.toString)
-        engine.observeAction(rivalId, action, state)
-      }
+      strategicHelperOpt.foreach(_.observeVillainAction(position, action, state))
 
     private def appendReviewLine(playerName: String, suffix: String): Unit =
       reviewHistoryLines += s"$playerName: $suffix"
@@ -1022,9 +1024,32 @@ object TexasHoldemPlayingHall:
               )
             )
         case HeroMode.Strategic =>
-          strategicEngineOpt match
-            case Some(engine) =>
-              engine.decide(state, candidates)
+          strategicHelperOpt match
+            case Some(helper) =>
+              val adaptiveEngine = if street == Street.Preflop then preflopEngine else postflopEngine
+              val upstreamRec = multiwayRecommendationFor(
+                actor = heroPosition,
+                state = state,
+                candidateActions = candidates,
+              ).getOrElse {
+                adaptiveEngine.decide(
+                  hero = deal.holeCardsFor(heroPosition),
+                  state = state,
+                  folds = foldsForInference(heroPosition, focusVillainPosition),
+                  villainPos = focusVillainPosition,
+                  observations = playerObservations(focusVillainPosition),
+                  candidateActions = candidates,
+                  decisionBudgetMillis = Some(1L),
+                  rng = new Random(rng.nextLong())
+                ).decision.recommendation
+              }
+              val livePlayers = participatingPositions.size - foldedPositions.size
+              val source = if livePlayers > 2 then
+                UpstreamSource.Multiway(livePlayers - 1)
+              else UpstreamSource.Adaptive
+              helper.decideWithOverlay(
+                state, candidates, upstreamRec, source
+              ).selectedAction
             case None =>
               candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
       val normalized = normalizeAction(
@@ -2398,9 +2423,10 @@ object TexasHoldemPlayingHall:
       case None => Right(default)
       case Some(raw) =>
         raw.trim.toLowerCase match
-          case "adaptive" => Right(HeroMode.Adaptive)
-          case "gto"      => Right(HeroMode.Gto)
-          case _          => Left("--heroStyle must be one of: adaptive, gto")
+          case "adaptive"  => Right(HeroMode.Adaptive)
+          case "gto"       => Right(HeroMode.Gto)
+          case "strategic" => Right(HeroMode.Strategic)
+          case _           => Left("--heroStyle must be one of: adaptive, gto, strategic")
 
   private def gtoModeOpt(
       options: Map[String, String],
