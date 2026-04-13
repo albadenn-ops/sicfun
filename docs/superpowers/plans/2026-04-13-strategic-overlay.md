@@ -784,10 +784,8 @@ Then replace the method:
     )
     overlayResult.selectedAction
 
-  /** @deprecated Use the two-arg overload with both strategic and hero contexts. */
-  @deprecated("Use decideHeroStrategic(strategicCtx, heroCtx) instead", "v0.33")
-  def decideHeroStrategicLegacy(ctx: StrategicDecisionContext): PokerAction =
-    ctx.engine.decide(ctx.state, ctx.candidates)
+  // decideHeroStrategicLegacy removed — old 2-arg StrategicEngine.decide() is
+  // already deprecated independently; no need for a wrapper that calls it.
 ```
 
 - [ ] **Step 3: Run existing tests to verify no regressions**
@@ -804,12 +802,67 @@ git commit -m "feat(engine): rewrite decideHeroStrategic to run adaptive upstrea
 
 ---
 
-### Task 5: PlayingHall — Wire Strategic Branch to Overlay
+### Task 5: PlayingHall — Full Migration to StrategicLifecycleHelper
 
 **Files:**
 - Modify: `src/main/scala/sicfun/holdem/runtime/TexasHoldemPlayingHall.scala`
 
-- [ ] **Step 1: Update the Strategic branch in HandResolver.decideHero**
+The hall has **11 sites** that reference `strategicEngineOpt`/`StrategicEngine`. All must migrate
+to `strategicHelperOpt: Option[StrategicLifecycleHelper]`. This task covers every site.
+
+- [ ] **Step 1: Change field declaration and all parameter-threading sites**
+
+Add import (with the other imports, top of file):
+```scala
+import sicfun.holdem.engine.UpstreamSource
+```
+
+**Line 338** — field declaration. Replace:
+```scala
+    private var strategicEngineOpt = Option.empty[StrategicEngine]
+```
+With:
+```scala
+    private var strategicHelperOpt = Option.empty[StrategicLifecycleHelper]
+```
+
+**Line 453** — named arg passed to `resolveHand()`. Replace:
+```scala
+        strategicEngineOpt = strategicEngineOpt
+```
+With:
+```scala
+        strategicHelperOpt = strategicHelperOpt
+```
+
+**Line 633** — `resolveHand()` parameter. Replace:
+```scala
+      strategicEngineOpt: Option[StrategicEngine]
+```
+With:
+```scala
+      strategicHelperOpt: Option[StrategicLifecycleHelper]
+```
+
+**Line 648** — named arg passed to `HandResolver` constructor. Replace:
+```scala
+      strategicEngineOpt = strategicEngineOpt
+```
+With:
+```scala
+      strategicHelperOpt = strategicHelperOpt
+```
+
+**Line 679** — `HandResolver` constructor parameter. Replace:
+```scala
+      strategicEngineOpt: Option[StrategicEngine]
+```
+With:
+```scala
+      strategicHelperOpt: Option[StrategicLifecycleHelper]
+```
+
+- [ ] **Step 2: Update the Strategic branch in HandResolver.decideHero**
 
 In `TexasHoldemPlayingHall.scala`, find the `HeroMode.Strategic` case (around line 1023):
 
@@ -858,82 +911,113 @@ With:
               candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
 ```
 
-Add the import at the top of the file (with the other imports):
-```scala
-import sicfun.holdem.engine.{UpstreamSource, StrategicLifecycleHelper => _}
-```
+(`UpstreamSource` import was already added in Step 1.)
 
-Wait — `StrategicLifecycleHelper` is in the `runtime` package, same as the hall. No import needed for it. But `UpstreamSource` is in `engine` package. Add:
-```scala
-import sicfun.holdem.engine.UpstreamSource
-```
+- [ ] **Step 3: Update initialization in initializeArtifact()**
 
-- [ ] **Step 2: Update strategic engine initialization to use StrategicLifecycleHelper**
-
-Find `initializeArtifact()` (around line 403):
-
-Replace:
+Find `initializeArtifact()` (around line 410). Replace:
 ```scala
       if config.heroMode == HeroMode.Strategic then
         strategicEngineOpt = Some(new StrategicEngine(StrategicEngine.Config()))
 ```
-
 With:
 ```scala
       if config.heroMode == HeroMode.Strategic then
-        strategicHelperOpt = Some(StrategicLifecycleHelper.create())
+        val helper = StrategicLifecycleHelper.create()
+        // Register ALL villain pool names up front so rotating profiles
+        // accumulate beliefs across hands (not just the first-hand subset).
+        val allRivalIds = config.villainPool.map(p => PlayerId(p.name)).distinct.toVector
+        helper.initSession(rivalIds = allRivalIds, positionMapping = Map.empty)
+        strategicHelperOpt = Some(helper)
 ```
 
-- [ ] **Step 3: Update session initialization in playHand to use helper**
+This solves the rotating-pool problem: every profile name that could appear in any hand
+is registered once at session start. Per-hand, only the position mapping changes.
 
-Find the session initialization block (around line 431):
+- [ ] **Step 4: Update per-hand position mapping in playHand()**
 
-Replace the existing `strategicEngineOpt.foreach { engine => ... }` block that calls `engine.initSession` directly with a version that uses the helper and provides stable rival IDs:
-
-The existing code builds `rivalIds` from position strings — this is the identity bug. Replace with:
+Find the session initialization block (around line 433). Replace the entire existing
+`strategicEngineOpt.foreach { engine => ... }` block with:
 
 ```scala
       strategicHelperOpt.foreach { helper =>
-        // Build stable rival IDs from VillainProfile names (not position strings)
+        // Map current-hand positions to stable VillainProfile names
         val villainPositions = tableScenario.activePositions
           .filterNot(_ == config.heroPosition)
         val posMapping = villainPositions.map { pos =>
           pos -> PlayerId(tableScenario.villainProfileByPosition(pos).name)
         }.toMap
-        val rivalIds = posMapping.values.toVector.distinct
-        if !helper.engine.isSessionInitialized then
-          helper.initSession(rivalIds, posMapping)
-        else
-          // Update position mapping for seat rotation
-          helper.updatePositionMapping(posMapping)
+        helper.updatePositionMapping(posMapping)
       }
 ```
 
-- [ ] **Step 4: Update heroModeOpt to accept "strategic"**
+No init-check needed here — session was initialized in `initializeArtifact()`.
 
-Find `heroModeOpt` (around line 2391):
+- [ ] **Step 5: Migrate startHand() and endHand() in HandResolver.play()**
 
-Replace:
+**Line 723** — startHand. Replace:
+```scala
+      strategicEngineOpt.foreach(_.startHand(deal.holeCardsFor(heroPosition)))
+```
+With:
+```scala
+      strategicHelperOpt.foreach(_.startHand(deal.holeCardsFor(heroPosition)))
+```
+
+**Line 728** — endHand. Replace:
+```scala
+      strategicEngineOpt.foreach(_.endHand())
+```
+With:
+```scala
+      strategicHelperOpt.foreach(_.endHand())
+```
+
+- [ ] **Step 6: Fix the identity bug — replace direct observeAction with helper.observeVillainAction()**
+
+This is the critical identity fix. **Lines 858-861** currently do:
+```scala
+      strategicEngineOpt.foreach { engine =>
+        val rivalId = sicfun.holdem.strategic.types.PlayerId(position.toString)
+        engine.observeAction(rivalId, action, state)
+      }
+```
+
+`PlayerId(position.toString)` creates seat-derived IDs like `"Button"` / `"BigBlind"` that
+split belief tracks when seats rotate. Replace with:
+```scala
+      strategicHelperOpt.foreach(_.observeVillainAction(position, action, state))
+```
+
+The helper routes through its position mapping → stable `PlayerId` from VillainProfile name.
+
+- [ ] **Step 7: Update heroModeOpt CLI parser to accept "strategic"**
+
+Find `heroModeOpt` (around line 2391). Replace:
 ```scala
           case _          => Left("--heroStyle must be one of: adaptive, gto")
 ```
-
 With:
 ```scala
           case "strategic" => Right(HeroMode.Strategic)
           case _           => Left("--heroStyle must be one of: adaptive, gto, strategic")
 ```
 
-- [ ] **Step 5: Run hall-related tests**
+- [ ] **Step 8: Compile check**
+
+Run: `sbt compile`
+Expected: Compiles cleanly. All 11 `strategicEngineOpt` sites are now `strategicHelperOpt`.
+
+- [ ] **Step 9: Run hall-related tests**
 
 Run: `sbt "testOnly sicfun.holdem.validation.HeadsUpSimulatorTest"`
 Expected: Pass (this exercises the hall).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add src/main/scala/sicfun/holdem/runtime/TexasHoldemPlayingHall.scala
-git commit -m "feat(runtime): wire PlayingHall strategic branch to overlay via StrategicLifecycleHelper"
+git commit -m "feat(runtime): full hall migration to StrategicLifecycleHelper — fix identity bug, rotating pool"
 ```
 
 ---
