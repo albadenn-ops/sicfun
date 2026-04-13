@@ -9,6 +9,7 @@ import sicfun.holdem.strategic.safety.*
 import sicfun.holdem.strategic.exploitation.*
 import sicfun.holdem.strategic.solver.WPomcpRuntime
 
+@scala.annotation.nowarn("msg=deprecated")
 class StrategicEngineTest extends FunSuite:
 
   private def card(token: String): Card =

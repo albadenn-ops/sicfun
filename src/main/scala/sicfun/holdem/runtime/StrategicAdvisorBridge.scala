@@ -31,6 +31,7 @@ object StrategicAdvisorBridge:
   /** Called during advise to get strategic engine diagnostics.
     * Returns additional output lines to append to the advice.
     */
+  @scala.annotation.nowarn("msg=deprecated")
   def onAdvise(
       engine: StrategicEngine,
       gameState: GameState,

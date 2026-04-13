@@ -7,6 +7,7 @@ import sicfun.holdem.strategic.state.*
 import sicfun.holdem.strategic.safety.*
 import sicfun.holdem.strategic.solver.PftDpwResult
 
+@scala.annotation.nowarn("msg=deprecated")
 class FormalPathTest extends munit.FunSuite:
 
   private def card(token: String): Card =

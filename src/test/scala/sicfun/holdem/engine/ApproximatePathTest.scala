@@ -4,6 +4,7 @@ import sicfun.core.Card
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.types.*
 
+@scala.annotation.nowarn("msg=deprecated")
 class ApproximatePathTest extends munit.FunSuite:
 
   private def card(token: String): Card =

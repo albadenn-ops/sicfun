@@ -956,6 +956,7 @@ object TexasHoldemPlayingHall:
       * GtoSolveEngine for equilibrium play. The result is normalized (e.g., Check->Call if
       * facing a bet) and recorded as an observation.
       */
+    @scala.annotation.nowarn("msg=deprecated")
     private def decideHero(
         street: Street,
         board: Board,

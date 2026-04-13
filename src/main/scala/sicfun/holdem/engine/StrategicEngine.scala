@@ -11,6 +11,7 @@ import sicfun.holdem.strategic.exploitation.*
 import sicfun.holdem.strategic.decomposition.*
 import sicfun.holdem.strategic.{bridge => strategicBridge}
 import sicfun.holdem.strategic.solver.{WPomcpRuntime, PftDpwRuntime, PftDpwConfig, PftDpwResult, TabularGenerativeModel, ParticleBelief, WassersteinDroRuntime}
+import sicfun.holdem.engine.inference.ActionEvaluation
 
 /** Session/hand orchestrator for the Strategic decision mode.
   *
@@ -38,9 +39,11 @@ class StrategicEngine(val config: StrategicEngine.Config):
   private var _lastStreet: Option[Street] = None
   private var _lastDiagnostics: Option[StrategicEngine.DecisionDiagnostics] = None
   private var _lastBundle: Option[DecisionEvaluationBundle] = None
+  private var _lastOverlayResult: Option[OverlayResult] = None
 
   def lastDecisionDiagnostics: Option[StrategicEngine.DecisionDiagnostics] = _lastDiagnostics
   def lastDecisionBundle: Option[DecisionEvaluationBundle] = _lastBundle
+  def lastOverlayResult: Option[OverlayResult] = _lastOverlayResult
 
   /** Test-only: inject a bundle to simulate solver output for testing advisory clamp / deployment tracking. */
   private[engine] def injectTestBundle(bundle: DecisionEvaluationBundle): Unit =
@@ -208,6 +211,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
     *
     * Falls back to BaselineFallback if any solve returns Left.
     */
+  @deprecated("Use overlay decide(gameState, candidates, upstreamEvs) instead", "v0.33")
   def decide(gameState: GameState, candidateActions: Vector[PokerAction]): PokerAction =
     require(_sessionState != null, "Session not initialized")
     require(_handActive, "No hand in progress")
@@ -275,6 +279,65 @@ class StrategicEngine(val config: StrategicEngine.Config):
     }
 
     action
+
+  /** Overlay decision path: filters upstream EVs through rival-model beliefs.
+    *
+    * This is the Phase 1 entry point. The caller obtains EVs from the adaptive
+    * or multiway engine and passes them here. The overlay applies belief-weighted
+    * penalties and soft veto, then returns a full OverlayResult trace.
+    *
+    * The old two-arg decide() is deprecated but not removed — certification
+    * tests may still exercise it.
+    */
+  def decide(
+      gameState: GameState,
+      candidateActions: Vector[PokerAction],
+      upstreamEvs: Vector[ActionEvaluation]
+  ): OverlayResult =
+    require(_sessionState != null, "Session not initialized")
+    require(_handActive, "No hand in progress")
+    require(candidateActions.nonEmpty, "No candidate actions")
+
+    val session = _sessionState.nn
+
+    // Attach robust lower bounds from certification if previously run.
+    // The bundle carries per-action lower bounds directly in robustActionLowerBounds
+    // (computed as min_profile Q[a] in StrategicEngine.decideWPomcp).
+    // Do NOT use rootLosses — those are non-negative losses (baselineValue - lowerBound).
+    val robustBounds = _lastBundle.flatMap { bundle =>
+      val bounds = bundle.robustActionLowerBounds
+      if bounds != null && bounds.nonEmpty then Some(bounds) else None
+    }
+
+    val input = OverlayInput(
+      gameState = gameState,
+      upstreamEvs = upstreamEvs,
+      rivalBeliefs = session.rivalBeliefs,
+      exploitationStates = session.exploitationStates,
+      robustLowerBounds = robustBounds,
+      config = config
+    )
+
+    val result = StrategicOverlay.filter(input)
+    _lastOverlayResult = Some(result)
+
+    // Update deployment tracking from overlay result
+    val deploySession = _sessionState.nn
+    val beliefs = deploySession.rivalBeliefs.values
+    if beliefs.nonEmpty then
+      val avgEntropy = beliefs.map { b =>
+        val probs = StrategicClass.values.map(c => b.typePosterior.probabilityOf(c))
+        -probs.filter(_ > 0).map(p => p * math.log(p)).sum
+      }.sum / beliefs.size
+      val summary = DeploymentBeliefSummary(
+        beliefEntropy = avgEntropy,
+        exploitabilitySnapshot = Ev(0.0), // Phase 1: no pointwise exploit from overlay
+        timestamp = System.currentTimeMillis()
+      )
+      val updatedDeploy = deploySession.deploymentSet.add(summary)
+      _sessionState = deploySession.copy(deploymentSet = updatedDeploy)
+
+    result
 
   /** WPomcp 6-solve decision path.
     *

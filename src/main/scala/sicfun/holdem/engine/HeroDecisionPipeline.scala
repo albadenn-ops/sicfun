@@ -148,6 +148,7 @@ private[holdem] object HeroDecisionPipeline:
           "Strategic mode requires StrategicDecisionContext — use decideHeroStrategic()")
 
   /** Strategic mode decision dispatch. */
+  @scala.annotation.nowarn("msg=deprecated")
   def decideHeroStrategic(ctx: StrategicDecisionContext): PokerAction =
     ctx.engine.decide(ctx.state, ctx.candidates)
 
