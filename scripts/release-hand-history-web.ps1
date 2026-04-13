@@ -118,6 +118,20 @@ function Assert-RequiredStaticFiles {
   }
 }
 
+function Assert-PowerShellScriptParses {
+  param(
+    [string]$Path
+  )
+
+  $tokens = $null
+  $errors = $null
+  [void][System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+  if ($null -ne $errors -and $errors.Count -gt 0) {
+    $summary = ($errors | ForEach-Object { $_.Message } | Select-Object -First 5) -join "; "
+    throw "PowerShell parse failure in ${Path}: $summary"
+  }
+}
+
 function Resolve-JobUri {
   param(
     [string]$BaseUri,
@@ -148,6 +162,70 @@ function New-BasicAuthHeaderValue {
   $raw = [System.Text.Encoding]::UTF8.GetBytes("${Username}:${Password}")
   $encoded = [Convert]::ToBase64String($raw)
   return "Basic $encoded"
+}
+
+function Invoke-PowerShellFileCapture {
+  param(
+    [string]$Path,
+    [string[]]$Arguments = @()
+  )
+
+  $output = @()
+  $exitCode = 1
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $Path @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+  }
+  catch {
+    $output = @($_)
+    $exitCode =
+      if ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) { $LASTEXITCODE }
+      else { 1 }
+  }
+  finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  [pscustomobject]@{
+    ExitCode = $exitCode
+    Output = (($output | ForEach-Object {
+      if ($null -eq $_) { "" }
+      else { $_.ToString() }
+    }) -join [Environment]::NewLine).Trim()
+  }
+}
+
+function Assert-PackagedLauncherFails {
+  param(
+    [string]$LauncherPath,
+    [string[]]$ConfigLines,
+    [string[]]$ExpectedSubstrings
+  )
+
+  $configFile = Join-Path ([System.IO.Path]::GetTempPath()) ("sicfun-hand-history-web-negative-smoke-" + [guid]::NewGuid().ToString("N") + ".env")
+  try {
+    Set-Content -Path $configFile -Encoding ascii -Value $ConfigLines
+    $result = Invoke-PowerShellFileCapture -Path $LauncherPath -Arguments @("-ConfigFile", $configFile)
+    if ($result.ExitCode -eq 0) {
+      $details =
+        if ([string]::IsNullOrWhiteSpace($result.Output)) { "<no output>" }
+        else { $result.Output }
+      throw "Packaged launcher unexpectedly accepted an unsafe config:`n$details"
+    }
+
+    foreach ($expected in $ExpectedSubstrings) {
+      if ($result.Output -notlike "*$expected*") {
+        $details =
+          if ([string]::IsNullOrWhiteSpace($result.Output)) { "<no output>" }
+          else { $result.Output }
+        throw "Packaged launcher failure output did not mention '$expected'. Output:`n$details"
+      }
+    }
+  }
+  finally {
+    Remove-Item -Path $configFile -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Wait-AnalysisJobResult {
@@ -206,8 +284,12 @@ function Invoke-ReleaseSmoke {
     [string]$ExpectedAnalysisModelSource
   )
 
-  $drainSignalFile = Join-Path ([System.IO.Path]::GetTempPath()) ("sicfun-hand-history-web-drain-" + [guid]::NewGuid().ToString("N") + ".signal")
-  $configFile = Join-Path ([System.IO.Path]::GetTempPath()) ("sicfun-hand-history-web-smoke-" + [guid]::NewGuid().ToString("N") + ".env")
+  $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sicfun-hand-history-web-smoke-" + [guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Path $tempRoot | Out-Null
+  $launcherPath = Join-Path $ReleaseRoot "bin\\run-hand-history-web.ps1"
+  $drainSignalFile = Join-Path $tempRoot "drain.signal"
+  $configFile = Join-Path $tempRoot "smoke.env"
+  $userStorePath = Join-Path $tempRoot "users.json"
   $basicAuthUser = "operator"
   $basicAuthPassword = "smoke-" + [guid]::NewGuid().ToString("N")
   $rateLimitSubmitsPerMinute = 1
@@ -226,27 +308,13 @@ function Invoke-ReleaseSmoke {
     Authorization = New-BasicAuthHeaderValue -Username $basicAuthUser -Password $basicAuthPassword
   }
   $thirdClientHeaders[$rateLimitClientIpHeader] = "198.51.100.12"
-  Set-Content -Path $configFile -Encoding ascii -Value @(
-    "HOST=127.0.0.1",
-    "PORT=$Port",
-    "MAX_UPLOAD_BYTES=$MaxUploadBytes",
-    "ANALYSIS_TIMEOUT_MS=$AnalysisTimeoutMs",
-    "RATE_LIMIT_SUBMITS_PER_MINUTE=$rateLimitSubmitsPerMinute",
-    "RATE_LIMIT_STATUS_PER_MINUTE=$rateLimitStatusPerMinute",
-    "RATE_LIMIT_CLIENT_IP_HEADER=$rateLimitClientIpHeader",
-    "RATE_LIMIT_TRUSTED_PROXY_IPS=$rateLimitTrustedProxyIps",
-    "DRAIN_SIGNAL_FILE=$drainSignalFile",
-    "BASIC_AUTH_USER=$basicAuthUser",
-    "BASIC_AUTH_PASSWORD=$basicAuthPassword"
-  )
-  $job = Start-Job -ScriptBlock {
-    param($launcherPath, $configFileArg)
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $launcherPath -ConfigFile $configFileArg
-  } -ArgumentList (Join-Path $ReleaseRoot "bin\\run-hand-history-web.ps1"), $configFile
+  $job = $null
 
   try {
     $requiredPackagedFiles = @(
+      "README.md",
       "bin\\run-hand-history-web.ps1",
+      "bin\\verify-release-manifest.ps1",
       "bin\\service-common.ps1",
       "bin\\install-hand-history-web-service.ps1",
       "bin\\uninstall-hand-history-web-service.ps1",
@@ -259,7 +327,51 @@ function Invoke-ReleaseSmoke {
       if (-not (Test-Path -LiteralPath $candidate)) {
         throw "Packaged helper missing: $candidate"
       }
+      if ($candidate.EndsWith(".ps1", [System.StringComparison]::OrdinalIgnoreCase)) {
+        Assert-PowerShellScriptParses -Path $candidate
+      }
     }
+
+    Assert-PackagedLauncherFails `
+      -LauncherPath $launcherPath `
+      -ConfigLines @(
+        "HOST=0.0.0.0",
+        "PORT=0"
+      ) `
+      -ExpectedSubstrings @(
+        "ALLOW_UNAUTHENTICATED_PUBLIC_BIND",
+        "BASIC_AUTH_*/USER_STORE_PATH"
+      )
+
+    Assert-PackagedLauncherFails `
+      -LauncherPath $launcherPath `
+      -ConfigLines @(
+        "HOST=0.0.0.0",
+        "PORT=0",
+        "USER_STORE_PATH=$userStorePath"
+      ) `
+      -ExpectedSubstrings @(
+        "USER_AUTH_COOKIE_SECURE",
+        "ALLOW_INSECURE_USER_AUTH"
+      )
+
+    Set-Content -Path $configFile -Encoding ascii -Value @(
+      "HOST=127.0.0.1",
+      "PORT=$Port",
+      "MAX_UPLOAD_BYTES=$MaxUploadBytes",
+      "ANALYSIS_TIMEOUT_MS=$AnalysisTimeoutMs",
+      "RATE_LIMIT_SUBMITS_PER_MINUTE=$rateLimitSubmitsPerMinute",
+      "RATE_LIMIT_STATUS_PER_MINUTE=$rateLimitStatusPerMinute",
+      "RATE_LIMIT_CLIENT_IP_HEADER=$rateLimitClientIpHeader",
+      "RATE_LIMIT_TRUSTED_PROXY_IPS=$rateLimitTrustedProxyIps",
+      "DRAIN_SIGNAL_FILE=$drainSignalFile",
+      "BASIC_AUTH_USER=$basicAuthUser",
+      "BASIC_AUTH_PASSWORD=$basicAuthPassword"
+    )
+    $job = Start-Job -ScriptBlock {
+      param($launcherPathArg, $configFileArg)
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $launcherPathArg -ConfigFile $configFileArg
+    } -ArgumentList $launcherPath, $configFile
 
     $healthUri = "http://127.0.0.1:$Port/api/health"
     $readyUri = "http://127.0.0.1:$Port/api/ready"
@@ -408,6 +520,23 @@ Hero: folds
       throw "Packaged analysis smoke check failed: $analysisJson"
     }
 
+    $rateLimited = $false
+    try {
+      Invoke-WebRequest -Uri $analyzeUri -Method Post -Headers $firstClientHeaders -ContentType "application/json" -Body $payload -UseBasicParsing -TimeoutSec 20 | Out-Null
+    }
+    catch {
+      $response = $_.Exception.Response
+      if ($null -ne $response -and [int]$response.StatusCode -eq 429) {
+        $rateLimited = $true
+      }
+      else {
+        throw
+      }
+    }
+    if (-not $rateLimited) {
+      throw "Packaged submit rate limit did not reject a second submission from the same trusted client IP"
+    }
+
     $secondAnalysisResponse = Invoke-WebRequest -Uri $analyzeUri -Method Post -Headers $secondClientHeaders -ContentType "application/json" -Body $payload -UseBasicParsing -TimeoutSec 20
     $secondSubmission = $secondAnalysisResponse.Content | ConvertFrom-Json
     $secondStatusUrl = if ($secondSubmission.statusUrl) { [string]$secondSubmission.statusUrl } else { [string]$secondAnalysisResponse.Headers.Location }
@@ -514,9 +643,9 @@ Hero: folds
     }
   }
   finally {
-    Remove-Item -Path $configFile -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path $drainSignalFile -Force -ErrorAction SilentlyContinue
-    Stop-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
+    if ($null -ne $job) {
+      Stop-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
+    }
     $lingeringJava = Get-CimInstance Win32_Process -Filter "Name='java.exe'" -ErrorAction SilentlyContinue |
       Where-Object {
         $cmd = $_.CommandLine
@@ -528,8 +657,11 @@ Hero: folds
     foreach ($proc in $lingeringJava) {
       Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
     }
-    Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
-    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue | Out-Null
+    if ($null -ne $job) {
+      Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
+      Remove-Job -Job $job -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+    Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -543,6 +675,7 @@ $releaseConfDir = Join-Path $releaseRoot "conf"
 $releaseStaticDir = Join-Path $releaseRoot "static"
 $releaseModelDir = Join-Path $releaseRoot "model"
 $serviceTemplateDir = Join-Path $repoRoot "scripts\packaged-hand-history-web"
+$deploymentGuidePath = Join-Path $repoRoot "docs\HAND_HISTORY_WEB_DEPLOYMENT.md"
 $previousSbtOpts = $env:SBT_OPTS
 
 Push-Location $repoRoot
@@ -589,6 +722,10 @@ try {
     New-Item -ItemType Directory -Path $releaseLibDir | Out-Null
     New-Item -ItemType Directory -Path $releaseBinDir | Out-Null
     New-Item -ItemType Directory -Path $releaseConfDir | Out-Null
+    if (-not (Test-Path -LiteralPath $deploymentGuidePath)) {
+      throw "Deployment guide missing: $deploymentGuidePath"
+    }
+    Copy-Item -Path $deploymentGuidePath -Destination (Join-Path $releaseRoot "README.md") -Force
     Copy-Item -Path $resolvedStaticDir -Destination $releaseStaticDir -Recurse -Force
 
     $jarPaths = @($classpathLine -split ";" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
@@ -612,6 +749,7 @@ try {
       "uninstall-hand-history-web-service.ps1",
       "drain-stop-hand-history-web-service.ps1",
       "start-hand-history-web-service.ps1",
+      "verify-release-manifest.ps1",
       "hand-history-web.env"
     ) | ForEach-Object { Join-Path $serviceTemplateDir $_ }
 
@@ -626,6 +764,7 @@ try {
     Copy-Item -Path (Join-Path $serviceTemplateDir "uninstall-hand-history-web-service.ps1") -Destination $releaseBinDir -Force
     Copy-Item -Path (Join-Path $serviceTemplateDir "drain-stop-hand-history-web-service.ps1") -Destination $releaseBinDir -Force
     Copy-Item -Path (Join-Path $serviceTemplateDir "start-hand-history-web-service.ps1") -Destination $releaseBinDir -Force
+    Copy-Item -Path (Join-Path $serviceTemplateDir "verify-release-manifest.ps1") -Destination $releaseBinDir -Force
     Copy-Item -Path (Join-Path $serviceTemplateDir "hand-history-web.env") -Destination (Join-Path $releaseConfDir "hand-history-web.env") -Force
   }
 
@@ -656,7 +795,9 @@ param(
   [string]$RateLimitTrustedProxyIps = "",
   [string]$DrainSignalFile = "",
   [string]$BasicAuthUser = "",
-  [string]$BasicAuthPassword = ""
+  [string]$BasicAuthPassword = "",
+  [bool]$AllowUnauthenticatedPublicBind = $false,
+  [bool]$AllowInsecureUserAuth = $false
 )
 
 Set-StrictMode -Version Latest
@@ -936,6 +1077,16 @@ $effectiveBasicAuthPassword =
   elseif (-not [string]::IsNullOrWhiteSpace($env:BASIC_AUTH_PASSWORD)) { $env:BASIC_AUTH_PASSWORD }
   elseif (-not [string]::IsNullOrWhiteSpace((Get-ConfigValue -ConfigValues $configValues -Name "BASIC_AUTH_PASSWORD"))) { Get-ConfigValue -ConfigValues $configValues -Name "BASIC_AUTH_PASSWORD" }
   else { "" }
+$effectiveAllowUnauthenticatedPublicBind =
+  if ($PSBoundParameters.ContainsKey("AllowUnauthenticatedPublicBind")) { $AllowUnauthenticatedPublicBind }
+  elseif (-not [string]::IsNullOrWhiteSpace($env:ALLOW_UNAUTHENTICATED_PUBLIC_BIND)) { $env:ALLOW_UNAUTHENTICATED_PUBLIC_BIND }
+  elseif (-not [string]::IsNullOrWhiteSpace((Get-ConfigValue -ConfigValues $configValues -Name "ALLOW_UNAUTHENTICATED_PUBLIC_BIND"))) { Get-ConfigValue -ConfigValues $configValues -Name "ALLOW_UNAUTHENTICATED_PUBLIC_BIND" }
+  else { "" }
+$effectiveAllowInsecureUserAuth =
+  if ($PSBoundParameters.ContainsKey("AllowInsecureUserAuth")) { $AllowInsecureUserAuth }
+  elseif (-not [string]::IsNullOrWhiteSpace($env:ALLOW_INSECURE_USER_AUTH)) { $env:ALLOW_INSECURE_USER_AUTH }
+  elseif (-not [string]::IsNullOrWhiteSpace((Get-ConfigValue -ConfigValues $configValues -Name "ALLOW_INSECURE_USER_AUTH"))) { Get-ConfigValue -ConfigValues $configValues -Name "ALLOW_INSECURE_USER_AUTH" }
+  else { "" }
 $effectiveUserStorePathInput =
   if (-not [string]::IsNullOrWhiteSpace($env:USER_STORE_PATH)) { $env:USER_STORE_PATH }
   elseif (-not [string]::IsNullOrWhiteSpace((Get-ConfigValue -ConfigValues $configValues -Name "USER_STORE_PATH"))) { Get-ConfigValue -ConfigValues $configValues -Name "USER_STORE_PATH" }
@@ -1021,6 +1172,8 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedDrainSignalFile)) {
 
 $previousBasicAuthUser = $env:BASIC_AUTH_USER
 $previousBasicAuthPassword = $env:BASIC_AUTH_PASSWORD
+$previousAllowUnauthenticatedPublicBind = $env:ALLOW_UNAUTHENTICATED_PUBLIC_BIND
+$previousAllowInsecureUserAuth = $env:ALLOW_INSECURE_USER_AUTH
 $previousUserStorePath = $env:USER_STORE_PATH
 $previousUserAuthAllowRegistration = $env:USER_AUTH_ALLOW_REGISTRATION
 $previousUserAuthSessionTtlMs = $env:USER_AUTH_SESSION_TTL_MS
@@ -1043,6 +1196,20 @@ try {
   }
   else {
     $env:BASIC_AUTH_PASSWORD = $effectiveBasicAuthPassword
+  }
+
+  if ([string]::IsNullOrWhiteSpace($effectiveAllowUnauthenticatedPublicBind)) {
+    Remove-Item Env:ALLOW_UNAUTHENTICATED_PUBLIC_BIND -ErrorAction SilentlyContinue
+  }
+  else {
+    $env:ALLOW_UNAUTHENTICATED_PUBLIC_BIND = $effectiveAllowUnauthenticatedPublicBind
+  }
+
+  if ([string]::IsNullOrWhiteSpace($effectiveAllowInsecureUserAuth)) {
+    Remove-Item Env:ALLOW_INSECURE_USER_AUTH -ErrorAction SilentlyContinue
+  }
+  else {
+    $env:ALLOW_INSECURE_USER_AUTH = $effectiveAllowInsecureUserAuth
   }
 
   if ([string]::IsNullOrWhiteSpace($resolvedUserStorePath)) {
@@ -1110,6 +1277,20 @@ finally {
   }
   else {
     Remove-Item Env:BASIC_AUTH_PASSWORD -ErrorAction SilentlyContinue
+  }
+
+  if ($null -ne $previousAllowUnauthenticatedPublicBind) {
+    $env:ALLOW_UNAUTHENTICATED_PUBLIC_BIND = $previousAllowUnauthenticatedPublicBind
+  }
+  else {
+    Remove-Item Env:ALLOW_UNAUTHENTICATED_PUBLIC_BIND -ErrorAction SilentlyContinue
+  }
+
+  if ($null -ne $previousAllowInsecureUserAuth) {
+    $env:ALLOW_INSECURE_USER_AUTH = $previousAllowInsecureUserAuth
+  }
+  else {
+    Remove-Item Env:ALLOW_INSECURE_USER_AUTH -ErrorAction SilentlyContinue
   }
 
   if ($null -ne $previousUserStorePath) {
@@ -1196,10 +1377,14 @@ exit $exitCode
     $files = Get-ChildItem -Path $releaseRoot -File -Recurse | Sort-Object FullName
     $lines = foreach ($file in $files) {
       $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-      $relative = $file.FullName.Substring($releaseRoot.Length).TrimStart('\')
+      $relative = $file.FullName.Substring($releaseRoot.Length).TrimStart('\', '/').Replace('\', '/')
       "$hash  $relative"
     }
     Set-Content -Path $manifestPath -Value $lines -Encoding utf8
+  }
+
+  Invoke-Step "Verify packaged manifest" {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $releaseBinDir "verify-release-manifest.ps1") -ReleaseRoot $releaseRoot
   }
 
   Write-Host "Hand-history web release ready: $releaseRoot"

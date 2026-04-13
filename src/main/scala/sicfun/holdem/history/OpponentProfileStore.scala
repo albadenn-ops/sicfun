@@ -1,6 +1,7 @@
 package sicfun.holdem.history
 import sicfun.holdem.analysis.*
-import sicfun.holdem.engine.*
+import sicfun.holdem.engine.inference.*
+import sicfun.holdem.engine.villain.*
 import sicfun.holdem.types.*
 
 import sicfun.core.{Card, Metrics}

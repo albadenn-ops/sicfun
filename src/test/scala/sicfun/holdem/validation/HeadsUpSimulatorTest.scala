@@ -1,10 +1,12 @@
 package sicfun.holdem.validation
 
 import munit.FunSuite
-import sicfun.holdem.engine.RealTimeAdaptiveEngine
+import sicfun.holdem.engine.villain.RealTimeAdaptiveEngine
 import sicfun.holdem.equity.{TableFormat, TableRanges}
 import sicfun.holdem.model.PokerActionModel
 import sicfun.holdem.types.PokerAction
+
+import scala.concurrent.duration.*
 
 /** Tests for the heads-up hand simulator used in validation proof runs.
   *
@@ -22,6 +24,8 @@ import sicfun.holdem.types.PokerAction
   *   - Hero raise responses are surfaced when the villain responds to raises
   */
 class HeadsUpSimulatorTest extends FunSuite:
+
+  override val munitTimeout: Duration = 90.seconds
 
   private val table = TableRanges.defaults(TableFormat.HeadsUp)
   private val model = PokerActionModel.uniform

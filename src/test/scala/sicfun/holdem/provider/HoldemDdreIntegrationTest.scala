@@ -1,6 +1,7 @@
 package sicfun.holdem.provider
 import sicfun.holdem.types.*
 import sicfun.holdem.engine.*
+import sicfun.holdem.engine.inference.*
 import sicfun.holdem.io.*
 import sicfun.holdem.model.*
 import sicfun.holdem.gpu.*

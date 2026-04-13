@@ -211,6 +211,12 @@ class HoldemCfrSolverTest extends FunSuite:
       HoldemCfrNativeRuntime.resetLoadCacheForTests()
       HoldemCfrSolver.resetAutoProviderForTests()
 
+      val cpuAvail = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Cpu)
+      assume(
+        !cpuAvail.available,
+        s"CPU library was loaded by concurrent thread — fallback test cannot be simulated: ${cpuAvail.detail}"
+      )
+
       val hero = hole("Ac", "Ad")
       val state = GameState(
         street = Street.Preflop,
@@ -262,6 +268,12 @@ class HoldemCfrSolverTest extends FunSuite:
       HoldemCfrNativeRuntime.resetLoadCacheForTests()
       HoldemCfrSolver.resetAutoProviderForTests()
 
+      val cpuAvail = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Cpu)
+      assume(
+        !cpuAvail.available,
+        s"CPU library was loaded by concurrent thread — fallback test cannot be simulated: ${cpuAvail.detail}"
+      )
+
       val hero = hole("Ac", "Ad")
       val state = GameState(
         street = Street.Preflop,
@@ -312,6 +324,12 @@ class HoldemCfrSolverTest extends FunSuite:
     ) {
       HoldemCfrNativeRuntime.resetLoadCacheForTests()
       HoldemCfrSolver.resetAutoProviderForTests()
+
+      val cpuAvail = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Cpu)
+      assume(
+        !cpuAvail.available,
+        s"CPU library was loaded by concurrent thread — fallback test cannot be simulated: ${cpuAvail.detail}"
+      )
 
       val hero = hole("Ac", "Ad")
       val state = GameState(
@@ -367,6 +385,15 @@ class HoldemCfrSolverTest extends FunSuite:
     ) {
       HoldemCfrNativeRuntime.resetLoadCacheForTests()
       HoldemCfrSolver.resetAutoProviderForTests()
+
+      // Force-resolve availability on this thread to populate the load cache
+      // with our invalid-path results before a concurrent thread can insert
+      // valid-path results via compareAndSet.
+      val gpuAvail = HoldemCfrNativeRuntime.availability(HoldemCfrNativeRuntime.Backend.Gpu)
+      assume(
+        !gpuAvail.available,
+        s"GPU library was loaded by concurrent thread — fallback test cannot be simulated: ${gpuAvail.detail}"
+      )
 
       val hero = hole("Ac", "Ad")
       val state = GameState(

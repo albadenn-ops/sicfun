@@ -43,6 +43,8 @@ try {
   $readyFlipped = $false
   $drained = $false
   $lastObservedDrainState = $null
+  $lastReadyProbe = $null
+  $lastHealthProbe = $null
   $deadline = [DateTime]::UtcNow.AddSeconds($DrainTimeoutSeconds)
   while ([DateTime]::UtcNow -lt $deadline) {
     $service = Get-ServiceOrNull -ServiceName $ServiceName
@@ -51,19 +53,14 @@ try {
       break
     }
 
-    try {
-      Invoke-WebRequest -Uri $readyUri -UseBasicParsing -TimeoutSec 5 | Out-Null
-    }
-    catch {
-      $response = $_.Exception.Response
-      if ($null -ne $response -and [int]$response.StatusCode -eq 503) {
-        $readyFlipped = $true
-      }
+    $lastReadyProbe = Invoke-JsonProbe -Uri $readyUri -TimeoutSeconds 5
+    if (-not $lastReadyProbe.Success -and $lastReadyProbe.StatusCode -eq 503) {
+      $readyFlipped = $true
     }
 
-    try {
-      $healthResponse = Invoke-WebRequest -Uri $healthUri -UseBasicParsing -TimeoutSec 5
-      $health = $healthResponse.Content | ConvertFrom-Json
+    $lastHealthProbe = Invoke-JsonProbe -Uri $healthUri -TimeoutSeconds 5
+    if ($lastHealthProbe.Success -and $lastHealthProbe.StatusCode -eq 200 -and $null -ne $lastHealthProbe.Json) {
+      $health = $lastHealthProbe.Json
       $lastObservedDrainState = [pscustomobject]@{
         ActiveHttpRequests = [int]$health.activeHttpRequests
         QueuedJobs = [int]$health.queuedJobs
@@ -79,14 +76,12 @@ try {
         break
       }
     }
-    catch {
-    }
 
     Start-Sleep -Milliseconds 500
   }
 
   if (-not $readyFlipped) {
-    Write-Warning "Readiness did not flip to 503 before stop."
+    Write-Warning "Readiness did not flip to 503 before stop. $(Format-ProbeSummary -Label "ready" -Probe $lastReadyProbe)"
   }
   if (-not $drained) {
     if ($null -ne $lastObservedDrainState) {
@@ -98,7 +93,7 @@ try {
         $lastObservedDrainState.TimedOutWorkersInFlight)
     }
     else {
-      Write-Warning "Service did not fully drain within $DrainTimeoutSeconds seconds. Stopping service anyway."
+      Write-Warning "Service did not fully drain within $DrainTimeoutSeconds seconds. $(Format-ProbeSummary -Label "health" -Probe $lastHealthProbe) Stopping service anyway."
     }
   }
 

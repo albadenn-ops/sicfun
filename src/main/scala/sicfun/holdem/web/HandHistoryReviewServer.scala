@@ -8,12 +8,11 @@ import ujson.{Arr, Obj, Str, Value}
 
 import java.io.ByteArrayOutputStream
 import java.time.Instant
-import java.net.{BindException, InetAddress, InetSocketAddress, URLDecoder}
+import java.net.{BindException, InetAddress, InetSocketAddress, URI, URLDecoder}
 import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
-import java.util.Base64
-import java.util.UUID
+import java.util.{Base64, Locale, UUID}
 import java.util.concurrent.{
   ArrayBlockingQueue,
   ConcurrentHashMap,
@@ -201,6 +200,12 @@ object HandHistoryReviewServer:
       val platformAuthService = platformAuthServiceEither match
         case Left(error) => throw new IllegalArgumentException(error)
         case Right(value) => value
+      if isNonLoopbackBindHost(config.host) then
+        config.platformAuth.filterNot(_.cookieSecure).foreach { _ =>
+          logWarn(
+            "platform-user auth is bound to a non-loopback host with USER_AUTH_COOKIE_SECURE=false; set --userAuthCookieSecure=true / USER_AUTH_COOKIE_SECURE=true when serving users through HTTPS"
+          )
+        }
       val jobStore = new AnalysisJobStore(
         executor = analysisExecutor,
         timeoutExecutor = analysisTimeoutExecutor,
@@ -875,6 +880,18 @@ object HandHistoryReviewServer:
           options.get("basicAuthUser").orElse(env("BASIC_AUTH_USER")).map(_.trim).filter(_.nonEmpty),
           options.get("basicAuthPassword").orElse(env("BASIC_AUTH_PASSWORD")).map(_.trim).filter(_.nonEmpty)
         )
+        allowUnauthenticatedPublicBind <- resolveBooleanOption(
+          options,
+          "allowUnauthenticatedPublicBind",
+          env("ALLOW_UNAUTHENTICATED_PUBLIC_BIND"),
+          default = false
+        )
+        allowInsecureUserAuth <- resolveBooleanOption(
+          options,
+          "allowInsecureUserAuth",
+          env("ALLOW_INSECURE_USER_AUTH"),
+          default = false
+        )
         userStorePath <- parseOptionalPath(
           options.get("userStorePath").orElse(env("USER_STORE_PATH")),
           "userStorePath"
@@ -898,10 +915,13 @@ object HandHistoryReviewServer:
           env("USER_AUTH_COOKIE_SECURE"),
           default = false
         )
+        googleOidcClientId = options.get("googleOidcClientId").orElse(env("GOOGLE_OIDC_CLIENT_ID")).map(_.trim).filter(_.nonEmpty)
+        googleOidcClientSecret = options.get("googleOidcClientSecret").orElse(env("GOOGLE_OIDC_CLIENT_SECRET")).map(_.trim).filter(_.nonEmpty)
+        googleOidcRedirectUri = options.get("googleOidcRedirectUri").orElse(env("GOOGLE_OIDC_REDIRECT_URI")).map(_.trim).filter(_.nonEmpty)
         googleOidc <- resolveGoogleOidcConfig(
-          options.get("googleOidcClientId").orElse(env("GOOGLE_OIDC_CLIENT_ID")).map(_.trim).filter(_.nonEmpty),
-          options.get("googleOidcClientSecret").orElse(env("GOOGLE_OIDC_CLIENT_SECRET")).map(_.trim).filter(_.nonEmpty),
-          options.get("googleOidcRedirectUri").orElse(env("GOOGLE_OIDC_REDIRECT_URI")).map(_.trim).filter(_.nonEmpty)
+          googleOidcClientId,
+          googleOidcClientSecret,
+          googleOidcRedirectUri
         )
         platformAuth <- resolvePlatformAuthConfig(
           userStorePath = userStorePath,
@@ -914,6 +934,18 @@ object HandHistoryReviewServer:
           basicAuth.isEmpty || platformAuth.isEmpty,
           (),
           "basic auth and user auth cannot both be enabled"
+        )
+        _ <- Either.cond(
+          allowUnauthenticatedPublicBind || !isNonLoopbackBindHost(host) || basicAuth.nonEmpty || platformAuth.nonEmpty,
+          (),
+          "refusing to bind to a non-loopback host without auth; configure BASIC_AUTH_*/USER_STORE_PATH or set --allowUnauthenticatedPublicBind=true / ALLOW_UNAUTHENTICATED_PUBLIC_BIND=true to override for a trusted private network"
+        )
+        _ <- validateNetworkUserAuthSafety(
+          host = host,
+          platformAuth = platformAuth,
+          googleOidcRedirectUri = googleOidcRedirectUri,
+          cookieSecure = userAuthCookieSecure,
+          allowInsecureUserAuth = allowInsecureUserAuth
         )
         modelDir <- parseOptionalDirectory(options.get("model").orElse(env("MODEL_DIR")), "model")
         seed <- resolveLongOption(options, "seed", env("SEED"), 42L)
@@ -1032,7 +1064,7 @@ object HandHistoryReviewServer:
     (maybeClientId, maybeClientSecret, maybeRedirectUri) match
       case (None, None, None) => Right(None)
       case (Some(clientId), Some(clientSecret), Some(redirectUri)) =>
-        Right(
+        parseAbsoluteHttpUri(redirectUri, "--googleOidcRedirectUri/GOOGLE_OIDC_REDIRECT_URI").map { _ =>
           Some(
             new PlatformUserAuth.GoogleOidcProvider(
               PlatformUserAuth.GoogleOidcConfig(
@@ -1042,11 +1074,35 @@ object HandHistoryReviewServer:
               )
             )
           )
-        )
+        }
       case _ =>
         Left(
           "Google OIDC requires --googleOidcClientId/GOOGLE_OIDC_CLIENT_ID, --googleOidcClientSecret/GOOGLE_OIDC_CLIENT_SECRET, and --googleOidcRedirectUri/GOOGLE_OIDC_REDIRECT_URI"
         )
+
+  private def validateNetworkUserAuthSafety(
+      host: String,
+      platformAuth: Option[PlatformUserAuth.Config],
+      googleOidcRedirectUri: Option[String],
+      cookieSecure: Boolean,
+      allowInsecureUserAuth: Boolean
+  ): Either[String, Unit] =
+    if allowInsecureUserAuth || !isNonLoopbackBindHost(host) || platformAuth.isEmpty then Right(())
+    else if !cookieSecure then
+      Left(
+        "platform-user auth on a non-loopback host requires --userAuthCookieSecure=true / USER_AUTH_COOKIE_SECURE=true; set --allowInsecureUserAuth=true / ALLOW_INSECURE_USER_AUTH=true only for trusted private-network testing"
+      )
+    else
+      googleOidcRedirectUri match
+        case Some(redirectUri) =>
+          parseAbsoluteHttpUri(redirectUri, "--googleOidcRedirectUri/GOOGLE_OIDC_REDIRECT_URI").flatMap { uri =>
+            if uri.getScheme.equalsIgnoreCase("https") then Right(())
+            else
+              Left(
+                "Google OIDC on a non-loopback host requires an https:// redirect URI; set --allowInsecureUserAuth=true / ALLOW_INSECURE_USER_AUTH=true only for trusted private-network testing"
+              )
+          }
+        case None => Right(())
 
   private def resolvePlatformAuthConfig(
       userStorePath: Option[Path],
@@ -1072,6 +1128,18 @@ object HandHistoryReviewServer:
           )
         )
 
+  private def parseAbsoluteHttpUri(raw: String, label: String): Either[String, URI] =
+    try
+      val uri = URI.create(raw.trim)
+      if !uri.isAbsolute || uri.getHost == null then Left(s"$label must be an absolute http:// or https:// URI")
+      else if uri.getFragment != null then Left(s"$label must not contain a URI fragment")
+      else
+        uri.getScheme.toLowerCase(Locale.ROOT) match
+          case "http" | "https" => Right(uri)
+          case _ => Left(s"$label must use http:// or https://")
+    catch
+      case NonFatal(e) => Left(s"$label is not a valid URI: ${e.getMessage}")
+
   private def env(name: String): Option[String] =
     Option(System.getenv(name)).map(_.trim).filter(_.nonEmpty)
 
@@ -1080,6 +1148,16 @@ object HandHistoryReviewServer:
 
   private def defaultMaxQueuedJobs(maxConcurrentJobs: Int): Int =
     math.max(8, maxConcurrentJobs * 8)
+
+  private def isNonLoopbackBindHost(host: String): Boolean =
+    val normalized = host.trim.stripPrefix("[").stripSuffix("]").toLowerCase(Locale.ROOT)
+    normalized match
+      case "" => false
+      case "localhost" => false
+      case "::1" => false
+      case "0:0:0:0:0:0:0:1" => false
+      case value if value.startsWith("127.") => false
+      case _ => true
 
   private final case class JsonResponse(
       status: Int,
@@ -2099,6 +2177,8 @@ object HandHistoryReviewServer:
       |  --drainSignalFile=<path> Optional file that makes /api/ready fail and rejects new analysis submissions while present (falls back to DRAIN_SIGNAL_FILE env)
       |  --basicAuthUser=<user>   Optional HTTP Basic auth username (falls back to BASIC_AUTH_USER env)
       |  --basicAuthPassword=<pw> Optional HTTP Basic auth password (falls back to BASIC_AUTH_PASSWORD env)
+      |  --allowUnauthenticatedPublicBind=<bool> Allow non-loopback binds without auth for trusted private networks only (falls back to ALLOW_UNAUTHENTICATED_PUBLIC_BIND env)
+      |  --allowInsecureUserAuth=<bool> Allow non-loopback platform-user auth without secure cookies / HTTPS OIDC callback only for trusted private-network testing (falls back to ALLOW_INSECURE_USER_AUTH env)
       |  --model=<dir>            Optional model artifact directory (falls back to MODEL_DIR env)
       |  --seed=42                RNG seed (falls back to SEED env)
       |  --bunchingTrials=200     Monte Carlo bunching trials per analysis

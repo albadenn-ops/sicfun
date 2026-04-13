@@ -80,6 +80,9 @@ private[holdem] object HandStrengthEstimator:
     */
   def bestCategoryStrength(hand: HoleCards, board: Board): Double =
     val cards = hand.toVector ++ board.cards
+    // Board-blocked hand: hole card duplicates a board card — impossible combination.
+    // Fall back to preflop heuristic to avoid crashing the evaluator.
+    if cards.distinct.length < cards.length then return preflopStrength(hand)
     cards.length match
       case 5 =>
         HandEvaluator.evaluate5Cached(cards).category.strength.toDouble / 8.0

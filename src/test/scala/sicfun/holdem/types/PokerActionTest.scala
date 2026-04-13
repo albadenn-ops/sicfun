@@ -68,11 +68,12 @@ class PokerActionTest extends FunSuite:
     assertEquals(features.dimension, PokerFeatures.dimension)
   }
 
-  test("hand strength is 0.5 preflop") {
+  test("hand strength preflop uses heuristic estimate") {
     val state = GameState(Street.Preflop, Board.empty, pot = 3.0, toCall = 2.0,
       position = Position.Button, stackSize = 100.0, betHistory = Vector.empty)
     val features = PokerFeatures.extract(state, hole("As", "Ks"))
-    assertEquals(features.values.last, 0.5)
+    // AKs is a strong preflop hand; preflopStrength returns ~0.757
+    assertEqualsDouble(features.values.last, 0.7571428571428571, 1e-9)
   }
 
   test("hand strength on river is between 0 and 1") {

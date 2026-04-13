@@ -2,8 +2,8 @@ package sicfun.holdem.runtime
 
 import sicfun.core.{Card, HandEvaluator}
 import sicfun.holdem.cli.CliHelpers
-import sicfun.holdem.engine.{HeroDecisionPipeline, VillainObservation}
-import sicfun.holdem.equity.{PreflopFold, TableFormat, TableRanges}
+import sicfun.holdem.engine.HeroDecisionPipeline
+import sicfun.holdem.engine.inference.VillainObservation
 import sicfun.holdem.model.{CalibrationGate, CalibrationSummary, ModelVersion, PokerActionModel, PokerActionModelArtifactIO, TrainedPokerActionModel}
 import sicfun.holdem.types.*
 
@@ -701,6 +701,8 @@ private[holdem] object AcpcActionCodec:
   */
 object AcpcMatchRunner:
   private val ProtocolVersion = "VERSION:2.0.0"
+  private[runtime] def tableRangesForMatch = HeadsUpMatchDefaults.tableRanges
+  private[runtime] def preflopFoldsForMatch = HeadsUpMatchDefaults.preflopFoldsBeforeButtonOpen
 
   /** CLI configuration for connecting to an ACPC dealer.
     *
@@ -803,8 +805,8 @@ object AcpcMatchRunner:
     private val decisionsPath = config.outDir.resolve("decisions.tsv")
     private val summaryPath = config.outDir.resolve("summary.txt")
 
-    private val tableRanges = TableRanges.defaults(TableFormat.NineMax)
-    private val folds = TableFormat.NineMax.foldsBeforeOpener(Position.Button).map(PreflopFold(_))
+    private val tableRanges = tableRangesForMatch
+    private val folds = preflopFoldsForMatch
     private val rng = new Random(config.seed)
 
     private var handsWriterOpt = Option.empty[BufferedWriter]

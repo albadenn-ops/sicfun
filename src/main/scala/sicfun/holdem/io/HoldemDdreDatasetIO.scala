@@ -1,6 +1,6 @@
 package sicfun.holdem.io
 import sicfun.holdem.types.*
-import sicfun.holdem.engine.*
+import sicfun.holdem.engine.inference.*
 import sicfun.holdem.cli.*
 import sicfun.holdem.equity.*
 

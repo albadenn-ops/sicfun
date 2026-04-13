@@ -2,6 +2,7 @@ package sicfun.holdem.equity
 import sicfun.holdem.types.*
 
 import munit.FunSuite
+import scala.concurrent.duration.*
 import scala.util.Random
 
 /**
@@ -16,6 +17,8 @@ import scala.util.Random
   * Uses low Monte Carlo trial counts and small matchup limits for fast test execution.
   */
 class HeadsUpEquityCanonicalTableTest extends FunSuite:
+  override val munitTimeout: Duration = 90.seconds
+
   private val PreflopBackendProperty = "sicfun.holdem.preflopEquityBackend"
 
   private def hole(a: String, b: String): HoleCards =

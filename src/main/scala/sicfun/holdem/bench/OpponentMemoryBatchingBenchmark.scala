@@ -310,7 +310,7 @@ object OpponentMemoryBatchingBenchmark:
         firstSeenEpochMillis = baseMillis,
         lastSeenEpochMillis = baseMillis + 2L,
         actionSummary = OpponentActionSummary(folds = 3, raises = 5, calls = 3, checks = 2),
-        raiseResponses = sicfun.holdem.engine.RaiseResponseCounts(folds = 2, calls = 3, raises = 1),
+        raiseResponses = sicfun.holdem.engine.villain.RaiseResponseCounts(folds = 2, calls = 3, raises = 1),
         recentEvents = recentEvents,
         seenHandIds = Vector.tabulate(12)(n => s"$name-seen-$n")
       )

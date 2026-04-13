@@ -2,6 +2,7 @@ package sicfun.holdem.runtime
 import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 import sicfun.holdem.engine.*
+import sicfun.holdem.engine.villain.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.io.*
 import sicfun.holdem.cli.*

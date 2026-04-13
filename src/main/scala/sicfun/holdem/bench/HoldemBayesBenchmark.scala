@@ -1,6 +1,6 @@
 package sicfun.holdem.bench
 import sicfun.holdem.types.*
-import sicfun.holdem.engine.*
+import sicfun.holdem.engine.inference.*
 import sicfun.holdem.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*

@@ -28,7 +28,7 @@ The design splits certification into two layers:
 | Layer | Solver | Certification | Spec Claims | Action Filtering |
 |-------|--------|---------------|-------------|------------------|
 | **Approximate** | WPomcp | LocalRobustScreening | Root-local budget bound. Advisory. Theorem 8 beta clamping. NOT Defs 61-66. | No. Beta clamping only. |
-| **Formal** | PftDpw | TabularCertification | Defs 58-66, Corollary 9.3. Full multi-state B\*, safe action set, structural certificate. | Yes. Def 62/63 gate decide(). |
+| **Formal** | PftDpw | TabularCertification | Conservative tabular approximation of Defs 58-66. Latent-state B\* lifted to belief by particle expectation. Valid upper bound on safety budget; may over-restrict safe action set. Corollary 9.3 used as a conservative upper-bound check on the tabular certificate. | Yes. Action filtering via belief-lifted Def 62 analog. |
 
 No code in the approximate layer may reference Def 61, 62, 63, 65, or 66
 in comments, names, or documentation. Those definitions apply only to
@@ -51,14 +51,24 @@ Correct (Def 60):
 (T_safe B)(s) = inf_u [ L_robust(s, u) + gamma * sup_{sigma} E[B(s') | s, u, sigma] ]
 ```
 
-With deterministic transitions in the tabular model, `sup E[B(s')]`
-collapses to `max_{s'} B(s')` (already correct). But the outer operator
-must be `min_a`, not `max_a`. This affects `tSafe`, `computeBStar`,
-`safeActionSet`, and all `ForWorld` wrappers.
+Two fixes required:
 
-This correction is a hard prerequisite for the formal path. Until it
-lands, no code may claim Defs 60-66. The fix is step 0 in the
-implementation sequence.
+1. **Outer operator**: `max_a` → `min_a` (inf_u). The operator finds the
+   action that minimizes the required degradation budget.
+
+2. **Future term**: The current global `max_{s'} B(s')` is NOT the exact
+   Def 60 future term. With deterministic transitions, `sup_σ E[B(s') | s, u, σ]`
+   collapses to `max_σ B(T_σ(s, u))` — the worst-case successor state
+   *reachable from (s, u)* under some profile σ, not a global maximum
+   over all states. The global max is a conservative over-approximation
+   but not the exact operator. `tSafe` must accept a transition function
+   `transitions: (stateIdx, actionIdx, profileIdx) => stateIdx` and
+   compute profile-conditioned successor bounds per (s, a) pair.
+
+Both fixes affect `tSafe`, `computeBStar`, `safeActionSet`, and all
+`ForWorld` wrappers. This correction is a hard prerequisite for the
+formal path. Until it lands, no code may claim Defs 60-66. The fix is
+step 0 in the implementation sequence.
 
 ## Section 1: DecisionEvaluationBundle
 
@@ -104,11 +114,11 @@ enum CertificationResult:
       withinTolerance: Boolean        // budgetEstimate <= epsilon_adapt
   )
   case TabularCertification(
-      bStar: Array[Double],           // Def 61: B* per state
-      requiredBudget: Double,         // Def 64: sup B*
-      safeActionIndices: IndexedSeq[Int], // Def 62: U*_safe at root
-      certificateValid: Boolean,      // Def 66
-      withinTolerance: Boolean        // Def 64: epsilon*_adapt <= epsilon_adapt
+      bStar: Array[Double],           // B* per latent state (Def 61 analog, not belief space)
+      requiredBudget: Double,         // sup B* (Def 64 analog; upper bound on belief-level budget)
+      safeActionIndices: IndexedSeq[Int], // Belief-lifted safe action set (Def 62 analog via particle expectation)
+      certificateValid: Boolean,      // Structural certificate valid (Def 65/66 on latent states)
+      withinTolerance: Boolean        // epsilon*_adapt <= epsilon_adapt
   )
   case Unavailable(reason: String)
 ```
@@ -233,6 +243,15 @@ All names avoid Def 61-66 language.
 
 ## Section 4: PftDpw Formal Certification (TabularCertification)
 
+**Approximation status**: This path computes B\* on latent tabular
+states (not belief states) and lifts to belief-level action filtering
+via particle expectation. This is a conservative approximation of the
+spec's belief-level Defs 58-66 — the transition-aware future term and
+latent-to-belief lifting both make the safety budget *more restrictive*
+than the exact belief-space operator. The path does NOT implement exact
+belief-space Bellman iteration. All Def references in this section are
+analogs on the latent state space, not the exact belief-level objects.
+
 ### Prerequisites
 
 1. **PokerPftFormulation** (new): builds `TabularGenerativeModel` and
@@ -286,11 +305,14 @@ model construction, not solver re-runs at every state.
      max(0, V^{barpi}_sigma(s) - R_sigma(s,a) - gamma * V^{barpi}_sigma(T_sigma(s,a)))
 6. SafetyBellman.computeBStar(robustLosses, bellmanGamma) -> bStar
    (uses corrected min_a operator from step 0)
-7. Belief-level safe action set:
-   B_belief(a) = sum_s belief(s) * [L_robust(s,a) + gamma * max_{s'} bStar(s')]
+7. Belief-level safe action set (Def 62 analog, not exact):
+   B_belief(a) = sum_s belief(s) * [L_robust(s,a) + gamma * max_σ bStar(T_σ(s,a))]
    safeActions = { a : B_belief(a) <= sum_s belief(s) * bStar(s) }
-   This is Def 62 instantiated at the particle belief (Def 54), not a
-   collapsed state index. The belief weights come from ParticleBelief.
+   This is a conservative approximation of Def 62: B* is computed on
+   latent states and lifted to belief via particle expectation, not
+   computed directly on belief space. The belief weights come from
+   ParticleBelief. The future term uses the transition-aware
+   max_σ bStar(T_σ(s,a)) from the corrected tSafe (step 0).
 8. action = SafetyBellman.safeFeasibleAction(qValues, safeActions)
 9. Certificate validation (Def 65/66)
 10. Bundle with TabularCertification
@@ -445,7 +467,7 @@ approximate (WPomcp) path continues with single `JointKernelProfile`.
 ## Section 9: Chain-World vs Grid-World Outputs
 
 These are separate dimensions. `WorldTypes.scala` defines:
-- `ChainWorld` = `LearningChannel x ShowdownMode` (8 worlds, 6 distinct)
+- `ChainWorld` = `LearningChannel x ShowdownMode` (8 worlds, 7 effective)
 - `GridWorld` = `LearningChannel x PolicyScope` (4 worlds)
 
 `chainWorldValues: Map[ChainWorld, Ev]` in the bundle provides
@@ -498,8 +520,12 @@ object StrategicSnapshot:
 ```
 
 This populates the v0.31.1 optional fields:
-- `securityValue`: from `bundle.robustActionLowerBounds` (labeled as
-  root-local lower bound, not V^sec)
+- `securityValue`: `None` on the approximate path.
+  `robustActionLowerBounds` is a per-action `Array[Double]` of root-local
+  lower bounds, explicitly not V^sec (Def 55), and cannot populate a
+  scalar `Option[Ev]` field that claims to be security value.
+  On the formal path, populated from belief-level V^sec if the tabular
+  certification computes it; otherwise remains `None`.
 - `safetyCertificateSummary`: `(requiredBudget, withinTolerance)` from
   certification result
 - `chainRiskProfile`: from `RiskDecomposition` over chain-world values
@@ -558,7 +584,7 @@ verified by a behavioral test. Not "acknowledged" or "injectable".
 | **BaselineFallbackTest** | Solver error -> `BaselineFallback`. Empty safe action set -> `BaselineFallback`. |
 | **AdversarialRootGapTest** | Verify adversarialRootGap > 0 when beliefs are concentrated. Verify it is NOT named PointwiseExploitability. |
 | **DeploymentBaselineTest** | EmpiricalDeploymentSet accumulates summaries. DeploymentExploitability computed over buffer. |
-| **CertificationScopeHonestyTest** | WPomcp bundle does NOT contain Def 61/62/63 references. PftDpw bundle does. |
+| **CertificationScopeHonestyTest** | WPomcp bundle does NOT contain Def 61/62/63 references. PftDpw bundle contains analog-labeled references only (not exact Def claims). |
 | **DiagnosticsToSnapshotTest** | StrategicSnapshot.fromDiagnostics populates v0.31.1 fields correctly. |
 | **AssumptionManifestAlignmentTest** | All 10+1 entries match v0.31.1 spec definitions. |
 | **ReductionismTruthTest** | No `resolved = true` entry whose code path is still a stub. |
@@ -593,10 +619,13 @@ final case class Config(
 
 ## Implementation Sequencing
 
-0. **SafetyBellman operator correction** — fix `tSafe` from `max_a` to
-   `min_a` per Def 60. Update `computeBStar`, `safeActionSet`, and all
-   `ForWorld` wrappers. Add belief-level safe action evaluation method.
-   Existing SafetyBellman unit tests updated to match corrected semantics.
+0. **SafetyBellman operator correction** — two fixes per Def 60:
+   (a) outer operator `max_a` → `min_a`;
+   (b) future term `max_{s'} B(s')` → `max_σ B(T_σ(s,a))` using a
+   transition function parameter. Update `computeBStar`, `safeActionSet`,
+   and all `ForWorld` wrappers. Add belief-level safe action evaluation
+   method. Existing SafetyBellman unit tests updated to match corrected
+   semantics.
 1. **DecisionEvaluationBundle + CertificationResult types** — pure data,
    no behavioral change.
 2. **Profile-conditional evaluation in PokerPomcpFormulation** — new

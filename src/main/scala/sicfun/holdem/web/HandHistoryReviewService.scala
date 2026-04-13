@@ -1,6 +1,6 @@
 package sicfun.holdem.web
 
-import sicfun.holdem.engine.RealTimeAdaptiveEngine
+import sicfun.holdem.engine.villain.RealTimeAdaptiveEngine
 import sicfun.holdem.equity.{TableFormat, TableRanges}
 import sicfun.holdem.history.{ExploitHint, HandHistoryImport, HandHistorySite, ImportedHand, OpponentProfile}
 import sicfun.holdem.model.{PokerActionModel, PokerActionModelArtifactIO}

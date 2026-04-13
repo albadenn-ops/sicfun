@@ -1,6 +1,6 @@
 package sicfun.holdem.history
 
-import sicfun.holdem.engine.PlayerArchetype
+import sicfun.holdem.engine.villain.PlayerArchetype
 
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest

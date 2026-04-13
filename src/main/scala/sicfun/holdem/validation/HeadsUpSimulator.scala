@@ -1,7 +1,8 @@
 package sicfun.holdem.validation
 
 import sicfun.core.{Deck, HandEvaluator}
-import sicfun.holdem.engine.{RealTimeAdaptiveEngine, VillainObservation}
+import sicfun.holdem.engine.inference.VillainObservation
+import sicfun.holdem.engine.villain.RealTimeAdaptiveEngine
 import sicfun.holdem.types.*
 
 import scala.collection.mutable

@@ -2,7 +2,7 @@ package sicfun.holdem.history
 
 import munit.FunSuite
 import sicfun.core.Card
-import sicfun.holdem.engine.RaiseResponseCounts
+import sicfun.holdem.engine.villain.RaiseResponseCounts
 import sicfun.holdem.types.*
 import ujson.{Arr, Num, Obj, Str}
 

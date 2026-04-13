@@ -1,5 +1,7 @@
 package sicfun.holdem.engine
 
+import sicfun.holdem.engine.inference.{VillainObservation, RangeInferenceEngine}
+import sicfun.holdem.engine.villain.{RealTimeAdaptiveEngine, EquilibriumBaselineConfig}
 import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 import sicfun.holdem.equity.*

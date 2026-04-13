@@ -1,7 +1,7 @@
 package sicfun.holdem.history
 
 import munit.FunSuite
-import sicfun.holdem.engine.RaiseResponseCounts
+import sicfun.holdem.engine.villain.RaiseResponseCounts
 
 import java.nio.file.Files
 import scala.jdk.CollectionConverters.*

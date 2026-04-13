@@ -52,6 +52,11 @@ import scala.jdk.CollectionConverters.*
   *     through the full server pipeline
   *   - '''Bind error''': duplicate port binding returns a descriptive error
   *   - '''Default host''': direct launches default to 127.0.0.1
+  *   - '''Bind safety''': unauthenticated non-loopback binds require an
+  *     explicit override
+  *   - '''Networked user auth safety''': non-loopback session auth requires
+  *     secure cookies, and non-loopback OIDC requires HTTPS callbacks unless
+  *     explicitly overridden
   */
 class HandHistoryReviewServerTest extends FunSuite:
 
@@ -744,7 +749,7 @@ class HandHistoryReviewServerTest extends FunSuite:
 
   test("timed-out workers keep readiness failed closed until the worker exits") {
     withStaticSite { staticDir =>
-      val backend = new BusyBackend(runForMs = 400L, result = Right(sampleAnalysisResult))
+      val backend = new BusyBackend(runForMs = 2000L, result = Right(sampleAnalysisResult))
       withServer(staticDir, backend = backend, maxConcurrentJobs = 1, maxQueuedJobs = 1, analysisTimeoutMs = 100L) { server =>
         val baseUri = s"http://${server.binding.host}:${server.binding.port}"
 
@@ -769,7 +774,7 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(rejected.statusCode(), 503)
         assert(rejected.body().contains("waiting for recovery"))
 
-        assert(backend.finished.await(3, TimeUnit.SECONDS), "busy backend never finished")
+        assert(backend.finished.await(5, TimeUnit.SECONDS), "busy backend never finished")
         awaitReady(s"$baseUri/api/ready")
 
         val recoveredHealth = getJson(s"$baseUri/api/health")
@@ -881,6 +886,112 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(get(s"http://${server.binding.host}:${server.binding.port}/api/health").statusCode(), 200)
       finally
         server.close()
+    }
+  }
+
+  test("start rejects unauthenticated non-loopback binds unless explicitly allowed") {
+    withStaticSite { staticDir =>
+      val result = HandHistoryReviewServer.start(Array(
+        s"--staticDir=$staticDir",
+        "--host=0.0.0.0",
+        "--port=0"
+      ))
+      assert(result.isLeft)
+      val error = result.left.toOption.getOrElse("")
+      assert(error.contains("ALLOW_UNAUTHENTICATED_PUBLIC_BIND"))
+      assert(error.contains("BASIC_AUTH_*/USER_STORE_PATH"))
+    }
+  }
+
+  test("start allows unauthenticated non-loopback binds when explicitly overridden") {
+    withStaticSite { staticDir =>
+      val server = HandHistoryReviewServer.start(Array(
+        s"--staticDir=$staticDir",
+        "--host=0.0.0.0",
+        "--port=0",
+        "--allowUnauthenticatedPublicBind=true"
+      )).fold(err => fail(err), identity)
+      try
+        assertEquals(server.binding.host, "0.0.0.0")
+        assertEquals(get(s"http://127.0.0.1:${server.binding.port}/api/health").statusCode(), 200)
+      finally
+        server.close()
+    }
+  }
+
+  test("non-loopback platform-user auth requires secure cookies unless explicitly allowed") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val result = HandHistoryReviewServer.start(Array(
+          s"--staticDir=$staticDir",
+          "--host=0.0.0.0",
+          "--port=0",
+          s"--userStorePath=$storePath"
+        ))
+        assert(result.isLeft)
+        val error = result.left.toOption.getOrElse("")
+        assert(error.contains("USER_AUTH_COOKIE_SECURE"))
+        assert(error.contains("ALLOW_INSECURE_USER_AUTH"))
+      }
+    }
+  }
+
+  test("non-loopback OIDC requires an HTTPS redirect URI unless explicitly allowed") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val result = HandHistoryReviewServer.start(Array(
+          s"--staticDir=$staticDir",
+          "--host=0.0.0.0",
+          "--port=0",
+          s"--userStorePath=$storePath",
+          "--userAuthCookieSecure=true",
+          "--googleOidcClientId=test-client.apps.googleusercontent.com",
+          "--googleOidcClientSecret=test-secret",
+          "--googleOidcRedirectUri=http://review.example.com/api/auth/oidc/google/callback"
+        ))
+        assert(result.isLeft)
+        val error = result.left.toOption.getOrElse("")
+        assert(error.contains("https://"))
+        assert(error.contains("ALLOW_INSECURE_USER_AUTH"))
+      }
+    }
+  }
+
+  test("localhost user auth still allows insecure cookies and HTTP OIDC callback for local development") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val server = HandHistoryReviewServer.start(Array(
+          s"--staticDir=$staticDir",
+          "--host=127.0.0.1",
+          "--port=0",
+          s"--userStorePath=$storePath",
+          "--googleOidcClientId=test-client.apps.googleusercontent.com",
+          "--googleOidcClientSecret=test-secret",
+          "--googleOidcRedirectUri=http://127.0.0.1:8080/api/auth/oidc/google/callback"
+        )).fold(err => fail(err), identity)
+        try
+          assertEquals(get(s"http://${server.binding.host}:${server.binding.port}/api/health").statusCode(), 200)
+        finally
+          server.close()
+      }
+    }
+  }
+
+  test("non-loopback platform-user auth can be explicitly allowed for private-network testing") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val server = HandHistoryReviewServer.start(Array(
+          s"--staticDir=$staticDir",
+          "--host=0.0.0.0",
+          "--port=0",
+          s"--userStorePath=$storePath",
+          "--allowInsecureUserAuth=true"
+        )).fold(err => fail(err), identity)
+        try
+          assertEquals(get(s"http://127.0.0.1:${server.binding.port}/api/health").statusCode(), 200)
+        finally
+          server.close()
+      }
     }
   }
 

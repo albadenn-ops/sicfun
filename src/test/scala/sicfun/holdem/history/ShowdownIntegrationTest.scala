@@ -2,6 +2,7 @@ package sicfun.holdem.history
 
 import sicfun.holdem.types.*
 import sicfun.holdem.engine.*
+import sicfun.holdem.engine.inference.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.model.*
 

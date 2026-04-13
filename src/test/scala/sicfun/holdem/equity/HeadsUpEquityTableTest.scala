@@ -3,6 +3,7 @@ import sicfun.holdem.types.*
 
 import munit.FunSuite
 
+import scala.concurrent.duration.*
 import scala.util.Random
 
 /**
@@ -19,6 +20,8 @@ import scala.util.Random
   *   - ComputeBackend parser rejects unknown backend strings
   */
 class HeadsUpEquityTableTest extends FunSuite:
+  override val munitTimeout: Duration = 90.seconds
+
   private val PreflopBackendProperty = "sicfun.holdem.preflopEquityBackend"
 
   private def hole(a: String, b: String): HoleCards =

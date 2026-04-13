@@ -2,7 +2,7 @@ package sicfun.holdem.validation
 
 import munit.FunSuite
 import sicfun.core.Card
-import sicfun.holdem.engine.RangeInferenceEngine
+import sicfun.holdem.engine.inference.RangeInferenceEngine
 import sicfun.holdem.equity.{TableFormat, TableRanges}
 import sicfun.holdem.history.{HandHistoryImport, HandHistorySite, OpponentProfile, ShowdownRecord}
 import sicfun.holdem.model.PokerActionModel

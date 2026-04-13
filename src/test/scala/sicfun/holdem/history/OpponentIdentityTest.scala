@@ -1,7 +1,7 @@
 package sicfun.holdem.history
 
 import munit.FunSuite
-import sicfun.holdem.engine.RaiseResponseCounts
+import sicfun.holdem.engine.villain.RaiseResponseCounts
 
 /** Tests for the [[OpponentIdentity]] module and the identity domain types
   * ([[RememberedPlayer]], [[PlayerAlias]], [[PlayerCollapse]],

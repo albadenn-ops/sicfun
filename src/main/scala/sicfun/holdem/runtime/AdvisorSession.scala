@@ -1,6 +1,8 @@
 package sicfun.holdem.runtime
 import sicfun.holdem.types.*
 import sicfun.holdem.engine.*
+import sicfun.holdem.engine.inference.*
+import sicfun.holdem.engine.villain.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.cli.*
 import sicfun.holdem.history.*
@@ -172,7 +174,8 @@ final class AdvisorSession(
     val opponentMemorySite: Option[String] = None,
     val opponentMemoryName: Option[String] = None,
     val opponentMemoryStore: Option[OpponentProfileStore] = None,
-    val opponentMemoryDirty: Boolean = false
+    val opponentMemoryDirty: Boolean = false,
+    val strategicEngine: Option[StrategicEngine] = None
 ):
   private val HeroIdx = 0
   private val VillainIdx = 1
@@ -251,6 +254,7 @@ final class AdvisorSession(
       case _                      => stats
 
     engine.clearInferenceCache()
+    strategicEngine.foreach(StrategicAdvisorBridge.onNewHand)
 
     val posStr = if heroPos == Position.Button then "BTN/SB" else "BB"
     val out = Vector(
@@ -417,6 +421,10 @@ final class AdvisorSession(
       )
       villainObs = villainObs :+ VillainObservation(action, obsState)
 
+    // Strategic engine: observe villain action
+    if !isHero then
+      strategicEngine.foreach(se => StrategicAdvisorBridge.onVillainAction(se, action, h))
+
     if !isHero then
       val (updatedStore, updatedOpponent, updatedDirty) = persistVillainObservation(h, action)
       memoryStore = updatedStore
@@ -496,6 +504,7 @@ final class AdvisorSession(
         if cards.asSet.exists(dead.contains) then
           CommandResult(this, Vector("Showdown cards overlap with board or hero cards."))
         else
+          strategicEngine.foreach(se => StrategicAdvisorBridge.onVillainShowdown(se, cards))
           val updatedSnapshot = h.copy(villainRevealedCards = Some(cards))
           CommandResult(
             updated(newHand = Some(updatedSnapshot), newStats = stats),
@@ -605,7 +614,10 @@ final class AdvisorSession(
             )
 
             val out = formatAdvice(result, h)
-            CommandResult(this, out)
+            val strategicOut = strategicEngine.map(se =>
+              StrategicAdvisorBridge.onAdvise(se, gameState, candidates)
+            ).getOrElse(Vector.empty)
+            CommandResult(this, out ++ strategicOut)
 
   // ---- Review ----
 
@@ -814,7 +826,8 @@ final class AdvisorSession(
       opponentMemorySite = opponentMemorySite,
       opponentMemoryName = opponentMemoryName,
       opponentMemoryStore = newOpponentMemoryStore,
-      opponentMemoryDirty = newOpponentMemoryDirty
+      opponentMemoryDirty = newOpponentMemoryDirty,
+      strategicEngine = strategicEngine
     )
 
   /** Record a villain action in the opponent profile store (if configured).

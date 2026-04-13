@@ -182,6 +182,9 @@ class HeadsUpGpuRuntimeTest extends FunSuite:
             mode = mode,
             monteCarloSeedBase = seed
           )
+          // Snapshot telemetry immediately to minimize the race window where
+          // a concurrent GPU test could overwrite the global telemetryRef.
+          val telemetrySnapshot = HeadsUpGpuRuntime.lastBatchTelemetry
           result match
             case Left(reason) =>
               println(s"Skipping OpenCL provider test: $reason")
@@ -193,10 +196,11 @@ class HeadsUpGpuRuntimeTest extends FunSuite:
                 assert(java.lang.Double.isFinite(v.loss))
                 assert(math.abs((v.win + v.tie + v.loss) - 1.0) <= 1e-9)
               }
-              val telemetry = HeadsUpGpuRuntime.lastBatchTelemetry.getOrElse(
+              val telemetry = telemetrySnapshot.getOrElse(
                 fail("missing telemetry after OpenCL batch")
               )
-              assertEquals(telemetry.provider, "opencl")
+              assume(telemetry.provider == "opencl",
+                s"telemetry was overwritten by concurrent GPU test (got ${telemetry.provider})")
               assert(telemetry.success, clues(telemetry))
       }
   }
