@@ -4,7 +4,6 @@ import sicfun.holdem.strategic.state.*
 import sicfun.holdem.strategic.kernel.*
 import sicfun.holdem.strategic.safety.*
 import sicfun.holdem.strategic.exploitation.*
-import sicfun.holdem.strategic.decomposition.*
 
 import scala.annotation.nowarn
 import sicfun.core.{CardId, DiscreteDistribution}

@@ -2,8 +2,6 @@ package sicfun.holdem.runtime
 import sicfun.holdem.types.*
 import sicfun.holdem.model.*
 import sicfun.holdem.io.*
-import sicfun.holdem.engine.*
-import sicfun.holdem.engine.inference.*
 import sicfun.holdem.engine.villain.*
 import sicfun.holdem.history.*
 
@@ -173,7 +171,7 @@ class AlwaysOnDecisionLoopTest extends FunSuite:
       firstSeenEpochMillis = 1_700_000_000_000L,
       lastSeenEpochMillis = 1_800_000_000_000L,
       actionSummary = OpponentActionSummary(folds = 2, raises = 8, calls = 2, checks = 1),
-      raiseResponses = sicfun.holdem.engine.RaiseResponseCounts(folds = 0, calls = 1, raises = 12),
+      raiseResponses = sicfun.holdem.engine.villain.RaiseResponseCounts(folds = 0, calls = 1, raises = 12),
       recentEvents = Vector.empty,
       seenHandIds = Vector.tabulate(12)(idx => s"mem-$idx")
     )

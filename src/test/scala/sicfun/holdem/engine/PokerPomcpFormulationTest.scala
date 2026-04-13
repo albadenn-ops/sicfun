@@ -4,10 +4,6 @@ import munit.FunSuite
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.types.*
 import sicfun.holdem.strategic.state.*
-import sicfun.holdem.strategic.kernel.*
-import sicfun.holdem.strategic.safety.*
-import sicfun.holdem.strategic.exploitation.*
-import sicfun.holdem.strategic.decomposition.*
 import sicfun.holdem.strategic.solver.WPomcpRuntime
 
 class PokerPomcpFormulationTest extends FunSuite:

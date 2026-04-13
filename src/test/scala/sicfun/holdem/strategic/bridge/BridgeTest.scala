@@ -2,10 +2,9 @@ package sicfun.holdem.strategic.bridge
 
 import sicfun.holdem.strategic.types.*
 import sicfun.holdem.strategic.state.*
-import sicfun.holdem.strategic.kernel.*
 import sicfun.holdem.strategic.safety.*
-import sicfun.holdem.strategic.exploitation.*
 import sicfun.holdem.strategic.decomposition.*
+import sicfun.holdem.strategic.PosteriorAttributedBaseline
 import sicfun.holdem.engine.StrategicEngine
 import sicfun.holdem.types.{Board, GameState, PokerAction, Position, Street}
 

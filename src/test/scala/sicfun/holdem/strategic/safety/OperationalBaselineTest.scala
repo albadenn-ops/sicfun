@@ -1,10 +1,6 @@
 package sicfun.holdem.strategic.safety
 import sicfun.holdem.strategic.types.*
-import sicfun.holdem.strategic.state.*
-import sicfun.holdem.strategic.kernel.*
 import sicfun.holdem.strategic.safety.*
-import sicfun.holdem.strategic.exploitation.*
-import sicfun.holdem.strategic.decomposition.*
 
 class OperationalBaselineTest extends munit.FunSuite:
 
