@@ -42,7 +42,7 @@ object BridgeManifest:
 
     // -- Baseline bridge --
     BridgeEntry("RealBaseline",             "Def 9",  Fidelity.Approximate, Severity.Behavioral,  "Monte Carlo equity"),
-    BridgeEntry("AttributedBaseline",       "Def 10", Fidelity.Approximate, Severity.Structural,  "requires kernel decomposition"),
+    BridgeEntry("AttributedBaseline",       "Def 10", Fidelity.Approximate, Severity.Behavioral,  "kernel-coupled posterior-predictive attribution; per-rival via PosteriorAttributedBaseline"),
 
     // -- Value bridge --
     BridgeEntry("FourWorld.V11",            "Def 44", Fidelity.Approximate, Severity.Behavioral,  "engine EV is best available"),

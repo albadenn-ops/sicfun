@@ -290,6 +290,12 @@ class FormalClosureValidationTest extends munit.FunSuite:
     assert(dv.isDefined, "DeltaVocabulary entry must exist")
     assertEquals(dv.get.severity, Severity.Behavioral)
 
+  test("BridgeManifest: zero Structural severity gaps remain (full formal closure)"):
+    import bridge.BridgeManifest
+    val gaps = BridgeManifest.structuralGaps
+    assertEquals(gaps.size, 0,
+      s"Expected zero structural gaps, found: ${gaps.map(e => s"${e.formalObject} (${e.specDef})").mkString(", ")}")
+
   // ========================================================================
   // Helpers
   // ========================================================================
