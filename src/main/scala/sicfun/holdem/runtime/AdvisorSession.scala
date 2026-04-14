@@ -615,7 +615,7 @@ final class AdvisorSession(
 
             val out = formatAdvice(result, h)
             val strategicOut = strategicEngine.map(se =>
-              StrategicAdvisorBridge.onAdvise(se, gameState, candidates)
+              StrategicAdvisorBridge.onAdvise(se, gameState, candidates, Some(result.decision.recommendation))
             ).getOrElse(Vector.empty)
             CommandResult(this, out ++ strategicOut)
 
