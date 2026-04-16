@@ -57,6 +57,13 @@ private[holdem] object HeroDecisionPipeline:
       helper: StrategicLifecycleHelper  // was: engine: StrategicEngine
   )
 
+  /** Result of a strategic overlay decision, including the overlay diagnostic and elapsed time. */
+  final case class StrategicDecisionResult(
+      action: PokerAction,
+      overlayResult: OverlayResult,
+      totalLatencyNanos: Long
+  )
+
   /** Context for a hero decision. Bundles all parameters needed by both Adaptive and GTO modes. */
   final case class HeroDecisionContext(
       hero: HoleCards,
@@ -154,13 +161,14 @@ private[holdem] object HeroDecisionPipeline:
     * RealTimeAdaptiveEngine), then filters through the strategic overlay
     * (via strategicCtx.helper, a StrategicLifecycleHelper wrapping StrategicEngine).
     *
-    * Returns the overlay-selected action. The full OverlayResult is stored
-    * in strategicCtx.helper.engine.lastOverlayResult for diagnostics.
+    * Returns a StrategicDecisionResult containing the selected action, the full
+    * OverlayResult for diagnostics, and total elapsed time for benchmarking.
     */
   def decideHeroStrategic(
       strategicCtx: StrategicDecisionContext,
       heroCtx: HeroDecisionContext
-  ): PokerAction =
+  ): StrategicDecisionResult =
+    val startNanos = System.nanoTime()
     // 1. Run adaptive engine for upstream EVs
     val adaptiveResult = heroCtx.engine.decide(
       hero = heroCtx.hero,
@@ -178,7 +186,12 @@ private[holdem] object HeroDecisionPipeline:
       heroCtx.candidates,
       adaptiveResult.decision.recommendation
     )
-    overlayResult.selectedAction
+    val elapsedNanos = System.nanoTime() - startNanos
+    StrategicDecisionResult(
+      action = overlayResult.selectedAction,
+      overlayResult = overlayResult,
+      totalLatencyNanos = elapsedNanos
+    )
 
   /** Computes legal raise sizes based on the protocol game state.
     *

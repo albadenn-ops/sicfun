@@ -1016,7 +1016,7 @@ object AcpcMatchRunner:
               HeroDecisionPipeline.decideHeroStrategic(
                 HeroDecisionPipeline.StrategicDecisionContext(state, candidates, helper),
                 heroCtx
-              )
+              ).action
             case None =>
               candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
         case mode =>
