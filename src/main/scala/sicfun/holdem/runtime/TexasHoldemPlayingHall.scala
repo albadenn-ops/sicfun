@@ -8,6 +8,7 @@ import sicfun.holdem.engine.GtoSolveEngine.{GtoMode, GtoSolveCacheKey, GtoCached
 import sicfun.holdem.provider.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.cli.*
+import sicfun.holdem.runtime.protocol.OverlayMetricsAccumulator
 import sicfun.holdem.strategic.types.PlayerId
 
 import sicfun.core.{Card, CardId, Deck, DiscreteDistribution, HandEvaluator}
@@ -337,6 +338,7 @@ object TexasHoldemPlayingHall:
     private var preflopEngineOpt = Option.empty[RealTimeAdaptiveEngine]
     private var postflopEngineOpt = Option.empty[RealTimeAdaptiveEngine]
     private var strategicHelperOpt = Option.empty[StrategicLifecycleHelper]
+    private var overlayMetricsOpt: Option[OverlayMetricsAccumulator] = None
     private var heroNet = 0.0
     private var heroWins = 0
     private var heroTies = 0
@@ -412,6 +414,7 @@ object TexasHoldemPlayingHall:
         val allRivalIds = config.villainPool.map(p => PlayerId(p.name)).distinct.toVector
         helper.initSession(rivalIds = allRivalIds, positionMapping = Map.empty)
         strategicHelperOpt = Some(helper)
+        overlayMetricsOpt = Some(OverlayMetricsAccumulator())
 
     private def playHands(): Unit =
       var handNo = 1
@@ -1047,9 +1050,15 @@ object TexasHoldemPlayingHall:
               val source = if livePlayers > 2 then
                 UpstreamSource.Multiway(livePlayers - 1)
               else UpstreamSource.Adaptive
-              helper.decideWithOverlay(
+              val startNanos = System.nanoTime()
+              val overlayResult = helper.decideWithOverlay(
                 state, candidates, upstreamRec, source
-              ).selectedAction
+              )
+              val elapsedNanos = System.nanoTime() - startNanos
+              overlayMetricsOpt.foreach(_.record(
+                OverlayMetricsAccumulator.DecisionRecord(overlayResult, elapsedNanos)
+              ))
+              overlayResult.selectedAction
             case None =>
               candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
       val normalized = normalizeAction(
