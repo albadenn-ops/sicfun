@@ -1095,7 +1095,11 @@ object AcpcMatchRunner:
         )
 
     private def buildSummary(): MatchRunnerSupport.RunSummary =
-      stats.buildSummary(heroMode = config.heroMode, modelId = modelId, outDir = config.outDir, bigBlindChips = AcpcActionCodec.BigBlindChips)
+      stats.buildSummary(
+        heroMode = config.heroMode, modelId = modelId, outDir = config.outDir,
+        bigBlindChips = AcpcActionCodec.BigBlindChips,
+        overlayStats = overlayMetrics.map(_.snapshot())
+      )
 
     private def writeSummary(summary: MatchRunnerSupport.RunSummary): Unit =
       MatchRunnerSupport.writeSummary(summaryPath, "ACPC Match Runner", summary)

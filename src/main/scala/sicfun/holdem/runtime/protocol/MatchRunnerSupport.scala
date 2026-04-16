@@ -43,7 +43,8 @@ private[holdem] object MatchRunnerSupport:
       bigBlindNetChips: Double,
       heroMode: HeroMode,
       modelId: String,
-      outDir: Path
+      outDir: Path,
+      overlayStats: Option[OverlayStats] = None
   )
 
   /** Mutable match statistics accumulator. Thread-unsafe — used within a single Runner. */
@@ -88,7 +89,8 @@ private[holdem] object MatchRunnerSupport:
       else 0.0
 
     /** Freeze the current mutable statistics into an immutable [[RunSummary]] snapshot. */
-    def buildSummary(heroMode: HeroMode, modelId: String, outDir: Path, bigBlindChips: Int = 100): RunSummary =
+    def buildSummary(heroMode: HeroMode, modelId: String, outDir: Path, bigBlindChips: Int = 100,
+                     overlayStats: Option[OverlayStats] = None): RunSummary =
       RunSummary(
         handsPlayed      = handsPlayed,
         heroNetChips     = heroNetChips,
@@ -102,7 +104,8 @@ private[holdem] object MatchRunnerSupport:
         bigBlindNetChips = bigBlindNetChips,
         heroMode         = heroMode,
         modelId          = modelId,
-        outDir           = outDir
+        outDir           = outDir,
+        overlayStats     = overlayStats
       )
 
   /** Write a human-readable summary file with all match statistics.
@@ -126,7 +129,20 @@ private[holdem] object MatchRunnerSupport:
       s"bigBlindNetChips: ${PokerFormatting.fmtDouble(summary.bigBlindNetChips, 3)}",
       s"heroMode: ${PokerFormatting.heroModeLabel(summary.heroMode)}",
       s"modelId: ${summary.modelId}"
-    )
+    ) ++ summary.overlayStats.toVector.flatMap { os =>
+      Vector(
+        s"overlayDecisions: ${os.decisions}",
+        s"overlayChangeRate: ${PokerFormatting.fmtDouble(os.overlayChangeRate * 100.0, 1)}%",
+        s"vetoRate: ${PokerFormatting.fmtDouble(os.vetoRate * 100.0, 1)}%",
+        s"decisionsWithVeto: ${os.decisionsWithVeto}",
+        s"totalVetoedActions: ${os.totalVetoedActions}",
+        s"adjustments: ${os.adjustments}",
+        s"meanLatencyMs: ${PokerFormatting.fmtDouble(os.meanLatencyMs, 3)}",
+        s"p95LatencyMs: ${PokerFormatting.fmtDouble(os.p95LatencyMs, 3)}",
+        s"p99LatencyMs: ${PokerFormatting.fmtDouble(os.p99LatencyMs, 3)}",
+        s"actionDistribution: ${os.actionDistribution.toVector.sortBy(-_._2).map((k,v) => s"$k=$v").mkString(", ")}"
+      )
+    }
     Files.write(path, lines.mkString(System.lineSeparator()).getBytes(StandardCharsets.UTF_8))
 
   /** Append a tab-separated decision log row to the decisions.tsv file.

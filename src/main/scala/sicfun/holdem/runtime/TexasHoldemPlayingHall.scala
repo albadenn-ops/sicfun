@@ -8,7 +8,7 @@ import sicfun.holdem.engine.GtoSolveEngine.{GtoMode, GtoSolveCacheKey, GtoCached
 import sicfun.holdem.provider.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.cli.*
-import sicfun.holdem.runtime.protocol.OverlayMetricsAccumulator
+import sicfun.holdem.runtime.protocol.{OverlayMetricsAccumulator, OverlayStats}
 import sicfun.holdem.strategic.types.PlayerId
 
 import sicfun.core.{Card, CardId, Deck, DiscreteDistribution, HandEvaluator}
@@ -134,7 +134,8 @@ object TexasHoldemPlayingHall:
       exactGtoCacheMisses: Long = 0L,
       exactGtoSolvedByProvider: Map[String, Long] = Map.empty,
       exactGtoServedByProvider: Map[String, Long] = Map.empty,
-      perVillainNetChips: Map[String, Double] = Map.empty
+      perVillainNetChips: Map[String, Double] = Map.empty,
+      overlayStats: Option[OverlayStats] = None
   ):
     def exactGtoCacheTotal: Long = exactGtoCacheHits + exactGtoCacheMisses
     def exactGtoCacheHitRate: Double =
@@ -286,6 +287,17 @@ object TexasHoldemPlayingHall:
           println(s"exactGtoServedByProvider: ${formatLongCountMap(summary.exactGtoServedByProvider)}")
         println(s"modelId: ${summary.modelId}")
         println(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
+        summary.overlayStats.foreach { os =>
+          println(s"overlayDecisions: ${os.decisions}")
+          println(f"overlayChangeRate: ${os.overlayChangeRate * 100.0}%.1f%%")
+          println(f"vetoRate: ${os.vetoRate * 100.0}%.1f%%")
+          println(s"decisionsWithVeto: ${os.decisionsWithVeto}")
+          println(s"totalVetoedActions: ${os.totalVetoedActions}")
+          println(f"meanLatencyMs: ${os.meanLatencyMs}%.3f")
+          println(f"p95LatencyMs: ${os.p95LatencyMs}%.3f")
+          println(f"p99LatencyMs: ${os.p99LatencyMs}%.3f")
+          println(s"actionDistribution: ${os.actionDistribution.toVector.sortBy(-_._2).map((k,v) => s"$k=$v").mkString(", ")}")
+        }
       case Left(error) =>
         if wantsHelp then println(error)
         else
@@ -458,7 +470,8 @@ object TexasHoldemPlayingHall:
         collectDdreTraining = collectDdreTraining,
         exactGtoCache = exactGtoCache,
         exactGtoCacheStats = exactGtoCacheStats,
-        strategicHelperOpt = strategicHelperOpt
+        strategicHelperOpt = strategicHelperOpt,
+        overlayMetricsOpt = overlayMetricsOpt
       )
 
       recordTrainingSamples(handNo, tableId, result)
@@ -619,7 +632,8 @@ object TexasHoldemPlayingHall:
         exactGtoCacheMisses = exactGtoCacheStats.misses,
         exactGtoSolvedByProvider = exactGtoCacheStats.solvedByProviderSnapshot,
         exactGtoServedByProvider = exactGtoCacheStats.servedByProviderSnapshot,
-        perVillainNetChips = perVillainNet.toMap
+        perVillainNetChips = perVillainNet.toMap,
+        overlayStats = overlayMetricsOpt.map(_.snapshot())
       )
 
   /** Factory method that creates a [[HandResolver]] and plays a single hand to completion.
@@ -638,7 +652,8 @@ object TexasHoldemPlayingHall:
       collectDdreTraining: Boolean,
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
       exactGtoCacheStats: GtoCacheStats,
-      strategicHelperOpt: Option[StrategicLifecycleHelper]
+      strategicHelperOpt: Option[StrategicLifecycleHelper],
+      overlayMetricsOpt: Option[OverlayMetricsAccumulator]
   ): HandResult =
     new HandResolver(
       deal = deal,
@@ -653,7 +668,8 @@ object TexasHoldemPlayingHall:
       collectDdreTraining = collectDdreTraining,
       exactGtoCache = exactGtoCache,
       exactGtoCacheStats = exactGtoCacheStats,
-      strategicHelperOpt = strategicHelperOpt
+      strategicHelperOpt = strategicHelperOpt,
+      overlayMetricsOpt = overlayMetricsOpt
     ).play()
 
   /** Resolves a single hand from preflop through showdown. This class encapsulates all mutable
@@ -684,7 +700,8 @@ object TexasHoldemPlayingHall:
       collectDdreTraining: Boolean,
       exactGtoCache: mutable.HashMap[GtoSolveCacheKey, GtoCachedPolicy],
       exactGtoCacheStats: GtoCacheStats,
-      strategicHelperOpt: Option[StrategicLifecycleHelper]
+      strategicHelperOpt: Option[StrategicLifecycleHelper],
+      overlayMetricsOpt: Option[OverlayMetricsAccumulator]
   ):
     private val heroPosition = tableScenario.heroPosition
     private val preflopOrder = tableScenario.modeledPositions

@@ -883,7 +883,11 @@ object SlumbotMatchRunner:
         )
 
     private def buildSummary(): MatchRunnerSupport.RunSummary =
-      stats.buildSummary(heroMode = config.heroMode, modelId = modelId, outDir = config.outDir, bigBlindChips = SlumbotActionCodec.BigBlindChips)
+      stats.buildSummary(
+        heroMode = config.heroMode, modelId = modelId, outDir = config.outDir,
+        bigBlindChips = SlumbotActionCodec.BigBlindChips,
+        overlayStats = overlayMetrics.map(_.snapshot())
+      )
 
     private def writeSummary(summary: MatchRunnerSupport.RunSummary): Unit =
       MatchRunnerSupport.writeSummary(summaryPath, "Slumbot Match Runner", summary)
