@@ -1046,6 +1046,7 @@ object TexasHoldemPlayingHall:
         case HeroMode.Strategic =>
           strategicHelperOpt match
             case Some(helper) =>
+              val startNanos = System.nanoTime()
               val adaptiveEngine = if street == Street.Preflop then preflopEngine else postflopEngine
               val upstreamRec = multiwayRecommendationFor(
                 actor = heroPosition,
@@ -1067,7 +1068,6 @@ object TexasHoldemPlayingHall:
               val source = if livePlayers > 2 then
                 UpstreamSource.Multiway(livePlayers - 1)
               else UpstreamSource.Adaptive
-              val startNanos = System.nanoTime()
               val overlayResult = helper.decideWithOverlay(
                 state, candidates, upstreamRec, source
               )
