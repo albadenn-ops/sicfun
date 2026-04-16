@@ -637,6 +637,10 @@ object SlumbotMatchRunner:
         Some(helper)
       else None
 
+    private val overlayMetrics: Option[OverlayMetricsAccumulator] =
+      if config.heroMode == HeroMode.Strategic then Some(OverlayMetricsAccumulator())
+      else None
+
     private val api = new SlumbotApiClient(config.baseUrl, config.timeoutMillis)
 
     def run(): Either[String, MatchRunnerSupport.RunSummary] =
@@ -804,10 +808,14 @@ object SlumbotMatchRunner:
         case HeroMode.Strategic =>
           strategicHelperOpt match
             case Some(helper) =>
-              HeroDecisionPipeline.decideHeroStrategic(
+              val strategicResult = HeroDecisionPipeline.decideHeroStrategic(
                 HeroDecisionPipeline.StrategicDecisionContext(state, candidates, helper),
                 heroCtx
-              ).action
+              )
+              overlayMetrics.foreach(_.record(
+                OverlayMetricsAccumulator.DecisionRecord(strategicResult.overlayResult, strategicResult.totalLatencyNanos)
+              ))
+              strategicResult.action
             case None =>
               candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
         case mode =>
