@@ -67,10 +67,10 @@ if ($modes.Count -eq 0) {
   throw "HeroModes produced no values."
 }
 
-$allowedModes = @("adaptive", "gto")
+$allowedModes = @("adaptive", "gto", "strategic")
 foreach ($mode in $modes) {
   if ($allowedModes -notcontains $mode) {
-    throw "Unsupported hero mode '$mode'. Allowed: adaptive, gto."
+    throw "Unsupported hero mode '$mode'. Allowed: adaptive, gto, strategic."
   }
 }
 

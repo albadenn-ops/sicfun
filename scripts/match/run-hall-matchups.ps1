@@ -173,7 +173,7 @@ function Split-TrimCsv {
 function Resolve-HeroStyles {
   param([string]$Csv)
 
-  $allowed = @("adaptive", "gto")
+  $allowed = @("adaptive", "gto", "strategic")
   $styles = @(Split-TrimCsv -Value $Csv)
   if ($styles.Count -eq 0) {
     throw "HeroStyles produced no values."
