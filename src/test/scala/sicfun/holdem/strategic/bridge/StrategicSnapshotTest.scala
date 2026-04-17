@@ -39,8 +39,9 @@ class StrategicSnapshotTest extends munit.FunSuite:
     // Classification
     assertEquals(snap.strategicClass, StrategicClass.Value) // 0.72 >= 0.65
     // Four-world
-    assertEqualsDouble(snap.fourWorld.v11.value, 0.65, 1e-12)
-    assertEqualsDouble(snap.fourWorld.v00.value, 0.50, 1e-12)
+    assert(snap.fourWorld.isDefined)
+    assertEqualsDouble(snap.fourWorld.get.v11.value, 0.65, 1e-12)
+    assertEqualsDouble(snap.fourWorld.get.v00.value, 0.50, 1e-12)
     // Baseline
     assertEqualsDouble(snap.baseline.value, 0.72, 1e-12)
     // Signal
@@ -160,7 +161,8 @@ class StrategicSnapshotTest extends munit.FunSuite:
     val enriched = base.copy(gridWorldValues = Some(gridValues))
 
     // Old fields unchanged
-    assertEqualsDouble(enriched.fourWorld.v11.value, 0.60, 1e-12)
+    assert(enriched.fourWorld.isDefined)
+    assertEqualsDouble(enriched.fourWorld.get.v11.value, 0.60, 1e-12)
     assertEqualsDouble(enriched.baseline.value, 0.50, 1e-12)
     assertEquals(enriched.street, Street.Flop)
 

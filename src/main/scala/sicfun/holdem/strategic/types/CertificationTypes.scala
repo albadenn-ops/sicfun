@@ -48,6 +48,12 @@ final case class BluffAnnotation(
     isExploitativeBluff: Boolean
 )
 
+/** Machine-checkable provenance for values carried through the certification path. */
+enum ValueProvenance:
+  case SolverGrounded
+  case Approximate(source: String)
+  case Absent(reason: String)
+
 /** Decision outcome from the certification pipeline. */
 enum DecisionOutcome:
   case Certified(action: PokerAction, bundle: DecisionEvaluationBundle)
@@ -57,19 +63,23 @@ enum DecisionOutcome:
 final case class DecisionEvaluationBundle(
     profileResults: Map[JointRivalProfileId, SolverResult],
     robustActionLowerBounds: Array[Double],
+    robustActionLowerBoundsProvenance: ValueProvenance = ValueProvenance.Absent("robust action lower bounds not computed"),
     baselineActionValues: Array[Double],
     baselineValue: Double,
     adversarialRootGap: Option[Ev],
     pointwiseExploitability: Option[Ev],
+    pointwiseExploitabilityProvenance: ValueProvenance = ValueProvenance.Absent("pointwise exploitability not computed"),
     deploymentExploitability: Option[Ev],
     certification: CertificationResult,
     chainWorldValues: Map[ChainWorld, Ev],
     fourWorld: Option[FourWorld] = None,
+    fourWorldProvenance: ValueProvenance = ValueProvenance.Absent("four-world decomposition not computed"),
     deltaVocabulary: Option[DeltaVocabulary] = None,
     bluffAnnotations: Vector[BluffAnnotation] = Vector.empty,
     chainRiskProfile: Option[RiskDecomposition.ChainRiskProfile] = None,
     polarizationProfile: Map[Int, Double] = Map.empty,
     revealDecision: Option[RevealDecision] = None,
+    revealDecisionProvenance: ValueProvenance = ValueProvenance.Absent("reveal decision not computed"),
     operationalBaseline: Option[OperationalBaseline] = None,
     notes: Vector[String]
 )

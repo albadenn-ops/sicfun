@@ -63,8 +63,8 @@ class ValidationRunnerTest extends FunSuite:
     val summary = StrategicSummary(
       dominantClass = snap.strategicClass.toString,
       fidelityCoverage = snap.fidelitySummary,
-      fourWorldV11 = snap.fourWorld.v11.value,
-      fourWorldV00 = snap.fourWorld.v00.value
+      fourWorldV11 = snap.fourWorld.map(_.v11.value).getOrElse(Double.NaN),
+      fourWorldV00 = snap.fourWorld.map(_.v00.value).getOrElse(Double.NaN)
     )
     assert(summary.dominantClass.nonEmpty)
     assert(summary.fidelityCoverage.contains("exact"))

@@ -466,6 +466,7 @@ class FormalPathTest extends munit.FunSuite:
       case Some(bundle) =>
         bundle.fourWorld match
           case Some(fw) =>
+            assertEquals(bundle.fourWorldProvenance, ValueProvenance.SolverGrounded)
             // Theorem 4 identity must hold: v11 = v00 + deltaControl + deltaSigStar + deltaInteraction
             val reconstructed = fw.v00 + fw.deltaControl + fw.deltaSigStar + fw.deltaInteraction
             assertEqualsDouble(reconstructed.value, fw.v11.value, 1e-12)

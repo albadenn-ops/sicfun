@@ -45,6 +45,17 @@ class CertificationTypesTest extends munit.FunSuite:
     val outcome: DecisionOutcome.Certified = DecisionOutcome.Certified(PokerAction.Call, bundle)
     assertEquals(outcome.action, PokerAction.Call)
 
+  test("ValueProvenance carries exact, approximate, and absent variants"):
+    assertEquals(ValueProvenance.SolverGrounded, ValueProvenance.SolverGrounded)
+    assertEquals(
+      ValueProvenance.Approximate("approx source"),
+      ValueProvenance.Approximate("approx source")
+    )
+    assertEquals(
+      ValueProvenance.Absent("not available"),
+      ValueProvenance.Absent("not available")
+    )
+
   test("DecisionOutcome.BaselineFallback wraps action and reason"):
     val outcome: DecisionOutcome.BaselineFallback = DecisionOutcome.BaselineFallback(PokerAction.Fold, "solver error")
     assertEquals(outcome.reason, "solver error")

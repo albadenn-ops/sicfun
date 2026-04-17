@@ -29,7 +29,7 @@ final case class StrategicSnapshot(
     // Classification (from ClassificationBridge)
     strategicClass: StrategicClass,
     // Value decomposition (from ValueBridge)
-    fourWorld: FourWorld,
+    fourWorld: Option[FourWorld],
     // Baseline (from BaselineBridge)
     baseline: Ev,
     // Opponent model (from OpponentModelBridge, optional)
@@ -95,7 +95,7 @@ object StrategicSnapshot:
     val strategicClass = unwrapValue(ClassificationBridge.classify(heroEquity, hasDrawPotential))
 
     // Value decomposition
-    val fourWorld = unwrapValue(ValueBridge.toFourWorld(engineEv, staticEquity))
+    val fourWorld = Some(unwrapValue(ValueBridge.toFourWorld(engineEv, staticEquity)))
 
     // Baseline
     val baseline = unwrapValue(BaselineBridge.toRealBaseline(heroEquity))

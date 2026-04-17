@@ -507,6 +507,9 @@ class StrategicEngineTest extends FunSuite:
     val snapshot = engine.buildSnapshot(gs, PokerAction.Call)
     assert(snapshot.isDefined, "snapshot should be defined")
     assert(snapshot.get.attributionEnabled, "attributionEnabled should be true")
+    assertEquals(snapshot.get.fourWorld, None)
+    assert(snapshot.get.gridWorldValues.isDefined)
+    assert(snapshot.get.gridWorldValues.get.values.forall(_.fidelity == Fidelity.Absent))
 
   test("StrategicSnapshot.build static factory has attributionEnabled = false"):
     import sicfun.holdem.strategic.{bridge => strategicBridge}

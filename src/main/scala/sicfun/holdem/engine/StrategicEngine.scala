@@ -458,13 +458,19 @@ class StrategicEngine(val config: StrategicEngine.Config):
     val bundle = DecisionEvaluationBundle(
       profileResults = profileResultMap,
       robustActionLowerBounds = robustActionLowerBounds,
+      robustActionLowerBoundsProvenance =
+        ValueProvenance.Approximate("local robust screening over approximate WPomcp profile models"),
       baselineActionValues = baselineActionValues,
       baselineValue = baselineValue,
       adversarialRootGap = Some(Ev(adversarialRootGap)),
       pointwiseExploitability = None,
+      pointwiseExploitabilityProvenance =
+        ValueProvenance.Absent("WPomcp local robust screening does not compute pointwise exploitability"),
       deploymentExploitability = None,
       certification = certification,
       chainWorldValues = Map.empty,
+      fourWorldProvenance =
+        ValueProvenance.Absent("WPomcp path does not compute four-world decomposition"),
       notes = if withinTolerance then Vector("LocalRobustScreening: within tolerance")
               else Vector("LocalRobustScreening: budget exceeds tolerance, beta clamped")
     )
@@ -604,14 +610,14 @@ class StrategicEngine(val config: StrategicEngine.Config):
           // Chain world Q-values (Def 47A) — mapped from grid/ref solves
           import LearningChannel.*, ShowdownMode.*
           val cwQs: Map[ChainWorld, Ev] = {
-            val base = Map(
-              ChainWorld(Blind, Off)  -> fw.v00,
-              ChainWorld(Attrib, Off) -> fw.v10,
-              ChainWorld(Attrib, On)  -> fw.v11
-            )
+            val base = Map.newBuilder[ChainWorld, Ev]
+            base += ChainWorld(Blind, Off) -> fw.v00
+            base += ChainWorld(Attrib, Off) -> fw.v10
+            base += ChainWorld(Attrib, On) -> fw.v11
+            val rooted = base.result()
             val withRef = refResultOpt match
-              case Some(refResult) => base + (ChainWorld(Ref, Off) -> Ev(refResult.qValues.max))
-              case None => base
+              case Some(refResult) => rooted + (ChainWorld(Ref, Off) -> Ev(refResult.qValues.max))
+              case None => rooted
             designResultOpt match
               case Some(designResult) => withRef + (ChainWorld(Design, Off) -> Ev(designResult.qValues.max))
               case None => withRef
@@ -924,14 +930,28 @@ class StrategicEngine(val config: StrategicEngine.Config):
     val bundle = DecisionEvaluationBundle(
       profileResults = profileResultMap,
       robustActionLowerBounds = robustActionLowerBounds,
+      robustActionLowerBoundsProvenance =
+        ValueProvenance.Approximate(
+          if ambiguityRadius > 0.0 && numProfiles > 1 then
+            "Wasserstein DRO robust lower bounds over grounded profile models"
+          else
+            "minimum over grounded profile models"
+        ),
       baselineActionValues = baselineActionValues,
       baselineValue = baselineValue,
       adversarialRootGap = Some(Ev(adversarialRootGap)),
       pointwiseExploitability = Some(pwExploit),
+      pointwiseExploitabilityProvenance =
+        ValueProvenance.Approximate(
+          "derived from baseline mixed-model value and per-profile security value"
+        ),
       deploymentExploitability = None,
       certification = certification,
       chainWorldValues = chainWorldValues,
       fourWorld = fourWorld,
+      fourWorldProvenance =
+        if fourWorld.isDefined then ValueProvenance.SolverGrounded
+        else ValueProvenance.Absent("four-world decomposition not computed"),
       deltaVocabulary = deltaVocabulary,
       notes = Vector(
         s"PftDpw formal path: B*_max=$requiredBudget, safeActions=${safeActions.mkString(",")}"
@@ -953,13 +973,19 @@ class StrategicEngine(val config: StrategicEngine.Config):
     DecisionEvaluationBundle(
       profileResults = Map.empty,
       robustActionLowerBounds = Array.fill(numActions)(0.0),
+      robustActionLowerBoundsProvenance =
+        ValueProvenance.Absent(s"fallback bundle does not compute robust action lower bounds: $reason"),
       baselineActionValues = Array.fill(numActions)(0.0),
       baselineValue = 0.0,
       adversarialRootGap = None,
       pointwiseExploitability = None,
+      pointwiseExploitabilityProvenance =
+        ValueProvenance.Absent(s"fallback bundle does not compute pointwise exploitability: $reason"),
       deploymentExploitability = None,
       certification = CertificationResult.Unavailable(reason),
       chainWorldValues = Map.empty,
+      fourWorldProvenance =
+        ValueProvenance.Absent(s"fallback bundle does not compute four-world decomposition: $reason"),
       notes = Vector(s"BaselineFallback: $reason")
     )
 
@@ -976,17 +1002,22 @@ class StrategicEngine(val config: StrategicEngine.Config):
       val heroBucket = estimateHeroBucket(gameState)
       val heroClass = StrategicEngine.estimateHeroClass(heroBucket)
       val baseline = Ev(bundle.baselineValue)
-      val fw = bundle.fourWorld.getOrElse(
-        FourWorld(v11 = baseline, v10 = baseline, v01 = baseline, v00 = baseline)
-      )
 
       val session = _sessionState.nn
       val opponentPosterior = session.rivalBeliefs.values.headOption.map(_.typePosterior)
 
       // v0.31.1 optional fields from certification data
-      val gridWorldValues = bundle.fourWorld.map { fwv =>
-        GridWorld.all.map(gw => gw -> BridgeResult.Exact(fwv(gw))).toMap
-      }
+      val gridWorldValues = bundle.fourWorldProvenance match
+        case ValueProvenance.SolverGrounded =>
+          bundle.fourWorld.map { fwv =>
+            GridWorld.all.map(gw => gw -> BridgeResult.Exact(fwv(gw))).toMap
+          }
+        case ValueProvenance.Approximate(source) =>
+          bundle.fourWorld.map { fwv =>
+            GridWorld.all.map(gw => gw -> BridgeResult.Approximate(fwv(gw), source)).toMap
+          }
+        case ValueProvenance.Absent(reason) =>
+          Some(GridWorld.all.map(gw => gw -> BridgeResult.Absent(reason)).toMap)
       val securityValue = bundle.certification match
         case CertificationResult.TabularCertification(bStar, _, _, _, _) =>
           if bStar.nonEmpty then Some(Ev(bStar.min)) else None
@@ -1001,6 +1032,13 @@ class StrategicEngine(val config: StrategicEngine.Config):
         id -> StrategicEngine.PosteriorReputationalProjection.project(belief)
       }
 
+      val fidelityNotes =
+        Vector("snapshot from StrategicEngine decision bundle") ++ (bundle.fourWorldProvenance match
+          case ValueProvenance.SolverGrounded => Vector.empty
+          case ValueProvenance.Approximate(source) => Vector(s"FourWorld/gridWorldValues approximate: $source")
+          case ValueProvenance.Absent(reason) => Vector(s"FourWorld unavailable: $reason")
+        )
+
       strategicBridge.StrategicSnapshot(
         street = street,
         pot = Chips(gameState.pot),
@@ -1008,14 +1046,14 @@ class StrategicEngine(val config: StrategicEngine.Config):
         toCall = Chips(gameState.toCall),
         actionSignal = bridgeActionSignal(heroAction, gameState),
         strategicClass = heroClass,
-        fourWorld = fw,
+        fourWorld = bundle.fourWorld,
         baseline = baseline,
         opponentClassPosterior = opponentPosterior,
         gridWorldValues = gridWorldValues,
         securityValue = securityValue,
         safetyCertificateSummary = safetyCertSummary,
         reputationViews = reputationViews,
-        bridgeFidelityNotes = Vector("snapshot from StrategicEngine decision bundle"),
+        bridgeFidelityNotes = fidelityNotes,
         attributionEnabled = true
       )
     }

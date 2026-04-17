@@ -74,6 +74,10 @@ class ApproximatePathTest extends munit.FunSuite:
         bundle.certification match
           case _: CertificationResult.LocalRobustScreening => () // expected
           case other => fail(s"Expected LocalRobustScreening, got $other")
+        assertEquals(
+          bundle.fourWorldProvenance,
+          ValueProvenance.Absent("WPomcp path does not compute four-world decomposition")
+        )
       case None =>
         // Native solver not available -- bundle comes from fallback path
         // This is acceptable; the fallback still populates the bundle
