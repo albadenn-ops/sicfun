@@ -166,6 +166,16 @@ Gate:
 
 Ground `PokerPomcpFormulation` after the PFT path is stable.
 
+Status note, 2026-04-17:
+
+- Implemented in the deprecated formulation path. The `FormulationInput`
+  WPomcp path now uses percentile-calibrated showdown equity tables by default,
+  and `GroundedValueSource` overrides the current hero row from exact
+  `HandStrengthEstimator.fastGtoStrength` when hero cards are known.
+- The legacy linear showdown-equity helper still exists as a compatibility
+  helper for the old toy adapter/tests, but it is no longer used by the
+  `FormulationInput`/`StrategicEngine`-driven WPomcp path.
+
 Required replacements:
 
 - replace coarse linear showdown-equity heuristic with a real or calibrated

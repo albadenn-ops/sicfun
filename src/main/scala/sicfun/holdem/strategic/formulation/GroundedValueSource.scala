@@ -10,6 +10,8 @@ import sicfun.holdem.types.*
   * for A2 compatibility when only a StrengthHint is present.
   */
 object GroundedValueSource extends FormulationValueSource:
+  private def bucketForStrength(strength: Double, numBuckets: Int): Int =
+    math.min(numBuckets - 1, math.max(0, (strength * numBuckets).toInt))
 
   override def estimateSpotEquity(spot: FormulationSpot): BridgeResult[Double] =
     spot.heroValueInput match
@@ -26,10 +28,30 @@ object GroundedValueSource extends FormulationValueSource:
       numHeroBuckets: Int,
       numRivalBuckets: Int
   ): BridgeResult[Array[Double]] =
-    BridgeResult.Approximate(
-      PokerPomcpFormulation.buildLinearShowdownEquity(numHeroBuckets, numRivalBuckets),
-      "A3: linear showdown equity heuristic retained"
-    )
+    val calibrated = PokerPomcpFormulation.buildShowdownEquity(numHeroBuckets, numRivalBuckets)
+    spot.heroValueInput match
+      case HeroValueInput.ExactHoleCards(cards) =>
+        val gs = spot.gameState
+        val exactStrength = HandStrengthEstimator.fastGtoStrength(cards, gs.board, gs.street)
+        val heroBucket = bucketForStrength(exactStrength, numHeroBuckets)
+        val rowBase = heroBucket * numRivalBuckets
+        var rivalBucket = 0
+        while rivalBucket < numRivalBuckets do
+          calibrated(rowBase + rivalBucket) = PokerPomcpFormulation.calibratedBucketEquity(
+            heroStrength = exactStrength,
+            rivalBucket = rivalBucket,
+            numRivalBuckets = numRivalBuckets
+          )
+          rivalBucket += 1
+        BridgeResult.Approximate(
+          calibrated,
+          "calibrated showdown equity with exact hero row"
+        )
+      case HeroValueInput.StrengthHint(_, _) =>
+        BridgeResult.Approximate(
+          calibrated,
+          "calibrated percentile showdown equity"
+        )
 
   override def estimateActionValue(
       spot: FormulationSpot,

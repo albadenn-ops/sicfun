@@ -1,6 +1,7 @@
 package sicfun.holdem.engine
 
 import munit.FunSuite
+import sicfun.core.{Card, Rank, Suit}
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.formulation.*
 import sicfun.holdem.strategic.types.*
@@ -54,6 +55,12 @@ class PokerPomcpFormulationTest extends FunSuite:
     )
     assertEquals(equity.length, 100)
     assert(equity.forall(e => e >= 0.0 && e <= 1.0))
+    assert(!equity.sameElements(PokerPomcpFormulation.buildLinearShowdownEquity(10, 10)))
+    val middleRow = equity.slice(4 * 10, 5 * 10)
+    assert(middleRow.sliding(2).forall {
+      case Array(left, right) => left >= right
+      case _ => true
+    }, s"expected monotone decreasing calibrated row, got ${middleRow.toVector}")
 
   test("buildTerminalFlags marks fold as HeroFold"):
     val flags = PokerPomcpFormulation.buildTerminalFlags(numPubStates = 192, numActions = 3)
@@ -232,3 +239,37 @@ class PokerPomcpFormulationTest extends FunSuite:
     assertEqualsDouble(mixedInput.model.rivalPolicy(bluffSliceBase + 0), 0.0, 1e-10)
     assertEqualsDouble(mixedInput.model.rivalPolicy(bluffSliceBase + 1), 1.0, 1e-10)
     assertEqualsDouble(mixedInput.model.rivalPolicy(bluffSliceBase + 2), 0.0, 1e-10)
+
+  test("FormulationInput overload uses grounded showdown equity for exact hero cards"):
+    val cards = HoleCards(
+      Card(Rank.Ace, Suit.Spades),
+      Card(Rank.King, Suit.Spades)
+    )
+    val spot = FormulationSpot(
+      gameState = mkGameState,
+      candidateActions = testActions,
+      heroValueInput = HeroValueInput.ExactHoleCards(cards),
+      rivalBeliefs = mkRivalBeliefs
+    )
+    val input = FormulationInput(
+      spot = spot,
+      valueSource = GroundedValueSource,
+      rivalPolicySource = new FormulationRivalPolicySource:
+        override def actionPolicy(
+            cls: StrategicClass,
+            spot: FormulationSpot
+        ): BridgeResult[Vector[Double]] =
+          BridgeResult.Exact(Vector(0.25, 0.5, 0.25)),
+      actionSource = NoopActionSource
+    )
+
+    val mixedInput = PokerPomcpFormulation.buildSearchInputV2(input, particlesPerRival = 10)
+    val linear = PokerPomcpFormulation.buildLinearShowdownEquity(
+      mixedInput.model.numHeroBuckets,
+      mixedInput.model.numRivalBuckets
+    )
+
+    assert(
+      !mixedInput.model.showdownEquity.sameElements(linear),
+      "exact hero FormulationInput path should not fall back to linear showdown equity"
+    )

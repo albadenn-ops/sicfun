@@ -2,6 +2,7 @@ package sicfun.holdem.strategic.formulation
 
 import munit.FunSuite
 import sicfun.core.{Card, Rank, Suit}
+import sicfun.holdem.engine.{HandStrengthEstimator, PokerPomcpFormulation}
 import sicfun.holdem.strategic.types.{BridgeResult, Ev}
 import sicfun.holdem.types.*
 
@@ -77,11 +78,30 @@ class GroundedValueSourceTest extends FunSuite:
         assertEqualsDouble(eq, 7.0 / 9.0, 1e-10)
       case other => fail(s"Expected Approximate for StrengthHint, got $other")
 
-  test("showdownEquityTable returns Approximate with linear heuristic"):
+  test("showdownEquityTable returns calibrated table with exact hero row"):
+    val exactStrength = HandStrengthEstimator.fastGtoStrength(
+      aceKingSuited,
+      Board.empty,
+      Street.Preflop
+    )
+    val heroBucket = math.min(9, math.max(0, (exactStrength * 10.0).toInt))
+    val linear = PokerPomcpFormulation.buildLinearShowdownEquity(10, 10)
     GroundedValueSource.showdownEquityTable(makeSpot(aceKingSuited), 10, 10) match
-      case BridgeResult.Approximate(table, _) =>
+      case BridgeResult.Approximate(table, note) =>
         assertEquals(table.length, 100)
         assert(table.forall(equity => equity >= 0.0 && equity <= 1.0))
+        assert(!note.contains("linear"), s"unexpected note: $note")
+        assert(!table.sameElements(linear), "grounded showdown table should not use linear heuristic")
+        val row = table.slice(heroBucket * 10, heroBucket * 10 + 10)
+        assert(row.sliding(2).forall {
+          case Array(left, right) => left >= right
+          case _ => true
+        }, s"exact hero row should be monotone decreasing: ${row.toVector}")
+        assertEqualsDouble(
+          row(heroBucket),
+          PokerPomcpFormulation.calibratedBucketEquity(exactStrength, heroBucket, 10),
+          1e-10
+        )
       case other => fail(s"Expected Approximate, got $other")
 
   test("estimateActionValue: fold has negative value, raise exceeds fold for strong hand"):

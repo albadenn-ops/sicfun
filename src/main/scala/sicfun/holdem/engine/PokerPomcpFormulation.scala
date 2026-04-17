@@ -162,14 +162,10 @@ object PokerPomcpFormulation:
       i += 1
     result
 
-  /** Default showdown equity table: linear heuristic.
-    * Replace with calibrated bucket-vs-bucket equity from HeadsUpEquityTable.
-    */
-  val defaultShowdownEquity: (Int, Int) => Array[Double] = buildLinearShowdownEquity
+  /** Default showdown equity table: calibrated percentile bucket-vs-bucket equity. */
+  val defaultShowdownEquity: (Int, Int) => Array[Double] = buildShowdownEquity
 
-  /** Linear equity heuristic: equity = 0.5 + (heroBucket - rivalBucket) * 0.4 / max(H, R).
-    * Named explicitly so callers know this is an approximation.
-    */
+  /** Legacy linear equity heuristic retained for compatibility helpers and tests only. */
   def buildLinearShowdownEquity(numHeroBuckets: Int, numRivalBuckets: Int): Array[Double] =
     Array.tabulate(numHeroBuckets * numRivalBuckets) { idx =>
       val hb = idx / numRivalBuckets
@@ -178,20 +174,53 @@ object PokerPomcpFormulation:
       0.5 + diff * 0.4
     }
 
+  private def bucketLower(bucket: Int, numBuckets: Int): Double =
+    bucket.toDouble / numBuckets.toDouble
+
+  private def bucketUpper(bucket: Int, numBuckets: Int): Double =
+    (bucket + 1).toDouble / numBuckets.toDouble
+
+  private def bucketMidpoint(bucket: Int, numBuckets: Int): Double =
+    (bucketLower(bucket, numBuckets) + bucketUpper(bucket, numBuckets)) * 0.5
+
+  /** Percentile-calibrated showdown equity against a rival bucket.
+    *
+    * Treats bucket ids as contiguous percentile bands ordered by hand strength. The result is
+    * the fraction of the rival bucket's band that the hero strength outranks.
+    */
+  def calibratedBucketEquity(
+      heroStrength: Double,
+      rivalBucket: Int,
+      numRivalBuckets: Int
+  ): Double =
+    val low = bucketLower(rivalBucket, numRivalBuckets)
+    val high = bucketUpper(rivalBucket, numRivalBuckets)
+    if heroStrength <= low then 0.0
+    else if heroStrength >= high then 1.0
+    else (heroStrength - low) / (high - low)
+
   /** Build showdown equity table: E[hero equity | heroBucket, rivalBucket].
     *
     * Indexed as: showdownEquity(heroBucket * numRivalBuckets + rivalBucket)
-    * Delegates to buildLinearShowdownEquity by default.
+    * Uses percentile-calibrated bucket bands rather than the old linear heuristic.
     *
     * @param numHeroBuckets  number of hero hand-strength buckets
     * @param numRivalBuckets number of rival hand-strength buckets
-    * @return flat array of length numHeroBuckets * numRivalBuckets, all in [0.1, 0.9]
+    * @return flat array of length numHeroBuckets * numRivalBuckets, all in [0, 1]
     */
   def buildShowdownEquity(
       numHeroBuckets: Int,
       numRivalBuckets: Int
   ): Array[Double] =
-    buildLinearShowdownEquity(numHeroBuckets, numRivalBuckets)
+    Array.tabulate(numHeroBuckets * numRivalBuckets) { idx =>
+      val hb = idx / numRivalBuckets
+      val rb = idx % numRivalBuckets
+      calibratedBucketEquity(
+        heroStrength = bucketMidpoint(hb, numHeroBuckets),
+        rivalBucket = rb,
+        numRivalBuckets = numRivalBuckets
+      )
+    }
 
   /** Build terminal flags: outcome code at each (pubState, action) pair.
     *
@@ -229,7 +258,7 @@ object PokerPomcpFormulation:
   /** Build complete SearchInputV2 from poker game state and strategic beliefs.
     *
     * @param showdownEquityFn equity table builder; defaults to [[defaultShowdownEquity]]
-    *        (linear heuristic). Callers may inject calibrated bucket-vs-bucket equity.
+    *        (percentile-calibrated bucket-vs-bucket equity).
     */
   def buildSearchInputV2(
       gameState: GameState,
@@ -378,7 +407,7 @@ object PokerPomcpFormulation:
       input.valueSource.showdownEquityTable(input.spot, h, r) match
         case BridgeResult.Exact(table) => table
         case BridgeResult.Approximate(table, _) => table
-        case BridgeResult.Absent(_) => buildLinearShowdownEquity(h, r)
+        case BridgeResult.Absent(_) => buildShowdownEquity(h, r)
 
   /** Build SearchInputV2 from the shared formulation contract. */
   def buildSearchInputV2(
