@@ -1,0 +1,32 @@
+Phase 2 A3 vs Baseline Comparison
+Baseline: C:\Users\alexl\code\math\untitled\data\phase2-baseline\2026-04-17-1519
+A3: C:\Users\alexl\code\math\untitled\data\phase2-a3\2026-04-17-1601
+BaselineCommit: fcbc3a8af76ac80e502ed1765faf87048e79289a
+A3Commit: 048a7377040c2e977c99b9d1fbf0c55063457a25
+
+Decision corpus
+- 12 of 12 rows matched exactly on selectedAction, upstreamAction, perActionEvs, overlayChanged, softVetoCount, and adjustmentCount.
+- Strategic mean latency moved from 30.088 ms to 30.905 ms (+0.817 ms).
+- Adaptive mean latency moved from 235.988 ms to 215.214 ms (-20.774 ms).
+
+Hall self-play
+- 18 of 18 seat-normalized matchups matched exactly on heroBbPer100, heroWinRate, and status.
+- Mean runtime by hero style:
+  adaptive: 50.310 s -> 52.144 s (+1.835 s)
+  gto: 30.654 s -> 30.010 s (-0.644 s)
+  strategic: 54.338 s -> 52.125 s (-2.213 s)
+- No new failures or retries were needed in the A3 hall run.
+
+Slumbot
+- Treat 50-hand bb/100 as noise only; use this surface as a latency and protocol-health probe.
+- Adaptive bb/100 moved from -945.000 to -760.000.
+- Strategic bb/100 moved from 689.000 to 590.000.
+- Strategic overlayDecisions moved from 101 to 108.
+- Strategic overlayChangeRate stayed at 0.0%.
+- Strategic vetoRate stayed at 0.0%.
+- Strategic mean latency moved from 40.931 ms to 37.588 ms.
+
+Interpretation
+- The deterministic surfaces are unchanged.
+- Inference from code: the benchmarked runtime surfaces do not enter the grounded A3 formulation path; they stay on the Phase 1 overlay path.
+- The rerun therefore supports "A3 did not bleed into overlay-backed runtime behavior" but does not directly validate grounded formulation quality.

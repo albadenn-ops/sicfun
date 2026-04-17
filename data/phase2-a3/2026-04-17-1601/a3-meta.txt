@@ -1,0 +1,18 @@
+Phase 2 A3 Rerun Capture
+Date: 2026-04-17-1601
+Seed: 42
+HallHands: 1000
+BaselineRef: C:\Users\alexl\code\math\untitled\data\phase2-baseline\2026-04-17-1519
+GitCommit: 048a7377040c2e977c99b9d1fbf0c55063457a25
+GitBranch: bench/a3-rerun-20260417-160046
+CaptureWorktree: C:\Users\alexl\code\math\untitled-a3-20260417-160046
+ArtifactsRoot: C:\Users\alexl\code\math\untitled\data\phase2-a3\2026-04-17-1601
+
+DecisionCorpusCommand: sbt "runMain sicfun.holdem.bench.DecisionCorpusBenchmark 42 ..\untitled\data\phase2-a3\2026-04-17-1601\decision-corpus"
+HallCommand: powershell -ExecutionPolicy Bypass -File data\phase2-a3\2026-04-17-1601\capture-hall-baseline-sbt.ps1 -Hands 1000 -Seed 42 -OutDir data\phase2-a3\2026-04-17-1601\hall
+SlumbotAdaptiveCommand: sbt "runMain sicfun.holdem.runtime.protocol.SlumbotMatchRunner --hands=50 --heroMode=adaptive --seed=42 --outDir=..\untitled\data\phase2-a3\2026-04-17-1601\slumbot-adaptive"
+SlumbotStrategicCommand: sbt "runMain sicfun.holdem.runtime.protocol.SlumbotMatchRunner --hands=50 --heroMode=strategic --seed=42 --outDir=..\untitled\data\phase2-a3\2026-04-17-1601\slumbot-strategic"
+
+HallRunnerNote: Reused the preserved capture-hall-baseline-sbt.ps1 helper because scripts\match\run-hall-matchups.ps1 still fails under Java 22 when its helper invokes sbt package and hits UnsupportedOperationException for the deprecated Security Manager.
+SurfaceCoverageNote: By local code inspection, DecisionCorpusBenchmark and SlumbotMatchRunner route strategic decisions through HeroDecisionPipeline.decideHeroStrategic, while TexasHoldemPlayingHall routes directly to helper.decideWithOverlay. All three stay on the overlay path rather than StrategicEngine.decide(gameState, candidateActions). This rerun is therefore a non-regression check for runtime surfaces rather than a direct end-to-end measurement of the grounded formulation path added in A3.
+RunnerNote: An initial attempt to run both Slumbot legs in parallel hit sbt boot-server lock contention. The missing adaptive leg was rerun sequentially and completed successfully.

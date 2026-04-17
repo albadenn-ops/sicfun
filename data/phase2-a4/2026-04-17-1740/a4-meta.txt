@@ -1,0 +1,20 @@
+Phase 2 A4 Rerun Capture
+Date: 2026-04-17-1740
+Seed: 42
+HallHands: 1000
+BaselineRef: C:\Users\alexl\code\math\untitled\data\phase2-baseline\2026-04-17-1519
+A3Ref: C:\Users\alexl\code\math\untitled\data\phase2-a3\2026-04-17-1601
+GitCommit: f26cbe3a257b1850a7c23a39e059b4b0281147bb
+GitBranch: bench/a4-grounding-20260417-173122
+CaptureWorktree: C:\Users\alexl\code\math\untitled-a4-20260417-173122
+ArtifactsRoot: C:\Users\alexl\code\math\untitled\data\phase2-a4\2026-04-17-1740
+
+DecisionCorpusCommand: sbt "runMain sicfun.holdem.bench.DecisionCorpusBenchmark 42 ..\untitled\data\phase2-a4\2026-04-17-1740\decision-corpus"
+HallCommand: powershell -ExecutionPolicy Bypass -File data\phase2-a4\2026-04-17-1740\capture-hall-baseline-sbt.ps1 -Hands 1000 -Seed 42 -OutDir data\phase2-a4\2026-04-17-1740\hall
+SlumbotAdaptiveCommand: sbt "runMain sicfun.holdem.runtime.protocol.SlumbotMatchRunner --hands=50 --heroMode=adaptive --seed=42 --outDir=..\untitled\data\phase2-a4\2026-04-17-1740\slumbot-adaptive"
+SlumbotStrategicCommand: sbt "runMain sicfun.holdem.runtime.protocol.SlumbotMatchRunner --hands=50 --heroMode=strategic --seed=42 --outDir=..\untitled\data\phase2-a4\2026-04-17-1740\slumbot-strategic"
+FocusedValidationCommand: sbt "testOnly sicfun.holdem.strategic.formulation.* sicfun.holdem.engine.FormalPathTest sicfun.holdem.engine.ApproximatePathTest sicfun.holdem.engine.StrategicEngineTest sicfun.holdem.engine.PokerPftFormulationTest sicfun.holdem.engine.PokerPomcpFormulationTest sicfun.holdem.engine.FourWorldSolveTest sicfun.holdem.bench.DecisionCorpusBenchmarkTest"
+FocusedValidationResult: 121 passed, 0 failed
+
+HallRunnerNote: Reused the preserved capture-hall-baseline-sbt.ps1 helper because scripts\match\run-hall-matchups.ps1 still fails under Java 22 when its helper invokes sbt package and hits UnsupportedOperationException for the deprecated Security Manager.
+SurfaceCoverageNote: By local code inspection, DecisionCorpusBenchmark and SlumbotMatchRunner route strategic decisions through HeroDecisionPipeline.decideHeroStrategic, while TexasHoldemPlayingHall routes directly to helper.decideWithOverlay. All three stay on the overlay path rather than StrategicEngine.decide(gameState, candidateActions). This rerun is therefore a non-regression check for runtime surfaces rather than a direct end-to-end measurement of the grounded WPomcp formulation path.

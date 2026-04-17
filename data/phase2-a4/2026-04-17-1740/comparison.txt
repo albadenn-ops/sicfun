@@ -1,0 +1,33 @@
+Phase 2 A4 vs Baseline Comparison
+Baseline: C:\Users\alexl\code\math\untitled\data\phase2-baseline\2026-04-17-1519
+A4: C:\Users\alexl\code\math\untitled\data\phase2-a4\2026-04-17-1740
+BaselineCommit: fcbc3a8af76ac80e502ed1765faf87048e79289a
+A4Commit: f26cbe3a257b1850a7c23a39e059b4b0281147bb
+
+Decision corpus
+- 12 of 12 rows matched exactly on selectedAction, upstreamAction, perActionEvs, overlayChanged, softVetoCount, and adjustmentCount.
+- Strategic mean latency moved from 30.088 ms to 23.315 ms (-6.773 ms).
+- Adaptive mean latency moved from 235.988 ms to 206.313 ms (-29.676 ms).
+
+Hall self-play
+- 18 of 18 seat-normalized matchups matched exactly on heroBbPer100, heroWinRate, and status.
+- Mean runtime by hero style:
+  adaptive: 50.310 s -> 50.196 s (-0.114 s)
+  gto: 30.654 s -> 29.987 s (-0.666 s)
+  strategic: 54.338 s -> 52.309 s (-2.029 s)
+- No new failures or retries were needed in the A4 hall run.
+
+Slumbot
+- Treat 50-hand bb/100 as noise only; use this surface as a latency and protocol-health probe.
+- Adaptive bb/100 moved from -945.000 to -585.000.
+- Strategic bb/100 moved from 689.000 to -134.000.
+- Strategic overlayDecisions moved from 101 to 135.
+- Strategic overlayChangeRate stayed at 0.0%.
+- Strategic vetoRate stayed at 0.0%.
+- Strategic mean latency moved from 40.931 ms to 34.938 ms.
+- Slumbot is server-driven and not deterministic under local seed control; decision-count drift should not be read as A4 signal.
+
+Interpretation
+- The deterministic surfaces are unchanged.
+- Inference from code: the benchmarked runtime surfaces still do not enter the grounded WPomcp formulation path; they stay on the Phase 1 overlay path.
+- The rerun therefore supports "A4 did not bleed into overlay-backed runtime behavior" but does not directly validate grounded WPomcp formulation quality.
