@@ -38,6 +38,14 @@ Artifact path convention:
 - Proceeding into A5 therefore means accepting the known full-suite instability as separate
   repo-health debt unless a newly appearing failure reproduces in isolation as an A-track
   semantic regression.
+- A5 uses `27e72d4` as its pre-change audit point. Subsequent A5 sub-slices should compare
+  focused-slice and isolated-rerun behavior against that tip rather than against the earlier
+  `fa1347e` full-suite run.
+- Residual non-grounded surfaces after the current A5 code slices are explicit carve-outs:
+  synthetic `StrategicSnapshot.build` / `ValidationRunner` reporting, legacy raw-parameter
+  `PokerPftFormulation` helpers, `LegacyToyFormulationInput`, and deferred A4 items 2 and 3.
+- The grounded certification path remains certification/offline-only. Runtime rollout is still
+  a separate Phase 3 decision.
 
 ## Operational Notes
 
@@ -58,3 +66,6 @@ Artifact path convention:
   not a `.gitignore` miss. `src/main/native/build/` is already ignored, but those binaries are
   tracked in git today, so test runs rewrite tracked files. Cleaning that up requires
   de-tracking or relocating the generated native outputs rather than another ignore rule.
+- On `bench/a5-certification-20260417-192934`, commit `27e72d4` proved the cold regeneration
+  path by passing `sbt "clean; compile"` after the native build outputs were removed from the
+  index. `src/main/native/build/` is now ignored rather than tracked on that branch line.

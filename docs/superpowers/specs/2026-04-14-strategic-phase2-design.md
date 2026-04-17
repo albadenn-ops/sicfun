@@ -209,9 +209,36 @@ This includes:
 - any four-world decomposition values that still depend on the toy
   formulations
 
+Status note, 2026-04-17:
+
+- Implemented on the deprecated `StrategicEngine` certification/offline path.
+  `DecisionEvaluationBundle` now carries machine-checkable provenance for
+  robust lower bounds, pointwise exploitability, four-world values, and reveal
+  decisions.
+- `StrategicEngine.buildSnapshot` no longer fabricates a baseline-filled
+  `FourWorld` when the certification bundle does not provide one. WPomcp /
+  `LocalRobustScreening` snapshots now surface `fourWorld = None` and honest
+  absent `gridWorldValues`; PftDpw / `TabularCertification` snapshots mark
+  grid-world values `Exact` only when the four-world source is solver-grounded.
+- The PftDpw reveal-schedule path no longer uses `heroBucket / 9.0`. It now
+  consumes `FormulationInput.valueSource.estimateSpotEquity`, carrying grounded
+  provenance when exact hero cards are available and approximate provenance
+  otherwise.
+- Grounded certification outputs remain certification/offline-only. Production
+  runtime behavior still stays on the Phase 1 overlay path pending a later
+  Phase 3 exposure decision.
+- Explicit carve-outs for this slice:
+  synthetic `StrategicSnapshot.build` / `ValidationRunner` reporting remains
+  approximate by construction; raw-parameter `PokerPftFormulation` overloads and
+  `LegacyToyFormulationInput` remain legacy helpers; the `PokerPomcpFormulation`
+  `BridgeResult.Absent` fallback remains compatibility-only; A4 deferred items 2
+  and 3 (class-prior reduction, legal-action / terminal cleanup) remain outside
+  A5.
+
 Gate:
 
-- Certification artifacts describe poker-grounded values, not proxy bucket
+- Certification artifacts produced by the `FormulationInput`/`StrategicEngine`-
+  driven certification path describe poker-grounded values, not proxy bucket
   values or handcrafted reward scales.
 
 ## Track B - Repeatable Benchmarks and Rollout Gates
