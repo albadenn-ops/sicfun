@@ -29,6 +29,16 @@ Artifact path convention:
   therefore show that formulation changes did not bleed into runtime behavior; they do not
   directly benchmark the grounded formulation path itself.
 
+## Audit Policy
+
+- For Track A work, the authoritative semantic signals are the focused formulation slice and
+  isolated reruns of any suite that newly appears in the full-repo audit.
+- Full `sbt test` pass counts are still useful repo-health telemetry, but on this branch they
+  are treated as informational because the suite contains load-sensitive timeout churn.
+- Proceeding into A5 therefore means accepting the known full-suite instability as separate
+  repo-health debt unless a newly appearing failure reproduces in isolation as an A-track
+  semantic regression.
+
 ## Operational Notes
 
 - Hall capture uses the preserved `capture-hall-baseline-sbt.ps1` helper because
