@@ -1,0 +1,83 @@
+Full A4 branch audit
+Commit: fa1347e0577d6a341f4e8d73a001c0bcabf40d4f
+Branch: bench/a4-grounding-20260417-173122
+Command: sbt test
+Observed result: 1806 passed, 8 failed, 1 ignored
+
+Failing suites from target/test-reports:
+
+1. sicfun.holdem.cfr.HoldemCfrExternalValidationParityTest
+   - Namespace: cfr
+   - Failures: 1
+   - First failure: `native CPU full solve passes external comparison gate against scala reference`
+   - Message: `test timed out after 180 seconds`
+
+2. sicfun.holdem.equity.EquityAccuracyTest
+   - Namespace: equity
+   - Failures: 1
+   - First failure: `specific matchup: AA vs KK (vs cardfight.com)`
+   - Message: `test timed out after 30 seconds`
+
+3. sicfun.holdem.equity.HeadsUpEquityCanonicalTableTest
+   - Namespace: equity
+   - Failures: 1
+   - First failure: `buildAll limit is applied to canonical key count`
+   - Message: `test timed out after 90 seconds`
+
+4. sicfun.holdem.validation.CfrGtoCalibrationTest
+   - Namespace: validation
+   - Failures: 1
+   - First failure: `CFR equilibrium villain produces no false positive leak hints under the configured auto provider`
+   - Message: false-positive leak hint `overfold-river-aggression` on CFR equilibrium villain
+
+5. sicfun.holdem.validation.GtoBaselineFalsePositiveTest
+   - Namespace: validation
+   - Failures: 1
+   - First failure: `CFR GTO baseline produces no false positive leak hints`
+   - Message: `test timed out after 600 seconds`
+
+6. sicfun.holdem.validation.HeadsUpSimulatorTest
+   - Namespace: validation
+   - Failures: 1
+   - First failure: `multiple hands produce different cards`
+   - Message: `test timed out after 90 seconds`
+
+7. sicfun.holdem.validation.ShowdownConsumptionTest
+   - Namespace: validation
+   - Failures: 1
+   - First failure: `GTO control does not produce showdown-specific false positives`
+   - Message: `test timed out after 600 seconds`
+
+8. sicfun.holdem.web.HandHistoryReviewServerTest
+   - Namespace: web
+   - Failures: 1
+   - First failure: `async review flow accepts a reproducible exact-gto hall export`
+   - Message: `test timed out after 30 seconds`
+
+Namespace summary:
+- strategic.* failures: 0
+- engine.* failures: 0
+- bench.* failures: 0
+- runtime.* failures: 0
+
+Delta versus the prior frozen A3 full-test audit at `048a737`:
+- Shared failing suites: `EquityAccuracyTest`, `HeadsUpEquityCanonicalTableTest`,
+  `CfrGtoCalibrationTest`, `GtoBaselineFalsePositiveTest`, `HeadsUpSimulatorTest`,
+  `ShowdownConsumptionTest`
+- Newly failing at `fa1347e`: `HoldemCfrExternalValidationParityTest`,
+  `HandHistoryReviewServerTest`
+- No longer failing at `fa1347e`: `AlwaysOnDecisionLoopTest`,
+  `HoldemCfrBatchSolverTest`, `HandHistoryReviewSimulationProofTest`
+- The earlier `AlwaysOnDecisionLoopTest` timeout waiver is therefore not relevant to the
+  current full-repo failure set.
+
+Focused slice still green on the same branch:
+- Command: `sbt "testOnly sicfun.holdem.strategic.formulation.* sicfun.holdem.engine.FormalPathTest sicfun.holdem.engine.ApproximatePathTest sicfun.holdem.engine.StrategicEngineTest sicfun.holdem.engine.PokerPftFormulationTest sicfun.holdem.engine.PokerPomcpFormulationTest sicfun.holdem.engine.FourWorldSolveTest sicfun.holdem.bench.DecisionCorpusBenchmarkTest"`
+- Result: `121 passed, 0 failed`
+
+Interpretation:
+- The A4 formulation-focused gate remains green.
+- Full-repo `sbt test` at `fa1347e` is not a clean reproduction of the earlier `048a737`
+  failure set.
+- Because the failure set changed, this audit should be treated as a pre-A5 blocking triage
+  result unless the new delta is explicitly waived.

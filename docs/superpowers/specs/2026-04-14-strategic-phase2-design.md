@@ -178,8 +178,8 @@ Status note, 2026-04-17:
   `FormulationInput`/`StrategicEngine`-driven WPomcp path.
 - Required replacement items 2 (static class-prior policy tables) and 3
   (legal-action-history / terminal handling cleanup) were not changed in this
-  slice and are deferred to follow-up cleanup before or during A5
-  certification rebinding.
+  slice and are deferred to follow-up cleanup before A5 certification
+  rebinding.
 
 Required replacements:
 
@@ -359,6 +359,9 @@ Required order:
 10. Re-run Track B gates
 
 This ordering is deliberate. Track A is not allowed to outrun measurement.
+As of `fa1347e`, A5 is additionally blocked on triaging or explicitly waiving
+the changed full-repo `sbt test` failure set recorded in
+`docs/superpowers/bench/failures-at-fa1347e.txt`.
 
 ## Deliverables
 
