@@ -469,6 +469,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       deploymentExploitability = None,
       certification = certification,
       chainWorldValues = Map.empty,
+      fourWorld = None,
       fourWorldProvenance =
         ValueProvenance.Absent("WPomcp path does not compute four-world decomposition"),
       notes = if withinTolerance then Vector("LocalRobustScreening: within tolerance")
@@ -710,12 +711,32 @@ class StrategicEngine(val config: StrategicEngine.Config):
         case None => Map.empty
 
       // 7. RevealSchedule (Def 51) — hero information disclosure decision
-      val revealDec = config.revealSchedule.flatMap { schedule =>
-        val equity = Ev(heroBucket / 9.0)
-        session.rivalBeliefs.keys.headOption.map { rivalId =>
-          schedule.classify(rivalId, gameState.street, equity)
-        }
-      }
+      val (revealDec, revealDecisionProvenance) = config.revealSchedule match
+        case None =>
+          (Option.empty[RevealDecision], ValueProvenance.Absent("reveal schedule not configured"))
+        case Some(schedule) =>
+          session.rivalBeliefs.keys.headOption match
+            case None =>
+              (Option.empty[RevealDecision], ValueProvenance.Absent("reveal schedule has no rival to evaluate"))
+            case Some(rivalId) =>
+              schedule.threshold(rivalId, gameState.street) match
+                case None =>
+                  (Some(RevealDecision.Unknown), ValueProvenance.Absent("no reveal threshold available for rival/stage"))
+                case Some(threshold) =>
+                  formulationInput.valueSource.estimateSpotEquity(formulationInput.spot) match
+                    case BridgeResult.Exact(eq) =>
+                      val decision = schedule.classify(rivalId, gameState.street, Ev(eq))
+                      val provenance =
+                        if threshold.isExact then
+                          ValueProvenance.Grounded("reveal decision from exact hero-card spot equity and exact threshold")
+                        else
+                          ValueProvenance.Approximate("reveal decision from exact hero-card spot equity and approximate threshold")
+                      (Some(decision), provenance)
+                    case BridgeResult.Approximate(eq, note) =>
+                      val decision = schedule.classify(rivalId, gameState.street, Ev(eq))
+                      (Some(decision), ValueProvenance.Approximate(s"reveal decision from approximate spot equity: $note"))
+                    case BridgeResult.Absent(reason) =>
+                      (Option.empty[RevealDecision], ValueProvenance.Absent(s"reveal decision unavailable: $reason"))
 
       // 8. OperationalBaseline (A10) — compose from config + deployment set
       val opBaseline = Some(OperationalBaseline(
@@ -729,6 +750,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
         chainRiskProfile = riskProfileOpt,
         polarizationProfile = polProfile,
         revealDecision = revealDec,
+        revealDecisionProvenance = revealDecisionProvenance,
         operationalBaseline = opBaseline
       )
 
@@ -1012,6 +1034,10 @@ class StrategicEngine(val config: StrategicEngine.Config):
           bundle.fourWorld.map { fwv =>
             GridWorld.all.map(gw => gw -> BridgeResult.Exact(fwv(gw))).toMap
           }
+        case ValueProvenance.Grounded(_) =>
+          bundle.fourWorld.map { fwv =>
+            GridWorld.all.map(gw => gw -> BridgeResult.Exact(fwv(gw))).toMap
+          }
         case ValueProvenance.Approximate(source) =>
           bundle.fourWorld.map { fwv =>
             GridWorld.all.map(gw => gw -> BridgeResult.Approximate(fwv(gw), source)).toMap
@@ -1035,6 +1061,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       val fidelityNotes =
         Vector("snapshot from StrategicEngine decision bundle") ++ (bundle.fourWorldProvenance match
           case ValueProvenance.SolverGrounded => Vector.empty
+          case ValueProvenance.Grounded(source) => Vector(s"FourWorld/gridWorldValues grounded: $source")
           case ValueProvenance.Approximate(source) => Vector(s"FourWorld/gridWorldValues approximate: $source")
           case ValueProvenance.Absent(reason) => Vector(s"FourWorld unavailable: $reason")
         )

@@ -48,6 +48,10 @@ class CertificationTypesTest extends munit.FunSuite:
   test("ValueProvenance carries exact, approximate, and absent variants"):
     assertEquals(ValueProvenance.SolverGrounded, ValueProvenance.SolverGrounded)
     assertEquals(
+      ValueProvenance.Grounded("exact equity"),
+      ValueProvenance.Grounded("exact equity")
+    )
+    assertEquals(
       ValueProvenance.Approximate("approx source"),
       ValueProvenance.Approximate("approx source")
     )

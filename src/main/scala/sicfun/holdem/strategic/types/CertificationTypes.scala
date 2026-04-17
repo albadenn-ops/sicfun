@@ -51,6 +51,7 @@ final case class BluffAnnotation(
 /** Machine-checkable provenance for values carried through the certification path. */
 enum ValueProvenance:
   case SolverGrounded
+  case Grounded(source: String)
   case Approximate(source: String)
   case Absent(reason: String)
 

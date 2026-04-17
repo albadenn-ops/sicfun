@@ -7,7 +7,9 @@ import sicfun.holdem.strategic.types.*
 import sicfun.holdem.strategic.state.*
 import sicfun.holdem.strategic.safety.*
 import sicfun.holdem.strategic.exploitation.*
+import sicfun.holdem.strategic.decomposition.FourWorld
 import sicfun.holdem.strategic.solver.WPomcpRuntime
+import sicfun.holdem.engine.HandStrengthEstimator
 
 @scala.annotation.nowarn("msg=deprecated")
 class StrategicEngineTest extends FunSuite:
@@ -522,3 +524,74 @@ class StrategicEngineTest extends FunSuite:
       hasDrawPotential = false
     )
     assert(!snap.attributionEnabled, "static factory should default to attributionEnabled = false")
+
+  test("buildSnapshot preserves grounded fourWorld and exact grid-world values"):
+    val engine = new StrategicEngine(StrategicEngine.Config())
+    engine.initSession(rivalIds = Vector(PlayerId("v1")))
+    engine.startHand(testHeroCards)
+    val gs = minimalState
+    val fw = FourWorld(v11 = Ev(0.9), v10 = Ev(0.7), v01 = Ev(0.6), v00 = Ev(0.4))
+    engine.injectTestBundle(DecisionEvaluationBundle(
+      profileResults = Map.empty,
+      robustActionLowerBounds = Array(0.0),
+      baselineActionValues = Array(0.5, 0.3),
+      baselineValue = 0.5,
+      adversarialRootGap = None,
+      pointwiseExploitability = Some(Ev(0.1)),
+      pointwiseExploitabilityProvenance = ValueProvenance.Approximate("test exploitability"),
+      deploymentExploitability = None,
+      certification = CertificationResult.TabularCertification(
+        bStar = Array(0.1, 0.2),
+        requiredBudget = 0.2,
+        safeActionIndices = IndexedSeq(0),
+        certificateValid = true,
+        withinTolerance = true
+      ),
+      chainWorldValues = Map.empty,
+      fourWorld = Some(fw),
+      fourWorldProvenance = ValueProvenance.SolverGrounded,
+      notes = Vector("test: exact snapshot")
+    ))
+
+    val snapshot = engine.buildSnapshot(gs, PokerAction.Call)
+    assert(snapshot.isDefined)
+    assertEquals(snapshot.get.fourWorld, Some(fw))
+    assert(snapshot.get.gridWorldValues.isDefined)
+    assert(snapshot.get.gridWorldValues.get.values.forall(_.fidelity == Fidelity.Exact))
+
+  test("PftDpw reveal decision uses grounded spot equity instead of bucket proxy when available"):
+    val exactStrength = HandStrengthEstimator.fastGtoStrength(testHeroCards, Board.empty, Street.Preflop)
+    val bucketProxy = math.min(9, math.max(0, (exactStrength * 10.0).toInt)) / 9.0
+    assert(
+      math.abs(exactStrength - bucketProxy) > 1e-9,
+      s"expected exact strength and bucket proxy to differ, got exact=$exactStrength proxy=$bucketProxy"
+    )
+
+    val midpoint = (exactStrength + bucketProxy) / 2.0
+    val expectedDecision =
+      if exactStrength < midpoint then RevealDecision.Conceal
+      else if exactStrength > midpoint then RevealDecision.Reveal
+      else RevealDecision.Randomize
+
+    val schedule = RevealSchedule(
+      Map((PlayerId("v1"), Street.Preflop) -> RevealThreshold(Ev(midpoint), isExact = true))
+    )
+    val engine = new StrategicEngine(StrategicEngine.Config(
+      solverBackend = StrategicEngine.SolverBackend.PftDpw,
+      revealSchedule = Some(schedule)
+    ))
+    engine.initSession(rivalIds = Vector(PlayerId("v1")))
+    engine.startHand(testHeroCards)
+    engine.decide(minimalState, Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(50.0)))
+
+    engine.lastDecisionBundle.foreach { bundle =>
+      bundle.certification match
+        case _: CertificationResult.TabularCertification =>
+          assertEquals(bundle.revealDecision, Some(expectedDecision))
+          assertEquals(
+            bundle.revealDecisionProvenance,
+            ValueProvenance.Grounded("reveal decision from exact hero-card spot equity and exact threshold")
+          )
+        case _: CertificationResult.Unavailable => ()
+        case other => fail(s"Unexpected certification: $other")
+    }
