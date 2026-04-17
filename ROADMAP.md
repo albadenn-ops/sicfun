@@ -71,7 +71,7 @@ Status note: a checked box means code landed in the repo. It does not automatica
 - [x] Parallel hall saturation runner with optional auto-tuning of profile/worker count (`scripts/match/run-playing-hall-max.ps1`)
 - [x] Consolidated operator command runbook (`docs/OPERATOR_RUNBOOK.md`) for day-to-day execution flow
 - [x] Interactive runbook launcher (`scripts/validation/runbook.ps1`) for one-command access to top operational actions
-- [x] Append-only AI context archive (`docs/AI_CONTEXT_ARCHIVE.md`) for future bounded-context sessions
+- [x] Append-only AI context archive (`docs/ai/AI_CONTEXT_ARCHIVE.md`) for future bounded-context sessions
 - [x] Context append helper script (`scripts/archive-context.ps1`) with git metadata
 - [ ] True autonomous gameplay integration (real table adapter + action executor)
 - [x] Equilibrium baseline module (CFR/Nash-style reference policy) for exploitability-aware deviations

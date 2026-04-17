@@ -16,7 +16,8 @@ The most usable surface today is the local hand-history review web UI; the rest 
 
 - Source of truth: `src/main`, `src/test`, `scripts`, and the checked-in docs/specs under `docs/`.
 - Output-heavy areas: packaged layouts under `dist/`, generated scratch data under `data/`, validation reports under `validation-output/`, and native build directories under `src/main/native/`.
-- `data/` is for generated runtimes, scratch output, local benchmark artifacts, and developer-local setup. Recreate those artifacts when needed instead of treating them as repository content.
+- `data/` is still for generated runtimes, scratch output, local benchmark artifacts, and developer-local setup. Recreate those artifacts when needed instead of treating them as repository content.
+- The only `data/phase2-*` artifacts that belong in git are compact dated-run summaries such as `*-meta.txt` and `comparison.txt`; bulky `hall/`, `slumbot-*`, `decision-corpus/`, and helper rerun outputs stay local and should be regenerated when needed.
 - Developer-local dependencies may also live under `data/tmp/` (for example `g5-poker-bot`, `acpc-server`, and `toolchains`); they are local setup, not source of truth.
 - Current goal: ship the hand-history review surface cleanly while the rest of the repo remains research-grade analysis and simulation tooling.
 

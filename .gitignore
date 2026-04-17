@@ -104,6 +104,11 @@ data/playing-hall-*/
 data/benchmarks/
 data/manual-bench-auto/
 
+### Retained phase rerun summaries ###
+data/phase2-*/*/**
+!data/phase2-*/*/*-meta.txt
+!data/phase2-*/*/comparison.txt
+
 ### Windows reserved names ###
 nul
 

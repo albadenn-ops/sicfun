@@ -180,7 +180,7 @@ gpuSmokeGate := {
   val log = streams.value.log
   val cp = (Compile / fullClasspath).value.files
   val run = new ForkRun(ForkOptions())
-  val result = run.run("sicfun.holdem.bench.HeadsUpGpuSmokeGate", cp, Seq.empty, log)
+  val result = run.run("sicfun.holdem.bench.gate.HeadsUpGpuSmokeGate", cp, Seq.empty, log)
   result match {
     case scala.util.Success(_) => ()
     case scala.util.Failure(err) =>
@@ -192,7 +192,7 @@ gpuExactParityGate := {
   val log = streams.value.log
   val cp = (Compile / fullClasspath).value.files
   val run = new ForkRun(ForkOptions())
-  val result = run.run("sicfun.holdem.bench.HeadsUpGpuExactParityGate", cp, Seq.empty, log)
+  val result = run.run("sicfun.holdem.bench.gate.HeadsUpGpuExactParityGate", cp, Seq.empty, log)
   result match {
     case scala.util.Success(_) => ()
     case scala.util.Failure(err) =>

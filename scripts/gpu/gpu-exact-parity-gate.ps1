@@ -43,11 +43,13 @@ function Invoke-SbtWithRetry {
   }
 }
 
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\\..")
 $previousSbtOpts = $null
+$previousNativePathEnv = $null
 Push-Location $repoRoot
 try {
   $previousSbtOpts = $env:SBT_OPTS
+  $previousNativePathEnv = [Environment]::GetEnvironmentVariable("sicfun_GPU_NATIVE_PATH", "Process")
   $env:SBT_OPTS = "-Dsbt.server.autostart=false"
 
   $args = @(
@@ -57,12 +59,12 @@ try {
   )
   if (-not [string]::IsNullOrWhiteSpace($NativePath)) {
     $resolvedNativePath = (Resolve-Path $NativePath).Path
-    $args += "--nativePath=$resolvedNativePath"
+    $env:sicfun_GPU_NATIVE_PATH = $resolvedNativePath
   }
 
   Stop-StaleSbtJavaProcesses
   $joined = $args -join " "
-  Invoke-SbtWithRetry -Commands @("runMain sicfun.holdem.bench.HeadsUpGpuExactParityGate $joined")
+  Invoke-SbtWithRetry -Commands @("runMain sicfun.holdem.bench.gate.HeadsUpGpuExactParityGate $joined")
 }
 finally {
   if ($null -ne $previousSbtOpts) {
@@ -70,6 +72,12 @@ finally {
   }
   else {
     Remove-Item Env:SBT_OPTS -ErrorAction SilentlyContinue
+  }
+  if ($null -ne $previousNativePathEnv) {
+    $env:sicfun_GPU_NATIVE_PATH = $previousNativePathEnv
+  }
+  else {
+    Remove-Item Env:sicfun_GPU_NATIVE_PATH -ErrorAction SilentlyContinue
   }
   Pop-Location
 }

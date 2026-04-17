@@ -84,7 +84,9 @@ try {
   }
 
   $previousSbtOpts = $env:SBT_OPTS
+  $previousNativePathEnv = [Environment]::GetEnvironmentVariable("sicfun_GPU_NATIVE_PATH", "Process")
   $env:SBT_OPTS = "-Dsbt.server.autostart=false"
+  $env:sicfun_GPU_NATIVE_PATH = $resolvedNativeDll
 
   Invoke-Step "Clear stale sbt java processes" {
     Stop-StaleSbtJavaProcesses
@@ -92,14 +94,14 @@ try {
 
   Invoke-Step "GPU smoke gate (source workspace)" {
     $null = Invoke-SbtWithRetry -Commands @(
-      "runMain sicfun.holdem.HeadsUpGpuSmokeGate --table=canonical --trials=$SmokeTrials --maxMatchups=$SmokeMatchups --seed=1 --nativePath=$resolvedNativeDll"
+      ('runMain sicfun.holdem.bench.gate.HeadsUpGpuSmokeGate --table=canonical --trials={0} --maxMatchups={1} --seed=1' -f $SmokeTrials, $SmokeMatchups)
     )
   }
 
   Invoke-Step "GPU exact parity gate (source workspace)" {
     Stop-StaleSbtJavaProcesses
     $null = Invoke-SbtWithRetry -Commands @(
-      "runMain sicfun.holdem.HeadsUpGpuExactParityGate --maxMatchups=$ParityMatchups --seed=1 --parallelism=1 --nativePath=$resolvedNativeDll"
+      ('runMain sicfun.holdem.bench.gate.HeadsUpGpuExactParityGate --maxMatchups={0} --seed=1 --parallelism=1' -f $ParityMatchups)
     )
   }
 
@@ -184,7 +186,7 @@ if ([string]::IsNullOrWhiteSpace($classpath)) {
 & java `
   "-Dsicfun.gpu.native.path=$nativeDll" `
   "-cp" $classpath `
-  "sicfun.holdem.HeadsUpGpuSmokeGate" `
+  "sicfun.holdem.bench.gate.HeadsUpGpuSmokeGate" `
   "--table=$Table" `
   "--trials=$Trials" `
   "--maxMatchups=$MaxMatchups" `
@@ -201,7 +203,7 @@ exit $LASTEXITCODE
     & java `
       "-Dsicfun.gpu.native.path=$releaseNativeDll" `
       "-cp" $releaseClasspath `
-      "sicfun.holdem.HeadsUpGpuSmokeGate" `
+      "sicfun.holdem.bench.gate.HeadsUpGpuSmokeGate" `
       "--table=canonical" `
       "--trials=128" `
       "--maxMatchups=64" `
@@ -230,6 +232,12 @@ finally {
   }
   else {
     Remove-Item Env:SBT_OPTS -ErrorAction SilentlyContinue
+  }
+  if ($null -ne $previousNativePathEnv) {
+    $env:sicfun_GPU_NATIVE_PATH = $previousNativePathEnv
+  }
+  else {
+    Remove-Item Env:sicfun_GPU_NATIVE_PATH -ErrorAction SilentlyContinue
   }
   Pop-Location
 }
