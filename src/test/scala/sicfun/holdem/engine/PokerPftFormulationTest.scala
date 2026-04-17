@@ -1,7 +1,9 @@
 package sicfun.holdem.engine
 
 import sicfun.holdem.types.*
+import sicfun.holdem.strategic.formulation.*
 import sicfun.holdem.strategic.types.StrategicClass
+import sicfun.holdem.strategic.types.{BridgeResult, Ev, PlayerId}
 
 class PokerPftFormulationTest extends munit.FunSuite:
 
@@ -18,6 +20,38 @@ class PokerPftFormulationTest extends munit.FunSuite:
 
   private val testPriors: Map[(StrategicClass, PokerAction.Category), Double] =
     StrategicEngine.defaultActionPriors
+
+  private object NeutralValueSource extends FormulationValueSource:
+    override def estimateSpotEquity(spot: FormulationSpot): BridgeResult[Double] =
+      BridgeResult.Exact(0.5)
+
+    override def showdownEquityTable(
+        spot: FormulationSpot,
+        numHeroBuckets: Int,
+        numRivalBuckets: Int
+    ): BridgeResult[Array[Double]] =
+      BridgeResult.Exact(PokerPomcpFormulation.buildLinearShowdownEquity(numHeroBuckets, numRivalBuckets))
+
+    override def estimateActionValue(
+        spot: FormulationSpot,
+        action: PokerAction
+    ): BridgeResult[Ev] =
+      BridgeResult.Exact(Ev.Zero)
+
+  private object NoopActionSource extends FormulationActionSource:
+    override def semanticsFor(
+        spot: FormulationSpot,
+        action: PokerAction
+    ): BridgeResult[FormulationActionSemantics] =
+      BridgeResult.Exact(
+        FormulationActionSemantics(
+          chipsCommitted = 0.0,
+          potDeltaChips = 0.0,
+          isAllIn = false,
+          terminal = FormulationTerminalKind.Continue,
+          advancesStreet = true
+        )
+      )
 
   test("buildTabularModel produces valid TabularGenerativeModel"):
     val heroActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(2.0))
@@ -100,3 +134,36 @@ class PokerPftFormulationTest extends munit.FunSuite:
           o += 1
         assertEqualsDouble(sum, 1.0, 1e-12)
         i += 1
+
+  test("FormulationInput overload derives action priors from generic rivalPolicySource"):
+    val heroActions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(50.0))
+    val spot = FormulationSpot(
+      gameState = minimalState,
+      candidateActions = heroActions,
+      heroValueInput = HeroValueInput.StrengthHint(5, "test"),
+      rivalBeliefs = Map.empty[PlayerId, sicfun.holdem.strategic.state.StrategicRivalBelief]
+    )
+    val policySource = new FormulationRivalPolicySource:
+      override def actionPolicy(
+          cls: StrategicClass,
+          spot: FormulationSpot
+      ): BridgeResult[Vector[Double]] =
+        val weights =
+          if cls == StrategicClass.Value then Vector(1.0, 0.0, 0.0)
+          else if cls == StrategicClass.Bluff then Vector(0.0, 0.0, 1.0)
+          else Vector(0.0, 1.0, 0.0)
+        BridgeResult.Exact(weights)
+
+    val input = FormulationInput(
+      spot = spot,
+      valueSource = NeutralValueSource,
+      rivalPolicySource = policySource,
+      actionSource = NoopActionSource
+    )
+
+    val valueModel = PokerPftFormulation.buildTabularModel(input, profileClass = Some(StrategicClass.Value))
+    val bluffModel = PokerPftFormulation.buildTabularModel(input, profileClass = Some(StrategicClass.Bluff))
+    assert(
+      !valueModel.rewardTable.sameElements(bluffModel.rewardTable),
+      "generic rivalPolicySource should yield different profile-conditioned rewards"
+    )

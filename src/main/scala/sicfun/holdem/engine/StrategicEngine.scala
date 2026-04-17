@@ -10,6 +10,7 @@ import sicfun.holdem.strategic.safety.*
 import sicfun.holdem.strategic.exploitation.*
 import sicfun.holdem.strategic.decomposition.*
 import sicfun.holdem.strategic.{bridge => strategicBridge}
+import sicfun.holdem.strategic.formulation.*
 import sicfun.holdem.strategic.solver.{WPomcpRuntime, PftDpwRuntime, PftDpwConfig, PftDpwResult, TabularGenerativeModel, ParticleBelief, WassersteinDroRuntime}
 import sicfun.holdem.engine.inference.ActionEvaluation
 
@@ -353,23 +354,18 @@ class StrategicEngine(val config: StrategicEngine.Config):
   ): PokerAction =
     val numActions = candidateActions.size
     val numProfiles = StrategicClass.values.length  // 4
+    val formulationInput = buildFormulationInput(gameState, candidateActions, heroBucket, session)
 
     // --- Solve 1: Mixed-belief solve (action selection) ---
     val mixedInput = PokerPomcpFormulation.buildSearchInputV2(
-      gameState = gameState,
-      rivalBeliefs = session.rivalBeliefs,
-      heroActions = candidateActions,
-      heroBucket = heroBucket,
+      formulationInput,
       particlesPerRival = config.particlesPerRival
     )
     val mixedResult = WPomcpRuntime.solveV2(mixedInput, solverConfig)
 
     // --- Solve 2: Baseline solve (profile 0, beta=0 reference) ---
     val baselineInput = PokerPomcpFormulation.buildSearchInputForProfile(
-      gameState = gameState,
-      rivalBeliefs = session.rivalBeliefs,
-      heroActions = candidateActions,
-      heroBucket = heroBucket,
+      formulationInput,
       particlesPerRival = config.particlesPerRival,
       profileId = JointRivalProfileId(0)
     )
@@ -379,10 +375,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
     val profileResults: Array[Either[String, WPomcpRuntime.SearchResult]] =
       Array.tabulate(numProfiles) { p =>
         val profileInput = PokerPomcpFormulation.buildSearchInputForProfile(
-          gameState = gameState,
-          rivalBeliefs = session.rivalBeliefs,
-          heroActions = candidateActions,
-          heroBucket = heroBucket,
+          formulationInput,
           particlesPerRival = config.particlesPerRival,
           profileId = JointRivalProfileId(p)
         )
@@ -517,10 +510,10 @@ class StrategicEngine(val config: StrategicEngine.Config):
     val numActions = candidateActions.size
 
     try
+      val formulationInput = buildFormulationInput(gameState, candidateActions, heroBucket, session)
       // 1. Build mixed-belief (baseline) model and belief
       val baselineModel = PokerPftFormulation.buildTabularModel(
-        gameState, session.rivalBeliefs, candidateActions,
-        heroBucket, config.actionPriors, profileClass = None
+        formulationInput, profileClass = None
       )
       val belief = PokerPftFormulation.buildParticleBelief(
         session.rivalBeliefs, config.particlesPerRival, currentStreet = gameState.street
@@ -544,7 +537,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       // 3. Four-world grid solve + signal decomposition (Theorem 4, Defs 40-43, 47, 50)
       val (fourWorldOpt, deltaVocabOpt, chainWorldQs, riskProfileOpt): (Option[FourWorld], Option[DeltaVocabulary], Map[ChainWorld, Ev], Option[RiskDecomposition.ChainRiskProfile]) = try
         val fwModels = StrategicEngine.buildFourWorldModels(
-          gameState, session.rivalBeliefs, candidateActions, heroBucket, config.actionPriors
+          formulationInput
         )
         val olResult = PftDpwRuntime.solve(fwModels.openLoop, belief, pftConfig)
         val blindResult = PftDpwRuntime.solve(fwModels.blind, belief, pftConfig)
@@ -560,8 +553,11 @@ class StrategicEngine(val config: StrategicEngine.Config):
           // Ref-kernel solve for per-rival signal decomposition (Defs 40-42)
           val refResultOpt: Option[PftDpwResult] = try
             val uniformBeliefs = session.rivalBeliefs.map((id, _) => id -> StrategicRivalBelief.uniform)
+            val refFormulationInput = formulationInput.copy(
+              spot = formulationInput.spot.copy(rivalBeliefs = uniformBeliefs)
+            )
             val refModel = PokerPftFormulation.buildTabularModel(
-              gameState, uniformBeliefs, candidateActions, heroBucket, config.actionPriors
+              refFormulationInput, profileClass = None
             )
             val r = PftDpwRuntime.solve(refModel, belief, pftConfig)
             if r.isSuccess then Some(r) else None
@@ -570,7 +566,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
           // Design-kernel solve for signaling sub-decomposition (Defs 48-49)
           val designResultOpt: Option[PftDpwResult] = try
             val designModel = PokerPftFormulation.buildDesignKernelModel(
-              gameState, session.rivalBeliefs, candidateActions, heroBucket, config.actionPriors
+              formulationInput
             )
             val r = PftDpwRuntime.solve(designModel, belief, pftConfig)
             if r.isSuccess then Some(r) else None
@@ -659,8 +655,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       // 4. Build profile models and certify
       val profileModels = (0 until StrategicClass.values.length).map { p =>
         PokerPftFormulation.buildTabularModel(
-          gameState, session.rivalBeliefs, candidateActions,
-          heroBucket, config.actionPriors, profileClass = Some(StrategicClass.fromOrdinal(p))
+          formulationInput, profileClass = Some(StrategicClass.fromOrdinal(p))
         )
       }
 
@@ -859,9 +854,24 @@ class StrategicEngine(val config: StrategicEngine.Config):
     // Compute B*
     val bStar = SafetyBellman.computeBStar(robustLosses, gamma, transitions, numProfiles)
 
-    // Belief-level safe action set
+    // Belief-level safe action set. buildParticleBelief tracks only the 4 poker
+    // street states; A3 adds a terminal sink state to the tabular model, so align
+    // the sparse particle belief onto the full model state space with zero mass
+    // on the sink.
+    val fullStateBelief =
+      if belief.weights.length == baselineModel.numStates then belief.weights
+      else
+        val aligned = Array.fill(baselineModel.numStates)(0.0)
+        var i = 0
+        while i < math.min(belief.stateIndices.length, belief.weights.length) do
+          val stateIdx = belief.stateIndices(i)
+          if stateIdx >= 0 && stateIdx < aligned.length then
+            aligned(stateIdx) += belief.weights(i)
+          i += 1
+        aligned
+
     val safeActions = SafetyBellman.beliefLevelSafeActions(
-      belief.weights, bStar, robustLosses, gamma, transitions, numProfiles
+      fullStateBelief, bStar, robustLosses, gamma, transitions, numProfiles
     )
 
     // Certificate validation
@@ -1056,6 +1066,38 @@ class StrategicEngine(val config: StrategicEngine.Config):
     }
     if deviations.isEmpty then 0.0
     else deviations.max
+
+  /** Build FormulationInput for deprecated formulation consumers via the legacy adapter.
+    *
+    * A3 swaps in GroundedValueSource when exact hero cards are known so the
+    * deprecated PFT path can use street-aware equity instead of the bucket proxy.
+    */
+  private def buildFormulationInput(
+      gameState: GameState,
+      candidateActions: Vector[PokerAction],
+      heroBucket: Int,
+      session: StrategicEngine.SessionState
+  ): FormulationInput =
+    val rivalPriors = LegacyRivalPriors(
+      pftActionPriors = config.actionPriors,
+      pomcpClassPriors = PokerPomcpFormulation.defaultClassPriors
+    )
+    val baseInput = LegacyToyFormulationInput.from(
+      gameState = gameState,
+      candidateActions = candidateActions,
+      rivalBeliefs = session.rivalBeliefs,
+      heroBucket = heroBucket,
+      rivalPriors = rivalPriors
+    )
+    _heroCards match
+      case Some(cards) =>
+        baseInput.copy(
+          spot = baseInput.spot.copy(
+            heroValueInput = HeroValueInput.ExactHoleCards(cards)
+          ),
+          valueSource = GroundedValueSource
+        )
+      case None => baseInput
 
   private def estimateHeroBucket(gameState: GameState): Int =
     _heroCards match
@@ -1309,24 +1351,20 @@ object StrategicEngine:
 
   /** Build the four tabular models for the four-world grid (Theorem 4). */
   def buildFourWorldModels(
-      gameState: GameState,
-      rivalBeliefs: Map[PlayerId, StrategicRivalBelief],
-      heroActions: Vector[PokerAction],
-      heroBucket: Int,
-      actionPriors: Map[(StrategicClass, PokerAction.Category), Double]
+      input: FormulationInput
   ): FourWorldModels =
     FourWorldModels(
       baseline = PokerPftFormulation.buildTabularModel(
-        gameState, rivalBeliefs, heroActions, heroBucket, actionPriors
+        input, profileClass = None
       ),
       openLoop = PokerPftFormulation.buildOpenLoopModel(
-        gameState, rivalBeliefs, heroActions, heroBucket, actionPriors
+        input, profileClass = None
       ),
       blind = PokerPftFormulation.buildBlindKernelModel(
-        gameState, rivalBeliefs, heroActions, heroBucket, actionPriors
+        input
       ),
       blindOpenLoop = PokerPftFormulation.buildBlindOpenLoopModel(
-        gameState, rivalBeliefs, heroActions, heroBucket, actionPriors
+        input
       )
     )
 
