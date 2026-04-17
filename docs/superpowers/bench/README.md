@@ -16,6 +16,7 @@ Artifact path convention:
 | Baseline | `2026-04-17-1519` | `fcbc3a8` | `detached` | `42` | `1000` | not run | not run | G1 baseline captured for decision corpus, hall, and Slumbot probe | `data/phase2-baseline/2026-04-17-1519` |
 | A3 rerun | `2026-04-17-1601` | `048a737` | `bench/a3-rerun-20260417-160046` | `42` | `1000` | `120 passed, 0 failed` | `1803 passed, 10 failed, 1 ignored` | G2-G5 passed as overlay-path non-regression; grounded PFT path still covered by focused formulation tests rather than Track B | `data/phase2-a3/2026-04-17-1601` |
 | A4 rerun | `2026-04-17-1740` | `f26cbe3` code, `fa1347e` docs and hygiene | `bench/a4-grounding-20260417-173122` | `42` | `1000` | `121 passed, 0 failed` | `1806 passed, 8 failed, 1 ignored` at `fa1347e`; see [failures-at-fa1347e.txt](./failures-at-fa1347e.txt) | A4 gate met for the `FormulationInput` / `StrategicEngine`-driven WPomcp path; Track B remained a non-regression probe for overlay-backed runtime surfaces | `data/phase2-a4/2026-04-17-1740` |
+| A5 Slumbot focus | `2026-04-17-2037` | `9c92419` | `bench/a5-certification-20260417-192934` | `42` | `n/a` | `888 passed, 0 failed` | not rerun | Narrow A5 end-to-end Slumbot probe for adaptive, GTO, and strategic modes; records stable strategic mean latency, unchanged `overlayChangeRate=0.0%` relative to A4 in this probe, and the native-CPU CFR smoke used for the GTO check | `data/phase2-a5/2026-04-17-2037-slumbot-focus` |
 
 ## Gate Notes
 
@@ -28,6 +29,30 @@ Artifact path convention:
   `TexasHoldemPlayingHall` stay on the Phase 1 overlay path. The A3 and A4 Track B reruns
   therefore show that formulation changes did not bleed into runtime behavior; they do not
   directly benchmark the grounded formulation path itself.
+
+## A5 Slumbot Focus
+
+- Commit `9c92419` on `bench/a5-certification-20260417-192934` added a narrow Slumbot-only
+  verification run under `data/phase2-a5/2026-04-17-2037-slumbot-focus/`.
+- This artifact records that all three runtime modes completed end-to-end against
+  Slumbot at the A5 tip, that strategic `meanLatencyMs` remained in-family
+  (`31.045 ms` vs. `34.938 ms` at A4 and `30.905 ms` at A3), and that strategic
+  `overlayChangeRate` remained `0.0%`, matching the A4 Slumbot probe. Treat that as
+  bounded runtime-behavior evidence rather than a formal latency non-regression gate.
+- The GTO Slumbot run was configured with `sicfun.cfr.provider=native-cpu-fixed`.
+  A separate 1-hand verbose smoke recorded at
+  `data/phase2-a5/2026-04-17-2037-slumbot-focus/slumbot-gto-verbose-smoke.log`
+  showed native runtime activity (`postflop native auto-engine: routing to CPU for small workload`)
+  and no `unavailable`, `fallback`, or `scala` lines. That is positive evidence of native-CPU
+  execution for the smoke, not a proof that every solve in the 50-hand run used the native path.
+- This artifact does not certify EV direction, quality ranking, or statistical significance.
+  At `n=50`, cross-run and cross-mode `bb/100` deltas mix sampling noise with server-side
+  dealer non-determinism and should be treated as protocol/behavior probes only.
+- Engine-path reminder for future readers:
+  `SlumbotMatchRunner` dispatches `strategic` to `decideHeroStrategic` and other modes to
+  `decideHero`; `HeroDecisionPipeline` routes `adaptive` through the adaptive engine,
+  `strategic` through adaptive-upstream plus overlay, and `gto` through `HoldemCfrSolver`.
+  Only `gto` can reach the Scala/native CFR provider surface in Slumbot runs.
 
 ## Audit Policy
 
