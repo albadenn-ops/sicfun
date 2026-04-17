@@ -79,5 +79,26 @@ Interpretation:
 - The A4 formulation-focused gate remains green.
 - Full-repo `sbt test` at `fa1347e` is not a clean reproduction of the earlier `048a737`
   failure set.
-- Because the failure set changed, this audit should be treated as a pre-A5 blocking triage
-  result unless the new delta is explicitly waived.
+
+Follow-up triage at `0c15676`:
+- `sbt "testOnly sicfun.holdem.cfr.HoldemCfrExternalValidationParityTest"` at
+  `fcbc3a8` passed: `2 passed, 0 failed`
+- `sbt "testOnly sicfun.holdem.cfr.HoldemCfrExternalValidationParityTest"` at
+  `048a737` passed: `2 passed, 0 failed`
+- `sbt "testOnly sicfun.holdem.cfr.HoldemCfrExternalValidationParityTest"` at the A4 branch
+  tip `0c15676` passed: `2 passed, 0 failed`
+- `sbt "testOnly sicfun.holdem.web.HandHistoryReviewServerTest"` at the A4 branch tip
+  `0c15676` passed: `29 passed, 0 failed`
+- The exact `async review flow accepts a reproducible exact-gto hall export` case completed in
+  `2.882s` when isolated.
+
+Updated interpretation:
+- The newly failing parity suite does not reproduce in isolated reruns at `fcbc3a8`,
+  `048a737`, or the current A4 branch tip.
+- The newly failing web suite does not reproduce in isolation on the current A4 branch tip.
+- The `fa1347e` delta is therefore treated as non-reproducing in isolation and likely
+  load-sensitive full-suite timeout churn, not as direct evidence that A3 or A4 changed the
+  tested semantics.
+- Remaining full-repo instability is still repo-health debt. The newly changed failure set is
+  no longer untriaged, but moving to A5 still requires an explicit decision to accept that
+  broader instability as known debt rather than an A3/A4-specific blocker.

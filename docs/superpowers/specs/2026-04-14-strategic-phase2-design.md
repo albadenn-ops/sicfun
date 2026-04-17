@@ -359,9 +359,13 @@ Required order:
 10. Re-run Track B gates
 
 This ordering is deliberate. Track A is not allowed to outrun measurement.
-As of `fa1347e`, A5 is additionally blocked on triaging or explicitly waiving
-the changed full-repo `sbt test` failure set recorded in
-`docs/superpowers/bench/failures-at-fa1347e.txt`.
+As of `0c15676`, the newly changed `fa1347e` parity and web-suite failures have
+been triaged via isolated reruns recorded in
+`docs/superpowers/bench/failures-at-fa1347e.txt`. They did not reproduce in
+isolation and are treated as likely load-sensitive timeout churn rather than a
+direct A3/A4 semantic regression. Full-repo instability remains separate
+repo-health debt, and proceeding to A5 still requires an explicit decision to
+accept that broader instability as known debt.
 
 ## Deliverables
 

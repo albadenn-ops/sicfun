@@ -38,5 +38,13 @@ Artifact path convention:
   the successful retry back into the aggregate artifacts.
 - The `fa1347e` full-repo audit changed the failing-suite set relative to `048a737`, even
   though none of the failing suites were in `strategic.*`, `engine.*`, `bench.*`, or
-  `runtime.*`. That delta is logged in [failures-at-fa1347e.txt](./failures-at-fa1347e.txt)
-  and should be treated as a pre-A5 blocking triage item unless explicitly waived.
+  `runtime.*`. That delta is logged in [failures-at-fa1347e.txt](./failures-at-fa1347e.txt).
+- Follow-up isolated reruns at `0c15676` showed that
+  `HoldemCfrExternalValidationParityTest` passes at `fcbc3a8`, `048a737`, and the A4 branch
+  tip, while `HandHistoryReviewServerTest` passes in isolation at the A4 branch tip. The new
+  `fa1347e` delta is therefore treated as non-reproducing in isolation and likely
+  load-sensitive timeout churn rather than direct A3/A4 semantic evidence.
+- The dirty `src/main/native/build/*.dll` and `*.exp` outputs left behind by `sbt test` are
+  not a `.gitignore` miss. `src/main/native/build/` is already ignored, but those binaries are
+  tracked in git today, so test runs rewrite tracked files. Cleaning that up requires
+  de-tracking or relocating the generated native outputs rather than another ignore rule.
