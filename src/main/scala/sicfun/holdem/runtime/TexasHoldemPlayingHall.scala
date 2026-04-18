@@ -215,10 +215,13 @@ object TexasHoldemPlayingHall:
       maxLivePlayers: Int
   )
 
-  /** The amount of chips hero receives at showdown (before subtracting hero's own contribution). */
+  /** Per-position payouts at hand resolution (showdown or last-standing). Folded positions
+    * are absent from the map (they receive 0). Net chips per position = payouts(pos) - contribution(pos).
+    */
   private final case class ShowdownResolution(
-      heroPayout: Double
-  )
+      payouts: Map[Position, Double]
+  ):
+    def heroPayout(heroPosition: Position): Double = payouts.getOrElse(heroPosition, 0.0)
 
   /** A single training example for the Deep Distributional Range Estimation (DDRE) model.
     * Captures the full inference context at a hero decision point: the game state, both
@@ -1435,13 +1438,14 @@ object TexasHoldemPlayingHall:
         )
 
     /** Evaluates all remaining players' 7-card hands and distributes the pot via side-pot
-      * logic. Returns hero's payout (the total chips hero receives from all side pots).
-      * If hero is not among the remaining players (shouldn't happen at this call site,
-      * but defensive), returns zero payout.
+      * logic. Returns a per-position payouts map. The single-survivor case awards the full
+      * pot to the last standing player without evaluating hands.
       */
     private def showdownResolution(): ShowdownResolution =
       val remainingPlayers = liveContestants
-      if !remainingPlayers.contains(heroPosition) then ShowdownResolution(heroPayout = 0.0)
+      if remainingPlayers.isEmpty then ShowdownResolution(payouts = Map.empty)
+      else if remainingPlayers.size == 1 then
+        ShowdownResolution(payouts = Map(remainingPlayers.head -> roundMoney(pot)))
       else
         val boardCards = deal.board.cards
         val ranked = remainingPlayers.map { position =>
@@ -1461,7 +1465,7 @@ object TexasHoldemPlayingHall:
           remainingPlayers = remainingPlayers,
           handStrengthByPosition = ranked
         )
-        ShowdownResolution(heroPayout = payouts.getOrElse(heroPosition, 0.0))
+        ShowdownResolution(payouts = payouts)
 
   /** Computes the amount a player must put in to match the current highest contribution.
     * Returns 0 if they have already matched or exceeded it.
