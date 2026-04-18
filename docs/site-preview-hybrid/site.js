@@ -11,6 +11,31 @@ const warningList = document.getElementById("warning-list");
 const decisionList = document.getElementById("decision-list");
 const opponentList = document.getElementById("opponent-list");
 const modelSource = document.getElementById("model-source");
+const hallForm = document.getElementById("playing-hall-form");
+const hallHandsInput = document.getElementById("hall-hands");
+const hallTableCountInput = document.getElementById("hall-table-count");
+const hallPlayerCountSelect = document.getElementById("hall-player-count");
+const hallSeedInput = document.getElementById("hall-seed");
+const hallRandomSeedInput = document.getElementById("hall-random-seed");
+const hallHeroStyleSelect = document.getElementById("hall-hero-style");
+const hallHeroPositionSelect = document.getElementById("hall-hero-position");
+const hallGtoModeSelect = document.getElementById("hall-gto-mode");
+const hallExplorationRateInput = document.getElementById("hall-exploration-rate");
+const hallRaiseSizeInput = document.getElementById("hall-raise-size");
+const hallLearnEveryInput = document.getElementById("hall-learn-every");
+const hallLearningWindowInput = document.getElementById("hall-learning-window");
+const hallBunchingTrialsInput = document.getElementById("hall-bunching-trials");
+const hallEquityTrialsInput = document.getElementById("hall-equity-trials");
+const hallSaveReviewInput = document.getElementById("hall-save-review");
+const hallFullRingInput = document.getElementById("hall-full-ring");
+const hallSubmitButton = document.getElementById("hall-submit");
+const hallStatus = document.getElementById("hall-status");
+const hallResults = document.getElementById("hall-results");
+const hallSummaryGrid = document.getElementById("hall-summary-grid");
+const hallModeLine = document.getElementById("hall-mode-line");
+const hallActionList = document.getElementById("hall-action-list");
+const hallOutputList = document.getElementById("hall-output-list");
+const hallVillainList = document.getElementById("hall-villain-list");
 
 const authStatePanel = document.getElementById("auth-state");
 const authForm = document.getElementById("auth-form");
@@ -94,6 +119,92 @@ if (form && fileInput && siteSelect && heroInput) {
       renderStatus(`Request failed: ${error instanceof Error ? error.message : "unknown error"}`);
     } finally {
       setSubmitting(false);
+    }
+  });
+}
+
+if (hallForm) {
+  hallForm.addEventListener("submit", async event => {
+    event.preventDefault();
+
+    if (requiresPlatformSignIn() && !authState.authenticated) {
+      renderHallStatus("Sign in to launch a playing hall run on this deployment.");
+      hallResults.classList.add("hidden");
+      return;
+    }
+
+    const villainPool = selectedVillainPool();
+    if (villainPool.length === 0) {
+      renderHallStatus("Select at least one villain profile before launching the hall.");
+      hallResults.classList.add("hidden");
+      return;
+    }
+
+    const payload = {
+      hands: numericValue(hallHandsInput, 240),
+      tableCount: numericValue(hallTableCountInput, 2),
+      playerCount: numericValue(hallPlayerCountSelect, 6),
+      heroStyle: hallHeroStyleSelect ? hallHeroStyleSelect.value : "adaptive",
+      heroPosition: hallHeroPositionSelect ? hallHeroPositionSelect.value : "Button",
+      gtoMode: hallGtoModeSelect ? hallGtoModeSelect.value : "exact",
+      villainPool,
+      heroExplorationRate: numericValue(hallExplorationRateInput, 0),
+      raiseSize: numericValue(hallRaiseSizeInput, 2.5),
+      bunchingTrials: numericValue(hallBunchingTrialsInput, 40),
+      equityTrials: numericValue(hallEquityTrialsInput, 240),
+      learnEveryHands: numericValue(hallLearnEveryInput, 0),
+      learningWindowSamples: numericValue(hallLearningWindowInput, 200),
+      seed: hallRandomSeedInput && hallRandomSeedInput.checked
+        ? Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)
+        : numericValue(hallSeedInput, 42),
+      saveReviewHandHistory: Boolean(hallSaveReviewInput && hallSaveReviewInput.checked),
+      fullRing: Boolean(hallFullRingInput && hallFullRingInput.checked)
+    };
+
+    setHallSubmitting(true);
+    renderHallStatus("Queueing a local playing hall run...");
+    hallResults.classList.add("hidden");
+
+    try {
+      const response = await fetch("/api/playing-hall", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: jsonHeaders(true),
+        body: JSON.stringify(payload)
+      });
+      const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
+
+      if (!response.ok) {
+        renderHallStatus(body.error || `Playing hall request failed with status ${response.status}.`);
+        return;
+      }
+
+      if (body.jobId) {
+        const statusUrl = body.statusUrl || response.headers.get("Location");
+        if (!statusUrl) {
+          renderHallStatus("Server accepted the hall run but did not return a job status URL.");
+          return;
+        }
+
+        renderHallStatus(playingHallJobStatusMessage(body.status));
+        const result = await pollPlayingHallJob(statusUrl, body.pollAfterMs);
+        renderHallResults(result);
+        return;
+      }
+
+      renderHallResults(body);
+    } catch (error) {
+      renderHallStatus(`Playing hall request failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    } finally {
+      setHallSubmitting(false);
+    }
+  });
+}
+
+if (hallRandomSeedInput) {
+  hallRandomSeedInput.addEventListener("change", () => {
+    if (hallSeedInput) {
+      hallSeedInput.disabled = hallRandomSeedInput.checked;
     }
   });
 }
@@ -220,6 +331,36 @@ function updateUploadAvailability() {
   }
   if (locked) {
     renderStatus("Sign in to queue a review job for this deployment.");
+  }
+  [
+    hallHandsInput,
+    hallTableCountInput,
+    hallPlayerCountSelect,
+    hallSeedInput,
+    hallRandomSeedInput,
+    hallHeroStyleSelect,
+    hallHeroPositionSelect,
+    hallGtoModeSelect,
+    hallExplorationRateInput,
+    hallRaiseSizeInput,
+    hallLearnEveryInput,
+    hallLearningWindowInput,
+    hallBunchingTrialsInput,
+    hallEquityTrialsInput,
+    hallSaveReviewInput,
+    hallFullRingInput,
+    ...Array.from(document.querySelectorAll('input[name="villain-pool"]'))
+  ].forEach(element => {
+    if (element) {
+      element.disabled = locked;
+    }
+  });
+  if (hallSubmitButton) {
+    hallSubmitButton.disabled = locked;
+    hallSubmitButton.textContent = locked ? "Sign In Required" : "Run Playing Hall";
+  }
+  if (locked && hallStatus) {
+    renderHallStatus("Sign in to launch a playing hall run on this deployment.");
   }
 }
 
@@ -474,6 +615,19 @@ function setSubmitting(isSubmitting) {
   submitButton.textContent = isSubmitting ? "Queueing Review..." : "Queue Review";
 }
 
+function setHallSubmitting(isSubmitting) {
+  if (!hallSubmitButton) {
+    return;
+  }
+  if (requiresPlatformSignIn() && !authState.authenticated) {
+    hallSubmitButton.disabled = true;
+    hallSubmitButton.textContent = "Sign In Required";
+    return;
+  }
+  hallSubmitButton.disabled = isSubmitting;
+  hallSubmitButton.textContent = isSubmitting ? "Running Hall..." : "Run Playing Hall";
+}
+
 function renderStatus(message) {
   reviewStatus.innerHTML = `
     <p class="card-kicker">Status</p>
@@ -481,6 +635,20 @@ function renderStatus(message) {
     <p class="section-note">
       SICFUN accepts the upload quickly, analyzes it in a background job, and fills this board with hand
       counts, EV gaps, warnings, and opponent notes when the review is ready.
+    </p>
+  `;
+}
+
+function renderHallStatus(message) {
+  if (!hallStatus) {
+    return;
+  }
+  hallStatus.innerHTML = `
+    <p class="card-kicker">Status</p>
+    <h3>${escapeHtml(message)}</h3>
+    <p class="section-note">
+      SICFUN runs the configured hall batch in the background, then returns the run summary, action mix,
+      per-villain chip flow, and the generated output files here.
     </p>
   `;
 }
@@ -529,6 +697,50 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
   }
 }
 
+async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
+  let pollAfterMs = normalizePollAfterMs(initialPollAfterMs);
+  const deadline = Date.now() + MAX_POLL_WAIT_MS;
+
+  for (;;) {
+    if (Date.now() >= deadline) {
+      throw new Error("Playing hall timed out while waiting for the run to finish.");
+    }
+
+    await sleep(pollAfterMs);
+
+    const response = await fetch(statusUrl, {
+      credentials: "same-origin",
+      headers: {
+        "Accept": "application/json"
+      }
+    });
+    const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error("Playing hall job expired, was purged, or is not visible to this user session.");
+      }
+      throw new Error(body.error || `Playing hall status failed with status ${response.status}.`);
+    }
+
+    renderHallStatus(playingHallJobStatusMessage(body.status));
+
+    if (body.status === "completed") {
+      return body.result || {};
+    }
+
+    if (body.status === "failed") {
+      throw new Error(body.error || "Playing hall failed.");
+    }
+
+    if (body.status !== "queued" && body.status !== "running") {
+      throw new Error(`Unexpected playing hall job status: ${body.status || "unknown"}`);
+    }
+
+    pollAfterMs = normalizePollAfterMs(body.pollAfterMs);
+  }
+}
+
 function normalizePollAfterMs(value) {
   const parsed = Number(value || 0);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -553,6 +765,21 @@ function jobStatusMessage(fileName, status) {
       return `Local review failed for ${fileName}.`;
     default:
       return `Processing ${fileName}...`;
+  }
+}
+
+function playingHallJobStatusMessage(status) {
+  switch (status) {
+    case "queued":
+      return "Queued the playing hall run...";
+    case "running":
+      return "Running the playing hall in the background...";
+    case "completed":
+      return "Playing hall run complete.";
+    case "failed":
+      return "Playing hall run failed.";
+    default:
+      return "Processing the playing hall run...";
   }
 }
 
@@ -594,6 +821,85 @@ function renderResults(fileName, data) {
       : emptyCard("No opponent notes were returned from this upload.");
 
   reviewResults.classList.remove("hidden");
+}
+
+function renderHallResults(data) {
+  const request = data && typeof data.request === "object" && data.request ? data.request : {};
+  const summary = data && typeof data.summary === "object" && data.summary ? data.summary : {};
+
+  renderHallStatus(
+    `Hall ready: ${formatInteger(summary.handsPlayed)} hands, ${formatSigned(summary.heroNetChips)} chips, ${formatSigned(summary.heroBbPer100)} bb/100.`
+  );
+
+  if (hallSummaryGrid) {
+    hallSummaryGrid.innerHTML = [
+      summaryCard("Hero", request.heroStyle || "-", request.heroPosition ? `Position: ${escapeHtml(request.heroPosition)}` : "Configured in this run"),
+      summaryCard("Villains", Array.isArray(request.villainPool) ? request.villainPool.join(", ") : "-", request.gtoMode ? `GTO: ${escapeHtml(request.gtoMode)}` : "Mixed pool"),
+      summaryCard("Hands", formatInteger(summary.handsPlayed), `${formatInteger(summary.tableCount)} tables / ${formatInteger(summary.playerCount)} players`),
+      summaryCard("Net Chips", formatSigned(summary.heroNetChips), `Wins ${formatInteger(summary.heroWins)} / Losses ${formatInteger(summary.heroLosses)}`),
+      summaryCard("bb/100", formatSigned(summary.heroBbPer100), `${formatInteger(summary.heroTies)} tied hands`),
+      summaryCard("Retrains", formatInteger(summary.retrains), summary.modelId ? `Model: ${escapeHtml(summary.modelId)}` : "Learning disabled")
+    ].join("");
+  }
+
+  if (hallModeLine) {
+    const pool = Array.isArray(request.villainPool) && request.villainPool.length > 0
+      ? request.villainPool.join(", ")
+      : "-";
+    hallModeLine.textContent = `Hero ${request.heroStyle || "-"} | Villains ${pool} | Seed ${request.seed ?? "-"}`;
+  }
+
+  if (hallActionList) {
+    const actionCounts = objectEntries(summary.actionCounts);
+    hallActionList.innerHTML = actionCounts.length > 0
+      ? actionCounts.map(([action, count]) => `
+          <article class="decision-card">
+            <div class="decision-head">
+              <h3 class="decision-title">${escapeHtml(action)}</h3>
+              <p class="card-meta">${formatInteger(count)} decisions</p>
+            </div>
+            <p class="decision-meta">
+              Exploration: ${formatMetric(request.heroExplorationRate || 0)}<br>
+              Raise size: ${formatMetric(request.raiseSize || 0)}
+            </p>
+          </article>
+        `).join("")
+      : emptyCard("No action distribution was returned for this hall run.");
+  }
+
+  if (hallOutputList) {
+    const files = Array.isArray(summary.outputFiles) ? summary.outputFiles : [];
+    hallOutputList.innerHTML = files.length > 0
+      ? files.map(file => `
+          <article class="opponent-card">
+            <div class="decision-head">
+              <h3 class="decision-title">Output File</h3>
+              <p class="card-meta">written</p>
+            </div>
+            <p class="opponent-meta">${escapeHtml(file)}</p>
+          </article>
+        `).join("")
+      : emptyCard(summary.outDir ? `Run directory: ${summary.outDir}` : "No output files were reported.");
+  }
+
+  if (hallVillainList) {
+    const villainNet = objectEntries(summary.perVillainNetChips);
+    hallVillainList.innerHTML = villainNet.length > 0
+      ? villainNet.map(([name, chips]) => `
+          <article class="opponent-card">
+            <div class="decision-head">
+              <h3 class="decision-title">${escapeHtml(name)}</h3>
+              <p class="card-meta">${formatSigned(chips)} chips</p>
+            </div>
+            <p class="opponent-meta">Net result attributed across the hall run.</p>
+          </article>
+        `).join("")
+      : emptyCard("No per-villain chip breakdown was returned for this hall run.");
+  }
+
+  if (hallResults) {
+    hallResults.classList.remove("hidden");
+  }
 }
 
 function summaryCard(label, value, note) {
@@ -674,6 +980,23 @@ function emptyCard(message) {
       <p class="decision-meta">${escapeHtml(message)}</p>
     </article>
   `;
+}
+
+function selectedVillainPool() {
+  return Array.from(document.querySelectorAll('input[name="villain-pool"]:checked'))
+    .map(input => input.value)
+    .filter(Boolean);
+}
+
+function numericValue(element, fallback) {
+  const parsed = Number(element && "value" in element ? element.value : fallback);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function objectEntries(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? Object.entries(value)
+    : [];
 }
 
 function formatInteger(value) {
