@@ -202,6 +202,7 @@ object TexasHoldemPlayingHall:
     */
   private final case class HandResult(
       heroNet: Double,
+      perPositionNet: Map[Position, Double],
       outcome: Int,
       tableScenario: TableScenario,
       villainDecision: Option[(GameState, PokerAction)],
@@ -743,9 +744,9 @@ object TexasHoldemPlayingHall:
     private val flopBoard = Board.from(deal.board.cards.take(3).sortBy(CardId.toId))
     private val turnBoard = Board.from(deal.board.cards.take(4).sortBy(CardId.toId))
 
-    /** Runs the hand through all streets and produces the final result. Hero's net is computed
-      * as showdown payout minus hero's total contribution. The outcome sign (+1/0/-1) is set
-      * after the net is finalized.
+    /** Runs the hand through all streets and produces the final result. Payouts for all positions
+      * are resolved through a single `showdownResolution()` call; net per position is payout minus
+      * that position's total contribution.
       */
     def play(): HandResult =
       strategicHelperOpt.foreach(_.startHand(deal.holeCardsFor(heroPosition)))
@@ -754,12 +755,15 @@ object TexasHoldemPlayingHall:
       if !handOver then playPostflopStreet(Street.Turn)
       if !handOver then playPostflopStreet(Street.River)
       strategicHelperOpt.foreach(_.endHand())
-      val heroNet =
-        if handOver && outcome > 0 then roundMoney(pot - contributionOf(heroPosition))
-        else if handOver && outcome < 0 then -contributionOf(heroPosition)
-        else
-          val showdown = showdownResolution()
-          roundMoney(showdown.heroPayout - contributionOf(heroPosition))
+
+      val resolution = showdownResolution()
+      val perPositionNet: Map[Position, Double] =
+        tableScenario.activePositions.iterator.map { position =>
+          val payout = resolution.payouts.getOrElse(position, 0.0)
+          position -> roundMoney(payout - contributionOf(position))
+        }.toMap
+
+      val heroNet = perPositionNet.getOrElse(heroPosition, 0.0)
       outcome =
         if heroNet > MoneyEpsilon then 1
         else if heroNet < -MoneyEpsilon then -1
@@ -767,6 +771,7 @@ object TexasHoldemPlayingHall:
 
       HandResult(
         heroNet = heroNet,
+        perPositionNet = perPositionNet,
         outcome = outcome,
         tableScenario = tableScenario,
         villainDecision = firstVillainDecision,
