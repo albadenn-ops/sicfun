@@ -691,6 +691,41 @@ class TexasHoldemPlayingHallTest extends FunSuite:
     }
   }
 
+  test("playing hall: hero net + per-villain nets sum to zero (zero-sum conservation)") {
+    withScalaCfrProvider {
+      val outDir = Files.createTempDirectory("hall-conservation-")
+      try
+        val result = TexasHoldemPlayingHall.run(Array(
+          "--hands=200",
+          "--tableCount=1",
+          "--playerCount=3",
+          "--heroStyle=adaptive",
+          "--heroPosition=Button",
+          "--gtoMode=exact",
+          "--villainPool=tag,gto",
+          "--heroExplorationRate=0.0",
+          "--raiseSize=2.5",
+          "--bunchingTrials=8",
+          "--equityTrials=120",
+          "--learnEveryHands=0",
+          "--learningWindowSamples=0",
+          "--saveReviewHandHistory=false",
+          "--seed=42",
+          s"--outDir=$outDir"
+        ))
+        assert(result.isRight, s"hall run failed: $result")
+        val summary = result.toOption.getOrElse(fail("missing hall summary"))
+        val totalVillainNet = summary.perVillainNetChips.values.sum
+        val delta = math.abs(summary.heroNetChips + totalVillainNet)
+        assert(
+          delta < 0.01,
+          s"zero-sum violated: heroNet=${summary.heroNetChips} sumVillainNet=$totalVillainNet delta=$delta"
+        )
+      finally
+        deleteRecursively(outDir)
+    }
+  }
+
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)
