@@ -735,7 +735,7 @@ class TexasHoldemPlayingHallTest extends FunSuite:
           "--tableCount=1",
           "--playerCount=3",
           "--heroStyle=adaptive",
-          "--heroPosition=Button",
+          "--heroPosition=SmallBlind",
           "--gtoMode=exact",
           "--villainPool=tag,gto",
           "--heroExplorationRate=0.0",
@@ -747,6 +747,7 @@ class TexasHoldemPlayingHallTest extends FunSuite:
           "--saveReviewHandHistory=true",
           "--saveTrainingTsv=false",
           "--saveDdreTrainingTsv=false",
+          "--fullRing=true",
           "--seed=42",
           s"--outDir=$outDir"
         ))

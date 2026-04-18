@@ -1274,21 +1274,20 @@ object TexasHoldemPlayingHall:
             totalContributionAfterRaise(contributionOf(position), toCallBefore, amount)
           )
 
-    /** Marks a position as folded. If hero folds, the hand is over with outcome = -1.
-      * If all villains have folded, hero wins uncontested with outcome = +1.
-      * Preflop folds are tracked separately for bunching-fold inference.
+    /** Marks a position as folded. The hand ends only when one or fewer live contestants remain;
+      * hero folding mid-multi-way no longer short-circuits the betting round — the remaining
+      * villains continue acting under their own decision policies until one is left standing
+      * or the river showdown resolves. Preflop folds are tracked separately for bunching-fold
+      * inference. The `outcome` var is no longer written here — `play()` recomputes it from
+      * the final `heroNet` produced by the unified payouts computation.
       */
     private def markFolded(position: Position, street: Street): Unit =
       if !foldedPositions.contains(position) then
         foldedPositions += position
         if street == Street.Preflop && !preflopFoldedPositions.contains(position) then
           preflopFoldedPositions += position
-      if position == heroPosition then
+      if liveContestants.size <= 1 then
         handOver = true
-        outcome = -1
-      else if !foldedPositions.contains(heroPosition) && liveVillains.isEmpty then
-        handOver = true
-        outcome = 1
 
     /** Mutates game state for the given action: folds mark the position out, calls pay the
       * to-call amount, raises pay the to-call plus the raise increment. Appends to the
