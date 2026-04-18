@@ -691,6 +691,25 @@ class TexasHoldemPlayingHallTest extends FunSuite:
     }
   }
 
+  test("hall summary: perHandHeroNet length equals handsPlayed and sums to heroNetChips") {
+    withScalaCfrProvider {
+      val outDir = Files.createTempDirectory("hall-perhand-")
+      try
+        val Right(summary) = TexasHoldemPlayingHall.run(Array(
+          "--hands=40", "--tables=1", "--players=3",
+          "--heroStyle=adaptive", "--heroPosition=Button",
+          "--gtoMode=exact", "--villainPool=tag,gto",
+          "--seed=42", s"--outDir=${outDir.toString}",
+          "--equityTrials=60", "--bunchingTrials=20"
+        )): @unchecked
+        assertEquals(summary.perHandHeroNet.length, summary.handsPlayed)
+        val delta = math.abs(summary.perHandHeroNet.sum - summary.heroNetChips)
+        assert(delta < 0.01, s"perHandHeroNet.sum=${summary.perHandHeroNet.sum} heroNetChips=${summary.heroNetChips}")
+      finally
+        deleteRecursively(outDir)
+    }
+  }
+
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)

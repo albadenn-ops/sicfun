@@ -135,6 +135,7 @@ object TexasHoldemPlayingHall:
       exactGtoSolvedByProvider: Map[String, Long] = Map.empty,
       exactGtoServedByProvider: Map[String, Long] = Map.empty,
       perVillainNetChips: Map[String, Double] = Map.empty,
+      perHandHeroNet: Vector[Double] = Vector.empty,
       overlayStats: Option[OverlayStats] = None
   ):
     def exactGtoCacheTotal: Long = exactGtoCacheHits + exactGtoCacheMisses
@@ -358,6 +359,7 @@ object TexasHoldemPlayingHall:
     private val actionCounts = mutable.Map.empty[String, Int].withDefaultValue(0)
     private var retrains = 0
     private val perVillainNet = mutable.HashMap.empty[String, Double].withDefaultValue(0.0)
+    private val perHandHeroNetBuilder = Vector.newBuilder[Double]
 
     /** Main execution: opens writers, initializes model, plays all hands, returns summary. */
     def run(): Either[String, HallSummary] =
@@ -524,6 +526,7 @@ object TexasHoldemPlayingHall:
 
     private def recordOutcome(result: HandResult, tableScenario: TableScenario): Unit =
       heroNet += result.heroNet
+      perHandHeroNetBuilder += result.heroNet
       if result.outcome > 0 then heroWins += 1
       else if result.outcome < 0 then heroLosses += 1
       else heroTies += 1
@@ -633,6 +636,7 @@ object TexasHoldemPlayingHall:
         exactGtoSolvedByProvider = exactGtoCacheStats.solvedByProviderSnapshot,
         exactGtoServedByProvider = exactGtoCacheStats.servedByProviderSnapshot,
         perVillainNetChips = perVillainNet.toMap,
+        perHandHeroNet = perHandHeroNetBuilder.result(),
         overlayStats = overlayMetricsOpt.map(_.snapshot())
       )
 
