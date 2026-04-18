@@ -313,122 +313,119 @@
       <div class="hall-grid">
         <article class="surface hall-card">
           <form class="hall-form" id="playing-hall-form">
-            <label class="field">
-              <span>Hands</span>
-              <input id="hall-hands" type="number" min="1" max="5000" step="1" value="240">
-            </label>
+            <div class="preset-bar" id="hall-preset-bar"></div>
 
-            <label class="field">
-              <span>Tables</span>
-              <input id="hall-table-count" type="number" min="1" max="24" step="1" value="2">
-            </label>
-
-            <label class="field">
-              <span>Players</span>
-              <select id="hall-player-count">
-                <option value="2">2-max</option>
-                <option value="3">3-max</option>
-                <option value="4">4-max</option>
-                <option value="5">5-max</option>
-                <option value="6" selected>6-max</option>
-                <option value="7">7-max</option>
-                <option value="8">8-max</option>
-                <option value="9">9-max</option>
-              </select>
-            </label>
-
-            <div class="field field-block">
-              <span>Seed</span>
-              <div class="seed-row">
-                <input id="hall-seed" type="number" min="0" step="1" value="42">
-                <label class="chip-check"><input id="hall-random-seed" type="checkbox"><span>random</span></label>
+            <details class="form-section" open>
+              <summary>Run sizing</summary>
+              <div class="form-section-body">
+                <label class="field">
+                  <span>Hands <span class="help" tabindex="0" data-help="Total hands to play across all tables.">ⓘ</span></span>
+                  <input id="hall-hands" type="number" min="1" max="5000" step="1" value="240">
+                </label>
+                <label class="field">
+                  <span>Tables <span class="help" tabindex="0" data-help="Parallel tables. More tables = faster wall-clock for the same hand count.">ⓘ</span></span>
+                  <input id="hall-table-count" type="number" min="1" max="24" step="1" value="2">
+                </label>
+                <label class="field">
+                  <span>Players <span class="help" tabindex="0" data-help="Seats per table. Blinds, positions, and villain slots all scale with this.">ⓘ</span></span>
+                  <select id="hall-player-count">
+                    <option value="2">2-max</option><option value="3">3-max</option><option value="4">4-max</option>
+                    <option value="5">5-max</option><option value="6" selected>6-max</option><option value="7">7-max</option>
+                    <option value="8">8-max</option><option value="9">9-max</option>
+                  </select>
+                </label>
+                <div class="field field-block">
+                  <span>Seed <span class="help" tabindex="0" data-help="RNG seed for cards and villain shuffles. Same seed + config = same run.">ⓘ</span></span>
+                  <div class="seed-row">
+                    <input id="hall-seed" type="number" min="0" step="1" value="42">
+                    <label class="chip-check"><input id="hall-random-seed" type="checkbox"><span>random</span></label>
+                  </div>
+                </div>
               </div>
-            </div>
+            </details>
 
-            <label class="field">
-              <span>Hero mode</span>
-              <select id="hall-hero-style">
-                <option value="adaptive" selected>Adaptive</option>
-                <option value="gto">GTO</option>
-                <option value="strategic">Strategic</option>
-              </select>
-            </label>
-
-            <label class="field">
-              <span>Hero position</span>
-              <select id="hall-hero-position">
-                <option value="Button" selected>Button</option>
-                <option value="Cutoff">Cutoff</option>
-                <option value="Hijack">Hijack</option>
-                <option value="Middle">Middle</option>
-                <option value="UTG">UTG</option>
-                <option value="UTG1">UTG1</option>
-                <option value="UTG2">UTG2</option>
-                <option value="SmallBlind">Small Blind</option>
-                <option value="BigBlind">Big Blind</option>
-              </select>
-            </label>
-
-            <label class="field">
-              <span>GTO mode</span>
-              <select id="hall-gto-mode">
-                <option value="exact" selected>Exact</option>
-                <option value="fast">Fast</option>
-              </select>
-            </label>
-
-            <label class="field">
-              <span>Hero exploration</span>
-              <input id="hall-exploration-rate" type="number" min="0" max="1" step="0.05" value="0">
-            </label>
-
-            <label class="field">
-              <span>Raise size</span>
-              <input id="hall-raise-size" type="number" min="0.25" max="20" step="0.1" value="2.5">
-            </label>
-
-            <label class="field">
-              <span>Learn every N hands</span>
-              <input id="hall-learn-every" type="number" min="0" max="5000" step="1" value="0">
-            </label>
-
-            <label class="field">
-              <span>Learning window</span>
-              <input id="hall-learning-window" type="number" min="0" max="500000" step="100" value="200">
-            </label>
-
-            <label class="field">
-              <span>Bunching trials</span>
-              <input id="hall-bunching-trials" type="number" min="1" max="600" step="1" value="40">
-            </label>
-
-            <label class="field">
-              <span>Equity trials</span>
-              <input id="hall-equity-trials" type="number" min="1" max="6000" step="1" value="240">
-            </label>
-
-            <div class="field field-block">
-              <span>Villain pool</span>
-              <div class="hall-pool">
-                <label class="chip-check"><input type="checkbox" name="villain-pool" value="tag" checked><span>tag</span></label>
-                <label class="chip-check"><input type="checkbox" name="villain-pool" value="lag" checked><span>lag</span></label>
-                <label class="chip-check"><input type="checkbox" name="villain-pool" value="nit"><span>nit</span></label>
-                <label class="chip-check"><input type="checkbox" name="villain-pool" value="station"><span>station</span></label>
-                <label class="chip-check"><input type="checkbox" name="villain-pool" value="maniac"><span>maniac</span></label>
-                <label class="chip-check"><input type="checkbox" name="villain-pool" value="gto" checked><span>gto</span></label>
+            <details class="form-section" open>
+              <summary>Hero</summary>
+              <div class="form-section-body">
+                <label class="field">
+                  <span>Mode <span class="help" tabindex="0" data-help="Adaptive learns from villains. GTO is a fixed mixed strategy. Strategic uses the Phase-2 overlay.">ⓘ</span></span>
+                  <select id="hall-hero-style">
+                    <option value="adaptive" selected>Adaptive</option>
+                    <option value="gto">GTO</option>
+                    <option value="strategic">Strategic</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Position <span class="help" tabindex="0" data-help="Seat hero occupies on each dealt hand.">ⓘ</span></span>
+                  <select id="hall-hero-position">
+                    <option value="Button" selected>Button</option><option value="Cutoff">Cutoff</option><option value="Hijack">Hijack</option>
+                    <option value="Middle">Middle</option><option value="UTG">UTG</option><option value="UTG1">UTG1</option>
+                    <option value="UTG2">UTG2</option><option value="SmallBlind">Small Blind</option><option value="BigBlind">Big Blind</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>GTO mode <span class="help" tabindex="0" data-help="Exact: full CFR solve per spot. Fast: lookup from precomputed table.">ⓘ</span></span>
+                  <select id="hall-gto-mode"><option value="exact" selected>Exact</option><option value="fast">Fast</option></select>
+                </label>
+                <label class="field">
+                  <span>Exploration <span class="help" tabindex="0" data-help="Probability hero takes a random legal action instead of the model pick.">ⓘ</span></span>
+                  <input id="hall-exploration-rate" type="number" min="0" max="1" step="0.05" value="0">
+                </label>
+                <label class="field">
+                  <span>Raise size <span class="help" tabindex="0" data-help="Standard hero open/raise size in big blinds.">ⓘ</span></span>
+                  <input id="hall-raise-size" type="number" min="0.25" max="20" step="0.1" value="2.5">
+                </label>
               </div>
-            </div>
+            </details>
 
-            <div class="hall-toggles">
-              <label class="toggle">
-                <input id="hall-save-review" type="checkbox">
-                <span>Export PokerStars review file</span>
-              </label>
-              <label class="toggle">
-                <input id="hall-full-ring" type="checkbox">
-                <span>Force all villains active</span>
-              </label>
-            </div>
+            <details class="form-section" open>
+              <summary>Villains</summary>
+              <div class="form-section-body">
+                <div class="field field-block">
+                  <span>Pool <span class="help" tabindex="0" data-help="Archetypes eligible to sit. One is picked per seat per hand.">ⓘ</span></span>
+                  <div class="hall-pool">
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="tag" checked><span>tag</span></label>
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="lag" checked><span>lag</span></label>
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="nit"><span>nit</span></label>
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="station"><span>station</span></label>
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="maniac"><span>maniac</span></label>
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="gto" checked><span>gto</span></label>
+                  </div>
+                </div>
+                <div class="hall-toggles">
+                  <label class="toggle"><input id="hall-save-review" type="checkbox"><span>Export PokerStars review file</span></label>
+                  <label class="toggle"><input id="hall-full-ring" type="checkbox"><span>Force all villains active</span></label>
+                </div>
+              </div>
+            </details>
+
+            <details class="form-section">
+              <summary>Learning</summary>
+              <div class="form-section-body">
+                <label class="field">
+                  <span>Learn every N hands <span class="help" tabindex="0" data-help="Retrain the adaptive model every N hands. Zero disables learning.">ⓘ</span></span>
+                  <input id="hall-learn-every" type="number" min="0" max="5000" step="1" value="0">
+                </label>
+                <label class="field">
+                  <span>Learning window <span class="help" tabindex="0" data-help="Recent hands retained as training samples.">ⓘ</span></span>
+                  <input id="hall-learning-window" type="number" min="0" max="500000" step="100" value="200">
+                </label>
+              </div>
+            </details>
+
+            <details class="form-section">
+              <summary>Advanced</summary>
+              <div class="form-section-body">
+                <label class="field">
+                  <span>Bunching trials <span class="help" tabindex="0" data-help="Monte-Carlo samples for bunching correction. More = tighter equity, slower.">ⓘ</span></span>
+                  <input id="hall-bunching-trials" type="number" min="1" max="600" step="1" value="40">
+                </label>
+                <label class="field">
+                  <span>Equity trials <span class="help" tabindex="0" data-help="Monte-Carlo samples per equity call.">ⓘ</span></span>
+                  <input id="hall-equity-trials" type="number" min="1" max="6000" step="1" value="240">
+                </label>
+              </div>
+            </details>
 
             <div class="upload-actions">
               <button class="button" id="hall-submit" type="submit">Run Playing Hall</button>
