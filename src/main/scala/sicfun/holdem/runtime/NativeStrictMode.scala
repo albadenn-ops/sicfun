@@ -38,3 +38,44 @@ object NativeStrictMode:
       "src/main/native/jni/HoldemPostflopNativeBindingsCuda.cu"
     ))
   )
+
+  def verify(
+      nativeDir: File,
+      required: Vector[Library],
+      strict: Boolean
+  ): Either[NativeStrictModeViolation, NativeReady] =
+    val missing = required.filter(lib => !dllFile(nativeDir, lib.name).exists())
+    val stale = required.flatMap { lib =>
+      val dll = dllFile(nativeDir, lib.name)
+      if !dll.exists() then None
+      else
+        val dllMtime = dll.lastModified()
+        lib.sources
+          .map(p => new File(p))
+          .find(src => src.exists() && src.lastModified() > dllMtime)
+          .map(src => (lib.name, src.getPath))
+    }
+    (missing, stale, strict) match
+      case (m, _, true) if m.nonEmpty =>
+        Left(NativeStrictModeViolation(
+          s"Missing native libraries (strict): ${m.map(_.name).mkString(", ")}; " +
+            "rebuild with src/main/native/build-windows-cuda11.ps1"
+        ))
+      case (_, s, true) if s.nonEmpty =>
+        Left(NativeStrictModeViolation(
+          s"Stale native builds (strict): ${s.map((d, src) => s"$d older than $src").mkString("; ")}"
+        ))
+      case (m, s, false) if m.nonEmpty || s.nonEmpty =>
+        System.err.println(
+          s"[BENCHMARK-CONTAMINATED] strict=false, missing=[${m.map(_.name).mkString(",")}], " +
+            s"stale=[${s.map(_._1).mkString(",")}]"
+        )
+        Right(NativeReady(Vector.empty, contaminated = true))
+      case _ =>
+        Right(NativeReady(required.map(_.name), contaminated = false))
+
+  private def dllFile(dir: File, libName: String): File =
+    val os = System.getProperty("os.name", "").toLowerCase
+    if os.contains("win") then new File(dir, s"$libName.dll")
+    else if os.contains("mac") then new File(dir, s"lib$libName.dylib")
+    else new File(dir, s"lib$libName.so")
