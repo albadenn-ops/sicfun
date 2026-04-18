@@ -531,8 +531,11 @@ object TexasHoldemPlayingHall:
       if result.outcome > 0 then heroWins += 1
       else if result.outcome < 0 then heroLosses += 1
       else heroTies += 1
-      val primaryName = tableScenario.primaryVillainProfile.name
-      perVillainNet.update(primaryName, perVillainNet(primaryName) + result.heroNet)
+      tableScenario.activeVillainPositions.foreach { position =>
+        val villainName = tableScenario.villainProfileByPosition(position).name
+        val villainDelta = result.perPositionNet.getOrElse(position, 0.0)
+        perVillainNet.update(villainName, perVillainNet(villainName) + villainDelta)
+      }
 
     private def recordHeroActions(result: HandResult): Unit =
       result.heroActions.foreach { action =>
