@@ -1226,7 +1226,7 @@ class HandHistoryReviewServerTest extends FunSuite:
       result: Either[String, Value]
   ): HandHistoryReviewServer.PlayingHallBackend =
     new HandHistoryReviewServer.PlayingHallBackend:
-      override def run(request: HandHistoryReviewServer.PlayingHallRequest): Either[String, Value] =
+      override def run(request: HandHistoryReviewServer.PlayingHallRequest, cancelSignal: () => Boolean): Either[String, Value] =
         result
 
   private final class BlockingBackend(result: Either[String, Value]) extends HandHistoryReviewServer.AnalysisBackend:
@@ -1243,7 +1243,7 @@ class HandHistoryReviewServerTest extends FunSuite:
     val started = new CountDownLatch(1)
     val release = new CountDownLatch(1)
 
-    override def run(request: HandHistoryReviewServer.PlayingHallRequest): Either[String, Value] =
+    override def run(request: HandHistoryReviewServer.PlayingHallRequest, cancelSignal: () => Boolean): Either[String, Value] =
       started.countDown()
       if !release.await(5, TimeUnit.SECONDS) then
         Left("playing hall failed: blocking backend timed out")
@@ -1268,7 +1268,7 @@ class HandHistoryReviewServerTest extends FunSuite:
     val started = new CountDownLatch(1)
     val finished = new CountDownLatch(1)
 
-    override def run(request: HandHistoryReviewServer.PlayingHallRequest): Either[String, Value] =
+    override def run(request: HandHistoryReviewServer.PlayingHallRequest, cancelSignal: () => Boolean): Either[String, Value] =
       started.countDown()
       try
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(runForMs)
