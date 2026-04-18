@@ -310,6 +310,11 @@
         </p>
       </div>
 
+      <details class="recent-runs" id="hall-recent-runs">
+        <summary><span class="card-kicker">Recent runs</span> <span class="recent-runs-count" id="hall-recent-count">0</span></summary>
+        <div class="recent-runs-body" id="hall-recent-runs-list"></div>
+      </details>
+
       <div class="hall-grid">
         <article class="surface hall-card">
           <form class="hall-form" id="playing-hall-form">
@@ -444,32 +449,36 @@
         <article class="frame review-panel hall-panel" aria-live="polite">
           <div class="review-status" id="hall-status">
             <p class="card-kicker">Ready</p>
-            <h3>Configure a hall run and launch it from the browser.</h3>
-            <p class="section-note">
+            <h3 id="hall-status-title">Configure a hall run and launch it from the browser.</h3>
+            <p class="section-note" id="hall-status-note">
               The result board returns hero win-rate, action mix, per-villain chip flow, and the output
               files written for that run.
             </p>
+            <div class="hall-progress hidden" id="hall-progress">
+              <div class="hall-progress-bar"><div class="hall-progress-bar-inner"></div></div>
+              <div class="hall-progress-meta">
+                <span id="hall-elapsed">Elapsed 00:00</span>
+                <button type="button" class="button button-secondary" id="hall-cancel">Cancel Run</button>
+              </div>
+            </div>
           </div>
 
           <div class="review-results hidden" id="hall-results">
-            <div class="summary-grid" id="hall-summary-grid"></div>
-
-            <div class="decision-block">
-              <div class="results-head">
-                <p class="card-kicker">Run Context</p>
-                <p class="card-meta" id="hall-mode-line">Hero: -</p>
-              </div>
-              <div class="decision-list" id="hall-action-list"></div>
+            <div class="dashboard-kpis" id="hall-kpi-grid"></div>
+            <div class="dashboard-chart" id="hall-chart-chips-over-time"></div>
+            <div class="dashboard-two-up">
+              <div class="dashboard-chart" id="hall-chart-action-donut"></div>
+              <div class="dashboard-chart" id="hall-chart-wlt"></div>
             </div>
-
+            <div class="dashboard-chart" id="hall-chart-villain-bar"></div>
+            <div class="dashboard-chart" id="hall-chart-equity-hist"></div>
+            <details class="dashboard-chart">
+              <summary><span class="card-kicker">Villain × result matrix</span></summary>
+              <div id="hall-chart-matrix"></div>
+            </details>
             <div class="opponent-block">
               <p class="card-kicker">Outputs</p>
               <div class="opponent-list" id="hall-output-list"></div>
-            </div>
-
-            <div class="opponent-block">
-              <p class="card-kicker">Per-Villain Net</p>
-              <div class="opponent-list" id="hall-villain-list"></div>
             </div>
           </div>
         </article>
