@@ -726,6 +726,52 @@ class TexasHoldemPlayingHallTest extends FunSuite:
     }
   }
 
+  test("playing hall: multi-way hands continue after hero folds (villain vs villain resolution)") {
+    withScalaCfrProvider {
+      val outDir = Files.createTempDirectory("hall-post-fold-")
+      try
+        val result = TexasHoldemPlayingHall.run(Array(
+          "--hands=400",
+          "--tableCount=1",
+          "--playerCount=3",
+          "--heroStyle=adaptive",
+          "--heroPosition=Button",
+          "--gtoMode=exact",
+          "--villainPool=tag,gto",
+          "--heroExplorationRate=0.0",
+          "--raiseSize=2.5",
+          "--bunchingTrials=8",
+          "--equityTrials=120",
+          "--learnEveryHands=0",
+          "--learningWindowSamples=0",
+          "--saveReviewHandHistory=true",
+          "--saveTrainingTsv=false",
+          "--saveDdreTrainingTsv=false",
+          "--seed=42",
+          s"--outDir=$outDir"
+        ))
+        assert(result.isRight, s"hall run failed: $result")
+        val handRows = Files.readAllLines(outDir.resolve("hands.tsv"), StandardCharsets.UTF_8).asScala.toVector
+        val header = handRows.head.split("\t", -1).toVector
+        val heroActionIdx = header.indexOf("heroAction")
+        val streetsPlayedIdx = header.indexOf("streetsPlayed")
+        assert(heroActionIdx >= 0, "hands.tsv missing heroAction column")
+        assert(streetsPlayedIdx >= 0, "hands.tsv missing streetsPlayed column")
+        val postHeroFold =
+          handRows.tail.count { row =>
+            val cells = row.split("\t", -1).toVector
+            cells.lift(heroActionIdx).contains("Fold") &&
+              cells.lift(streetsPlayedIdx).exists(_.toIntOption.exists(_ > 1))
+          }
+        assert(
+          postHeroFold > 0,
+          "expected at least one hand where hero folded but streets continued past preflop for remaining villains"
+        )
+      finally
+        deleteRecursively(outDir)
+    }
+  }
+
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)
