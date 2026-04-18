@@ -136,6 +136,7 @@ object TexasHoldemPlayingHall:
       exactGtoServedByProvider: Map[String, Long] = Map.empty,
       perVillainNetChips: Map[String, Double] = Map.empty,
       perHandHeroNet: Vector[Double] = Vector.empty,
+      heroDecisionEquities: Vector[Double] = Vector.empty,
       overlayStats: Option[OverlayStats] = None
   ):
     def exactGtoCacheTotal: Long = exactGtoCacheHits + exactGtoCacheMisses
@@ -210,6 +211,7 @@ object TexasHoldemPlayingHall:
       ddreTrainingSamples: Vector[DdreTrainingSample],
       raiseResponses: Vector[PokerAction],
       heroActions: Vector[PokerAction],
+      heroDecisionEquities: Vector[Double],
       villainActions: Vector[PokerAction],
       streetsPlayed: Int,
       reviewHistoryLines: Vector[String],
@@ -360,6 +362,7 @@ object TexasHoldemPlayingHall:
     private var retrains = 0
     private val perVillainNet = mutable.HashMap.empty[String, Double].withDefaultValue(0.0)
     private val perHandHeroNetBuilder = Vector.newBuilder[Double]
+    private val heroDecisionEquitiesBuilder = Vector.newBuilder[Double]
 
     /** Main execution: opens writers, initializes model, plays all hands, returns summary. */
     def run(): Either[String, HallSummary] =
@@ -527,6 +530,7 @@ object TexasHoldemPlayingHall:
     private def recordOutcome(result: HandResult, tableScenario: TableScenario): Unit =
       heroNet += result.heroNet
       perHandHeroNetBuilder += result.heroNet
+      result.heroDecisionEquities.foreach(e => heroDecisionEquitiesBuilder += e)
       if result.outcome > 0 then heroWins += 1
       else if result.outcome < 0 then heroLosses += 1
       else heroTies += 1
@@ -637,6 +641,7 @@ object TexasHoldemPlayingHall:
         exactGtoServedByProvider = exactGtoCacheStats.servedByProviderSnapshot,
         perVillainNetChips = perVillainNet.toMap,
         perHandHeroNet = perHandHeroNetBuilder.result(),
+        heroDecisionEquities = heroDecisionEquitiesBuilder.result(),
         overlayStats = overlayMetricsOpt.map(_.snapshot())
       )
 
@@ -731,6 +736,7 @@ object TexasHoldemPlayingHall:
     private val ddreTrainingSamples = mutable.ArrayBuffer.empty[DdreTrainingSample]
     private val raiseResponses = mutable.ArrayBuffer.empty[PokerAction]
     private val heroActions = mutable.ArrayBuffer.empty[PokerAction]
+    private val heroDecisionEquities = mutable.ArrayBuffer.empty[Double]
     private val villainActions = mutable.ArrayBuffer.empty[PokerAction]
     private val observationsByPosition = mutable.HashMap.empty[Position, mutable.ArrayBuffer[VillainObservation]]
     private val reviewHistoryLines = mutable.ArrayBuffer.empty[String]
@@ -775,6 +781,7 @@ object TexasHoldemPlayingHall:
         ddreTrainingSamples = ddreTrainingSamples.toVector,
         raiseResponses = raiseResponses.toVector,
         heroActions = heroActions.toVector,
+        heroDecisionEquities = heroDecisionEquities.toVector,
         villainActions = villainActions.toVector,
         streetsPlayed = streetsPlayed,
         reviewHistoryLines = reviewHistoryLines.toVector,
@@ -1002,6 +1009,7 @@ object TexasHoldemPlayingHall:
         betHistory = betHistory
       )
       val candidates = heroCandidates(state, config.raiseSize, allowRaise)
+      var equityAtDecision: Option[Double] = None
       val sampled = config.heroMode match
         case HeroMode.Adaptive =>
           val engine = if street == Street.Preflop then preflopEngine else postflopEngine
@@ -1015,24 +1023,28 @@ object TexasHoldemPlayingHall:
             decisionBudgetMillis = Some(1L),
             rng = new Random(rng.nextLong())
           )
-          val greedy =
-            multiwayRecommendationFor(
-              actor = heroPosition,
-              state = state,
-              candidateActions = candidates,
-              posteriorOverrides = Map(
-                focusVillainPosition -> adaptiveDecision.decision.posteriorInference.posterior
-              )
-            ).map(_.bestAction)
-              .getOrElse(adaptiveDecision.decision.recommendation.bestAction)
+          val mwRec = multiwayRecommendationFor(
+            actor = heroPosition,
+            state = state,
+            candidateActions = candidates,
+            posteriorOverrides = Map(
+              focusVillainPosition -> adaptiveDecision.decision.posteriorInference.posterior
+            )
+          )
+          equityAtDecision = mwRec.map(_.heroEquity.mean)
+            .orElse(Some(adaptiveDecision.decision.recommendation.heroEquity.mean))
+          val greedy = mwRec.map(_.bestAction)
+            .getOrElse(adaptiveDecision.decision.recommendation.bestAction)
           if rng.nextDouble() < config.heroExplorationRate then candidates(rng.nextInt(candidates.length))
           else greedy
         case HeroMode.Gto =>
-          multiwayRecommendationFor(
+          val mwRec = multiwayRecommendationFor(
             actor = heroPosition,
             state = state,
             candidateActions = candidates
-          ).map(_.bestAction)
+          )
+          equityAtDecision = mwRec.map(_.heroEquity.mean)
+          mwRec.map(_.bestAction)
             .getOrElse(
               GtoSolveEngine.gtoResponds(
                 hand = deal.holeCardsFor(heroPosition),
@@ -1068,6 +1080,7 @@ object TexasHoldemPlayingHall:
                   rng = new Random(rng.nextLong())
                 ).decision.recommendation
               }
+              equityAtDecision = Some(upstreamRec.heroEquity.mean)
               val livePlayers = participatingPositions.size - foldedPositions.size
               val source = if livePlayers > 2 then
                 UpstreamSource.Multiway(livePlayers - 1)
@@ -1082,6 +1095,7 @@ object TexasHoldemPlayingHall:
               overlayResult.selectedAction
             case None =>
               candidates.find(_ != PokerAction.Fold).getOrElse(PokerAction.Fold)
+      equityAtDecision.foreach(e => heroDecisionEquities += e)
       val normalized = normalizeAction(
         action = sampled,
         toCall = toCall,

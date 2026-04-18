@@ -710,6 +710,27 @@ class TexasHoldemPlayingHallTest extends FunSuite:
     }
   }
 
+  test("hall summary: heroDecisionEquities populated when hero acts") {
+    withScalaCfrProvider {
+      val outDir = Files.createTempDirectory("hall-equities-")
+      try
+        val Right(summary) = TexasHoldemPlayingHall.run(Array(
+          "--hands=30", "--tables=1", "--players=3",
+          "--heroStyle=adaptive", "--heroPosition=Button",
+          "--gtoMode=exact", "--villainPool=tag,gto",
+          "--seed=42", s"--outDir=${outDir.toString}",
+          "--equityTrials=60", "--bunchingTrials=20"
+        )): @unchecked
+        assert(summary.heroDecisionEquities.nonEmpty, "expected at least one hero decision")
+        assert(
+          summary.heroDecisionEquities.forall(e => e >= 0.0 && e <= 1.0),
+          s"out-of-range equities: ${summary.heroDecisionEquities}"
+        )
+      finally
+        deleteRecursively(outDir)
+    }
+  }
+
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)
