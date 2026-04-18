@@ -1,3 +1,7 @@
+> **SUPERSEDED BY** [2026-04-18-sicfun-9max-vs-blueprint-v2.md](2026-04-18-sicfun-9max-vs-blueprint-v2.md) — v1 contenía bugs en Tasks 2/3/4/14 (round closure off-by-one, mbb/100 off por 100×, rename de parámetro que rompía compile entre tasks) y varios placeholders sin marcar (`MdpEmbedding.estimateLossForAction` hardcoded, `exploitabilityFn = _ => 0.0`, `publicActions` nunca populado, `finalizeHand` no repartía el bote, `eventLog = Vector.empty`, `Card.fullDeck` inexistente, `PublicState.minimal` inexistente, `ExploitationConfig.default` inexistente). v2 corrige los bugs, sustituye los stubs silenciosos por un sistema `PlaceholderMarker` + `BenchmarkGate` runtime-enforced, y parte Spec A en **A.1 (infrastructure only)** + A.2 (benchmark honesto con bridges reales). No ejecutar v1.
+
+---
+
 # sicfun 9-max vs. Blueprint Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
