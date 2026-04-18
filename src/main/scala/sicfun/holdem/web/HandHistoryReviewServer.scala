@@ -143,12 +143,15 @@ object HandHistoryReviewServer:
   private[web] trait AnalysisBackend:
     def analyze(request: HandHistoryReviewService.AnalysisRequest): Either[String, Value]
 
+  private[web] enum CancelOutcome:
+    case Accepted, AlreadyTerminal, NotFound
+
   private[web] trait PlayingHallBackend:
-    def run(request: PlayingHallRequest): Either[String, Value]
+    def run(request: PlayingHallRequest, cancelSignal: () => Boolean = () => false): Either[String, Value]
 
   private val livePlayingHallBackend = new PlayingHallBackend:
-    override def run(request: PlayingHallRequest): Either[String, Value] =
-      runPlayingHall(request)
+    override def run(request: PlayingHallRequest, cancelSignal: () => Boolean): Either[String, Value] =
+      runPlayingHall(request, cancelSignal)
 
   def main(args: Array[String]): Unit =
     start(args) match
@@ -642,8 +645,8 @@ object HandHistoryReviewServer:
       jobStore: PlayingHallJobStore,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Left(405 -> "GET required")
-    else
+    val method = exchange.getRequestMethod
+    if method.equalsIgnoreCase("GET") then
       extractJobId(exchange, PlayingHallJobPathPrefix, "playing hall").flatMap { jobId =>
         jobStore
           .status(
@@ -653,6 +656,21 @@ object HandHistoryReviewServer:
           )
           .toRight(404 -> s"playing hall job not found: $jobId")
       }
+    else if method.equalsIgnoreCase("DELETE") then
+      extractJobId(exchange, PlayingHallJobPathPrefix, "playing hall").flatMap { jobId =>
+        jobStore.cancel(
+          jobId = jobId,
+          requesterUserId = authenticatedUser(exchange).map(_.userId),
+          enforceOwnership = platformAuth.nonEmpty
+        ) match
+          case CancelOutcome.Accepted =>
+            Right(JsonResponse(200, Obj("jobId" -> Str(jobId), "status" -> Str("cancelled"))))
+          case CancelOutcome.AlreadyTerminal =>
+            Left(409 -> "playing hall job already terminal")
+          case CancelOutcome.NotFound =>
+            Left(404 -> s"playing hall job not found: $jobId")
+      }
+    else Left(405 -> "GET or DELETE required")
 
   private def extractJobId(
       exchange: HttpExchange,
@@ -912,7 +930,10 @@ object HandHistoryReviewServer:
       case _ => None
     }
 
-  private def runPlayingHall(request: PlayingHallRequest): Either[String, Value] =
+  private def runPlayingHall(
+      request: PlayingHallRequest,
+      cancelSignal: () => Boolean
+  ): Either[String, Value] =
     Files.createDirectories(DefaultPlayingHallRoot)
     val runRoot = DefaultPlayingHallRoot.resolve(request.runDirectoryName).toAbsolutePath.normalize()
     val reportEvery = math.max(1, math.min(request.hands, math.max(25, request.hands / 3)))
@@ -939,7 +960,7 @@ object HandHistoryReviewServer:
       s"--fullRing=${request.fullRing}"
     )
     TexasHoldemPlayingHall
-      .run(args)
+      .runWithCancel(args, cancelSignal)
       .left
       .map(error => s"playing hall failed: $error")
       .map(summary => renderPlayingHallResult(request, summary))
@@ -987,6 +1008,8 @@ object HandHistoryReviewServer:
         "exactGtoSolvedByProvider" -> objFromLongCounts(summary.exactGtoSolvedByProvider),
         "exactGtoServedByProvider" -> objFromLongCounts(summary.exactGtoServedByProvider),
         "perVillainNetChips" -> objFromDoubleCounts(summary.perVillainNetChips),
+        "perHandHeroNet" -> Arr.from(summary.perHandHeroNet.map(v => ujson.Num(v))),
+        "heroDecisionEquities" -> Arr.from(summary.heroDecisionEquities.map(v => ujson.Num(v))),
         "overlayStats" -> summary.overlayStats.map(renderOverlayStats).getOrElse(ujson.Null),
         "outputFiles" -> Arr.from(existingOutputFiles(outDir).map(Str(_)))
       )
@@ -1792,6 +1815,17 @@ object HandHistoryReviewServer:
       override val completedAtEpochMs = Some(completedAt)
       override val isTerminal = true
 
+    final case class Cancelled(
+        submittedAtEpochMs: Long,
+        startedAt: Option[Long],
+        completedAt: Long,
+        result: Option[Value]
+    ) extends AnalysisJobState:
+      override val status = "cancelled"
+      override val startedAtEpochMs = startedAt
+      override val completedAtEpochMs = Some(completedAt)
+      override val isTerminal = true
+
   private final class AnalysisJobStore(
       executor: ThreadPoolExecutor,
       timeoutExecutor: ScheduledExecutorService,
@@ -2041,6 +2075,10 @@ object HandHistoryReviewServer:
           json("errorStatus") = ujson.Num(errorStatus)
           json("error") = Str(error)
           JsonResponse(200, json)
+        case Cancelled(submittedAt, startedAt, completedAt, _) =>
+          val json = baseStatus(jobId, state, submittedAt, startedAt, Some(completedAt), None)
+          startedAt.foreach(s => json("durationMs") = ujson.Num((completedAt - s).toDouble))
+          JsonResponse(200, json)
 
     private def baseStatus(
         jobId: String,
@@ -2082,6 +2120,7 @@ object HandHistoryReviewServer:
 
     private val jobs = new ConcurrentHashMap[String, AnalysisJobState]()
     private val jobOwners = new ConcurrentHashMap[String, String]()
+    private val cancelFlags = new ConcurrentHashMap[String, AtomicBoolean]()
     private val timedOutWorkersInFlight = new AtomicInteger(0)
 
     def submit(
@@ -2100,12 +2139,14 @@ object HandHistoryReviewServer:
           val jobId = UUID.randomUUID().toString
           val submittedAt = nowMillis()
           jobs.put(jobId, Queued(submittedAt))
+          cancelFlags.put(jobId, new AtomicBoolean(false))
           ownerUserId.foreach(owner => jobOwners.put(jobId, owner))
           try
             rejectIfUnavailable() match
               case Some(error) =>
                 jobs.remove(jobId)
                 jobOwners.remove(jobId)
+                cancelFlags.remove(jobId)
                 logWarn(
                   s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
                 )
@@ -2130,6 +2171,7 @@ object HandHistoryReviewServer:
             case _: RejectedExecutionException =>
               jobs.remove(jobId)
               jobOwners.remove(jobId)
+              cancelFlags.remove(jobId)
               rejectIfUnavailable() match
                 case Some(error) =>
                   logWarn(
@@ -2155,6 +2197,23 @@ object HandHistoryReviewServer:
       if !accessible then None
       else Option(jobs.get(jobId)).map(renderStatus(jobId, _))
 
+    def cancel(
+        jobId: String,
+        requesterUserId: Option[String] = None,
+        enforceOwnership: Boolean = false
+    ): CancelOutcome =
+      val owner = Option(jobOwners.get(jobId))
+      val accessible =
+        if !enforceOwnership then true
+        else owner.nonEmpty && requesterUserId.contains(owner.get)
+      Option(jobs.get(jobId)) match
+        case None => CancelOutcome.NotFound
+        case Some(_) if !accessible => CancelOutcome.NotFound
+        case Some(state) if state.isTerminal => CancelOutcome.AlreadyTerminal
+        case Some(_) =>
+          Option(cancelFlags.get(jobId)).foreach(_.set(true))
+          CancelOutcome.Accepted
+
     private def runJob(
         jobId: String,
         request: PlayingHallRequest,
@@ -2163,18 +2222,23 @@ object HandHistoryReviewServer:
       val startedAt = nowMillis()
       jobs.put(jobId, Running(submittedAt, startedAt))
       val timedOut = new AtomicBoolean(false)
+      val cancelFlag = Option(cancelFlags.get(jobId)).getOrElse(new AtomicBoolean(false))
       val timeoutTask = scheduleTimeout(jobId, submittedAt, startedAt, timedOut)
       logInfo(
         s"playing hall job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} timeoutMs=$analysisTimeoutMs ${request.logSummary}"
       )
       val completedState =
         try
-          val backendResult = backend.run(request)
+          val backendResult = backend.run(request, () => cancelFlag.get())
           if timedOut.get() then timeoutFailure(submittedAt, startedAt)
           else
             backendResult match
+              case Right(result) if cancelFlag.get() =>
+                Cancelled(submittedAt, Some(startedAt), nowMillis(), Some(result))
               case Right(result) =>
                 Completed(submittedAt, startedAt, nowMillis(), result)
+              case Left(error) if cancelFlag.get() =>
+                Cancelled(submittedAt, Some(startedAt), nowMillis(), None)
               case Left(error) =>
                 Failed(submittedAt, startedAt, nowMillis(), classifyPlayingHallError(error), error)
         catch
@@ -2182,6 +2246,7 @@ object HandHistoryReviewServer:
             timeoutFailure(submittedAt, startedAt)
           case NonFatal(e) =>
             if timedOut.get() then timeoutFailure(submittedAt, startedAt)
+            else if cancelFlag.get() then Cancelled(submittedAt, Some(startedAt), nowMillis(), None)
             else Failed(submittedAt, startedAt, nowMillis(), 500, s"playing hall failed: ${e.getMessage}")
       timeoutTask.foreach(_.cancel(false))
       if timedOut.get() then
@@ -2201,6 +2266,10 @@ object HandHistoryReviewServer:
         case Failed(_, _, completedAt, errorStatus, error) =>
           logWarn(
             s"playing hall job failed jobId=$jobId durationMs=${completedAt - startedAt} errorStatus=$errorStatus queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} error=$error"
+          )
+        case Cancelled(_, _, completedAt, _) =>
+          logInfo(
+            s"playing hall job cancelled jobId=$jobId durationMs=${completedAt - startedAt} queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
           )
         case _ => ()
 
@@ -2297,6 +2366,11 @@ object HandHistoryReviewServer:
           json("durationMs") = ujson.Num((completedAt - startedAt).toDouble)
           json("errorStatus") = ujson.Num(errorStatus)
           json("error") = Str(error)
+          JsonResponse(200, json)
+        case Cancelled(submittedAt, startedAt, completedAt, result) =>
+          val json = baseStatus(jobId, state, submittedAt, startedAt, Some(completedAt), None)
+          startedAt.foreach(s => json("durationMs") = ujson.Num((completedAt - s).toDouble))
+          result.foreach(r => json("result") = r)
           JsonResponse(200, json)
 
     private def baseStatus(
