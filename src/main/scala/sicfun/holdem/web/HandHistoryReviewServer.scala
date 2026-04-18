@@ -2,6 +2,7 @@ package sicfun.holdem.web
 
 import sicfun.holdem.cli.CliHelpers
 import sicfun.holdem.history.HandHistorySite
+import sicfun.holdem.runtime.TexasHoldemPlayingHall
 
 import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 import ujson.{Arr, Obj, Str, Value}
@@ -60,6 +61,8 @@ import scala.util.control.NonFatal
   */
 object HandHistoryReviewServer:
   private val AnalyzeJobPathPrefix = "/api/analyze-hand-history/jobs/"
+  private val PlayingHallPath = "/api/playing-hall"
+  private val PlayingHallJobPathPrefix = "/api/playing-hall/jobs/"
   private val AuthMePath = "/api/auth/me"
   private val AuthRegisterPath = "/api/auth/register"
   private val AuthLoginPath = "/api/auth/login"
@@ -68,6 +71,7 @@ object HandHistoryReviewServer:
   private val DefaultPollAfterMs = 750
   private val CompletedJobRetentionMs = 15L * 60L * 1000L
   private val DefaultAnalysisTimeoutMs = 120000L
+  private val DefaultPlayingHallTimeoutMs = 900000L
   private val DefaultShutdownGraceMs = 5000L
   private val DefaultRateLimitWindowMs = 60L * 1000L
   private val DefaultRateLimitSubmitsPerMinute = 6
@@ -76,8 +80,6 @@ object HandHistoryReviewServer:
   private val ReadyReasonDraining = "draining"
   private val ReadyReasonTimedOutWorker = "timed-out-worker"
   private val ReadyReasonQueueFull = "queue-full"
-  private val DrainingAdmissionMessage = "analysis service is draining; try another instance or retry later"
-  private val TimedOutWorkerAdmissionMessage = "analysis worker timed out; instance is waiting for recovery"
   private val BasicAuthRealm = "sicfun-hand-history-review"
   private val BasicAuthChallenge = s"""Basic realm="$BasicAuthRealm", charset="UTF-8""""
   private val AuthenticationRequiredMessage = "authentication required"
@@ -87,6 +89,16 @@ object HandHistoryReviewServer:
   private val ContentSecurityPolicy =
     "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'"
   private val AuthenticatedUserAttribute = "sicfun.hand-history.authenticated-user"
+  private val DefaultPlayingHallRoot = Paths.get("data", "web-playing-hall")
+  private val DefaultPlayingHallHands = 240
+  private val DefaultPlayingHallTableCount = 2
+  private val DefaultPlayingHallPlayerCount = 6
+  private val DefaultPlayingHallSeed = 42L
+  private val MaxPlayingHallHands = 5000
+  private val MaxPlayingHallTableCount = 24
+  private val MaxPlayingHallBunchingTrials = 600
+  private val MaxPlayingHallEquityTrials = 6000
+  private val MaxPlayingHallVillainPoolEntries = 8
 
   final case class BasicAuthConfig(
       username: String,
@@ -100,6 +112,7 @@ object HandHistoryReviewServer:
     * @param staticDir                 directory for serving static UI files
     * @param maxUploadBytes            maximum request body size for hand history uploads
     * @param analysisTimeoutMs         per-analysis timeout before a job is marked failed
+    * @param playingHallTimeoutMs      per-playing-hall timeout before a job is marked failed
     * @param maxConcurrentJobs         number of worker threads for analysis processing
     * @param maxQueuedJobs             maximum pending jobs before rejecting submissions
     * @param shutdownGraceMs           grace period for in-flight analysis on shutdown
@@ -113,6 +126,7 @@ object HandHistoryReviewServer:
       staticDir: Path,
       maxUploadBytes: Int,
       analysisTimeoutMs: Long,
+      playingHallTimeoutMs: Long,
       maxConcurrentJobs: Int,
       maxQueuedJobs: Int,
       shutdownGraceMs: Long,
@@ -128,6 +142,13 @@ object HandHistoryReviewServer:
 
   private[web] trait AnalysisBackend:
     def analyze(request: HandHistoryReviewService.AnalysisRequest): Either[String, Value]
+
+  private[web] trait PlayingHallBackend:
+    def run(request: PlayingHallRequest): Either[String, Value]
+
+  private val livePlayingHallBackend = new PlayingHallBackend:
+    override def run(request: PlayingHallRequest): Either[String, Value] =
+      runPlayingHall(request)
 
   def main(args: Array[String]): Unit =
     start(args) match
@@ -158,28 +179,34 @@ object HandHistoryReviewServer:
     for
       config <- parseArgs(args)
       service <- HandHistoryReviewService.create(config.serviceConfig)
-      running <- startWithBackend(
-        config,
-        new AnalysisBackend:
-          override def analyze(
-              request: HandHistoryReviewService.AnalysisRequest
-          ): Either[String, Value] =
-            service.analyze(request).map(service.writeJson)
-      )
+      analysisBackend = new AnalysisBackend:
+        override def analyze(
+            request: HandHistoryReviewService.AnalysisRequest
+        ): Either[String, Value] =
+          service.analyze(request).map(service.writeJson)
+      running <- startWithBackends(config, analysisBackend, livePlayingHallBackend)
     yield running
 
   private[web] def startWithBackend(
       config: ServerConfig,
       backend: AnalysisBackend
   ): Either[String, RunningServer] =
-    startServer(config, backend)
+    startWithBackends(config, backend, livePlayingHallBackend)
+
+  private[web] def startWithBackends(
+      config: ServerConfig,
+      backend: AnalysisBackend,
+      playingHallBackend: PlayingHallBackend
+  ): Either[String, RunningServer] =
+    startServer(config, backend, playingHallBackend)
 
   def run(args: Array[String]): Either[String, ServerBinding] =
     start(args).map(_.binding)
 
   private def startServer(
       config: ServerConfig,
-      backend: AnalysisBackend
+      backend: AnalysisBackend,
+      playingHallBackend: PlayingHallBackend
   ): Either[String, RunningServer] =
     val platformAuthServiceEither =
       config.platformAuth match
@@ -212,6 +239,12 @@ object HandHistoryReviewServer:
         backend = backend,
         analysisTimeoutMs = config.analysisTimeoutMs
       )
+      val playingHallJobStore = new PlayingHallJobStore(
+        executor = analysisExecutor,
+        timeoutExecutor = analysisTimeoutExecutor,
+        backend = playingHallBackend,
+        analysisTimeoutMs = config.playingHallTimeoutMs
+      )
       val activeHttpRequests = new AtomicInteger(0)
       val server = HttpServer.create(new InetSocketAddress(config.host, config.port), 0)
       server.createContext(
@@ -225,6 +258,7 @@ object HandHistoryReviewServer:
                 server.getAddress.getPort,
                 startedAtEpochMs,
                 jobStore,
+                playingHallJobStore,
                 activeHttpRequests.get(),
                 draining
               )
@@ -237,7 +271,16 @@ object HandHistoryReviewServer:
         trackActiveRequests(
           activeHttpRequests,
           new JsonHandler(_ =>
-            Right(renderReadiness(config, server.getAddress.getPort, jobStore, activeHttpRequests.get(), draining))
+            Right(
+              renderReadiness(
+                config,
+                server.getAddress.getPort,
+                jobStore,
+                playingHallJobStore,
+                activeHttpRequests.get(),
+                draining
+              )
+            )
           )
         )
       )
@@ -265,7 +308,7 @@ object HandHistoryReviewServer:
                 exchange,
                 jobStore,
                 config.maxUploadBytes,
-                () => readinessStatus(config, jobStore, draining),
+                () => readinessStatus(config, jobStore, playingHallJobStore, draining),
                 platformAuthService
               ),
             basicAuth = config.basicAuth,
@@ -273,6 +316,41 @@ object HandHistoryReviewServer:
             authRequirement = AuthRequirement.Required,
             rateLimiter = Some(rateLimiter),
             rateLimitBucket = Some(RateLimitBucket.Submit)
+          )
+        )
+      )
+      server.createContext(
+        PlayingHallPath,
+        trackActiveRequests(
+          activeHttpRequests,
+          new JsonHandler(
+            exchange =>
+              handlePlayingHallSubmit(
+                exchange,
+                playingHallJobStore,
+                config.maxUploadBytes,
+                () => readinessStatus(config, jobStore, playingHallJobStore, draining),
+                platformAuthService
+              ),
+            basicAuth = config.basicAuth,
+            platformAuth = platformAuthService,
+            authRequirement = AuthRequirement.Required,
+            rateLimiter = Some(rateLimiter),
+            rateLimitBucket = Some(RateLimitBucket.Submit)
+          )
+        )
+      )
+      server.createContext(
+        PlayingHallJobPathPrefix,
+        trackActiveRequests(
+          activeHttpRequests,
+          new JsonHandler(
+            exchange => handlePlayingHallJobStatus(exchange, playingHallJobStore, platformAuthService),
+            basicAuth = config.basicAuth,
+            platformAuth = platformAuthService,
+            authRequirement = AuthRequirement.Required,
+            rateLimiter = Some(rateLimiter),
+            rateLimitBucket = Some(RateLimitBucket.JobStatus)
           )
         )
       )
@@ -489,11 +567,58 @@ object HandHistoryReviewServer:
           )
         }
 
-  private def admissionRejectedMessage(readiness: ReadinessStatus): String =
+  private def handlePlayingHallSubmit(
+      exchange: HttpExchange,
+      jobStore: PlayingHallJobStore,
+      maxUploadBytes: Int,
+      readiness: () => ReadinessStatus,
+      platformAuth: Option[PlatformUserAuth.Service]
+  ): Either[(Int, String), JsonResponse] =
+    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Left(405 -> "POST required")
+    else if !ensurePlatformCsrf(exchange, platformAuth) then Left(403 -> SessionCsrfRequiredMessage)
+    else if !readiness().acceptingAnalysisJobs then
+      Left(503 -> admissionRejectedMessage(readiness(), "playing hall"))
+    else
+      readRequestBody(exchange, maxUploadBytes)
+        .flatMap(parsePlayingHallRequest)
+        .flatMap(request =>
+          jobStore
+            .submit(
+              request,
+              ownerUserId = authenticatedUser(exchange).map(_.userId),
+              rejectIfUnavailable = () =>
+                if readiness().acceptingAnalysisJobs then None
+                else Some(admissionRejectedMessage(readiness(), "playing hall"))
+            )
+            .left
+            .map(error => 503 -> error)
+        )
+        .map(renderAcceptedJobResponse)
+
+  private def renderAcceptedJobResponse(accepted: AcceptedJob): JsonResponse =
+    JsonResponse(
+      status = 202,
+      value = Obj(
+        "jobId" -> Str(accepted.jobId),
+        "status" -> Str("queued"),
+        "statusUrl" -> Str(accepted.statusUrl),
+        "submittedAtEpochMs" -> ujson.Num(accepted.submittedAtEpochMs.toDouble),
+        "pollAfterMs" -> ujson.Num(accepted.pollAfterMs)
+      ),
+      headers = Vector(
+        "Location" -> accepted.statusUrl,
+        "Retry-After" -> retryAfterSeconds(accepted.pollAfterMs)
+      )
+    )
+
+  private def admissionRejectedMessage(
+      readiness: ReadinessStatus,
+      serviceName: String = "analysis"
+  ): String =
     readiness.reason match
-      case ReadyReasonDraining => DrainingAdmissionMessage
-      case ReadyReasonTimedOutWorker => TimedOutWorkerAdmissionMessage
-      case _ => "analysis queue is full; try again later"
+      case ReadyReasonDraining => s"$serviceName service is draining; try another instance or retry later"
+      case ReadyReasonTimedOutWorker => s"$serviceName worker timed out; instance is waiting for recovery"
+      case _ => s"$serviceName queue is full; try again later"
 
   private def handleAnalyzeJobStatus(
       exchange: HttpExchange,
@@ -502,7 +627,7 @@ object HandHistoryReviewServer:
   ): Either[(Int, String), JsonResponse] =
     if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Left(405 -> "GET required")
     else
-      extractJobId(exchange).flatMap { jobId =>
+      extractJobId(exchange, AnalyzeJobPathPrefix, "analysis").flatMap { jobId =>
         jobStore
           .status(
             jobId = jobId,
@@ -512,12 +637,33 @@ object HandHistoryReviewServer:
           .toRight(404 -> s"analysis job not found: $jobId")
       }
 
-  private def extractJobId(exchange: HttpExchange): Either[(Int, String), String] =
-    val path = Option(exchange.getRequestURI.getPath).getOrElse("")
-    if !path.startsWith(AnalyzeJobPathPrefix) then Left(404 -> "not found")
+  private def handlePlayingHallJobStatus(
+      exchange: HttpExchange,
+      jobStore: PlayingHallJobStore,
+      platformAuth: Option[PlatformUserAuth.Service]
+  ): Either[(Int, String), JsonResponse] =
+    if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Left(405 -> "GET required")
     else
-      val jobId = path.substring(AnalyzeJobPathPrefix.length).trim
-      Either.cond(jobId.nonEmpty && !jobId.contains("/"), jobId, 400 -> "analysis job id is required")
+      extractJobId(exchange, PlayingHallJobPathPrefix, "playing hall").flatMap { jobId =>
+        jobStore
+          .status(
+            jobId = jobId,
+            requesterUserId = authenticatedUser(exchange).map(_.userId),
+            enforceOwnership = platformAuth.nonEmpty
+          )
+          .toRight(404 -> s"playing hall job not found: $jobId")
+      }
+
+  private def extractJobId(
+      exchange: HttpExchange,
+      pathPrefix: String,
+      label: String
+  ): Either[(Int, String), String] =
+    val path = Option(exchange.getRequestURI.getPath).getOrElse("")
+    if !path.startsWith(pathPrefix) then Left(404 -> "not found")
+    else
+      val jobId = path.substring(pathPrefix.length).trim
+      Either.cond(jobId.nonEmpty && !jobId.contains("/"), jobId, 400 -> s"$label job id is required")
 
   private def parseRequest(body: String): Either[(Int, String), HandHistoryReviewService.AnalysisRequest] =
     try
@@ -536,6 +682,355 @@ object HandHistoryReviewServer:
       )
     catch
       case NonFatal(e) => Left(400 -> s"invalid JSON request: ${e.getMessage}")
+
+  private def parsePlayingHallRequest(body: String): Either[(Int, String), PlayingHallRequest] =
+    try
+      val obj = ujson.read(body).obj
+      for
+        hands <- requiredIntInRange(
+          obj,
+          key = "hands",
+          default = DefaultPlayingHallHands,
+          min = 1,
+          max = MaxPlayingHallHands
+        )
+        tableCount <- requiredIntInRange(
+          obj,
+          key = "tableCount",
+          default = DefaultPlayingHallTableCount,
+          min = 1,
+          max = MaxPlayingHallTableCount
+        )
+        playerCount <- requiredIntInRange(
+          obj,
+          key = "playerCount",
+          default = DefaultPlayingHallPlayerCount,
+          min = 2,
+          max = 9
+        )
+        heroStyle <- requiredChoice(
+          obj,
+          key = "heroStyle",
+          default = "adaptive",
+          allowed = Set("adaptive", "gto", "strategic")
+        )
+        heroPosition <- requiredChoice(
+          obj,
+          key = "heroPosition",
+          default = "Button",
+          allowed = Set("SmallBlind", "BigBlind", "UTG", "UTG1", "UTG2", "Middle", "Hijack", "Cutoff", "Button")
+        )
+        gtoMode <- requiredChoice(
+          obj,
+          key = "gtoMode",
+          default = "exact",
+          allowed = Set("fast", "exact")
+        )
+        villainPool <- requiredVillainPool(obj)
+        heroExplorationRate <- requiredDoubleInRange(
+          obj,
+          key = "heroExplorationRate",
+          default = 0.0,
+          min = 0.0,
+          max = 1.0
+        )
+        raiseSize <- requiredDoubleInRange(
+          obj,
+          key = "raiseSize",
+          default = 2.5,
+          min = 0.25,
+          max = 20.0
+        )
+        bunchingTrials <- requiredIntInRange(
+          obj,
+          key = "bunchingTrials",
+          default = 40,
+          min = 1,
+          max = MaxPlayingHallBunchingTrials
+        )
+        equityTrials <- requiredIntInRange(
+          obj,
+          key = "equityTrials",
+          default = 240,
+          min = 1,
+          max = MaxPlayingHallEquityTrials
+        )
+        learnEveryHands <- requiredIntInRange(
+          obj,
+          key = "learnEveryHands",
+          default = 0,
+          min = 0,
+          max = MaxPlayingHallHands
+        )
+        learningWindowSamples <- requiredIntInRange(
+          obj,
+          key = "learningWindowSamples",
+          default = 200,
+          min = 0,
+          max = 500000
+        )
+        seed <- optionalLong(obj, "seed").getOrElse(Right(DefaultPlayingHallSeed))
+        saveReviewHandHistory <- optionalBoolean(obj, "saveReviewHandHistory").getOrElse(Right(false))
+        fullRing <- optionalBoolean(obj, "fullRing").getOrElse(Right(false))
+      yield PlayingHallRequest(
+        hands = hands,
+        tableCount = tableCount,
+        playerCount = playerCount,
+        heroStyle = heroStyle,
+        heroPosition = heroPosition,
+        gtoMode = gtoMode,
+        villainPool = villainPool,
+        heroExplorationRate = heroExplorationRate,
+        raiseSize = raiseSize,
+        bunchingTrials = bunchingTrials,
+        equityTrials = equityTrials,
+        learnEveryHands = learnEveryHands,
+        learningWindowSamples = learningWindowSamples,
+        saveReviewHandHistory = saveReviewHandHistory,
+        fullRing = fullRing,
+        seed = seed
+      )
+    catch
+      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${e.getMessage}")
+
+  private def requiredIntInRange(
+      obj: collection.Map[String, Value],
+      key: String,
+      default: Int,
+      min: Int,
+      max: Int
+  ): Either[(Int, String), Int] =
+    val value = optionalInt(obj, key).getOrElse(Right(default))
+    value.flatMap(parsed =>
+      Either.cond(parsed >= min && parsed <= max, parsed, 400 -> s"$key must be in [$min,$max]")
+    )
+
+  private def requiredDoubleInRange(
+      obj: collection.Map[String, Value],
+      key: String,
+      default: Double,
+      min: Double,
+      max: Double
+  ): Either[(Int, String), Double] =
+    val value = optionalDouble(obj, key).getOrElse(Right(default))
+    value.flatMap(parsed =>
+      Either.cond(parsed >= min && parsed <= max, parsed, 400 -> s"$key must be in [$min,$max]")
+    )
+
+  private def requiredChoice(
+      obj: collection.Map[String, Value],
+      key: String,
+      default: String,
+      allowed: Set[String]
+  ): Either[(Int, String), String] =
+    val raw = optionalString(obj, key).map(_.trim).filter(_.nonEmpty).getOrElse(default)
+    val normalized = raw.toLowerCase(Locale.ROOT)
+    val canonicalByNormalized =
+      allowed.map(value => value.toLowerCase(Locale.ROOT) -> value).toMap
+    canonicalByNormalized
+      .get(normalized)
+      .toRight(400 -> s"$key must be one of: ${allowed.toVector.sorted.mkString(", ")}")
+
+  private def requiredVillainPool(
+      obj: collection.Map[String, Value]
+  ): Either[(Int, String), Vector[String]] =
+    val parsed =
+      optionalStringArray(obj, "villainPool")
+        .orElse(optionalString(obj, "villainPool").map(raw =>
+          raw.split(',').toVector.map(_.trim).filter(_.nonEmpty)
+        ))
+        .getOrElse(Vector("tag", "gto"))
+        .map(_.trim)
+        .filter(_.nonEmpty)
+    if parsed.isEmpty then Left(400 -> "villainPool must include at least one entry")
+    else if parsed.length > MaxPlayingHallVillainPoolEntries then
+      Left(400 -> s"villainPool must include at most $MaxPlayingHallVillainPoolEntries entries")
+    else
+      val normalized = parsed.map(_.toLowerCase(Locale.ROOT))
+      val allowed = Set("nit", "tag", "lag", "callingstation", "station", "maniac", "gto")
+      val invalid = normalized.filterNot(allowed.contains)
+      if invalid.nonEmpty then
+        Left(400 -> s"villainPool contains unsupported entries: ${invalid.distinct.sorted.mkString(", ")}")
+      else Right(normalized)
+
+  private def optionalInt(
+      obj: collection.Map[String, Value],
+      key: String
+  ): Option[Either[(Int, String), Int]] =
+    obj.get(key).map {
+      case ujson.Num(value) if value.isWhole => Right(value.toInt)
+      case Str(value) => value.trim.toIntOption.toRight(400 -> s"$key must be an integer")
+      case other => Left(400 -> s"$key must be an integer, got ${ujson.write(other)}")
+    }
+
+  private def optionalLong(
+      obj: collection.Map[String, Value],
+      key: String
+  ): Option[Either[(Int, String), Long]] =
+    obj.get(key).map {
+      case ujson.Num(value) if value.isWhole => Right(value.toLong)
+      case Str(value) => value.trim.toLongOption.toRight(400 -> s"$key must be a long")
+      case other => Left(400 -> s"$key must be a long, got ${ujson.write(other)}")
+    }
+
+  private def optionalDouble(
+      obj: collection.Map[String, Value],
+      key: String
+  ): Option[Either[(Int, String), Double]] =
+    obj.get(key).map {
+      case ujson.Num(value) => Right(value)
+      case Str(value) => value.trim.toDoubleOption.toRight(400 -> s"$key must be a number")
+      case other => Left(400 -> s"$key must be a number, got ${ujson.write(other)}")
+    }
+
+  private def optionalBoolean(
+      obj: collection.Map[String, Value],
+      key: String
+  ): Option[Either[(Int, String), Boolean]] =
+    obj.get(key).map {
+      case ujson.Bool(value) => Right(value)
+      case Str(value) =>
+        value.trim.toLowerCase(Locale.ROOT) match
+          case "true" => Right(true)
+          case "false" => Right(false)
+          case _ => Left(400 -> s"$key must be true or false")
+      case other => Left(400 -> s"$key must be true or false, got ${ujson.write(other)}")
+    }
+
+  private def optionalStringArray(
+      obj: collection.Map[String, Value],
+      key: String
+  ): Option[Vector[String]] =
+    obj.get(key).flatMap {
+      case Arr(values) =>
+        Some(
+          values.collect {
+            case Str(value) => value
+            case other => other.str
+          }.toVector
+        )
+      case _ => None
+    }
+
+  private def runPlayingHall(request: PlayingHallRequest): Either[String, Value] =
+    Files.createDirectories(DefaultPlayingHallRoot)
+    val runRoot = DefaultPlayingHallRoot.resolve(request.runDirectoryName).toAbsolutePath.normalize()
+    val reportEvery = math.max(1, math.min(request.hands, math.max(25, request.hands / 3)))
+    val args = Array(
+      s"--hands=${request.hands}",
+      s"--tableCount=${request.tableCount}",
+      s"--playerCount=${request.playerCount}",
+      s"--reportEvery=$reportEvery",
+      s"--learnEveryHands=${request.learnEveryHands}",
+      s"--learningWindowSamples=${request.learningWindowSamples}",
+      s"--seed=${request.seed}",
+      s"--outDir=$runRoot",
+      s"--heroStyle=${request.heroStyle}",
+      s"--heroPosition=${request.heroPosition}",
+      s"--gtoMode=${request.gtoMode}",
+      s"--villainPool=${request.villainPool.mkString(",")}",
+      s"--heroExplorationRate=${request.heroExplorationRate}",
+      s"--raiseSize=${request.raiseSize}",
+      s"--bunchingTrials=${request.bunchingTrials}",
+      s"--equityTrials=${request.equityTrials}",
+      "--saveTrainingTsv=false",
+      "--saveDdreTrainingTsv=false",
+      s"--saveReviewHandHistory=${request.saveReviewHandHistory}",
+      s"--fullRing=${request.fullRing}"
+    )
+    TexasHoldemPlayingHall
+      .run(args)
+      .left
+      .map(error => s"playing hall failed: $error")
+      .map(summary => renderPlayingHallResult(request, summary))
+
+  private def renderPlayingHallResult(
+      request: PlayingHallRequest,
+      summary: TexasHoldemPlayingHall.HallSummary
+  ): Value =
+    val outDir = summary.outDir.toAbsolutePath.normalize()
+    Obj(
+      "request" -> Obj(
+        "hands" -> ujson.Num(request.hands.toDouble),
+        "tableCount" -> ujson.Num(request.tableCount.toDouble),
+        "playerCount" -> ujson.Num(request.playerCount.toDouble),
+        "heroStyle" -> Str(request.heroStyle),
+        "heroPosition" -> Str(request.heroPosition),
+        "gtoMode" -> Str(request.gtoMode),
+        "villainPool" -> Arr.from(request.villainPool.map(Str(_))),
+        "heroExplorationRate" -> ujson.Num(request.heroExplorationRate),
+        "raiseSize" -> ujson.Num(request.raiseSize),
+        "bunchingTrials" -> ujson.Num(request.bunchingTrials.toDouble),
+        "equityTrials" -> ujson.Num(request.equityTrials.toDouble),
+        "learnEveryHands" -> ujson.Num(request.learnEveryHands.toDouble),
+        "learningWindowSamples" -> ujson.Num(request.learningWindowSamples.toDouble),
+        "saveReviewHandHistory" -> ujson.Bool(request.saveReviewHandHistory),
+        "fullRing" -> ujson.Bool(request.fullRing),
+        "seed" -> ujson.Num(request.seed.toDouble)
+      ),
+      "summary" -> Obj(
+        "handsPlayed" -> ujson.Num(summary.handsPlayed.toDouble),
+        "tableCount" -> ujson.Num(summary.tableCount.toDouble),
+        "playerCount" -> ujson.Num(summary.playerCount.toDouble),
+        "heroNetChips" -> ujson.Num(summary.heroNetChips),
+        "heroBbPer100" -> ujson.Num(summary.heroBbPer100),
+        "heroWins" -> ujson.Num(summary.heroWins.toDouble),
+        "heroTies" -> ujson.Num(summary.heroTies.toDouble),
+        "heroLosses" -> ujson.Num(summary.heroLosses.toDouble),
+        "actionCounts" -> objFromCounts(summary.actionCounts),
+        "retrains" -> ujson.Num(summary.retrains.toDouble),
+        "modelId" -> Str(summary.modelId),
+        "outDir" -> Str(outDir.toString),
+        "exactGtoCacheHits" -> ujson.Num(summary.exactGtoCacheHits.toDouble),
+        "exactGtoCacheMisses" -> ujson.Num(summary.exactGtoCacheMisses.toDouble),
+        "exactGtoCacheHitRate" -> ujson.Num(summary.exactGtoCacheHitRate),
+        "exactGtoSolvedByProvider" -> objFromLongCounts(summary.exactGtoSolvedByProvider),
+        "exactGtoServedByProvider" -> objFromLongCounts(summary.exactGtoServedByProvider),
+        "perVillainNetChips" -> objFromDoubleCounts(summary.perVillainNetChips),
+        "overlayStats" -> summary.overlayStats.map(renderOverlayStats).getOrElse(ujson.Null),
+        "outputFiles" -> Arr.from(existingOutputFiles(outDir).map(Str(_)))
+      )
+    )
+
+  private def existingOutputFiles(outDir: Path): Vector[String] =
+    Vector(
+      "hands.tsv",
+      "learning.tsv",
+      "training-selfplay.tsv",
+      "ddre-training-selfplay.tsv",
+      "review-upload-pokerstars.txt"
+    ).flatMap { name =>
+      val candidate = outDir.resolve(name)
+      Option.when(Files.exists(candidate))(candidate.toString)
+    }
+
+  private def renderOverlayStats(stats: sicfun.holdem.runtime.protocol.OverlayStats): Value =
+    Obj(
+      "decisions" -> ujson.Num(stats.decisions.toDouble),
+      "overlayChangeRate" -> ujson.Num(stats.overlayChangeRate),
+      "vetoRate" -> ujson.Num(stats.vetoRate),
+      "decisionsWithVeto" -> ujson.Num(stats.decisionsWithVeto.toDouble),
+      "totalVetoedActions" -> ujson.Num(stats.totalVetoedActions.toDouble),
+      "meanLatencyMs" -> ujson.Num(stats.meanLatencyMs),
+      "p95LatencyMs" -> ujson.Num(stats.p95LatencyMs),
+      "p99LatencyMs" -> ujson.Num(stats.p99LatencyMs),
+      "actionDistribution" -> objFromCounts(stats.actionDistribution)
+    )
+
+  private def objFromCounts(values: Map[String, Int]): Value =
+    Obj.from(values.toVector.sortBy(_._1).map { case (key, value) =>
+      key -> ujson.Num(value.toDouble)
+    })
+
+  private def objFromLongCounts(values: Map[String, Long]): Value =
+    Obj.from(values.toVector.sortBy(_._1).map { case (key, value) =>
+      key -> ujson.Num(value.toDouble)
+    })
+
+  private def objFromDoubleCounts(values: Map[String, Double]): Value =
+    Obj.from(values.toVector.sortBy(_._1).map { case (key, value) =>
+      key -> ujson.Num(value)
+    })
 
   private def handleAuthMe(
       exchange: HttpExchange,
@@ -817,6 +1312,13 @@ object HandHistoryReviewServer:
           DefaultAnalysisTimeoutMs
         )
         _ <- Either.cond(analysisTimeoutMs >= 0, (), "--analysisTimeoutMs must be zero or positive")
+        playingHallTimeoutMs <- resolveLongOption(
+          options,
+          "playingHallTimeoutMs",
+          env("PLAYING_HALL_TIMEOUT_MS"),
+          DefaultPlayingHallTimeoutMs
+        )
+        _ <- Either.cond(playingHallTimeoutMs >= 0, (), "--playingHallTimeoutMs must be zero or positive")
         maxConcurrentJobs <- resolveIntOption(
           options,
           "maxConcurrentJobs",
@@ -959,6 +1461,7 @@ object HandHistoryReviewServer:
         staticDir = staticDir,
         maxUploadBytes = maxUploadBytes,
         analysisTimeoutMs = analysisTimeoutMs,
+        playingHallTimeoutMs = playingHallTimeoutMs,
         maxConcurrentJobs = maxConcurrentJobs,
         maxQueuedJobs = maxQueuedJobs,
         shutdownGraceMs = shutdownGraceMs,
@@ -1177,6 +1680,30 @@ object HandHistoryReviewServer:
       statusUrl: String,
       pollAfterMs: Int
   )
+
+  private[web] final case class PlayingHallRequest(
+      hands: Int,
+      tableCount: Int,
+      playerCount: Int,
+      heroStyle: String,
+      heroPosition: String,
+      gtoMode: String,
+      villainPool: Vector[String],
+      heroExplorationRate: Double,
+      raiseSize: Double,
+      bunchingTrials: Int,
+      equityTrials: Int,
+      learnEveryHands: Int,
+      learningWindowSamples: Int,
+      saveReviewHandHistory: Boolean,
+      fullRing: Boolean,
+      seed: Long
+  ):
+    def runDirectoryName: String =
+      s"${System.currentTimeMillis()}-${UUID.randomUUID().toString.take(8)}"
+
+    def logSummary: String =
+      s"hands=$hands tableCount=$tableCount playerCount=$playerCount heroStyle=$heroStyle heroPosition=$heroPosition gtoMode=$gtoMode villainPool=${villainPool.mkString(",")} seed=$seed"
 
   private final case class AnalysisJobMetrics(
       maxConcurrentJobs: Int,
@@ -1544,6 +2071,263 @@ object HandHistoryReviewServer:
           jobOwners.remove(entry.getKey)
           iterator.remove()
 
+  private final class PlayingHallJobStore(
+      executor: ThreadPoolExecutor,
+      timeoutExecutor: ScheduledExecutorService,
+      backend: PlayingHallBackend,
+      analysisTimeoutMs: Long,
+      nowMillis: () => Long = () => System.currentTimeMillis()
+  ):
+    import AnalysisJobState.*
+
+    private val jobs = new ConcurrentHashMap[String, AnalysisJobState]()
+    private val jobOwners = new ConcurrentHashMap[String, String]()
+    private val timedOutWorkersInFlight = new AtomicInteger(0)
+
+    def submit(
+        request: PlayingHallRequest,
+        ownerUserId: Option[String] = None,
+        rejectIfUnavailable: () => Option[String] = () => None
+    ): Either[String, AcceptedJob] =
+      purgeExpiredJobs()
+      rejectIfUnavailable() match
+        case Some(error) =>
+          logWarn(
+            s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+          )
+          Left(error)
+        case None =>
+          val jobId = UUID.randomUUID().toString
+          val submittedAt = nowMillis()
+          jobs.put(jobId, Queued(submittedAt))
+          ownerUserId.foreach(owner => jobOwners.put(jobId, owner))
+          try
+            rejectIfUnavailable() match
+              case Some(error) =>
+                jobs.remove(jobId)
+                jobOwners.remove(jobId)
+                logWarn(
+                  s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+                )
+                Left(error)
+              case None =>
+                executor.submit(new Runnable:
+                  override def run(): Unit =
+                    runJob(jobId, request, submittedAt)
+                )
+                logInfo(
+                  s"playing hall job accepted jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} ${request.logSummary}"
+                )
+                Right(
+                  AcceptedJob(
+                    jobId = jobId,
+                    submittedAtEpochMs = submittedAt,
+                    statusUrl = s"$PlayingHallJobPathPrefix$jobId",
+                    pollAfterMs = DefaultPollAfterMs
+                  )
+                )
+          catch
+            case _: RejectedExecutionException =>
+              jobs.remove(jobId)
+              jobOwners.remove(jobId)
+              rejectIfUnavailable() match
+                case Some(error) =>
+                  logWarn(
+                    s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+                  )
+                  Left(error)
+                case None =>
+                  logWarn(
+                    s"playing hall job rejected queue full queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} maxConcurrentJobs=${executor.getMaximumPoolSize} maxQueuedJobs=${queueCapacity(executor)}"
+                  )
+                  Left("playing hall queue is full; try again later")
+
+    def status(
+        jobId: String,
+        requesterUserId: Option[String] = None,
+        enforceOwnership: Boolean = false
+    ): Option[JsonResponse] =
+      purgeExpiredJobs()
+      val owner = Option(jobOwners.get(jobId))
+      val accessible =
+        if !enforceOwnership then true
+        else owner.nonEmpty && requesterUserId.contains(owner.get)
+      if !accessible then None
+      else Option(jobs.get(jobId)).map(renderStatus(jobId, _))
+
+    private def runJob(
+        jobId: String,
+        request: PlayingHallRequest,
+        submittedAt: Long
+    ): Unit =
+      val startedAt = nowMillis()
+      jobs.put(jobId, Running(submittedAt, startedAt))
+      val timedOut = new AtomicBoolean(false)
+      val timeoutTask = scheduleTimeout(jobId, submittedAt, startedAt, timedOut)
+      logInfo(
+        s"playing hall job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} timeoutMs=$analysisTimeoutMs ${request.logSummary}"
+      )
+      val completedState =
+        try
+          val backendResult = backend.run(request)
+          if timedOut.get() then timeoutFailure(submittedAt, startedAt)
+          else
+            backendResult match
+              case Right(result) =>
+                Completed(submittedAt, startedAt, nowMillis(), result)
+              case Left(error) =>
+                Failed(submittedAt, startedAt, nowMillis(), classifyPlayingHallError(error), error)
+        catch
+          case _: InterruptedException if timedOut.get() =>
+            timeoutFailure(submittedAt, startedAt)
+          case NonFatal(e) =>
+            if timedOut.get() then timeoutFailure(submittedAt, startedAt)
+            else Failed(submittedAt, startedAt, nowMillis(), 500, s"playing hall failed: ${e.getMessage}")
+      timeoutTask.foreach(_.cancel(false))
+      if timedOut.get() then
+        Thread.interrupted()
+      val finalState =
+        if timedOut.get() then terminalFailureFor(jobId, submittedAt, startedAt)
+        else
+          jobs.put(jobId, completedState)
+          completedState
+      if timedOut.get() then
+        timedOutWorkersInFlight.decrementAndGet()
+      finalState match
+        case Completed(_, _, completedAt, _) =>
+          logInfo(
+            s"playing hall job completed jobId=$jobId durationMs=${completedAt - startedAt} queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
+          )
+        case Failed(_, _, completedAt, errorStatus, error) =>
+          logWarn(
+            s"playing hall job failed jobId=$jobId durationMs=${completedAt - startedAt} errorStatus=$errorStatus queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} error=$error"
+          )
+        case _ => ()
+
+    private def scheduleTimeout(
+        jobId: String,
+        submittedAt: Long,
+        startedAt: Long,
+        timedOut: AtomicBoolean
+    ): Option[ScheduledFuture[?]] =
+      if analysisTimeoutMs <= 0 then None
+      else
+        val workerThread = Thread.currentThread()
+        Some(
+          timeoutExecutor.schedule(
+            new Runnable:
+              override def run(): Unit =
+                if tryMarkTimedOut(jobId, submittedAt, startedAt) then
+                  timedOut.set(true)
+                  timedOutWorkersInFlight.incrementAndGet()
+                  logWarn(
+                    s"playing hall job timed out jobId=$jobId timeoutMs=$analysisTimeoutMs queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
+                  )
+                  workerThread.interrupt()
+            ,
+            analysisTimeoutMs,
+            TimeUnit.MILLISECONDS
+          )
+        )
+
+    private def tryMarkTimedOut(
+        jobId: String,
+        submittedAt: Long,
+        startedAt: Long
+    ): Boolean =
+      val timedOutState = timeoutFailure(submittedAt, startedAt)
+      var marked = false
+      var retry = true
+      while retry do
+        val current = jobs.get(jobId)
+        if current == null || current.isTerminal then
+          retry = false
+        else if jobs.replace(jobId, current, timedOutState) then
+          marked = true
+          retry = false
+      marked
+
+    private def timeoutFailure(submittedAt: Long, startedAt: Long): Failed =
+      Failed(
+        submittedAtEpochMs = submittedAt,
+        startedAt = startedAt,
+        completedAt = nowMillis(),
+        errorStatus = 504,
+        error = s"playing hall timed out after ${analysisTimeoutMs}ms"
+      )
+
+    private def terminalFailureFor(
+        jobId: String,
+        submittedAt: Long,
+        startedAt: Long
+    ): Failed =
+      tryMarkTimedOut(jobId, submittedAt, startedAt)
+      jobs.get(jobId) match
+        case failed: Failed => failed
+        case _ => timeoutFailure(submittedAt, startedAt)
+
+    def timedOutWorkersInFlightCount: Int =
+      timedOutWorkersInFlight.get()
+
+    private def renderStatus(jobId: String, state: AnalysisJobState): JsonResponse =
+      state match
+        case Queued(submittedAt) =>
+          val json = baseStatus(jobId, state, submittedAt, None, None, Some(DefaultPollAfterMs))
+          json("message") = Str("Queued for playing hall")
+          JsonResponse(
+            status = 200,
+            value = json,
+            headers = Vector("Retry-After" -> retryAfterSeconds(DefaultPollAfterMs))
+          )
+        case Running(submittedAt, startedAt) =>
+          val json = baseStatus(jobId, state, submittedAt, Some(startedAt), None, Some(DefaultPollAfterMs))
+          json("message") = Str("Playing hall run in progress")
+          JsonResponse(
+            status = 200,
+            value = json,
+            headers = Vector("Retry-After" -> retryAfterSeconds(DefaultPollAfterMs))
+          )
+        case Completed(submittedAt, startedAt, completedAt, result) =>
+          val json = baseStatus(jobId, state, submittedAt, Some(startedAt), Some(completedAt), None)
+          json("durationMs") = ujson.Num((completedAt - startedAt).toDouble)
+          json("result") = result
+          JsonResponse(200, json)
+        case Failed(submittedAt, startedAt, completedAt, errorStatus, error) =>
+          val json = baseStatus(jobId, state, submittedAt, Some(startedAt), Some(completedAt), None)
+          json("durationMs") = ujson.Num((completedAt - startedAt).toDouble)
+          json("errorStatus") = ujson.Num(errorStatus)
+          json("error") = Str(error)
+          JsonResponse(200, json)
+
+    private def baseStatus(
+        jobId: String,
+        state: AnalysisJobState,
+        submittedAt: Long,
+        startedAt: Option[Long],
+        completedAt: Option[Long],
+        pollAfterMs: Option[Int]
+    ): Obj =
+      val json = Obj(
+        "jobId" -> Str(jobId),
+        "status" -> Str(state.status),
+        "statusUrl" -> Str(s"$PlayingHallJobPathPrefix$jobId"),
+        "submittedAtEpochMs" -> ujson.Num(submittedAt.toDouble),
+        "startedAtEpochMs" -> startedAt.map(value => ujson.Num(value.toDouble)).getOrElse(ujson.Null),
+        "completedAtEpochMs" -> completedAt.map(value => ujson.Num(value.toDouble)).getOrElse(ujson.Null)
+      )
+      pollAfterMs.foreach(value => json("pollAfterMs") = ujson.Num(value))
+      json
+
+    private def purgeExpiredJobs(): Unit =
+      val cutoff = nowMillis() - CompletedJobRetentionMs
+      val iterator = jobs.entrySet().iterator()
+      while iterator.hasNext do
+        val entry = iterator.next()
+        val state = entry.getValue
+        if state.isTerminal && state.completedAtEpochMs.exists(_ < cutoff) then
+          jobOwners.remove(entry.getKey)
+          iterator.remove()
+
   private final class RequestRateLimiter(
       submitsPerMinute: Int,
       statusPerMinute: Int,
@@ -1604,11 +2388,12 @@ object HandHistoryReviewServer:
       boundPort: Int,
       startedAtEpochMs: Long,
       jobStore: AnalysisJobStore,
+      playingHallJobStore: PlayingHallJobStore,
       activeHttpRequests: Int,
       draining: AtomicBoolean
   ): JsonResponse =
     val metrics = jobStore.metrics
-    val readiness = readinessStatus(config, jobStore, draining)
+    val readiness = readinessStatus(config, jobStore, playingHallJobStore, draining)
     val otherActiveHttpRequests = math.max(0, activeHttpRequests - 1)
     JsonResponse(
       status = 200,
@@ -1631,6 +2416,7 @@ object HandHistoryReviewServer:
         "drainSignalPresent" -> ujson.Bool(readiness.drainSignalPresent),
         "maxUploadBytes" -> ujson.Num(config.maxUploadBytes.toDouble),
         "analysisTimeoutMs" -> ujson.Num(config.analysisTimeoutMs.toDouble),
+        "playingHallTimeoutMs" -> ujson.Num(config.playingHallTimeoutMs.toDouble),
         "rateLimitSubmitsPerMinute" -> ujson.Num(config.rateLimitSubmitsPerMinute.toDouble),
         "rateLimitStatusPerMinute" -> ujson.Num(config.rateLimitStatusPerMinute.toDouble),
         "rateLimitClientIpSource" -> Str(rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)),
@@ -1639,7 +2425,7 @@ object HandHistoryReviewServer:
         "activeHttpRequests" -> ujson.Num(otherActiveHttpRequests.toDouble),
         "queuedJobs" -> ujson.Num(metrics.queuedJobs.toDouble),
         "runningJobs" -> ujson.Num(metrics.runningJobs.toDouble),
-        "timedOutWorkersInFlight" -> ujson.Num(metrics.timedOutWorkersInFlight.toDouble),
+        "timedOutWorkersInFlight" -> ujson.Num(readiness.timedOutWorkersInFlight.toDouble),
         "retainedTerminalJobs" -> ujson.Num(metrics.retainedTerminalJobs.toDouble)
       )
     )
@@ -1648,11 +2434,12 @@ object HandHistoryReviewServer:
       config: ServerConfig,
       boundPort: Int,
       jobStore: AnalysisJobStore,
+      playingHallJobStore: PlayingHallJobStore,
       activeHttpRequests: Int,
       draining: AtomicBoolean
   ): JsonResponse =
     val metrics = jobStore.metrics
-    val readiness = readinessStatus(config, jobStore, draining)
+    val readiness = readinessStatus(config, jobStore, playingHallJobStore, draining)
     val otherActiveHttpRequests = math.max(0, activeHttpRequests - 1)
     JsonResponse(
       status = if readiness.ready then 200 else 503,
@@ -1669,6 +2456,7 @@ object HandHistoryReviewServer:
         "drainSignalConfigured" -> ujson.Bool(config.drainSignalFile.nonEmpty),
         "drainSignalPresent" -> ujson.Bool(readiness.drainSignalPresent),
         "analysisTimeoutMs" -> ujson.Num(config.analysisTimeoutMs.toDouble),
+        "playingHallTimeoutMs" -> ujson.Num(config.playingHallTimeoutMs.toDouble),
         "rateLimitSubmitsPerMinute" -> ujson.Num(config.rateLimitSubmitsPerMinute.toDouble),
         "rateLimitStatusPerMinute" -> ujson.Num(config.rateLimitStatusPerMinute.toDouble),
         "rateLimitClientIpSource" -> Str(rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)),
@@ -1677,19 +2465,20 @@ object HandHistoryReviewServer:
         "maxQueuedJobs" -> ujson.Num(metrics.maxQueuedJobs.toDouble),
         "queuedJobs" -> ujson.Num(metrics.queuedJobs.toDouble),
         "runningJobs" -> ujson.Num(metrics.runningJobs.toDouble),
-        "timedOutWorkersInFlight" -> ujson.Num(metrics.timedOutWorkersInFlight.toDouble)
+        "timedOutWorkersInFlight" -> ujson.Num(readiness.timedOutWorkersInFlight.toDouble)
       )
     )
 
   private def readinessStatus(
       config: ServerConfig,
       jobStore: AnalysisJobStore,
+      playingHallJobStore: PlayingHallJobStore,
       draining: AtomicBoolean
   ): ReadinessStatus =
     val metrics = jobStore.metrics
     val drainSignalPresent = config.drainSignalFile.exists(path => Files.exists(path))
     val drainingNow = draining.get() || drainSignalPresent || jobStore.isShuttingDown
-    val timedOutWorkers = metrics.timedOutWorkersInFlight
+    val timedOutWorkers = metrics.timedOutWorkersInFlight + playingHallJobStore.timedOutWorkersInFlightCount
     val acceptingAnalysisJobs = !drainingNow && timedOutWorkers == 0 && jobStore.acceptingNewJobs
     val reason =
       if drainingNow then ReadyReasonDraining
@@ -1845,6 +2634,11 @@ object HandHistoryReviewServer:
   private def classifyAnalysisError(error: String): Int =
     if error.startsWith("analysis timed out after") then 504
     else if error.startsWith("analysis failed:") then 500
+    else 400
+
+  private def classifyPlayingHallError(error: String): Int =
+    if error.startsWith("playing hall timed out after") then 504
+    else if error.startsWith("playing hall failed:") then 500
     else 400
 
   private def authorizeJson(
@@ -2167,6 +2961,7 @@ object HandHistoryReviewServer:
       |  --staticDir=docs/site-preview-hybrid
       |  --maxUploadBytes=2097152 Max raw upload size in bytes (falls back to MAX_UPLOAD_BYTES env)
       |  --analysisTimeoutMs=120000 Overall timeout per analysis job; 0 disables it (falls back to ANALYSIS_TIMEOUT_MS env)
+      |  --playingHallTimeoutMs=900000 Overall timeout per playing-hall job; 0 disables it (falls back to PLAYING_HALL_TIMEOUT_MS env)
       |  --maxConcurrentJobs=<n>  Concurrent analysis worker count (falls back to MAX_CONCURRENT_JOBS env)
       |  --maxQueuedJobs=<n>      Max queued analyses before 503 overload rejection (falls back to MAX_QUEUED_JOBS env)
       |  --shutdownGraceMs=5000   Grace window for draining requests/jobs on shutdown (falls back to SHUTDOWN_GRACE_MS env)

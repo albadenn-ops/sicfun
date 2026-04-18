@@ -141,6 +141,61 @@ class HandHistoryReviewServerTest extends FunSuite:
       |}""".stripMargin
   )
   private val validUploadPayload = """{"handHistoryText":"PokerStars Hand #1","site":"auto","heroName":"Hero"}"""
+  private val samplePlayingHallResult = ujson.read(
+    """{
+      |  "request": {
+      |    "hands": 240,
+      |    "tableCount": 2,
+      |    "playerCount": 6,
+      |    "heroStyle": "adaptive",
+      |    "heroPosition": "Button",
+      |    "gtoMode": "exact",
+      |    "villainPool": ["tag", "gto"],
+      |    "heroExplorationRate": 0,
+      |    "raiseSize": 2.5,
+      |    "bunchingTrials": 40,
+      |    "equityTrials": 240,
+      |    "learnEveryHands": 0,
+      |    "learningWindowSamples": 200,
+      |    "saveReviewHandHistory": false,
+      |    "fullRing": false,
+      |    "seed": 42
+      |  },
+      |  "summary": {
+      |    "handsPlayed": 240,
+      |    "tableCount": 2,
+      |    "playerCount": 6,
+      |    "heroNetChips": 13.5,
+      |    "heroBbPer100": 5.6,
+      |    "heroWins": 111,
+      |    "heroTies": 8,
+      |    "heroLosses": 121,
+      |    "actionCounts": {
+      |      "Fold": 41,
+      |      "Call": 77,
+      |      "Raise(2.5)": 122
+      |    },
+      |    "retrains": 0,
+      |    "modelId": "uniform-baseline",
+      |    "outDir": "data/web-playing-hall/test-run",
+      |    "exactGtoCacheHits": 0,
+      |    "exactGtoCacheMisses": 0,
+      |    "exactGtoCacheHitRate": 0,
+      |    "exactGtoSolvedByProvider": {},
+      |    "exactGtoServedByProvider": {},
+      |    "perVillainNetChips": {
+      |      "Villain-1": -7.25,
+      |      "Villain-2": -6.25
+      |    },
+      |    "overlayStats": null,
+      |    "outputFiles": [
+      |      "data/web-playing-hall/test-run/hands.tsv"
+      |    ]
+      |  }
+      |}""".stripMargin
+  )
+  private val validPlayingHallPayload =
+    """{"hands":120,"tableCount":2,"playerCount":6,"heroStyle":"adaptive","heroPosition":"Button","gtoMode":"exact","villainPool":["tag","gto"],"heroExplorationRate":0,"raiseSize":2.5,"bunchingTrials":40,"equityTrials":240}"""
 
   test("shutdown grace milliseconds round up to whole HttpServer stop seconds") {
     assertEquals(HandHistoryReviewServer.shutdownDelaySeconds(0L), 0)
@@ -456,6 +511,81 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(completed("result")("trace")("import")("handsImported").num.toInt, 1)
         assertEquals(completed("result")("trace")("hands")(0)("status").str, "analyzed")
         assertEquals(completed("result")("trace")("summary")("decisionsAnalyzed").num.toInt, 1)
+      }
+    }
+  }
+
+  test("playing hall submission returns a job id and completes via polling") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, playingHallBackend = backend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val submissionResponse = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(submissionResponse.statusCode(), 202)
+        assertEquals(headerValue(submissionResponse, "Retry-After"), Some("1"))
+        val submission = jsonBody(submissionResponse)
+        assertEquals(submission("status").str, "queued")
+        val statusUri = s"$baseUri${submission("statusUrl").str}"
+
+        assert(backend.started.await(3, TimeUnit.SECONDS), "playing hall backend never started")
+
+        val runningResponse = get(statusUri)
+        assertEquals(headerValue(runningResponse, "Retry-After"), Some("1"))
+        val running = jsonBody(runningResponse)
+        assertEquals(running("status").str, "running")
+
+        backend.release.countDown()
+
+        val completed = awaitTerminalJob(statusUri)
+        assertEquals(completed("status").str, "completed")
+        assertEquals(completed("result")("request")("heroStyle").str, "adaptive")
+        assertEquals(completed("result")("summary")("handsPlayed").num.toInt, 240)
+        assertEquals(completed("result")("summary")("actionCounts")("Raise(2.5)").num.toInt, 122)
+      }
+    }
+  }
+
+  test("playing hall submission validates the payload") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val invalid = postJson(
+          s"$baseUri/api/playing-hall",
+          """{"hands":0,"villainPool":[],"heroStyle":"bad-mode"}"""
+        )
+        assertEquals(invalid.statusCode(), 400)
+        assert(jsonBody(invalid)("error").str.contains("hands"))
+      }
+    }
+  }
+
+  test("timed-out playing hall workers keep readiness failed closed until the worker exits") {
+    withStaticSite { staticDir =>
+      val backend = new BusyPlayingHallBackend(runForMs = 2000L, result = Right(samplePlayingHallResult))
+      withServer(staticDir, playingHallBackend = backend, maxConcurrentJobs = 1, maxQueuedJobs = 1, playingHallTimeoutMs = 100L) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val submissionResponse = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(submissionResponse.statusCode(), 202)
+        val submission = jsonBody(submissionResponse)
+        val statusUri = s"$baseUri${submission("statusUrl").str}"
+
+        assert(backend.started.await(3, TimeUnit.SECONDS), "busy playing hall backend never started")
+
+        val failed = awaitTerminalJob(statusUri)
+        assertEquals(failed("status").str, "failed")
+        assertEquals(failed("errorStatus").num.toInt, 504)
+
+        val readyWhileWorkerRuns = get(s"$baseUri/api/ready")
+        assertEquals(readyWhileWorkerRuns.statusCode(), 503)
+        val readyWhileWorkerRunsJson = jsonBody(readyWhileWorkerRuns)
+        assertEquals(readyWhileWorkerRunsJson("reason").str, "timed-out-worker")
+        assertEquals(readyWhileWorkerRunsJson("timedOutWorkersInFlight").num.toInt, 1)
+
+        assert(backend.finished.await(5, TimeUnit.SECONDS), "busy playing hall backend never finished")
+        awaitReady(s"$baseUri/api/ready")
       }
     }
   }
@@ -855,6 +985,7 @@ class HandHistoryReviewServerTest extends FunSuite:
             staticDir = staticDir,
             maxUploadBytes = 512,
             analysisTimeoutMs = 120000L,
+            playingHallTimeoutMs = 900000L,
             maxConcurrentJobs = 2,
             maxQueuedJobs = 8,
             shutdownGraceMs = 5000L,
@@ -1011,9 +1142,12 @@ class HandHistoryReviewServerTest extends FunSuite:
       staticDir: Path,
       maxUploadBytes: Int = 512,
       backend: HandHistoryReviewServer.AnalysisBackend = immediateBackend(Right(sampleAnalysisResult)),
+      playingHallBackend: HandHistoryReviewServer.PlayingHallBackend =
+        immediatePlayingHallBackend(Right(samplePlayingHallResult)),
       maxConcurrentJobs: Int = 2,
       maxQueuedJobs: Int = 8,
       analysisTimeoutMs: Long = 120000L,
+      playingHallTimeoutMs: Long = 900000L,
       shutdownGraceMs: Long = 5000L,
       rateLimitSubmitsPerMinute: Int = 6,
       rateLimitStatusPerMinute: Int = 240,
@@ -1023,13 +1157,14 @@ class HandHistoryReviewServerTest extends FunSuite:
       basicAuth: Option[HandHistoryReviewServer.BasicAuthConfig] = None,
       platformAuth: Option[PlatformUserAuth.Config] = None
   )(run: HandHistoryReviewServer.RunningServer => A): A =
-    val server = HandHistoryReviewServer.startWithBackend(
+    val server = HandHistoryReviewServer.startWithBackends(
       HandHistoryReviewServer.ServerConfig(
         host = "127.0.0.1",
         port = 0,
         staticDir = staticDir,
         maxUploadBytes = maxUploadBytes,
         analysisTimeoutMs = analysisTimeoutMs,
+        playingHallTimeoutMs = playingHallTimeoutMs,
         maxConcurrentJobs = maxConcurrentJobs,
         maxQueuedJobs = maxQueuedJobs,
         shutdownGraceMs = shutdownGraceMs,
@@ -1042,7 +1177,8 @@ class HandHistoryReviewServerTest extends FunSuite:
         serviceConfig = HandHistoryReviewService.ServiceConfig(),
         platformAuth = platformAuth
       ),
-      backend
+      backend,
+      playingHallBackend
     ).fold(err => fail(err), identity)
     try run(server)
     finally server.close()
@@ -1086,6 +1222,13 @@ class HandHistoryReviewServerTest extends FunSuite:
       override def analyze(request: HandHistoryReviewService.AnalysisRequest): Either[String, Value] =
         result
 
+  private def immediatePlayingHallBackend(
+      result: Either[String, Value]
+  ): HandHistoryReviewServer.PlayingHallBackend =
+    new HandHistoryReviewServer.PlayingHallBackend:
+      override def run(request: HandHistoryReviewServer.PlayingHallRequest): Either[String, Value] =
+        result
+
   private final class BlockingBackend(result: Either[String, Value]) extends HandHistoryReviewServer.AnalysisBackend:
     val started = new CountDownLatch(1)
     val release = new CountDownLatch(1)
@@ -1096,11 +1239,36 @@ class HandHistoryReviewServerTest extends FunSuite:
         Left("analysis failed: blocking backend timed out")
       else result
 
+  private final class BlockingPlayingHallBackend(result: Either[String, Value]) extends HandHistoryReviewServer.PlayingHallBackend:
+    val started = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+
+    override def run(request: HandHistoryReviewServer.PlayingHallRequest): Either[String, Value] =
+      started.countDown()
+      if !release.await(5, TimeUnit.SECONDS) then
+        Left("playing hall failed: blocking backend timed out")
+      else result
+
   private final class BusyBackend(runForMs: Long, result: Either[String, Value]) extends HandHistoryReviewServer.AnalysisBackend:
     val started = new CountDownLatch(1)
     val finished = new CountDownLatch(1)
 
     override def analyze(request: HandHistoryReviewService.AnalysisRequest): Either[String, Value] =
+      started.countDown()
+      try
+        val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(runForMs)
+        while System.nanoTime() < deadlineNanos do
+          Thread.interrupted()
+          Thread.onSpinWait()
+        result
+      finally
+        finished.countDown()
+
+  private final class BusyPlayingHallBackend(runForMs: Long, result: Either[String, Value]) extends HandHistoryReviewServer.PlayingHallBackend:
+    val started = new CountDownLatch(1)
+    val finished = new CountDownLatch(1)
+
+    override def run(request: HandHistoryReviewServer.PlayingHallRequest): Either[String, Value] =
       started.countDown()
       try
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(runForMs)
