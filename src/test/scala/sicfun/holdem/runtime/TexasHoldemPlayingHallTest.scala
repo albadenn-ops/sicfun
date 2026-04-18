@@ -731,6 +731,32 @@ class TexasHoldemPlayingHallTest extends FunSuite:
     }
   }
 
+  test("hall runner honours cancelSignal and stops early") {
+    withScalaCfrProvider {
+      val outDir = Files.createTempDirectory("hall-cancel-")
+      try
+        val counter = new java.util.concurrent.atomic.AtomicInteger(0)
+        val cancelAfter = 5
+        val Right(summary) = TexasHoldemPlayingHall.runWithCancel(
+          Array(
+            "--hands=100", "--tables=1", "--players=3",
+            "--heroStyle=adaptive", "--heroPosition=Button",
+            "--gtoMode=exact", "--villainPool=tag,gto",
+            "--seed=42", s"--outDir=${outDir.toString}",
+            "--equityTrials=60", "--bunchingTrials=20"
+          ),
+          () => counter.incrementAndGet() >= cancelAfter
+        ): @unchecked
+        assert(
+          summary.handsPlayed >= cancelAfter && summary.handsPlayed <= cancelAfter + 1,
+          s"expected early stop near $cancelAfter, got ${summary.handsPlayed}"
+        )
+        assert(summary.handsPlayed < 100, "expected cancel to stop before full hand count")
+      finally
+        deleteRecursively(outDir)
+    }
+  }
+
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)

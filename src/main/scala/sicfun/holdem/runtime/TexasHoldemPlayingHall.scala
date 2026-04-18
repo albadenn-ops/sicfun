@@ -311,10 +311,20 @@ object TexasHoldemPlayingHall:
     * @return Right(summary) on success, Left(errorMessage) on argument parsing or runtime failure.
     */
   def run(args: Array[String]): Either[String, HallSummary] =
-    parseArgs(args).flatMap(runConfig)
+    parseArgs(args).flatMap(cfg => runConfig(cfg))
 
-  private def runConfig(config: Config): Either[String, HallSummary] =
-    new HallRunner(config).run()
+  /** Programmatic entry with a caller-supplied cancel signal. Same semantics as `run(args)`
+    * but the runner checks the signal after each completed hand; if true, the run stops
+    * taking new hands and returns a Summary with `handsPlayed` reflecting actual progress.
+    */
+  def runWithCancel(args: Array[String], cancelSignal: () => Boolean): Either[String, HallSummary] =
+    parseArgs(args).flatMap(cfg => runConfig(cfg, cancelSignal))
+
+  private def runConfig(
+      config: Config,
+      cancelSignal: () => Boolean = () => false
+  ): Either[String, HallSummary] =
+    new HallRunner(config, cancelSignal).run()
 
   /** Stateful orchestrator for a single playing hall run. Owns the mutable accumulators
     * (net chips, win/loss/tie counts, action frequencies, per-villain net tracking), the
@@ -326,7 +336,7 @@ object TexasHoldemPlayingHall:
     *  2. Each hand is dealt, resolved, logged, and optionally triggers a model retrain.
     *  3. On completion, the GTO cache is trimmed and a [[HallSummary]] is returned.
     */
-  private final class HallRunner(config: Config):
+  private final class HallRunner(config: Config, cancelSignal: () => Boolean = () => false):
     private val modelsRoot = config.outDir.resolve("models")
     private val handsPath = config.outDir.resolve("hands.tsv")
     private val learningPath = config.outDir.resolve("learning.tsv")
@@ -433,10 +443,15 @@ object TexasHoldemPlayingHall:
         strategicHelperOpt = Some(helper)
         overlayMetricsOpt = Some(OverlayMetricsAccumulator())
 
+    private var handsPlayedCount: Int = 0
+
     private def playHands(): Unit =
       var handNo = 1
-      while handNo <= config.hands do
+      var cancelled = false
+      while !cancelled && handNo <= config.hands do
         playHand(handNo)
+        handsPlayedCount = handNo
+        if cancelSignal() then cancelled = true
         handNo += 1
 
     /** Plays a single hand: builds table scenario, deals cards, resolves the hand through
@@ -623,7 +638,7 @@ object TexasHoldemPlayingHall:
         if config.hands > 0 then (heroNet / config.hands.toDouble) * 100.0
         else 0.0
       HallSummary(
-        handsPlayed = config.hands,
+        handsPlayed = handsPlayedCount,
         tableCount = config.tableCount,
         playerCount = config.playerCount,
         heroNetChips = heroNet,
