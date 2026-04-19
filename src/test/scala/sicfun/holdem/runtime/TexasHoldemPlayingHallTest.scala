@@ -691,6 +691,72 @@ class TexasHoldemPlayingHallTest extends FunSuite:
     }
   }
 
+  test("hall summary: perHandHeroNet length equals handsPlayed and sums to heroNetChips") {
+    withScalaCfrProvider {
+      val outDir = Files.createTempDirectory("hall-perhand-")
+      try
+        val Right(summary) = TexasHoldemPlayingHall.run(Array(
+          "--hands=40", "--tables=1", "--players=3",
+          "--heroStyle=adaptive", "--heroPosition=Button",
+          "--gtoMode=exact", "--villainPool=tag,gto",
+          "--seed=42", s"--outDir=${outDir.toString}",
+          "--equityTrials=60", "--bunchingTrials=20"
+        )): @unchecked
+        assertEquals(summary.perHandHeroNet.length, summary.handsPlayed)
+        val delta = math.abs(summary.perHandHeroNet.sum - summary.heroNetChips)
+        assert(delta < 0.01, s"perHandHeroNet.sum=${summary.perHandHeroNet.sum} heroNetChips=${summary.heroNetChips}")
+      finally
+        deleteRecursively(outDir)
+    }
+  }
+
+  test("hall summary: heroDecisionEquities populated when hero acts") {
+    withScalaCfrProvider {
+      val outDir = Files.createTempDirectory("hall-equities-")
+      try
+        val Right(summary) = TexasHoldemPlayingHall.run(Array(
+          "--hands=30", "--tables=1", "--players=3",
+          "--heroStyle=adaptive", "--heroPosition=Button",
+          "--gtoMode=exact", "--villainPool=tag,gto",
+          "--seed=42", s"--outDir=${outDir.toString}",
+          "--equityTrials=60", "--bunchingTrials=20"
+        )): @unchecked
+        assert(summary.heroDecisionEquities.nonEmpty, "expected at least one hero decision")
+        assert(
+          summary.heroDecisionEquities.forall(e => e >= 0.0 && e <= 1.0),
+          s"out-of-range equities: ${summary.heroDecisionEquities}"
+        )
+      finally
+        deleteRecursively(outDir)
+    }
+  }
+
+  test("hall runner honours cancelSignal and stops early") {
+    withScalaCfrProvider {
+      val outDir = Files.createTempDirectory("hall-cancel-")
+      try
+        val counter = new java.util.concurrent.atomic.AtomicInteger(0)
+        val cancelAfter = 5
+        val Right(summary) = TexasHoldemPlayingHall.runWithCancel(
+          Array(
+            "--hands=100", "--tables=1", "--players=3",
+            "--heroStyle=adaptive", "--heroPosition=Button",
+            "--gtoMode=exact", "--villainPool=tag,gto",
+            "--seed=42", s"--outDir=${outDir.toString}",
+            "--equityTrials=60", "--bunchingTrials=20"
+          ),
+          () => counter.incrementAndGet() >= cancelAfter
+        ): @unchecked
+        assert(
+          summary.handsPlayed >= cancelAfter && summary.handsPlayed <= cancelAfter + 1,
+          s"expected early stop near $cancelAfter, got ${summary.handsPlayed}"
+        )
+        assert(summary.handsPlayed < 100, "expected cancel to stop before full hand count")
+      finally
+        deleteRecursively(outDir)
+    }
+  }
+
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)
