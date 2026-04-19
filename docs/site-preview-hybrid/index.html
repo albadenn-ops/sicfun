@@ -3,13 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SICFUN | Texas Hold'em Hand-History Review</title>
+  <title>SICFUN | Hand-History Review &amp; Playing Hall</title>
   <link rel="icon" href="data:,">
   <meta
     name="description"
-    content="Run SICFUN locally to review PokerStars, Winamax, or GGPoker hand histories with async upload analysis, ranked EV gaps, opponent notes, and model source."
+    content="Run SICFUN locally to review PokerStars, Winamax, or GGPoker hand histories with ranked EV gaps and opponent reads, or launch self-play hall runs against adaptive, GTO, and strategic lines."
   >
   <link rel="stylesheet" href="site.css">
+  <link rel="stylesheet" href="vendor/uPlot.min.css">
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to content</a>
@@ -19,13 +20,13 @@
     <header class="site-header surface">
       <div class="brand-block">
         <a class="brand" href="#hero">SICFUN</a>
-        <p class="pronunciation">Texas Hold'em hand-history review</p>
+        <p class="pronunciation">Texas Hold'em review &amp; self-play</p>
       </div>
       <nav class="site-nav" aria-label="Primary">
         <a href="#account">Account</a>
         <a href="#upload">Upload</a>
         <a href="#proof">Results</a>
-        <a href="#range">Simulator</a>
+        <a href="#range">Playing Hall</a>
         <a href="#outputs">Outputs</a>
         <a href="#workflow">Workflow</a>
         <a href="#status">Scope</a>
@@ -35,27 +36,28 @@
 
     <section class="hero" id="hero">
       <div class="hero-copy surface">
-        <p class="eyebrow">Local Review</p>
-        <h1>Upload exported hands. Review the costly spots locally.</h1>
+        <p class="eyebrow">Local Review &amp; Self-Play</p>
+        <h1>Review hands. Run the hall. Study the gaps.</h1>
         <p class="lead">
-          SICFUN turns exported hand histories into an async local review job: imported-hand counts,
-          ranked EV gaps, opponent reads, and the model source used for the run.
+          SICFUN reviews exported hand histories for ranked EV gaps and opponent reads, and runs local
+          self-play hall batches against adaptive, GTO, and strategic lines — all from one browser surface.
         </p>
         <div class="chip-row" aria-label="Key product facts">
           <span>PokerStars / Winamax / GGPoker</span>
           <span>Async upload + polling</span>
-          <span>2-max through 9-max context</span>
+          <span>Playing Hall self-play</span>
+          <span>2-max through 9-max</span>
           <span>Local-first default</span>
         </div>
         <div class="hero-actions">
           <a class="button" href="#upload">Queue a review</a>
-          <a class="button button-secondary" href="#outputs">See sample outputs</a>
+          <a class="button button-secondary" href="#range">Run Playing Hall</a>
         </div>
       </div>
 
       <aside class="hero-stack">
         <article class="info-card frame">
-          <p class="card-label">One completed job gives you</p>
+          <p class="card-label">Upload review gives you</p>
           <ul class="info-list">
             <li>Imported-hand count, detected site, and hero name when the file resolves one.</li>
             <li>Ranked decision gaps with actual action, recommended line, and EV difference.</li>
@@ -64,11 +66,11 @@
         </article>
 
         <article class="info-card surface">
-          <p class="card-label">Aligned to SICFUN today</p>
+          <p class="card-label">Playing Hall gives you</p>
           <ul class="info-list">
-            <li>Local review surface over the same importer and analyzer exercised by the repo tests.</li>
-            <li>Heads-up, six-max, and full-ring-style hand-history contexts when the upload resolves the seats.</li>
-            <li>Packaged Windows release for offline study use, not live-table automation.</li>
+            <li>Hero win-rate, net chips, and bb/100 across configurable self-play batches.</li>
+            <li>Action distribution, per-villain chip flow, and generated output files.</li>
+            <li>Mix villain archetypes with GTO controls and switch hero between adaptive, GTO, and strategic modes.</li>
           </ul>
         </article>
       </aside>
@@ -286,56 +288,201 @@
         </article>
 
         <article class="proof-card surface">
-          <p class="card-kicker">Range context</p>
-          <h3>Simulator context stays separate from the upload page.</h3>
+          <p class="card-kicker">Hall output</p>
+          <h3>Playing Hall runs produce their own result board.</h3>
           <p>
-            SICFUN emits posterior summaries in simulator and hall outputs, but the upload review page does
-            not return posterior ranges yet.
+            Hall runs return hero net chips, action mix, per-villain chip flow, and output files.
+            Posterior range summaries are available in CLI output but not yet surfaced on this page.
           </p>
-          <p class="card-meta">Available in: simulator and hall output, not upload review</p>
+          <p class="card-meta">Available in: Playing Hall results panel and CLI output</p>
         </article>
       </div>
     </section>
 
     <section class="section" id="range">
       <div class="section-head">
-        <p class="eyebrow">Simulator Output</p>
-        <h2>Posterior hands are still a separate research surface.</h2>
+        <p class="eyebrow">Playing Hall</p>
+        <h2>Launch a local hall run against adaptive, GTO, or strategic lines.</h2>
         <p class="section-note">
-          Separate from upload review, SICFUN's simulator and hall output can emit posterior hands and
-          probabilities. This panel shows the kind of read those CLI surfaces expose today.
+          Reuse the same local web surface to run short self-play batches, switch the hero between adaptive,
+          GTO, and strategic modes, mix villain archetypes with GTO controls, and inspect the resulting hall
+          summary without leaving the browser.
         </p>
       </div>
 
-      <article class="range-panel frame">
-        <div class="terminal-bar">
-          <strong>Posterior Range View</strong>
-          <span>illustrative simulator/hall output</span>
-        </div>
+      <details class="recent-runs" id="hall-recent-runs">
+        <summary><span class="card-kicker">Recent runs</span> <span class="recent-runs-count" id="hall-recent-count">0</span></summary>
+        <div class="recent-runs-body" id="hall-recent-runs-list"></div>
+      </details>
 
-        <div class="range-layout">
-          <div class="range-screen screen">
-            <img
-              src="range-heatmap.svg"
-              alt="Illustrative posterior range display showing preserved value clusters and remaining low-frequency bluffs."
-            >
-          </div>
+      <div class="hall-grid">
+        <article class="surface hall-card">
+          <form class="hall-form" id="playing-hall-form">
+            <div class="preset-bar" id="hall-preset-bar"></div>
 
-          <div class="range-copy">
-            <p class="card-kicker">Range Context</p>
-            <h3>Useful context, but not part of the upload API yet.</h3>
+            <details class="form-section" open>
+              <summary>Run sizing</summary>
+              <div class="form-section-body">
+                <label class="field">
+                  <span>Hands <span class="help" tabindex="0" data-help="Total hands to play across all tables.">ⓘ</span></span>
+                  <input id="hall-hands" type="number" min="1" max="5000" step="1" value="240">
+                </label>
+                <label class="field">
+                  <span>Tables <span class="help" tabindex="0" data-help="Parallel tables. More tables = faster wall-clock for the same hand count.">ⓘ</span></span>
+                  <input id="hall-table-count" type="number" min="1" max="24" step="1" value="2">
+                </label>
+                <label class="field">
+                  <span>Players <span class="help" tabindex="0" data-help="Seats per table. Blinds, positions, and villain slots all scale with this.">ⓘ</span></span>
+                  <select id="hall-player-count">
+                    <option value="2">2-max</option><option value="3">3-max</option><option value="4">4-max</option>
+                    <option value="5">5-max</option><option value="6" selected>6-max</option><option value="7">7-max</option>
+                    <option value="8">8-max</option><option value="9">9-max</option>
+                  </select>
+                </label>
+                <div class="field field-block">
+                  <span>Seed <span class="help" tabindex="0" data-help="RNG seed for cards and villain shuffles. Same seed + config = same run.">ⓘ</span></span>
+                  <div class="seed-row">
+                    <input id="hall-seed" type="number" min="0" step="1" value="42">
+                    <label class="chip-check"><input id="hall-random-seed" type="checkbox"><span>random</span></label>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <details class="form-section" open>
+              <summary>Hero</summary>
+              <div class="form-section-body">
+                <label class="field">
+                  <span>Mode <span class="help" tabindex="0" data-help="Adaptive learns from villains. GTO is a fixed mixed strategy. Strategic uses the Phase-2 overlay.">ⓘ</span></span>
+                  <select id="hall-hero-style">
+                    <option value="adaptive" selected>Adaptive</option>
+                    <option value="gto">GTO</option>
+                    <option value="strategic">Strategic</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Position <span class="help" tabindex="0" data-help="Seat hero occupies on each dealt hand.">ⓘ</span></span>
+                  <select id="hall-hero-position">
+                    <option value="Button" selected>Button</option><option value="Cutoff">Cutoff</option><option value="Hijack">Hijack</option>
+                    <option value="Middle">Middle</option><option value="UTG">UTG</option><option value="UTG1">UTG1</option>
+                    <option value="UTG2">UTG2</option><option value="SmallBlind">Small Blind</option><option value="BigBlind">Big Blind</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>GTO mode <span class="help" tabindex="0" data-help="Exact: full CFR solve per spot. Fast: lookup from precomputed table.">ⓘ</span></span>
+                  <select id="hall-gto-mode"><option value="exact" selected>Exact</option><option value="fast">Fast</option></select>
+                </label>
+                <label class="field">
+                  <span>Exploration <span class="help" tabindex="0" data-help="Probability hero takes a random legal action instead of the model pick.">ⓘ</span></span>
+                  <input id="hall-exploration-rate" type="number" min="0" max="1" step="0.05" value="0">
+                </label>
+                <label class="field">
+                  <span>Raise size <span class="help" tabindex="0" data-help="Standard hero open/raise size in big blinds.">ⓘ</span></span>
+                  <input id="hall-raise-size" type="number" min="0.25" max="20" step="0.1" value="2.5">
+                </label>
+              </div>
+            </details>
+
+            <details class="form-section" open>
+              <summary>Villains</summary>
+              <div class="form-section-body">
+                <div class="field field-block">
+                  <span>Pool <span class="help" tabindex="0" data-help="Archetypes eligible to sit. One is picked per seat per hand.">ⓘ</span></span>
+                  <div class="hall-pool">
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="tag" checked><span>tag</span></label>
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="lag" checked><span>lag</span></label>
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="nit"><span>nit</span></label>
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="station"><span>station</span></label>
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="maniac"><span>maniac</span></label>
+                    <label class="chip-check"><input type="checkbox" name="villain-pool" value="gto" checked><span>gto</span></label>
+                  </div>
+                </div>
+                <div class="hall-toggles">
+                  <label class="toggle"><input id="hall-save-review" type="checkbox"><span>Export PokerStars review file</span></label>
+                  <label class="toggle"><input id="hall-full-ring" type="checkbox"><span>Force all villains active</span></label>
+                </div>
+              </div>
+            </details>
+
+            <details class="form-section">
+              <summary>Learning</summary>
+              <div class="form-section-body">
+                <label class="field">
+                  <span>Learn every N hands <span class="help" tabindex="0" data-help="Retrain the adaptive model every N hands. Zero disables learning.">ⓘ</span></span>
+                  <input id="hall-learn-every" type="number" min="0" max="5000" step="1" value="0">
+                </label>
+                <label class="field">
+                  <span>Learning window <span class="help" tabindex="0" data-help="Recent hands retained as training samples.">ⓘ</span></span>
+                  <input id="hall-learning-window" type="number" min="0" max="500000" step="100" value="200">
+                </label>
+              </div>
+            </details>
+
+            <details class="form-section">
+              <summary>Advanced</summary>
+              <div class="form-section-body">
+                <label class="field">
+                  <span>Bunching trials <span class="help" tabindex="0" data-help="Monte-Carlo samples for bunching correction. More = tighter equity, slower.">ⓘ</span></span>
+                  <input id="hall-bunching-trials" type="number" min="1" max="600" step="1" value="40">
+                </label>
+                <label class="field">
+                  <span>Equity trials <span class="help" tabindex="0" data-help="Monte-Carlo samples per equity call.">ⓘ</span></span>
+                  <input id="hall-equity-trials" type="number" min="1" max="6000" step="1" value="240">
+                </label>
+              </div>
+            </details>
+
+            <div class="upload-actions">
+              <button class="button" id="hall-submit" type="submit">Run Playing Hall</button>
+            </div>
+          </form>
+
+          <div class="upload-callout">
+            <p class="card-kicker">Minimal control surface</p>
             <p>
-              The simulator prints posterior hands in text. This panel turns that separate research output
-              into a faster visual read without implying the upload page already returns it.
+              This panel runs short local hall batches. It is meant for comparing modes and opponent mixes,
+              not for live-table execution.
             </p>
-            <pre>topPosterior:
-  &lt;hand&gt; -&gt; &lt;probability&gt;
-  &lt;hand&gt; -&gt; &lt;probability&gt;
-  &lt;hand&gt; -&gt; &lt;probability&gt;
-  ...</pre>
           </div>
-        </div>
-      </article>
+        </article>
+
+        <article class="frame review-panel hall-panel" aria-live="polite">
+          <div class="review-status" id="hall-status">
+            <p class="card-kicker">Ready</p>
+            <h3 id="hall-status-title">Configure a hall run and launch it from the browser.</h3>
+            <p class="section-note" id="hall-status-note">
+              The result board returns hero win-rate, action mix, per-villain chip flow, and the output
+              files written for that run.
+            </p>
+            <div class="hall-progress hidden" id="hall-progress">
+              <div class="hall-progress-bar"><div class="hall-progress-bar-inner"></div></div>
+              <div class="hall-progress-meta">
+                <span id="hall-elapsed">Elapsed 00:00</span>
+                <button type="button" class="button button-secondary" id="hall-cancel">Cancel Run</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="review-results hidden" id="hall-results">
+            <div class="dashboard-kpis" id="hall-kpi-grid"></div>
+            <div class="dashboard-chart" id="hall-chart-chips-over-time"></div>
+            <div class="dashboard-two-up">
+              <div class="dashboard-chart" id="hall-chart-action-donut"></div>
+              <div class="dashboard-chart" id="hall-chart-wlt"></div>
+            </div>
+            <div class="dashboard-chart" id="hall-chart-villain-bar"></div>
+            <div class="dashboard-chart" id="hall-chart-equity-hist"></div>
+            <details class="dashboard-chart">
+              <summary><span class="card-kicker">Villain × result matrix</span></summary>
+              <div id="hall-chart-matrix"></div>
+            </details>
+            <div class="opponent-block">
+              <p class="card-kicker">Outputs</p>
+              <div class="opponent-list" id="hall-output-list"></div>
+            </div>
+          </div>
+        </article>
+      </div>
     </section>
 
     <section class="section" id="outputs">
@@ -414,11 +561,11 @@ topPosterior:
       <div class="status-grid">
         <article class="status-card surface status-card-positive">
           <p class="card-kicker">Implemented</p>
-          <h3>Ready for local review sessions</h3>
+          <h3>Ready for review and self-play</h3>
           <ul class="status-list">
-            <li>Upload supported text hand histories and get a fast async job id back.</li>
-            <li>Review actual versus recommended decisions with EV gaps and hero equity.</li>
-            <li>Return warnings, model source, and opponent reads with the finished review.</li>
+            <li>Upload hand histories and review ranked EV gaps, opponent reads, and model source.</li>
+            <li>Launch Playing Hall batches with configurable hero mode, villain pool, and learning settings.</li>
+            <li>Inspect hero win-rate, action mix, per-villain chip flow, and output files in the browser.</li>
           </ul>
         </article>
 
@@ -448,27 +595,27 @@ topPosterior:
       <div class="method-shell frame">
         <div class="method-copy">
           <p class="eyebrow">Workflow</p>
-          <h2>How a player or coach uses the current web path.</h2>
+          <h2>Two paths, same browser surface.</h2>
           <p>
-            Export hands, queue the upload, and start with the biggest gaps when the job completes. The
-            point is simple: spend review time on the decisions that cost the most.
+            Upload exported hands to review the costly spots, or configure a Playing Hall batch to compare
+            hero modes and villain mixes. Both run locally and return structured results.
           </p>
         </div>
 
         <div class="method-points">
           <article class="method-point">
-            <h3>Queue once</h3>
-            <p>Supports PokerStars, Winamax, and GGPoker text histories, with an optional hero-name override.</p>
+            <h3>Upload review</h3>
+            <p>Drop in a PokerStars, Winamax, or GGPoker export. Get ranked EV gaps, opponent reads, and model source.</p>
           </article>
 
           <article class="method-point">
-            <h3>Wait for completion</h3>
-            <p>The page polls the local review job until the finished summary, warnings, and decision gaps are ready.</p>
+            <h3>Playing Hall</h3>
+            <p>Pick hero mode, villain pool, and batch size. Run self-play and inspect win-rate, action mix, and per-villain chip flow.</p>
           </article>
 
           <article class="method-point">
-            <h3>Keep the trail</h3>
-            <p>Results stay tied to warnings, model source, and surfaced decision gaps for follow-up work.</p>
+            <h3>Study the results</h3>
+            <p>Both workflows return structured output boards — spend review time on what cost the most or what the hall run reveals.</p>
           </article>
         </div>
       </div>
@@ -477,16 +624,16 @@ topPosterior:
     <section class="section" id="fit">
       <div class="section-head">
         <p class="eyebrow">Fit</p>
-        <h2>Built for disciplined local review. Not for live automation.</h2>
+        <h2>Built for local review and self-play study. Not for live automation.</h2>
       </div>
 
       <div class="fit-grid">
         <article class="fit-card surface">
           <p class="card-kicker">Good fit</p>
           <ul class="fit-list">
-            <li>Solo grinders doing post-session review.</li>
-            <li>Coaches reviewing marked-hand files with students.</li>
-            <li>Teams that want repeatable local evidence, not screenshots alone.</li>
+            <li>Solo grinders doing post-session review or short self-play experiments.</li>
+            <li>Coaches reviewing hand files with students or comparing hero modes in the hall.</li>
+            <li>Teams that want repeatable local evidence from both review and self-play runs.</li>
           </ul>
         </article>
 
@@ -495,7 +642,7 @@ topPosterior:
           <ul class="fit-list">
             <li>Real-time table assistance or client control.</li>
             <li>Files that do not expose the hero hole cards.</li>
-            <li>Anyone expecting the web page to expose every simulator posterior artifact today.</li>
+            <li>Large-scale simulation — the hall is designed for short comparison batches.</li>
           </ul>
         </article>
       </div>
@@ -504,17 +651,20 @@ topPosterior:
     <section class="section final">
       <div class="final-panel surface">
         <p class="eyebrow">Start Here</p>
-        <h2>Queue one export and work the highest-cost decisions first.</h2>
+        <h2>Review your hands or run the hall — both paths start here.</h2>
         <p>
-          Async upload review, ranked decision gaps, opponent notes, and model source are live on this page.
+          Upload review with ranked EV gaps and opponent reads, plus Playing Hall self-play with
+          configurable hero modes and villain pools, are both live on this page.
         </p>
         <div class="hero-actions">
           <a class="button" href="#upload">Queue a review</a>
-          <a class="button button-secondary" href="#outputs">See sample outputs</a>
+          <a class="button button-secondary" href="#range">Run Playing Hall</a>
         </div>
       </div>
     </section>
   </main>
+  <script src="vendor/uPlot.iife.min.js"></script>
+  <script src="site-charts.js"></script>
   <script src="site.js"></script>
 </body>
 </html>

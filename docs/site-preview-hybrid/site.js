@@ -11,6 +11,42 @@ const warningList = document.getElementById("warning-list");
 const decisionList = document.getElementById("decision-list");
 const opponentList = document.getElementById("opponent-list");
 const modelSource = document.getElementById("model-source");
+const hallForm = document.getElementById("playing-hall-form");
+const hallHandsInput = document.getElementById("hall-hands");
+const hallTableCountInput = document.getElementById("hall-table-count");
+const hallPlayerCountSelect = document.getElementById("hall-player-count");
+const hallSeedInput = document.getElementById("hall-seed");
+const hallRandomSeedInput = document.getElementById("hall-random-seed");
+const hallHeroStyleSelect = document.getElementById("hall-hero-style");
+const hallHeroPositionSelect = document.getElementById("hall-hero-position");
+const hallGtoModeSelect = document.getElementById("hall-gto-mode");
+const hallExplorationRateInput = document.getElementById("hall-exploration-rate");
+const hallRaiseSizeInput = document.getElementById("hall-raise-size");
+const hallLearnEveryInput = document.getElementById("hall-learn-every");
+const hallLearningWindowInput = document.getElementById("hall-learning-window");
+const hallBunchingTrialsInput = document.getElementById("hall-bunching-trials");
+const hallEquityTrialsInput = document.getElementById("hall-equity-trials");
+const hallSaveReviewInput = document.getElementById("hall-save-review");
+const hallFullRingInput = document.getElementById("hall-full-ring");
+const hallSubmitButton = document.getElementById("hall-submit");
+const hallStatus = document.getElementById("hall-status");
+const hallResults = document.getElementById("hall-results");
+const hallStatusTitle = document.getElementById("hall-status-title");
+const hallStatusNote = document.getElementById("hall-status-note");
+const hallProgress = document.getElementById("hall-progress");
+const hallElapsed = document.getElementById("hall-elapsed");
+const hallCancelButton = document.getElementById("hall-cancel");
+const hallPresetBar = document.getElementById("hall-preset-bar");
+const hallRecentCount = document.getElementById("hall-recent-count");
+const hallRecentList = document.getElementById("hall-recent-runs-list");
+const hallKpiGrid = document.getElementById("hall-kpi-grid");
+const hallChartChips = document.getElementById("hall-chart-chips-over-time");
+const hallChartActionDonut = document.getElementById("hall-chart-action-donut");
+const hallChartWlt = document.getElementById("hall-chart-wlt");
+const hallChartVillainBar = document.getElementById("hall-chart-villain-bar");
+const hallChartEquityHist = document.getElementById("hall-chart-equity-hist");
+const hallChartMatrix = document.getElementById("hall-chart-matrix");
+const hallOutputList = document.getElementById("hall-output-list");
 
 const authStatePanel = document.getElementById("auth-state");
 const authForm = document.getElementById("auth-form");
@@ -98,6 +134,95 @@ if (form && fileInput && siteSelect && heroInput) {
   });
 }
 
+if (hallForm) {
+  hallForm.addEventListener("submit", async event => {
+    event.preventDefault();
+
+    if (requiresPlatformSignIn() && !authState.authenticated) {
+      renderHallStatus("Sign in to launch a playing hall run on this deployment.");
+      hallResults.classList.add("hidden");
+      return;
+    }
+
+    if (!validateHallForm()) {
+      renderHallStatus("Fix invalid fields before launching the hall.");
+      hallResults.classList.add("hidden");
+      return;
+    }
+
+    const payload = {
+      hands: numericValue(hallHandsInput, 240),
+      tableCount: numericValue(hallTableCountInput, 2),
+      playerCount: numericValue(hallPlayerCountSelect, 6),
+      heroStyle: hallHeroStyleSelect ? hallHeroStyleSelect.value : "adaptive",
+      heroPosition: hallHeroPositionSelect ? hallHeroPositionSelect.value : "Button",
+      gtoMode: hallGtoModeSelect ? hallGtoModeSelect.value : "exact",
+      villainPool: selectedVillainPool(),
+      heroExplorationRate: numericValue(hallExplorationRateInput, 0),
+      raiseSize: numericValue(hallRaiseSizeInput, 2.5),
+      bunchingTrials: numericValue(hallBunchingTrialsInput, 40),
+      equityTrials: numericValue(hallEquityTrialsInput, 240),
+      learnEveryHands: numericValue(hallLearnEveryInput, 0),
+      learningWindowSamples: numericValue(hallLearningWindowInput, 200),
+      seed: hallRandomSeedInput && hallRandomSeedInput.checked
+        ? Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)
+        : numericValue(hallSeedInput, 42),
+      saveReviewHandHistory: Boolean(hallSaveReviewInput && hallSaveReviewInput.checked),
+      fullRing: Boolean(hallFullRingInput && hallFullRingInput.checked)
+    };
+
+    setHallSubmitting(true);
+    renderHallStatus("Queueing a local playing hall run...");
+    hallResults.classList.add("hidden");
+
+    try {
+      const response = await fetch("/api/playing-hall", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: jsonHeaders(true),
+        body: JSON.stringify(payload)
+      });
+      const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
+
+      if (!response.ok) {
+        renderHallStatus(body.error || `Playing hall request failed with status ${response.status}.`);
+        return;
+      }
+
+      if (body.jobId) {
+        const statusUrl = body.statusUrl || response.headers.get("Location");
+        if (!statusUrl) {
+          renderHallStatus("Server accepted the hall run but did not return a job status URL.");
+          return;
+        }
+
+        startHallElapsed(body.jobId);
+        renderHallStatus(playingHallJobStatusMessage(body.status));
+        const result = await pollPlayingHallJob(statusUrl, body.pollAfterMs);
+        renderHallResults(result);
+        pushRecentRun(payload, (result && result.summary) || {});
+        return;
+      }
+
+      renderHallResults(body);
+      pushRecentRun(payload, (body && body.summary) || {});
+    } catch (error) {
+      renderHallStatus(`Playing hall request failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    } finally {
+      setHallSubmitting(false);
+      finishHallProgress();
+    }
+  });
+}
+
+if (hallRandomSeedInput) {
+  hallRandomSeedInput.addEventListener("change", () => {
+    if (hallSeedInput) {
+      hallSeedInput.disabled = hallRandomSeedInput.checked;
+    }
+  });
+}
+
 if (authLoginButton) {
   authLoginButton.addEventListener("click", () => {
     void submitAuth("/api/auth/login", false);
@@ -126,6 +251,9 @@ if (authLogoutButton) {
 async function boot() {
   await refreshAuthState();
   renderAuthFlash();
+  renderPresetBar();
+  renderRecentRuns();
+  wireHallValidation();
 }
 
 async function refreshAuthState() {
@@ -220,6 +348,36 @@ function updateUploadAvailability() {
   }
   if (locked) {
     renderStatus("Sign in to queue a review job for this deployment.");
+  }
+  [
+    hallHandsInput,
+    hallTableCountInput,
+    hallPlayerCountSelect,
+    hallSeedInput,
+    hallRandomSeedInput,
+    hallHeroStyleSelect,
+    hallHeroPositionSelect,
+    hallGtoModeSelect,
+    hallExplorationRateInput,
+    hallRaiseSizeInput,
+    hallLearnEveryInput,
+    hallLearningWindowInput,
+    hallBunchingTrialsInput,
+    hallEquityTrialsInput,
+    hallSaveReviewInput,
+    hallFullRingInput,
+    ...Array.from(document.querySelectorAll('input[name="villain-pool"]'))
+  ].forEach(element => {
+    if (element) {
+      element.disabled = locked;
+    }
+  });
+  if (hallSubmitButton) {
+    hallSubmitButton.disabled = locked;
+    hallSubmitButton.textContent = locked ? "Sign In Required" : "Run Playing Hall";
+  }
+  if (locked && hallStatus) {
+    renderHallStatus("Sign in to launch a playing hall run on this deployment.");
   }
 }
 
@@ -474,6 +632,19 @@ function setSubmitting(isSubmitting) {
   submitButton.textContent = isSubmitting ? "Queueing Review..." : "Queue Review";
 }
 
+function setHallSubmitting(isSubmitting) {
+  if (!hallSubmitButton) {
+    return;
+  }
+  if (requiresPlatformSignIn() && !authState.authenticated) {
+    hallSubmitButton.disabled = true;
+    hallSubmitButton.textContent = "Sign In Required";
+    return;
+  }
+  hallSubmitButton.disabled = isSubmitting;
+  hallSubmitButton.textContent = isSubmitting ? "Running Hall..." : "Run Playing Hall";
+}
+
 function renderStatus(message) {
   reviewStatus.innerHTML = `
     <p class="card-kicker">Status</p>
@@ -481,6 +652,20 @@ function renderStatus(message) {
     <p class="section-note">
       SICFUN accepts the upload quickly, analyzes it in a background job, and fills this board with hand
       counts, EV gaps, warnings, and opponent notes when the review is ready.
+    </p>
+  `;
+}
+
+function renderHallStatus(message) {
+  if (!hallStatus) {
+    return;
+  }
+  hallStatus.innerHTML = `
+    <p class="card-kicker">Status</p>
+    <h3>${escapeHtml(message)}</h3>
+    <p class="section-note">
+      SICFUN runs the configured hall batch in the background, then returns the run summary, action mix,
+      per-villain chip flow, and the generated output files here.
     </p>
   `;
 }
@@ -529,6 +714,56 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
   }
 }
 
+async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
+  let pollAfterMs = normalizePollAfterMs(initialPollAfterMs);
+  const deadline = Date.now() + MAX_POLL_WAIT_MS;
+
+  for (;;) {
+    if (Date.now() >= deadline) {
+      throw new Error("Playing hall timed out while waiting for the run to finish.");
+    }
+
+    await sleep(pollAfterMs);
+
+    const response = await fetch(statusUrl, {
+      credentials: "same-origin",
+      headers: {
+        "Accept": "application/json"
+      }
+    });
+    const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error("Playing hall job expired, was purged, or is not visible to this user session.");
+      }
+      throw new Error(body.error || `Playing hall status failed with status ${response.status}.`);
+    }
+
+    renderHallStatus(playingHallJobStatusMessage(body.status));
+
+    if (body.status === "completed") {
+      return body.result || {};
+    }
+
+    if (body.status === "cancelled") {
+      const result = body.result || {};
+      result.cancelled = true;
+      return result;
+    }
+
+    if (body.status === "failed") {
+      throw new Error(body.error || "Playing hall failed.");
+    }
+
+    if (body.status !== "queued" && body.status !== "running") {
+      throw new Error(`Unexpected playing hall job status: ${body.status || "unknown"}`);
+    }
+
+    pollAfterMs = normalizePollAfterMs(body.pollAfterMs);
+  }
+}
+
 function normalizePollAfterMs(value) {
   const parsed = Number(value || 0);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -553,6 +788,23 @@ function jobStatusMessage(fileName, status) {
       return `Local review failed for ${fileName}.`;
     default:
       return `Processing ${fileName}...`;
+  }
+}
+
+function playingHallJobStatusMessage(status) {
+  switch (status) {
+    case "queued":
+      return "Queued the playing hall run...";
+    case "running":
+      return "Running the playing hall in the background...";
+    case "completed":
+      return "Playing hall run complete.";
+    case "cancelled":
+      return "Playing hall run cancelled.";
+    case "failed":
+      return "Playing hall run failed.";
+    default:
+      return "Processing the playing hall run...";
   }
 }
 
@@ -594,6 +846,129 @@ function renderResults(fileName, data) {
       : emptyCard("No opponent notes were returned from this upload.");
 
   reviewResults.classList.remove("hidden");
+}
+
+function renderHallResults(data) {
+  const request = data && typeof data.request === "object" && data.request ? data.request : {};
+  const summary = data && typeof data.summary === "object" && data.summary ? data.summary : {};
+  const cancelled = !!(data && data.cancelled);
+  const cancelledNote = cancelled ? " · CANCELLED (partial data)" : "";
+
+  renderHallStatus(
+    `Hall ready: ${formatInteger(summary.handsPlayed)} hands, ${formatSigned(summary.heroNetChips)} chips, ${formatSigned(summary.heroBbPer100)} bb/100${cancelledNote}.`
+  );
+
+  if (hallKpiGrid) {
+    hallKpiGrid.innerHTML = "";
+    const perHand = Array.isArray(summary.perHandHeroNet) ? summary.perHandHeroNet.map(Number) : [];
+    const tail = perHand.slice(-20);
+    const cumTail = [];
+    let acc = 0;
+    tail.forEach(v => { acc += v; cumTail.push(acc); });
+    const kpiNet = document.createElement("div"); kpiNet.className = "kpi-card"; hallKpiGrid.appendChild(kpiNet);
+    const kpiBb  = document.createElement("div"); kpiBb.className  = "kpi-card"; hallKpiGrid.appendChild(kpiBb);
+    const kpiWlt = document.createElement("div"); kpiWlt.className = "kpi-card"; hallKpiGrid.appendChild(kpiWlt);
+    SicfunCharts.renderKpiCard(kpiNet, {
+      label: "Net Chips", value: formatSigned(summary.heroNetChips),
+      note: `${formatInteger(summary.handsPlayed)} hands`,
+      sparklineValues: cumTail.length > 1 ? cumTail : null
+    });
+    SicfunCharts.renderKpiCard(kpiBb, {
+      label: "bb/100", value: formatSigned(summary.heroBbPer100),
+      note: `${formatInteger(summary.retrains)} retrains`
+    });
+    SicfunCharts.renderKpiCard(kpiWlt, {
+      label: "W / L / T",
+      value: `${formatInteger(summary.heroWins)} / ${formatInteger(summary.heroLosses)} / ${formatInteger(summary.heroTies)}`,
+      note: summary.modelId ? `Model: ${summary.modelId}` : "Uniform fallback"
+    });
+  }
+
+  if (hallChartChips) {
+    const perHand = Array.isArray(summary.perHandHeroNet) ? summary.perHandHeroNet.map(Number) : [];
+    if (perHand.length >= 2) {
+      const xs = perHand.map((_, i) => i + 1);
+      const ys = [];
+      let acc = 0;
+      perHand.forEach(v => { acc += v; ys.push(acc); });
+      SicfunCharts.renderLine(hallChartChips, {xs, ys}, {yLabel: "cumulative chips", height: 220});
+    } else {
+      hallChartChips.innerHTML = `<p class="section-note">No per-hand data returned for this run.</p>`;
+    }
+  }
+
+  const actionEntries = objectEntries(summary.actionCounts);
+  if (hallChartActionDonut) {
+    if (actionEntries.length > 0) {
+      SicfunCharts.renderDonut(hallChartActionDonut, {
+        labels: actionEntries.map(([k]) => k),
+        values: actionEntries.map(([, v]) => Number(v))
+      }, {title: "Action distribution"});
+    } else {
+      hallChartActionDonut.innerHTML = `<p class="section-note">No hero actions recorded.</p>`;
+    }
+  }
+  if (hallChartWlt) {
+    SicfunCharts.renderStackedBarH(hallChartWlt, {
+      labels: ["W", "L", "T"],
+      values: [summary.heroWins || 0, summary.heroLosses || 0, summary.heroTies || 0]
+    }, {title: "Outcome split"});
+  }
+
+  if (hallChartVillainBar) {
+    const villainEntries = objectEntries(summary.perVillainNetChips);
+    if (villainEntries.length > 0) {
+      SicfunCharts.renderBarH(hallChartVillainBar, {
+        labels: villainEntries.map(([k]) => k),
+        values: villainEntries.map(([, v]) => Number(v)),
+        signed: true
+      }, {title: "Per-villain chip flow"});
+    } else {
+      hallChartVillainBar.innerHTML = `<p class="section-note">No per-villain breakdown returned.</p>`;
+    }
+  }
+
+  if (hallChartEquityHist) {
+    const equities = Array.isArray(summary.heroDecisionEquities) ? summary.heroDecisionEquities.map(Number) : [];
+    if (equities.length > 0) {
+      SicfunCharts.renderHistogram(hallChartEquityHist, {values: equities}, {bucketCount: 10, min: 0, max: 1, height: 200});
+    } else {
+      hallChartEquityHist.innerHTML = `<p class="section-note">No hero decision equities recorded.</p>`;
+    }
+  }
+
+  if (hallChartMatrix) {
+    const villains = objectEntries(summary.perVillainNetChips);
+    if (villains.length > 0) {
+      const cells = {};
+      cells["Net chips"] = {};
+      villains.forEach(([name, chips]) => { cells["Net chips"][name] = Number(chips); });
+      SicfunCharts.renderMatrix(hallChartMatrix, {
+        rows: ["Net chips"],
+        cols: villains.map(([k]) => k),
+        cells
+      }, {title: "Villain × result matrix"});
+    } else {
+      hallChartMatrix.innerHTML = `<p class="section-note">No data for matrix.</p>`;
+    }
+  }
+
+  if (hallOutputList) {
+    const files = Array.isArray(summary.outputFiles) ? summary.outputFiles : [];
+    hallOutputList.innerHTML = files.length > 0
+      ? files.map(file => `
+          <article class="opponent-card">
+            <div class="decision-head">
+              <h3 class="decision-title">Output File</h3>
+              <p class="card-meta">written</p>
+            </div>
+            <p class="opponent-meta">${escapeHtml(file)}</p>
+          </article>
+        `).join("")
+      : `<p class="section-note">${summary.outDir ? `Run directory: ${escapeHtml(summary.outDir)}` : "No output files were reported."}</p>`;
+  }
+
+  if (hallResults) hallResults.classList.remove("hidden");
 }
 
 function summaryCard(label, value, note) {
@@ -676,6 +1051,23 @@ function emptyCard(message) {
   `;
 }
 
+function selectedVillainPool() {
+  return Array.from(document.querySelectorAll('input[name="villain-pool"]:checked'))
+    .map(input => input.value)
+    .filter(Boolean);
+}
+
+function numericValue(element, fallback) {
+  const parsed = Number(element && "value" in element ? element.value : fallback);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function objectEntries(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? Object.entries(value)
+    : [];
+}
+
 function formatInteger(value) {
   return Number(value || 0).toLocaleString("en-US");
 }
@@ -704,4 +1096,243 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll("\"", "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+// ========== Playing Hall v2 — validation, presets, recent-runs, progress ==========
+
+const hallNumericInputs = [
+  hallHandsInput, hallTableCountInput, hallExplorationRateInput, hallRaiseSizeInput,
+  hallLearnEveryInput, hallLearningWindowInput, hallBunchingTrialsInput, hallEquityTrialsInput,
+  hallSeedInput
+];
+
+function validateField(input) {
+  if (!input) return true;
+  const value = Number(input.value);
+  const min = input.min !== "" ? Number(input.min) : -Infinity;
+  const max = input.max !== "" ? Number(input.max) : Infinity;
+  const ok = Number.isFinite(value) && value >= min && value <= max;
+  input.classList.toggle("invalid", !ok);
+  let err = input.parentElement.querySelector(".field-error");
+  if (!ok) {
+    if (!err) {
+      err = document.createElement("span");
+      err.className = "field-error";
+      input.parentElement.appendChild(err);
+    }
+    err.textContent = !Number.isFinite(value) ? "Number required" :
+      value < min ? `Min ${min}` : `Max ${max}`;
+  } else if (err) {
+    err.remove();
+  }
+  return ok;
+}
+
+function validateVillainPool() {
+  const ok = selectedVillainPool().length > 0;
+  document.querySelectorAll(".hall-pool .chip-check span").forEach(el => el.classList.toggle("invalid", !ok));
+  return ok;
+}
+
+function validateHallForm() {
+  const fieldsOk = hallNumericInputs.every(validateField);
+  const poolOk = validateVillainPool();
+  const allOk = fieldsOk && poolOk;
+  if (hallSubmitButton) {
+    const locked = requiresPlatformSignIn() && !authState.authenticated;
+    hallSubmitButton.disabled = !allOk || locked;
+  }
+  return allOk;
+}
+
+function wireHallValidation() {
+  if (!hallForm) return;
+  hallNumericInputs.forEach(input => {
+    if (input) input.addEventListener("input", () => validateHallForm());
+  });
+  document.querySelectorAll('input[name="villain-pool"]').forEach(el => {
+    el.addEventListener("change", () => validateHallForm());
+  });
+  validateHallForm();
+}
+
+// ----- Presets -----
+
+const HALL_PRESETS = [
+  {id: "smoke",          label: "Smoke 50",       config: {hands: 50,   tableCount: 1, playerCount: 2, heroStyle: "adaptive", heroPosition: "Button", gtoMode: "exact", villainPool: ["gto"], heroExplorationRate: 0, raiseSize: 2.5, bunchingTrials: 20, equityTrials: 120, learnEveryHands: 0, learningWindowSamples: 0, seed: 42, saveReviewHandHistory: false, fullRing: false}},
+  {id: "standard",       label: "Standard 240",   config: {hands: 240,  tableCount: 2, playerCount: 6, heroStyle: "adaptive", heroPosition: "Button", gtoMode: "exact", villainPool: ["tag","lag","gto"], heroExplorationRate: 0, raiseSize: 2.5, bunchingTrials: 40, equityTrials: 240, learnEveryHands: 0, learningWindowSamples: 200, seed: 42, saveReviewHandHistory: false, fullRing: false}},
+  {id: "long",           label: "Long 1000",      config: {hands: 1000, tableCount: 2, playerCount: 6, heroStyle: "adaptive", heroPosition: "Button", gtoMode: "exact", villainPool: ["tag","lag","gto"], heroExplorationRate: 0, raiseSize: 2.5, bunchingTrials: 40, equityTrials: 240, learnEveryHands: 100, learningWindowSamples: 200, seed: 42, saveReviewHandHistory: false, fullRing: false}},
+  {id: "gto-vs-tag",     label: "GTO vs TAGs",    config: {hands: 500,  tableCount: 2, playerCount: 6, heroStyle: "gto",      heroPosition: "Button", gtoMode: "exact", villainPool: ["tag"], heroExplorationRate: 0, raiseSize: 2.5, bunchingTrials: 40, equityTrials: 240, learnEveryHands: 0, learningWindowSamples: 0, seed: 42, saveReviewHandHistory: false, fullRing: false}},
+  {id: "adaptive-mixed", label: "Adaptive mixed", config: {hands: 500,  tableCount: 2, playerCount: 6, heroStyle: "adaptive", heroPosition: "Button", gtoMode: "exact", villainPool: ["tag","lag","nit","station"], heroExplorationRate: 0.05, raiseSize: 2.5, bunchingTrials: 40, equityTrials: 240, learnEveryHands: 100, learningWindowSamples: 200, seed: 42, saveReviewHandHistory: false, fullRing: false}},
+  {id: "strategic",      label: "Strategic",      config: {hands: 500,  tableCount: 2, playerCount: 6, heroStyle: "strategic", heroPosition: "Button", gtoMode: "exact", villainPool: ["maniac","station"], heroExplorationRate: 0, raiseSize: 2.5, bunchingTrials: 40, equityTrials: 240, learnEveryHands: 0, learningWindowSamples: 0, seed: 42, saveReviewHandHistory: false, fullRing: false}},
+  {id: "heads-up",       label: "Heads-up GTO",   config: {hands: 500,  tableCount: 1, playerCount: 2, heroStyle: "gto",      heroPosition: "Button", gtoMode: "exact", villainPool: ["gto"], heroExplorationRate: 0, raiseSize: 2.5, bunchingTrials: 40, equityTrials: 240, learnEveryHands: 0, learningWindowSamples: 0, seed: 42, saveReviewHandHistory: false, fullRing: false}}
+];
+
+function applyHallConfig(config) {
+  if (!config) return;
+  if (hallHandsInput && config.hands != null) hallHandsInput.value = config.hands;
+  if (hallTableCountInput && config.tableCount != null) hallTableCountInput.value = config.tableCount;
+  if (hallPlayerCountSelect && config.playerCount != null) hallPlayerCountSelect.value = String(config.playerCount);
+  if (hallHeroStyleSelect && config.heroStyle) hallHeroStyleSelect.value = config.heroStyle;
+  if (hallHeroPositionSelect && config.heroPosition) hallHeroPositionSelect.value = config.heroPosition;
+  if (hallGtoModeSelect && config.gtoMode) hallGtoModeSelect.value = config.gtoMode;
+  if (hallExplorationRateInput && config.heroExplorationRate != null) hallExplorationRateInput.value = config.heroExplorationRate;
+  if (hallRaiseSizeInput && config.raiseSize != null) hallRaiseSizeInput.value = config.raiseSize;
+  if (hallLearnEveryInput && config.learnEveryHands != null) hallLearnEveryInput.value = config.learnEveryHands;
+  if (hallLearningWindowInput && config.learningWindowSamples != null) hallLearningWindowInput.value = config.learningWindowSamples;
+  if (hallBunchingTrialsInput && config.bunchingTrials != null) hallBunchingTrialsInput.value = config.bunchingTrials;
+  if (hallEquityTrialsInput && config.equityTrials != null) hallEquityTrialsInput.value = config.equityTrials;
+  if (hallSeedInput && config.seed != null) hallSeedInput.value = config.seed;
+  if (hallSaveReviewInput) hallSaveReviewInput.checked = Boolean(config.saveReviewHandHistory);
+  if (hallFullRingInput) hallFullRingInput.checked = Boolean(config.fullRing);
+  if (Array.isArray(config.villainPool)) {
+    document.querySelectorAll('input[name="villain-pool"]').forEach(input => {
+      input.checked = config.villainPool.includes(input.value);
+    });
+  }
+  validateHallForm();
+}
+
+function renderPresetBar() {
+  if (!hallPresetBar) return;
+  hallPresetBar.innerHTML = HALL_PRESETS.map(p =>
+    `<button type="button" class="preset-button" data-preset="${p.id}">${escapeHtml(p.label)}</button>`
+  ).join("");
+  hallPresetBar.querySelectorAll(".preset-button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const preset = HALL_PRESETS.find(p => p.id === btn.dataset.preset);
+      if (preset) applyHallConfig(preset.config);
+    });
+  });
+}
+
+// ----- Recent runs -----
+
+const RECENT_RUNS_KEY = "sicfun.hall.recentRuns";
+const RECENT_RUNS_MAX = 20;
+
+function readRecentRuns() {
+  try {
+    const raw = localStorage.getItem(RECENT_RUNS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) { return []; }
+}
+
+function writeRecentRuns(entries) {
+  try { localStorage.setItem(RECENT_RUNS_KEY, JSON.stringify(entries.slice(0, RECENT_RUNS_MAX))); }
+  catch (_) { /* quota or private mode - ignore */ }
+}
+
+function pushRecentRun(request, summary) {
+  const entry = {
+    timestamp: Date.now(),
+    request,
+    summary: {
+      handsPlayed: summary.handsPlayed,
+      heroNetChips: summary.heroNetChips,
+      heroBbPer100: summary.heroBbPer100,
+      heroWins: summary.heroWins,
+      heroLosses: summary.heroLosses,
+      heroTies: summary.heroTies
+    }
+  };
+  const existing = readRecentRuns();
+  writeRecentRuns([entry, ...existing]);
+  renderRecentRuns();
+}
+
+function renderRecentRuns() {
+  if (!hallRecentList || !hallRecentCount) return;
+  const entries = readRecentRuns();
+  hallRecentCount.textContent = entries.length;
+  if (entries.length === 0) {
+    hallRecentList.innerHTML = `<p class="section-note">No runs yet. Launch one from the form.</p>`;
+    return;
+  }
+  hallRecentList.innerHTML = entries.map((entry, idx) => {
+    const ts = new Date(entry.timestamp).toLocaleString();
+    const pool = Array.isArray(entry.request.villainPool) ? entry.request.villainPool.join(", ") : "-";
+    return `
+      <article class="recent-run">
+        <div class="recent-run-head">
+          <span class="recent-run-ts">${escapeHtml(ts)}</span>
+          <button type="button" class="button button-secondary" data-recent-index="${idx}">Load</button>
+        </div>
+        <p class="recent-run-meta">
+          ${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands &middot;
+          ${formatSigned(entry.summary.heroNetChips)} chips &middot; [${escapeHtml(pool)}] &middot; seed ${entry.request.seed}
+        </p>
+      </article>
+    `;
+  }).join("");
+  hallRecentList.querySelectorAll("button[data-recent-index]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const entry = entries[Number(btn.dataset.recentIndex)];
+      if (entry) applyHallConfig(entry.request);
+    });
+  });
+}
+
+// ----- Progress / elapsed timer / cancel -----
+
+let hallElapsedTimer = null;
+let hallActiveJobId = null;
+let hallActiveStartedAt = 0;
+
+function startHallElapsed(jobId) {
+  hallActiveJobId = jobId;
+  hallActiveStartedAt = Date.now();
+  if (hallProgress) hallProgress.classList.remove("hidden");
+  if (hallCancelButton) {
+    hallCancelButton.disabled = false;
+    hallCancelButton.textContent = "Cancel Run";
+  }
+  stopHallElapsed();
+  hallElapsedTimer = window.setInterval(tickHallElapsed, 1000);
+  tickHallElapsed();
+}
+
+function stopHallElapsed() {
+  if (hallElapsedTimer) { window.clearInterval(hallElapsedTimer); hallElapsedTimer = null; }
+}
+
+function tickHallElapsed() {
+  if (!hallElapsed) return;
+  const sec = Math.floor((Date.now() - hallActiveStartedAt) / 1000);
+  const mm = String(Math.floor(sec / 60)).padStart(2, "0");
+  const ss = String(sec % 60).padStart(2, "0");
+  hallElapsed.textContent = `Elapsed ${mm}:${ss}`;
+}
+
+function finishHallProgress() {
+  stopHallElapsed();
+  hallActiveJobId = null;
+  if (hallProgress) hallProgress.classList.add("hidden");
+}
+
+if (hallCancelButton) {
+  hallCancelButton.addEventListener("click", async () => {
+    if (!hallActiveJobId) return;
+    hallCancelButton.disabled = true;
+    hallCancelButton.textContent = "Cancelling...";
+    try {
+      const response = await fetch(`/api/playing-hall/jobs/${encodeURIComponent(hallActiveJobId)}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+        headers: jsonHeaders(true)
+      });
+      if (response.status === 404) {
+        renderHallStatus("Job no longer available.");
+        finishHallProgress();
+      } else if (response.status === 409) {
+        // terminal - polling loop will resolve naturally
+      } else if (!response.ok) {
+        renderHallStatus(`Cancel failed with status ${response.status}.`);
+      }
+    } catch (error) {
+      renderHallStatus(`Cancel failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  });
 }
