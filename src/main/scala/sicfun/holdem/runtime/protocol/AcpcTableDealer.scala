@@ -13,8 +13,6 @@ final class AcpcTableDealer(
   // rng is wired now and used by later tasks (deal/shuffle); keep deterministic seed plumbing in place.
   @nowarn("msg=unused private member")
   private val rng = new Random(rngSeed)
-  // _buttonSeat is mutable to allow button rotation in later tasks; setter not yet exposed.
-  @nowarn("msg=unset private variable")
   private var _buttonSeat: SeatId = initialButtonSeat
   private val stacks = collection.mutable.Map[SeatId, Long]()
   private val contributions = collection.mutable.Map[SeatId, Long]()
@@ -22,6 +20,9 @@ final class AcpcTableDealer(
   for i <- 0 until config.numSeats do stacks(SeatId(i)) = config.startingStack
 
   def buttonSeat: SeatId = _buttonSeat
+
+  def advanceButton(): Unit =
+    _buttonSeat = SeatId((_buttonSeat.index + 1) % config.numSeats)
 
   private def nextSeat(s: SeatId): SeatId =
     SeatId((s.index + 1) % config.numSeats)

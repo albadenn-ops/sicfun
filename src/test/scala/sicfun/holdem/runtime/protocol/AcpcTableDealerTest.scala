@@ -31,3 +31,17 @@ class AcpcTableDealerTest extends munit.FunSuite:
       PostBlind(SeatId(0), 1L, SmallBlind),
       PostBlind(SeatId(1), 2L, BigBlind)
     ))
+
+  test("button rotates one seat per hand and cycles through all N=9 seats"):
+    val d = AcpcTableDealer(cfg9, SeatId(0), 1L)
+    val visited = (0 until 9).map { _ =>
+      val b = d.buttonSeat
+      d.advanceButton()
+      b.index
+    }.toSet
+    assertEquals(visited, (0 until 9).toSet)
+
+  test("button wraps modulo numSeats at N=2"):
+    val d = AcpcTableDealer(cfg2, SeatId(1), 1L)
+    d.advanceButton()
+    assertEquals(d.buttonSeat, SeatId(0))
