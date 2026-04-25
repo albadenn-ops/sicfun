@@ -8,6 +8,7 @@ import sicfun.core.CardId
 import java.io.{File, FileInputStream}
 import java.util.Properties
 import java.util.concurrent.atomic.AtomicReference
+import scala.util.control.NonFatal
 
 /** Runtime wrapper for postflop native Monte Carlo batch equity evaluation via JNI.
   *
@@ -258,7 +259,7 @@ private[holdem] object HoldemPostflopNativeRuntime:
           catch
             case ex: UnsatisfiedLinkError =>
               Left(s"postflop native symbols not found (${backendLabel(resolved.backend)}): ${ex.getMessage}")
-            case ex: Throwable =>
+            case NonFatal(ex) =>
               Left(
                 Option(ex.getMessage)
                   .map(_.trim)
@@ -347,14 +348,14 @@ private[holdem] object HoldemPostflopNativeRuntime:
           System.load(path)
           Right(s"path=$path")
         catch
-          case ex: Throwable =>
+          case NonFatal(ex) =>
             Left(s"failed to load $label '$path': ${ex.getMessage}")
       case None =>
         try
           System.loadLibrary(libName)
           Right(s"library=$libName")
         catch
-          case ex: Throwable =>
+          case NonFatal(ex) =>
             GpuRuntimeSupport.tryLoadFirstExistingPath(
               GpuRuntimeSupport.localNativeFallbackCandidates(libName)
             ) match
@@ -457,7 +458,7 @@ private[holdem] object HoldemPostflopNativeRuntime:
                   idx += 1
                 None
     catch
-      case _: Throwable => None
+      case NonFatal(_) => None
 
   private def resolvedPostflopAutoTuneCacheFile: File =
     runtimeConfig().resolvedPostflopAutoTuneCacheFile
@@ -508,12 +509,12 @@ private[holdem] object HoldemPostflopNativeRuntime:
   private def safeCudaDeviceCount(): Int =
     try HoldemPostflopNativeGpuBindings.cudaDeviceCount()
     catch
-      case _: Throwable => 0
+      case NonFatal(_) => 0
 
   private def safeCudaDeviceFingerprint(deviceIndex: Int): String =
     try Option(HoldemPostflopNativeGpuBindings.cudaDeviceInfo(deviceIndex)).map(_.trim).getOrElse("")
     catch
-      case _: Throwable => ""
+      case NonFatal(_) => ""
 
   private def configuredGpuLibraryIdentity: String =
     GpuRuntimeSupport.resolveNonEmpty(GpuPathProperty, GpuPathEnv) match
@@ -538,7 +539,7 @@ private[holdem] object HoldemPostflopNativeRuntime:
         case 0 => "unknown"
         case other => s"unknown(code=$other)"
     catch
-      case _: Throwable => "unknown"
+      case NonFatal(_) => "unknown"
 
   private def backendLabel(backend: Backend): String =
     backend match

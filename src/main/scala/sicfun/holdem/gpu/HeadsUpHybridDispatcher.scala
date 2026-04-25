@@ -7,6 +7,7 @@ import java.util.concurrent.{Callable, ExecutorService, Executors, Future, Threa
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
 import java.util.Locale
 import java.util.zip.CRC32
+import scala.util.control.NonFatal
 
 /** Multi-device hybrid dispatcher that distributes batch equity computation
   * across all available compute devices: CUDA GPUs, OpenCL iGPUs, and CPU threads.
@@ -545,7 +546,7 @@ object HeadsUpHybridDispatcher:
             val warmupMeasured = measuredThroughput.toMap
             calibratedWeightsRef.updateAndGet(current => current ++ warmupMeasured)
       catch
-        case ex: Throwable =>
+        case NonFatal(ex) =>
           val detail = Option(ex.getMessage).filter(_.nonEmpty).getOrElse(ex.getClass.getSimpleName)
           GpuRuntimeSupport.log(s"hybrid warmup skipped: $detail")
 
@@ -652,7 +653,7 @@ object HeadsUpHybridDispatcher:
       )
       ()
     catch
-      case _: Throwable => ()
+      case NonFatal(_) => ()
 
   private def discoverCudaDevices(): Vector[CudaComputeDevice] =
     try
@@ -663,7 +664,9 @@ object HeadsUpHybridDispatcher:
       }
     catch
       case _: UnsatisfiedLinkError => Vector.empty
-      case _: Throwable => Vector.empty
+      case NonFatal(ex) =>
+        GpuRuntimeSupport.warn(s"hybrid: CUDA device discovery failed: ${ex.getClass.getSimpleName}: ${ex.getMessage}")
+        Vector.empty
 
   /** Discovers OpenCL devices, filtering out any NVIDIA GPUs that are already
     * represented by CUDA devices. This prevents the same physical GPU from
@@ -683,7 +686,9 @@ object HeadsUpHybridDispatcher:
       }
     catch
       case _: UnsatisfiedLinkError => Vector.empty
-      case _: Throwable => Vector.empty
+      case NonFatal(ex) =>
+        GpuRuntimeSupport.warn(s"hybrid: OpenCL device discovery failed: ${ex.getClass.getSimpleName}: ${ex.getMessage}")
+        Vector.empty
 
   /** Discovers the CPU device by probing whether the native library is loaded
     * (via `lastEngineCode()`). If the probe throws, we still create a CPU device
@@ -695,7 +700,8 @@ object HeadsUpHybridDispatcher:
       Vector(CpuComputeDevice(Runtime.getRuntime.availableProcessors()))
     catch
       case _: UnsatisfiedLinkError => Vector.empty
-      case _: Throwable =>
+      case NonFatal(ex) =>
+        GpuRuntimeSupport.warn(s"hybrid: CPU device probe non-link error (still creating CpuComputeDevice): ${ex.getClass.getSimpleName}: ${ex.getMessage}")
         Vector(CpuComputeDevice(Runtime.getRuntime.availableProcessors()))
 
   private def parseCudaDeviceInfo(index: Int, info: String): Option[CudaComputeDevice] =
@@ -1137,7 +1143,7 @@ object HeadsUpHybridDispatcher:
   private def awaitSliceAttempt(future: Future[SliceAttempt], slice: SubBatchSlice): SliceAttempt =
     try future.get()
     catch
-      case ex: Throwable =>
+      case NonFatal(ex) =>
         SliceAttempt(
           slice = slice,
           status = Int.MinValue,
@@ -1243,7 +1249,7 @@ object HeadsUpHybridDispatcher:
       val elapsedMs = elapsedNanos / 1_000_000L
       SliceAttempt(slice, status, elapsedMs, elapsedNanos, None)
     catch
-      case ex: Throwable =>
+      case NonFatal(ex) =>
         val elapsedNanos = System.nanoTime() - startedAt
         val elapsedMs = elapsedNanos / 1_000_000L
         SliceAttempt(

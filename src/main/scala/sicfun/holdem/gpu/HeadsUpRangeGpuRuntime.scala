@@ -6,6 +6,7 @@ import sicfun.holdem.equity.*
 import java.io.{File, FileInputStream}
 import java.util.Properties
 import java.util.concurrent.atomic.AtomicReference
+import scala.util.control.NonFatal
 
 /** Runtime wrapper for CSR-based hero-vs-range Monte Carlo equity evaluation.
   *
@@ -168,7 +169,7 @@ object HeadsUpRangeGpuRuntime:
           )
         else
           Left(s"native GPU symbols not found: ${ex.getMessage}")
-      case ex: Throwable =>
+      case NonFatal(ex) =>
         val detail = Option(ex.getMessage).map(_.trim).filter(_.nonEmpty).getOrElse(ex.getClass.getSimpleName)
         Left(detail)
 
@@ -218,7 +219,7 @@ object HeadsUpRangeGpuRuntime:
     catch
       case ex: UnsatisfiedLinkError =>
         Left(s"native GPU symbols not found: ${ex.getMessage}")
-      case ex: Throwable =>
+      case NonFatal(ex) =>
         val detail = Option(ex.getMessage).map(_.trim).filter(_.nonEmpty).getOrElse(ex.getClass.getSimpleName)
         Left(detail)
 
@@ -348,12 +349,12 @@ object HeadsUpRangeGpuRuntime:
   private def safeCudaDeviceCount(): Int =
     try HeadsUpGpuNativeBindings.cudaDeviceCount()
     catch
-      case _: Throwable => 0
+      case NonFatal(_) => 0
 
   private def safeCudaDeviceFingerprint(deviceIndex: Int): String =
     try Option(HeadsUpGpuNativeBindings.cudaDeviceInfo(deviceIndex)).map(_.trim).getOrElse("")
     catch
-      case _: Throwable => ""
+      case NonFatal(_) => ""
 
   private def configuredNativeLibraryIdentity: String =
     GpuRuntimeSupport.resolveNonEmpty(NativePathProperty, NativePathEnv) match

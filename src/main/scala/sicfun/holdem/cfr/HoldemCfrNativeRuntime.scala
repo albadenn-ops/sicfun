@@ -5,6 +5,7 @@ import sicfun.holdem.gpu.*
 import sicfun.core.{FixedVal, Prob}
 
 import java.util.concurrent.atomic.AtomicReference
+import scala.util.control.NonFatal
 
 /** Runtime wrapper for native CFR providers (CPU and CUDA-compiled C/C++ libraries).
   *
@@ -297,7 +298,7 @@ private[holdem] object HoldemCfrNativeRuntime:
         catch
           case ex: UnsatisfiedLinkError =>
             Left(s"${backendLabel(backend)} native CFR symbols not found: ${ex.getMessage}")
-          case ex: Throwable =>
+          case NonFatal(ex) =>
             Left(
               Option(ex.getMessage)
                 .map(_.trim)
@@ -378,7 +379,7 @@ private[holdem] object HoldemCfrNativeRuntime:
         catch
           case ex: UnsatisfiedLinkError =>
             Left(s"${backendLabel(backend)} native CFR root-only symbols not found: ${ex.getMessage}")
-          case ex: Throwable =>
+          case NonFatal(ex) =>
             Left(
               Option(ex.getMessage)
                 .map(_.trim)
@@ -461,7 +462,7 @@ private[holdem] object HoldemCfrNativeRuntime:
         catch
           case ex: UnsatisfiedLinkError =>
             Left(s"${backendLabel(backend)} native CFR fixed symbols not found: ${ex.getMessage}")
-          case ex: Throwable =>
+          case NonFatal(ex) =>
             Left(
               Option(ex.getMessage)
                 .map(_.trim)
@@ -512,7 +513,7 @@ private[holdem] object HoldemCfrNativeRuntime:
         catch
           case ex: UnsatisfiedLinkError =>
             Left(s"GPU batch CFR symbols not found: ${ex.getMessage}")
-          case ex: Throwable =>
+          case NonFatal(ex) =>
             Left(Option(ex.getMessage).map(_.trim).filter(_.nonEmpty)
               .getOrElse(ex.getClass.getSimpleName))
 
@@ -548,11 +549,11 @@ private[holdem] object HoldemCfrNativeRuntime:
 
   private def safeLastEngineCodeCpu(): Int =
     try HoldemCfrNativeCpuBindings.lastEngineCode()
-    catch case _: Throwable => 0
+    catch case NonFatal(_) => 0
 
   private def safeLastEngineCodeGpu(): Int =
     try HoldemCfrNativeGpuBindings.lastEngineCode()
-    catch case _: Throwable => 0
+    catch case NonFatal(_) => 0
 
   private def backendLabel(backend: Backend): String =
     backend match

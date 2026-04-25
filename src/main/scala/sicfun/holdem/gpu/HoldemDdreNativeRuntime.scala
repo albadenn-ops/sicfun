@@ -2,6 +2,7 @@ package sicfun.holdem.gpu
 import sicfun.holdem.*
 
 import java.util.concurrent.atomic.AtomicReference
+import scala.util.control.NonFatal
 
 /** Runtime wrapper for native DDRE (Decision-Driving Range Estimation) posterior inference via JNI.
   *
@@ -188,7 +189,7 @@ private[holdem] object HoldemDdreNativeRuntime:
         catch
           case ex: UnsatisfiedLinkError =>
             Left(s"${backendLabel(backend)} native DDRE symbols not found: ${ex.getMessage}")
-          case ex: Throwable =>
+          case NonFatal(ex) =>
             Left(
               Option(ex.getMessage)
                 .map(_.trim)
@@ -228,11 +229,11 @@ private[holdem] object HoldemDdreNativeRuntime:
 
   private def safeLastEngineCodeCpu(): Option[Int] =
     try Some(HoldemDdreNativeCpuBindings.lastEngineCode())
-    catch case _: Throwable => None
+    catch case NonFatal(_) => None
 
   private def safeLastEngineCodeGpu(): Option[Int] =
     try Some(HoldemDdreNativeGpuBindings.lastEngineCode())
-    catch case _: Throwable => None
+    catch case NonFatal(_) => None
 
   private def backendLabel(backend: Backend): String =
     backend match
