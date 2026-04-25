@@ -65,3 +65,31 @@ class AcpcTableDealerTest extends munit.FunSuite:
     assertEquals(river.size, 5)
     val all = hole.values.flatten.toSet ++ river.toSet
     assertEquals(all.size, 12 + 5)    // all distinct
+
+  test("action closes preflop when BB checks option after limpers (N=3)"):
+    val cfg = TableConfig(3, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 1L)
+    d.postBlinds()
+    d.startStreet(sicfun.holdem.types.Street.Preflop)
+    assertEquals(d.nextToAct, Some(SeatId(0)))
+    d.applyAction(SeatId(0), sicfun.holdem.types.PokerAction.Call)
+      .getOrElse(fail("utg call"))
+    d.applyAction(SeatId(1), sicfun.holdem.types.PokerAction.Call)
+      .getOrElse(fail("sb call"))
+    d.applyAction(SeatId(2), sicfun.holdem.types.PokerAction.Check)
+      .getOrElse(fail("bb option"))
+    assert(d.roundClosed, "round closed after BB option")
+
+  test("action closes after BB flat-calls a raise (v1 bug regression)"):
+    val cfg = TableConfig(3, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 1L)
+    d.postBlinds()
+    d.startStreet(sicfun.holdem.types.Street.Preflop)
+    d.applyAction(SeatId(0), sicfun.holdem.types.PokerAction.Raise(6.0))
+      .getOrElse(fail("utg raise"))
+    d.applyAction(SeatId(1), sicfun.holdem.types.PokerAction.Call)
+      .getOrElse(fail("sb call"))
+    assert(!d.roundClosed, "BB still has option")
+    d.applyAction(SeatId(2), sicfun.holdem.types.PokerAction.Call)
+      .getOrElse(fail("bb call"))
+    assert(d.roundClosed, "closed after BB closes action on the raiser - v1 bug")

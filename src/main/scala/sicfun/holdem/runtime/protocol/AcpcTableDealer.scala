@@ -3,8 +3,13 @@ package sicfun.holdem.runtime.protocol
 import sicfun.core.{Card, Deck}
 import sicfun.holdem.runtime.protocol.BettingRoundEvent.*
 import sicfun.holdem.runtime.protocol.BlindKind.*
-import sicfun.holdem.types.Street
+import sicfun.holdem.types.{PokerAction, Street}
 import scala.util.Random
+
+enum IllegalActionReason:
+  case NotYourTurn(seat: SeatId, expected: Option[SeatId])
+  case IllegalForm(seat: SeatId, action: PokerAction, reason: String)
+  case InsufficientChips(seat: SeatId, required: Long, available: Long)
 
 final class AcpcTableDealer(
     val config: TableConfig,
@@ -73,3 +78,124 @@ final class AcpcTableDealer(
 
   def currentBoard: Vector[Card] = boardBuf.toVector
   def allHoleCards: Map[SeatId, Vector[Card]] = hole.toMap
+
+  private var currentStreet: Street = Street.Preflop
+  private var currentBet: Long = 0L
+  private var lastAggressor: Option[SeatId] = None
+  private var actOrder: Vector[SeatId] = Vector.empty
+  private var actIdx: Int = 0
+  private val folded: collection.mutable.Set[SeatId] =
+    collection.mutable.Set.empty
+  private val allIn: collection.mutable.Set[SeatId] =
+    collection.mutable.Set.empty
+  private val streetContribution: collection.mutable.Map[SeatId, Long] =
+    collection.mutable.Map.empty.withDefaultValue(0L)
+  private val eventBuffer: collection.mutable.ArrayBuffer[BettingRoundEvent] =
+    collection.mutable.ArrayBuffer.empty
+
+  /** Build action order starting at `firstToAct`, cycling through all N seats,
+    * then filter out folded/allIn. If `excludeAggressor` is set, also drops
+    * that seat — used for post-raise rebuild where the raiser does not re-act
+    * unless there is a further raise. */
+  private def buildActOrder(
+      firstToAct: SeatId,
+      excludeAggressor: Option[SeatId] = None
+  ): Vector[SeatId] =
+    val cycle = (0 until config.numSeats).map { off =>
+      SeatId((firstToAct.index + off) % config.numSeats)
+    }.toVector
+    cycle.filter { s =>
+      !folded.contains(s) &&
+        !allIn.contains(s) &&
+        !excludeAggressor.contains(s)
+    }
+
+  def startStreet(street: Street): Unit =
+    currentStreet = street
+    streetContribution.clear()
+    if street == Street.Preflop then
+      currentBet = config.bigBlind
+      streetContribution(smallBlindSeat) = config.smallBlind
+      streetContribution(bigBlindSeat) = config.bigBlind
+      lastAggressor = Some(bigBlindSeat)
+      // Preflop: BB is the initial aggressor but keeps option — include BB.
+      actOrder = buildActOrder(firstToAct = nextSeat(bigBlindSeat))
+    else
+      currentBet = 0L
+      lastAggressor = None
+      actOrder = buildActOrder(firstToAct = firstActivePostflop)
+    actIdx = 0
+
+  private def firstActivePostflop: SeatId =
+    var s = nextSeat(_buttonSeat)
+    while folded.contains(s) || allIn.contains(s) do s = nextSeat(s)
+    s
+
+  def nextToAct: Option[SeatId] =
+    if roundClosed then None else actOrder.lift(actIdx)
+
+  def streetOf: Street = currentStreet
+  def aggressor: Option[SeatId] = lastAggressor
+
+  def roundClosed: Boolean =
+    val eligible = (0 until config.numSeats).map(SeatId(_))
+      .filter(s => !folded.contains(s) && !allIn.contains(s))
+    if eligible.size <= 1 then true
+    else
+      val allMatched = eligible.forall(s => streetContribution(s) == currentBet)
+      allMatched && actIdx >= actOrder.size
+
+  def applyAction(seat: SeatId, action: PokerAction): Either[IllegalActionReason, Unit] =
+    if nextToAct != Some(seat) then
+      Left(IllegalActionReason.NotYourTurn(seat, nextToAct))
+    else action match
+      case PokerAction.Fold =>
+        folded += seat
+        actIdx += 1
+        eventBuffer += BettingRoundEvent.Act(seat, action)
+        Right(())
+      case PokerAction.Check =>
+        if streetContribution(seat) != currentBet then
+          Left(IllegalActionReason.IllegalForm(seat, action,
+            s"cannot check facing a bet (currentBet=$currentBet, ownContribution=${streetContribution(seat)})"))
+        else
+          actIdx += 1
+          eventBuffer += BettingRoundEvent.Act(seat, action)
+          Right(())
+      case PokerAction.Call =>
+        val owed = currentBet - streetContribution(seat)
+        if owed <= 0L then
+          Left(IllegalActionReason.IllegalForm(seat, action, "nothing to call"))
+        else
+          val pay = math.min(owed, stacks(seat))
+          stacks(seat) -= pay
+          streetContribution(seat) = streetContribution(seat) + pay
+          contributions(seat) = contributions(seat) + pay
+          if stacks(seat) == 0L then allIn += seat
+          actIdx += 1
+          eventBuffer += BettingRoundEvent.Act(seat, action)
+          Right(())
+      case PokerAction.Raise(amountDouble) =>
+        val target = amountDouble.toLong
+        if target <= currentBet then
+          Left(IllegalActionReason.IllegalForm(seat, action,
+            s"raise $target must exceed currentBet $currentBet"))
+        else
+          val pay = target - streetContribution(seat)
+          if pay > stacks(seat) then
+            Left(IllegalActionReason.InsufficientChips(seat, pay, stacks(seat)))
+          else
+            stacks(seat) -= pay
+            streetContribution(seat) = streetContribution(seat) + pay
+            contributions(seat) = contributions(seat) + pay
+            currentBet = target
+            lastAggressor = Some(seat)
+            if stacks(seat) == 0L then allIn += seat
+            // Post-raise rebuild: exclude the raiser. Everyone else gets one turn.
+            actOrder = buildActOrder(
+              firstToAct = nextSeat(seat),
+              excludeAggressor = Some(seat)
+            )
+            actIdx = 0
+            eventBuffer += BettingRoundEvent.Act(seat, action)
+            Right(())
