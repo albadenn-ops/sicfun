@@ -43,10 +43,12 @@ final class AcpcTableDealer(
     stacks(bb) -= config.bigBlind
     contributions(sb) = contributions(sb) + config.smallBlind
     contributions(bb) = contributions(bb) + config.bigBlind
-    Vector(
+    val events = Vector(
       PostBlind(sb, config.smallBlind, SmallBlind),
       PostBlind(bb, config.bigBlind, BigBlind)
     )
+    events.foreach(eventBuffer += _)
+    events
 
   def currentStacks: Map[SeatId, Long] = stacks.toMap
   def currentContributions: Map[SeatId, Long] = contributions.toMap
@@ -73,11 +75,15 @@ final class AcpcTableDealer(
       case Street.Flop    => 3
       case Street.Turn    => 1
       case Street.River   => 1
-    (1 to count).foreach { _ => boardBuf += deckBuf.remove(0) }
+    val dealtThisStreet = (1 to count).map { _ => deckBuf.remove(0) }.toVector
+    dealtThisStreet.foreach(boardBuf += _)
+    if count > 0 then eventBuffer += BettingRoundEvent.Deal(street, dealtThisStreet)
     boardBuf.toVector
 
   def currentBoard: Vector[Card] = boardBuf.toVector
   def allHoleCards: Map[SeatId, Vector[Card]] = hole.toMap
+
+  def eventLog: Vector[BettingRoundEvent] = eventBuffer.toVector
 
   private var currentStreet: Street = Street.Preflop
   private var currentBet: Long = 0L

@@ -172,3 +172,15 @@ class AcpcTableDealerTest extends munit.FunSuite:
     val wrong = if d.nextToAct == Some(SeatId(0)) then SeatId(2) else SeatId(0)
     val result = d.applyAction(wrong, sicfun.holdem.types.PokerAction.Fold)
     assert(result.isLeft)
+
+  test("eventLog records PostBlind, Deal, Act in order"):
+    val cfg = TableConfig(3, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 1L)
+    d.postBlinds()
+    d.dealHoleCards()
+    d.startStreet(sicfun.holdem.types.Street.Preflop)
+    d.applyAction(SeatId(0), sicfun.holdem.types.PokerAction.Fold)
+    val log = d.eventLog
+    assertEquals(log.take(2).collect { case e: BettingRoundEvent.PostBlind => e }.size, 2,
+      s"expected 2 PostBlind events, got ${log.take(2)}")
+    assert(log.exists(_.isInstanceOf[BettingRoundEvent.Act]))
