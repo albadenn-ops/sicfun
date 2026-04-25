@@ -43,11 +43,11 @@ Status note: a checked box means code landed in the repo. It does not automatica
 - [x] Actor/state model (HandState + HandEngine)
 - [x] Idempotent event ingestion (sequenceInHand deduplication, out-of-order delivery)
 - [x] Snapshot + recovery (HandStateSnapshotIO: state.properties + events.tsv)
-- [x] Latency targets (p95 < 1ms per applyEvent for 20-event hands, verified in HandEngineTest)
+- [x] Latency targets (p95 < 1ms per applyEvent for 20-event hands, verified in `HandEngineTest.scala:309-326`)
 
 ## M6 Batch analytics
 - [x] Multi-shard batch training pipeline (single-process)
-- [ ] Distributed training pipeline (planned; deferred while prioritizing M3/M5/M7 deliverables)
+- [ ] Distributed training pipeline (planned; not on the current product surface, no active blocker)
 - [x] Longitudinal stability tests
 - [x] Clustering + fingerprinting
 
@@ -73,7 +73,7 @@ Status note: a checked box means code landed in the repo. It does not automatica
 - [x] Interactive runbook launcher (`scripts/validation/runbook.ps1`) for one-command access to top operational actions
 - [x] Append-only AI context archive (`docs/ai/AI_CONTEXT_ARCHIVE.md`) for future bounded-context sessions
 - [x] Context append helper script (`scripts/archive-context.ps1`) with git metadata
-- [ ] True autonomous gameplay integration (real table adapter + action executor)
+- [ ] True autonomous gameplay integration (real table adapter + action executor) — out of scope for the current product surface
 - [x] Equilibrium baseline module (CFR/Nash-style reference policy) for exploitability-aware deviations
 
 ## M10 Native acceleration surfaces (done)
@@ -86,7 +86,7 @@ Status note: a checked box means code landed in the repo. It does not automatica
 - [x] Postflop benchmark CLI (`HoldemPostflopNativeBenchmark`)
 - [x] Postflop CUDA autotuner CLI (`HoldemPostflopGpuAutoTuner`)
 - [x] Postflop parity/behavior suite (`HoldemPostflopNativeParityTest`)
-- [x] Stabilize full-suite aggregated execution where isolated suite reruns pass (order/timing sensitivity on current machine)
+- [ ] Stabilize full-suite aggregated execution — isolated suite reruns pass deterministically, but order/timing sensitivity persists on current machine; treat as ongoing rather than done
 
 ## M11 DDRE phase-1 preparation (experimental; not model-complete)
 - [x] Feasibility audit against `SICFUN_Phase1_DDRE_Spec.docx`
@@ -99,8 +99,8 @@ Status note: a checked box means code landed in the repo. It does not automatica
 - [x] DDRE ONNX smoke-path readiness: pinned ONNX runtime dependency, reproducible tiny smoke model artifact generator, and adapter-level integration coverage for successful non-fallback ONNX execution (`build.sbt`, `scripts/generate-ddre-smoke-onnx.py`, `HoldemDdreIntegrationTest`)
 - [x] DDRE parity/benchmark gate CLI for provider plumbing checks across synthetic/native/onnx paths (`HoldemDdreParityBenchmark`)
 - [x] DDRE artifact contract + offline gate: ONNX artifacts now carry validation metadata, experimental artifacts are blocked by default in decision-driving modes, and `HoldemDdreOfflineGate` can promote an artifact after offline NLL/KL/latency checks
-- [ ] Train and validate a real DDRE model artifact against offline NLL/KL/latency gates
-- [ ] Replace synthetic/native-synthetic DDRE as the primary decision-driving path
+- [ ] Train and validate a real DDRE model artifact against offline NLL/KL/latency gates — see [README §"DDRE Reality Check"](README.md#ddre-reality-check); not on the current product surface
+- [ ] Replace synthetic/native-synthetic DDRE as the primary decision-driving path — see [README §"DDRE Reality Check"](README.md#ddre-reality-check); not on the current product surface
 
 ## M12 Reliability hardening (ongoing)
 - [x] DDRE shadow/fallback posterior stability: preserve exact Bayesian posterior in off/shadow/fallback paths and short-circuit alpha edge cases in fusion (`RangeInferenceEngine`)
