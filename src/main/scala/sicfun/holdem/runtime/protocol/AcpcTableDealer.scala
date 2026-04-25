@@ -1,6 +1,6 @@
 package sicfun.holdem.runtime.protocol
 
-import sicfun.core.{Card, Deck}
+import sicfun.core.{Card, Deck, HandEvaluator, HandRank}
 import sicfun.holdem.runtime.protocol.BettingRoundEvent.*
 import sicfun.holdem.runtime.protocol.BlindKind.*
 import sicfun.holdem.types.{PokerAction, Street}
@@ -229,3 +229,11 @@ final class AcpcTableDealer(
         .foreach(builder += _)
 
     builder.toSet
+
+  def evaluateShowdown(): Map[SeatId, HandRank] =
+    require(boardBuf.size == 5, s"showdown requires full board, got ${boardBuf.size}")
+    val nonFolded = (0 until config.numSeats).map(SeatId(_)).filterNot(folded.contains)
+    nonFolded.map { seat =>
+      val seven = hole(seat) ++ boardBuf.toVector
+      seat -> HandEvaluator.evaluate7(seven)
+    }.toMap

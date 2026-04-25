@@ -184,3 +184,18 @@ class AcpcTableDealerTest extends munit.FunSuite:
     assertEquals(log.take(2).collect { case e: BettingRoundEvent.PostBlind => e }.size, 2,
       s"expected 2 PostBlind events, got ${log.take(2)}")
     assert(log.exists(_.isInstanceOf[BettingRoundEvent.Act]))
+
+  test("evaluateShowdown: only non-folded seats get a HandRank"):
+    val cfg = TableConfig(3, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 42L)
+    d.postBlinds()
+    d.dealHoleCards()
+    d.startStreet(sicfun.holdem.types.Street.Preflop)
+    d.applyAction(SeatId(0), sicfun.holdem.types.PokerAction.Fold)
+    d.applyAction(SeatId(1), sicfun.holdem.types.PokerAction.Call)
+    d.applyAction(SeatId(2), sicfun.holdem.types.PokerAction.Check)
+    d.dealCommunity(sicfun.holdem.types.Street.Flop)
+    d.dealCommunity(sicfun.holdem.types.Street.Turn)
+    d.dealCommunity(sicfun.holdem.types.Street.River)
+    val ranks = d.evaluateShowdown()
+    assertEquals(ranks.keySet, Set(SeatId(1), SeatId(2)))
