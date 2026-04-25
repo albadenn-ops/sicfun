@@ -131,3 +131,44 @@ class AcpcTableDealerTest extends munit.FunSuite:
     val menu = d.legalActionsFor(SeatId(0))
     val raises = menu.collect { case sicfun.holdem.types.PokerAction.Raise(a) => a }
     assert(raises.contains(3.0), s"expected pot-size raise of 3.0 in $raises (would be 6.0 if pot was double-counted)")
+
+  test("applyAction: Check when owed > 0 → IllegalForm"):
+    val cfg = TableConfig(3, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 1L)
+    d.postBlinds()
+    d.startStreet(sicfun.holdem.types.Street.Preflop)
+    val result = d.applyAction(SeatId(0), sicfun.holdem.types.PokerAction.Check)
+    assert(result.isLeft)
+    result.left.foreach {
+      case IllegalActionReason.IllegalForm(_, _, _) => ()
+      case other => fail(s"expected IllegalForm, got $other")
+    }
+
+  test("applyAction: Raise below currentBet → IllegalForm"):
+    val cfg = TableConfig(3, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 1L)
+    d.postBlinds()
+    d.startStreet(sicfun.holdem.types.Street.Preflop)
+    val result = d.applyAction(SeatId(0), sicfun.holdem.types.PokerAction.Raise(1.5))
+    assert(result.isLeft)
+
+  test("applyAction: Raise more than stack → InsufficientChips"):
+    val cfg = TableConfig(3, 1L, 2L, 0L, 20L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 1L)
+    d.postBlinds()
+    d.startStreet(sicfun.holdem.types.Street.Preflop)
+    val result = d.applyAction(SeatId(0), sicfun.holdem.types.PokerAction.Raise(1000.0))
+    assert(result.isLeft)
+    result.left.foreach {
+      case IllegalActionReason.InsufficientChips(_, _, _) => ()
+      case other => fail(s"expected InsufficientChips, got $other")
+    }
+
+  test("applyAction: out-of-turn → NotYourTurn"):
+    val cfg = TableConfig(3, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 1L)
+    d.postBlinds()
+    d.startStreet(sicfun.holdem.types.Street.Preflop)
+    val wrong = if d.nextToAct == Some(SeatId(0)) then SeatId(2) else SeatId(0)
+    val result = d.applyAction(wrong, sicfun.holdem.types.PokerAction.Fold)
+    assert(result.isLeft)
