@@ -199,3 +199,49 @@ class AcpcTableDealerTest extends munit.FunSuite:
     d.dealCommunity(sicfun.holdem.types.Street.River)
     val ranks = d.evaluateShowdown()
     assertEquals(ranks.keySet, Set(SeatId(1), SeatId(2)))
+
+  test("distributePots: 3-way equal contributions, single winner takes whole pot"):
+    val cfg = TableConfig(3, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 42L)
+    d.setStateForTest(
+      stacks = Map(SeatId(0) -> 190L, SeatId(1) -> 190L, SeatId(2) -> 190L),
+      contributions = Map(SeatId(0) -> 10L, SeatId(1) -> 10L, SeatId(2) -> 10L),
+      folded = Set.empty
+    )
+    val winnerRank = sicfun.core.HandEvaluator.evaluate7(d.scriptedSevenForTest(SeatId(0)))
+    val ranks = Map(SeatId(0) -> winnerRank, SeatId(1) -> winnerRank, SeatId(2) -> winnerRank)
+    val distributed = d.distributePots(ranks)
+    val total = distributed.map(_._2.values.sum).sum
+    assertEquals(total, 30L)
+
+  test("distributePots: exact split on 3-way tie, odd chip goes to first winner clockwise from button"):
+    val cfg = TableConfig(3, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(2), 42L) // button = 2, clockwise from button = 0, 1, 2
+    d.setStateForTest(
+      stacks = Map(SeatId(0) -> 196L, SeatId(1) -> 196L, SeatId(2) -> 196L),
+      contributions = Map(SeatId(0) -> 4L, SeatId(1) -> 3L, SeatId(2) -> 3L),
+      folded = Set.empty
+    )
+    val tiedRank = sicfun.core.HandEvaluator.evaluate7(d.scriptedSevenForTest(SeatId(0)))
+    val ranks = Map(SeatId(0) -> tiedRank, SeatId(1) -> tiedRank, SeatId(2) -> tiedRank)
+    val distributed = d.distributePots(ranks)
+    val flat = distributed.flatMap(_._2).groupMapReduce(_._1)(_._2)(_ + _)
+    assertEquals(flat.values.sum, 10L, "conservation on tied pot")
+    assert(flat(SeatId(0)) >= flat(SeatId(1)), s"odd chip convention violated: $flat")
+    assert(flat(SeatId(0)) >= flat(SeatId(2)))
+
+  test("distributePots: multi-way all-in creates side pots, each awarded independently"):
+    val cfg = TableConfig(3, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 42L)
+    d.setStateForTest(
+      stacks = Map(SeatId(0) -> 0L, SeatId(1) -> 0L, SeatId(2) -> 0L),
+      contributions = Map(SeatId(0) -> 5L, SeatId(1) -> 10L, SeatId(2) -> 20L),
+      folded = Set.empty
+    )
+    val ranks = d.scriptedRanksSeat2WinsAll
+    val distributed = d.distributePots(ranks)
+    val flat = distributed.flatMap(_._2).groupMapReduce(_._1)(_._2)(_ + _)
+    assertEquals(flat.getOrElse(SeatId(2), 0L), 35L)
+    assertEquals(flat.getOrElse(SeatId(0), 0L), 0L)
+    assertEquals(flat.getOrElse(SeatId(1), 0L), 0L)
+    assertEquals(flat.values.sum, 35L)

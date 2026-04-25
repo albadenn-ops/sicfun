@@ -237,3 +237,72 @@ final class AcpcTableDealer(
       val seven = hole(seat) ++ boardBuf.toVector
       seat -> HandEvaluator.evaluate7(seven)
     }.toMap
+
+  def computeSidePots(): Vector[SidePot] =
+    val contribPairs = (0 until config.numSeats).map(SeatId(_))
+      .map(s => s -> contributions(s))
+      .filter(_._2 > 0L)
+      .sortBy(_._2)
+      .toVector
+
+    var result = Vector.empty[SidePot]
+    var prevLevel = 0L
+    var remaining = contribPairs
+
+    while remaining.nonEmpty do
+      val level = remaining.head._2
+      val delta = level - prevLevel
+      val potAmount = delta * remaining.size
+      val eligible = remaining.map(_._1).toSet -- folded.toSet
+      if potAmount > 0L && eligible.nonEmpty then
+        result = result :+ SidePot(potAmount, eligible)
+      prevLevel = level
+      remaining = remaining.filter(_._2 > level)
+
+    result
+
+  def distributePots(
+      ranks: Map[SeatId, HandRank]
+  ): Vector[(SidePot, Map[SeatId, Long])] =
+    val pots = computeSidePots()
+    pots.map { pot =>
+      val contenders = pot.eligibleSeats.toVector.filter(ranks.contains)
+      if contenders.isEmpty then pot -> Map.empty[SeatId, Long]
+      else
+        val bestRank = contenders.map(ranks).max(using summon[Ordering[HandRank]])
+        val winners = contenders.filter(s => ranks(s).compare(bestRank) == 0)
+        val share = pot.amount / winners.size
+        val remainder = pot.amount - share * winners.size
+        val winnerOrderFromButton = clockwiseFromButton(winners.toSet)
+        val baseDist = winners.map(_ -> share).toMap
+        val oddChipSeat = winnerOrderFromButton.headOption
+        val finalDist = oddChipSeat match
+          case Some(s) if remainder > 0 =>
+            baseDist.updated(s, baseDist(s) + remainder)
+          case _ => baseDist
+        pot -> finalDist
+    }
+
+  private def clockwiseFromButton(seats: Set[SeatId]): Vector[SeatId] =
+    (1 to config.numSeats).map { off =>
+      SeatId((_buttonSeat.index + off) % config.numSeats)
+    }.filter(seats.contains).toVector
+
+  // Test-only shims
+  private[protocol] def setStateForTest(
+      stacks: Map[SeatId, Long],
+      contributions: Map[SeatId, Long],
+      folded: Set[SeatId]
+  ): Unit =
+    stacks.foreach { case (s, v) => this.stacks(s) = v }
+    contributions.foreach { case (s, v) => this.contributions(s) = v }
+    folded.foreach(this.folded += _)
+
+  private[protocol] def scriptedSevenForTest(seat: SeatId): Vector[Card] =
+    Deck.full.take(7).toVector
+
+  private[protocol] def scriptedRanksSeat2WinsAll: Map[SeatId, HandRank] =
+    val loser = HandEvaluator.evaluate7(Deck.full.take(7).toVector)
+    val winner = HandEvaluator.evaluate7(Deck.full.drop(7).take(7).toVector)
+    val (w, l) = if winner.compare(loser) > 0 then (winner, loser) else (loser, winner)
+    Map(SeatId(0) -> l, SeatId(1) -> l, SeatId(2) -> w)
