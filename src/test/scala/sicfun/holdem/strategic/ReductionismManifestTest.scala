@@ -171,32 +171,46 @@ class ReductionismManifestTest extends FunSuite:
       assert(r.deadline.nonEmpty, s"${r.id}: empty deadline")
     }
 
-  test("manifest summary"):
+  test("manifest summary is internally consistent"):
+    val resolved = manifest.count(_.resolved)
+    val unresolved = manifest.count(!_.resolved)
     val bySeverity = manifest.filterNot(_.resolved).groupBy(_.severity)
     val summary = bySeverity.map { (sev, entries) =>
       s"  $sev: ${entries.size}"
     }.mkString("\n")
-    val total = manifest.count(!_.resolved)
-    println(s"\n=== REDUCTIONISM MANIFEST: $total unresolved ===")
+    println(s"\n=== REDUCTIONISM MANIFEST: $unresolved unresolved ===")
     println(summary)
-    println(s"  Resolved: ${manifest.count(_.resolved)}")
+    println(s"  Resolved: $resolved")
     println()
-    // This test always passes — it's informational
-    assert(true)
+    // Replaces the previous `assert(true)` with a structural invariant:
+    // resolved + unresolved must equal the manifest size. This catches
+    // accidental field corruption (e.g., a Reductionism with a third
+    // "in-progress" state slipping in if the resolved Boolean ever
+    // becomes a tri-state without updating this test).
+    assertEquals(resolved + unresolved, manifest.size,
+      "every entry must be either resolved or unresolved (no third state)")
 
-  test("silent reductionisms are acknowledged"):
+  test("silent reductionisms are resolved (formal guarantees bypassed)"):
     val silent = manifest.filter(r => r.severity == Severity.Silent && !r.resolved)
-    println(s"\n=== ${silent.size} SILENT REDUCTIONISMS (formal guarantees bypassed) ===")
-    silent.foreach { r =>
-      println(s"  [${r.id}] ${r.file}: ${r.description} (deadline: ${r.deadline})")
-    }
-    // This test PASSES but prints loudly. To make it FAIL when deadlines pass,
-    // uncomment the assertion below and update the deadline check logic:
-    // assert(silent.isEmpty, s"${silent.size} silent reductionisms remain")
+    if silent.nonEmpty then
+      val list = silent.map(r =>
+        s"  [${r.id}] ${r.file}: ${r.description} (deadline: ${r.deadline})"
+      ).mkString("\n")
+      fail(s"${silent.size} silent reductionism(s) remain unresolved -- formal " +
+        s"guarantees of the strategic engine are still bypassed:\n$list\n\n" +
+        "Either resolve the underlying reductionism and flip resolved = true, " +
+        "or push back on the manifest entry if the original concern no longer " +
+        "applies. Adding new Severity.Silent entries without resolving them " +
+        "fails this gate by design.")
 
-  test("orphaned formal objects are acknowledged"):
+  test("orphaned formal objects are wired (implemented but unreachable)"):
     val orphans = manifest.filter(r => r.severity == Severity.Orphan && !r.resolved)
-    println(s"\n=== ${orphans.size} ORPHANED FORMAL OBJECTS (implemented but unwired) ===")
-    orphans.foreach { r =>
-      println(s"  [${r.id}] ${r.file}: ${r.description} (deadline: ${r.deadline})")
-    }
+    if orphans.nonEmpty then
+      val list = orphans.map(r =>
+        s"  [${r.id}] ${r.file}: ${r.description} (deadline: ${r.deadline})"
+      ).mkString("\n")
+      fail(s"${orphans.size} orphaned formal object(s) remain unwired -- code is " +
+        s"compiled but never invoked from the engine:\n$list\n\n" +
+        "Either wire the object into the decision pipeline and flip resolved = true, " +
+        "or delete it. Adding new Severity.Orphan entries without resolving them " +
+        "fails this gate by design.")
