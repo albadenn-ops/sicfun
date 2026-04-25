@@ -1,8 +1,9 @@
 package sicfun.holdem.runtime.protocol
 
+import sicfun.core.{Card, Deck}
 import sicfun.holdem.runtime.protocol.BettingRoundEvent.*
 import sicfun.holdem.runtime.protocol.BlindKind.*
-import scala.annotation.nowarn
+import sicfun.holdem.types.Street
 import scala.util.Random
 
 final class AcpcTableDealer(
@@ -10,8 +11,6 @@ final class AcpcTableDealer(
     initialButtonSeat: SeatId,
     rngSeed: Long
 ):
-  // rng is wired now and used by later tasks (deal/shuffle); keep deterministic seed plumbing in place.
-  @nowarn("msg=unused private member")
   private val rng = new Random(rngSeed)
   private var _buttonSeat: SeatId = initialButtonSeat
   private val stacks = collection.mutable.Map[SeatId, Long]()
@@ -46,3 +45,31 @@ final class AcpcTableDealer(
 
   def currentStacks: Map[SeatId, Long] = stacks.toMap
   def currentContributions: Map[SeatId, Long] = contributions.toMap
+
+  private val deckBuf: collection.mutable.ArrayBuffer[Card] =
+    collection.mutable.ArrayBuffer.from(rng.shuffle(Deck.full))
+  private val hole: collection.mutable.Map[SeatId, Vector[Card]] =
+    collection.mutable.Map.empty
+  private val boardBuf: collection.mutable.ArrayBuffer[Card] =
+    collection.mutable.ArrayBuffer.empty
+
+  def dealHoleCards(): Map[SeatId, Vector[Card]] =
+    (0 until config.numSeats).foreach { i =>
+      val seat = SeatId(i)
+      val c1 = deckBuf.remove(0)
+      val c2 = deckBuf.remove(0)
+      hole(seat) = Vector(c1, c2)
+    }
+    hole.toMap
+
+  def dealCommunity(street: Street): Vector[Card] =
+    val count = street match
+      case Street.Preflop => 0
+      case Street.Flop    => 3
+      case Street.Turn    => 1
+      case Street.River   => 1
+    (1 to count).foreach { _ => boardBuf += deckBuf.remove(0) }
+    boardBuf.toVector
+
+  def currentBoard: Vector[Card] = boardBuf.toVector
+  def allHoleCards: Map[SeatId, Vector[Card]] = hole.toMap
