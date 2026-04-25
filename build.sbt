@@ -11,6 +11,7 @@ lazy val root = (project in file("."))
     name := "sicfun",
     libraryDependencies ++= Seq(
       "org.scalameta" %% "munit" % "1.2.2" % Test,
+      "org.scalameta" %% "munit-scalacheck" % "1.0.0" % Test,
       "io.zonky.test" % "embedded-postgres" % embeddedPostgresVersion % Test,
       "com.lihaoyi" %% "ujson" % "3.3.1",
       "com.microsoft.onnxruntime" % "onnxruntime" % onnxRuntimeVersion,
