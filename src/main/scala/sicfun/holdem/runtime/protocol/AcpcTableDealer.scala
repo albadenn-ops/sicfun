@@ -199,3 +199,27 @@ final class AcpcTableDealer(
             actIdx = 0
             eventBuffer += BettingRoundEvent.Act(seat, action)
             Right(())
+
+  def legalActionsFor(seat: SeatId): Set[PokerAction] =
+    val owed = currentBet - streetContribution(seat)
+    val stack = stacks(seat)
+    val contribution = streetContribution(seat)
+    val totalPot = contributions.values.sum + streetContribution.values.sum
+    val builder = scala.collection.mutable.Set[PokerAction]()
+
+    builder += PokerAction.Fold
+    if owed <= 0L then builder += PokerAction.Check
+    if owed > 0L && stack > 0L then builder += PokerAction.Call
+
+    val maxTotalBet = stack + contribution
+    if maxTotalBet > currentBet then
+      val halfPot = (totalPot / 2).max(currentBet + 1L)
+      val pot = totalPot.max(currentBet + 1L)
+      val allIn = maxTotalBet
+      Seq(halfPot, pot, allIn)
+        .map(_.min(maxTotalBet))
+        .filter(_ > currentBet)
+        .map(amt => PokerAction.Raise(amt.toDouble))
+        .foreach(builder += _)
+
+    builder.toSet

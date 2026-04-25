@@ -93,3 +93,29 @@ class AcpcTableDealerTest extends munit.FunSuite:
     d.applyAction(SeatId(2), sicfun.holdem.types.PokerAction.Call)
       .getOrElse(fail("bb call"))
     assert(d.roundClosed, "closed after BB closes action on the raiser - v1 bug")
+
+  test("legalActionsFor: facing no bet → menu has Fold, Check, Raise(halfPot), Raise(pot), Raise(allIn)"):
+    val cfg = TableConfig(6, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 1L)
+    d.postBlinds()
+    d.dealHoleCards()
+    d.startStreet(sicfun.holdem.types.Street.Flop) // no outstanding bet
+    val menu = d.legalActionsFor(SeatId(0))
+    assert(menu.contains(sicfun.holdem.types.PokerAction.Fold))
+    assert(menu.contains(sicfun.holdem.types.PokerAction.Check))
+    val raises = menu.collect { case r: sicfun.holdem.types.PokerAction.Raise => r }
+    assertEquals(raises.map(_.amount).size, raises.size)
+    assert(raises.nonEmpty, "post-flop raises should be available from non-empty pot")
+
+  test("legalActionsFor: stack short enough to collapse HalfPot/Pot/AllIn into one Raise"):
+    val cfg = TableConfig(2, 1L, 2L, 0L, 20L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 1L)
+    d.postBlinds()
+    d.dealHoleCards()
+    d.startStreet(sicfun.holdem.types.Street.Preflop)
+    d.applyAction(SeatId(0), sicfun.holdem.types.PokerAction.Raise(16.0))
+      .getOrElse(fail("aggressive open"))
+    val menu = d.legalActionsFor(SeatId(1))
+    val raises = menu.collect { case r: sicfun.holdem.types.PokerAction.Raise => r }
+    assertEquals(raises.map(_.amount).toSet.size, raises.size,
+      s"dedup failed: ${raises.map(_.amount)}")
