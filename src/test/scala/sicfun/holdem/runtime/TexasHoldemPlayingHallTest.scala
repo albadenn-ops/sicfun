@@ -757,6 +757,143 @@ class TexasHoldemPlayingHallTest extends FunSuite:
     }
   }
 
+  test("hands.tsv tableId follows the deterministic round-robin schedule per row") {
+    val root = Files.createTempDirectory("playing-hall-tableid-rotation-")
+    try
+      val out = root.resolve("hall-rotation-out")
+      val tableCount = 4
+      val hands = 24
+      val result = TexasHoldemPlayingHall.run(Array(
+        s"--hands=$hands",
+        s"--tableCount=$tableCount",
+        "--reportEvery=24",
+        "--learnEveryHands=0",
+        "--learningWindowSamples=50",
+        "--seed=51",
+        s"--outDir=$out",
+        "--villainStyle=tag",
+        "--heroExplorationRate=0.0",
+        "--raiseSize=2.5",
+        "--bunchingTrials=8",
+        "--equityTrials=80",
+        "--saveTrainingTsv=false",
+        "--saveDdreTrainingTsv=false"
+      ))
+      assert(result.isRight, s"hall run failed: $result")
+
+      val handRows = Files.readAllLines(out.resolve("hands.tsv"), StandardCharsets.UTF_8).asScala.toVector
+      val handHeader = handRows.head.split("\t", -1).toVector
+      val handIdx = handHeader.indexOf("hand")
+      val tableIdIdx = handHeader.indexOf("tableId")
+      assert(handIdx >= 0, "hands.tsv missing hand column")
+      assert(tableIdIdx >= 0, "hands.tsv missing tableId column")
+
+      val pairs = handRows.drop(1).map { row =>
+        val fields = row.split("\t", -1).toVector
+        (fields(handIdx).toInt, fields(tableIdIdx).toInt)
+      }
+
+      assertEquals(pairs.size, hands, "expected one row per hand")
+      pairs.foreach { case (handNo, tableId) =>
+        val expected = ((handNo - 1) % tableCount) + 1
+        assertEquals(tableId, expected, s"hand=$handNo expected tableId=$expected got $tableId")
+      }
+
+      val perTable = pairs.groupMapReduce(_._2)(_ => 1)(_ + _)
+      val expectedPerTable = (1 to tableCount).map(_ -> hands / tableCount).toMap
+      assertEquals(perTable, expectedPerTable, "every table should run an equal share when hands % tableCount == 0")
+    finally
+      deleteRecursively(root)
+  }
+
+  test("training-selfplay.tsv and ddre-training-selfplay.tsv carry tableId aligned with the parent hand row") {
+    val root = Files.createTempDirectory("playing-hall-sample-tableid-")
+    try
+      val out = root.resolve("hall-sample-out")
+      val tableCount = 3
+      val hands = 18
+      val result = TexasHoldemPlayingHall.run(Array(
+        s"--hands=$hands",
+        s"--tableCount=$tableCount",
+        "--reportEvery=18",
+        "--learnEveryHands=0",
+        "--learningWindowSamples=200",
+        "--seed=53",
+        s"--outDir=$out",
+        "--villainStyle=tag",
+        "--heroExplorationRate=0.0",
+        "--raiseSize=2.5",
+        "--bunchingTrials=8",
+        "--equityTrials=80",
+        "--saveTrainingTsv=true",
+        "--saveDdreTrainingTsv=true"
+      ))
+      assert(result.isRight, s"hall run failed: $result")
+
+      def assertSampleRowsAlign(file: String): Unit =
+        val rows = Files.readAllLines(out.resolve(file), StandardCharsets.UTF_8).asScala.toVector
+        assert(rows.length > 1, s"$file should have at least one data row")
+        val header = rows.head.split("\t", -1).toVector
+        val handIdx = header.indexOf("hand")
+        val tableIdIdx = header.indexOf("tableId")
+        assert(handIdx >= 0, s"$file missing hand column")
+        assert(tableIdIdx >= 0, s"$file missing tableId column")
+        rows.drop(1).foreach { row =>
+          val fields = row.split("\t", -1).toVector
+          val handNo = fields(handIdx).toInt
+          val tableId = fields(tableIdIdx).toInt
+          val expected = ((handNo - 1) % tableCount) + 1
+          assertEquals(tableId, expected, s"$file hand=$handNo expected tableId=$expected got $tableId")
+        }
+
+      assertSampleRowsAlign("training-selfplay.tsv")
+      assertSampleRowsAlign("ddre-training-selfplay.tsv")
+    finally
+      deleteRecursively(root)
+  }
+
+  test("table schedule stays fair within +/-1 when hands does not divide tableCount") {
+    val root = Files.createTempDirectory("playing-hall-fairness-")
+    try
+      val out = root.resolve("hall-fairness-out")
+      val tableCount = 4
+      val hands = 14
+      val result = TexasHoldemPlayingHall.run(Array(
+        s"--hands=$hands",
+        s"--tableCount=$tableCount",
+        "--reportEvery=14",
+        "--learnEveryHands=0",
+        "--learningWindowSamples=50",
+        "--seed=59",
+        s"--outDir=$out",
+        "--villainStyle=tag",
+        "--heroExplorationRate=0.0",
+        "--raiseSize=2.5",
+        "--bunchingTrials=8",
+        "--equityTrials=80",
+        "--saveTrainingTsv=false",
+        "--saveDdreTrainingTsv=false"
+      ))
+      assert(result.isRight, s"hall run failed: $result")
+
+      val rows = Files.readAllLines(out.resolve("hands.tsv"), StandardCharsets.UTF_8).asScala.toVector
+      val header = rows.head.split("\t", -1).toVector
+      val tableIdIdx = header.indexOf("tableId")
+      val tableIds = rows.drop(1).flatMap(_.split("\t", -1).toVector.lift(tableIdIdx).flatMap(_.toIntOption))
+      assertEquals(tableIds.length, hands, "expected one tableId per hand")
+      val perTable = tableIds.groupMapReduce(identity)(_ => 1)(_ + _)
+      assertEquals(perTable.keySet, (1 to tableCount).toSet, "every table should be visited at least once")
+      val counts = perTable.values.toVector.sorted
+      assert(counts.last - counts.head <= 1, s"expected per-table counts within +/-1, got $perTable")
+      assertEquals(
+        perTable,
+        Map(1 -> 4, 2 -> 4, 3 -> 3, 4 -> 3),
+        "round-robin remainder should attach to the lowest-numbered tables first"
+      )
+    finally
+      deleteRecursively(root)
+  }
+
   private def deleteRecursively(path: Path): Unit =
     if Files.exists(path) then
       val stream = Files.walk(path)
