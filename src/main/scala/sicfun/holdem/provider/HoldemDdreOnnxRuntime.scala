@@ -94,6 +94,89 @@ private[holdem] object HoldemDdreOnnxRuntime:
     *
     * @return `Right(config)` if a valid configuration was resolved, `Left(reason)` otherwise
     */
+  /** Reflection-bridge self-test report: status of each Class.forName / method lookup
+    * the ONNX path depends on. Use [[selfTest]] to populate.
+    */
+  final case class SelfTestReport(checks: Vector[(String, Either[String, Unit])]):
+    /** True iff every check resolved successfully. */
+    def allOk: Boolean = checks.forall(_._2.isRight)
+    /** Human-readable summary, one line per check. */
+    def summary: String =
+      checks.map { case (name, result) =>
+        result match
+          case Right(_)     => s"  OK  $name"
+          case Left(reason) => s"  FAIL $name: $reason"
+      }.mkString("\n")
+
+  /** Validate that every ai.onnxruntime class and method the [[runOnnx]] reflection
+    * chain depends on is reachable on the current classpath.
+    *
+    * Intended as an opt-in pre-flight check (not auto-run at startup) so the synthetic
+    * DDRE path can keep running on machines without ONNX. Catches API drift after an
+    * onnxruntime upgrade -- the compiler cannot, because the bridge is reflection-only.
+    *
+    * Returns Right(report) when every lookup resolved; Left(reason) only on a critical
+    * failure (e.g. SecurityManager blocking reflective access). The report itself is
+    * always populated, so callers can inspect which specific lookups failed.
+    */
+  def selfTest(): SelfTestReport =
+    def lookup(name: String, body: => Unit): (String, Either[String, Unit]) =
+      try
+        body
+        (name, Right(()))
+      catch
+        case ex: ClassNotFoundException =>
+          (name, Left(s"class not found: ${ex.getMessage}"))
+        case ex: NoSuchMethodException =>
+          (name, Left(s"method not found: ${ex.getMessage}"))
+        case ex: Throwable =>
+          (name, Left(Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))
+
+    val checks = Vector(
+      lookup("Class ai.onnxruntime.OrtEnvironment", {
+        Class.forName("ai.onnxruntime.OrtEnvironment")
+        ()
+      }),
+      lookup("Class ai.onnxruntime.OrtSession", {
+        Class.forName("ai.onnxruntime.OrtSession")
+        ()
+      }),
+      lookup("Class ai.onnxruntime.OrtSession$SessionOptions", {
+        Class.forName("ai.onnxruntime.OrtSession$SessionOptions")
+        ()
+      }),
+      lookup("Class ai.onnxruntime.OnnxTensor", {
+        Class.forName("ai.onnxruntime.OnnxTensor")
+        ()
+      }),
+      lookup("OrtEnvironment.getEnvironment()", {
+        Class.forName("ai.onnxruntime.OrtEnvironment").getMethod("getEnvironment")
+        ()
+      }),
+      lookup("SessionOptions()", {
+        Class.forName("ai.onnxruntime.OrtSession$SessionOptions").getConstructor()
+        ()
+      }),
+      lookup("OrtEnvironment.createSession(String, SessionOptions)", {
+        val env = Class.forName("ai.onnxruntime.OrtEnvironment")
+        val opts = Class.forName("ai.onnxruntime.OrtSession$SessionOptions")
+        env.getMethod("createSession", classOf[String], opts)
+        ()
+      }),
+      lookup("OnnxTensor.createTensor(OrtEnvironment, Object)", {
+        val env = Class.forName("ai.onnxruntime.OrtEnvironment")
+        val tensor = Class.forName("ai.onnxruntime.OnnxTensor")
+        tensor.getMethod("createTensor", env, classOf[Object])
+        ()
+      }),
+      lookup("OrtSession.run(Map)", {
+        Class.forName("ai.onnxruntime.OrtSession")
+          .getMethod("run", classOf[java.util.Map[?, ?]])
+        ()
+      })
+    )
+    SelfTestReport(checks)
+
   def configuredConfig(): Either[String, Config] =
     val allowExperimental = GpuRuntimeSupport
       .resolveNonEmpty(AllowExperimentalProperty, AllowExperimentalEnv)
