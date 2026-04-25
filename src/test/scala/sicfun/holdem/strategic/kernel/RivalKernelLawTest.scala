@@ -3,11 +3,9 @@ import sicfun.holdem.strategic.types.*
 import sicfun.holdem.strategic.state.*
 import sicfun.holdem.strategic.kernel.*
 
-import scala.annotation.nowarn
 import sicfun.holdem.types.{Position, Street, Board}
 import sicfun.core.DiscreteDistribution
 
-@nowarn("cat=deprecation")
 class RivalKernelLawTest extends munit.FunSuite:
 
   private val dummyPublicState = PublicState(
@@ -90,13 +88,13 @@ class RivalKernelLawTest extends munit.FunSuite:
     val belief = new RivalBeliefState:
       def update(signal: ActionSignal, publicState: PublicState): RivalBeliefState = this
 
-    val actionKernel = new ActionKernel[RivalBeliefState]:
-      def apply(state: RivalBeliefState, signal: ActionSignal): RivalBeliefState =
+    val actionKernel = new ActionKernelFull[RivalBeliefState]:
+      def apply(state: RivalBeliefState, signal: ActionSignal, publicState: PublicState): RivalBeliefState =
         new RivalBeliefState:
           def update(signal: ActionSignal, publicState: PublicState): RivalBeliefState = this
 
-    val designKernel = new ActionKernel[RivalBeliefState]:
-      def apply(state: RivalBeliefState, signal: ActionSignal): RivalBeliefState =
+    val designKernel = new ActionKernelFull[RivalBeliefState]:
+      def apply(state: RivalBeliefState, signal: ActionSignal, publicState: PublicState): RivalBeliefState =
         new RivalBeliefState:
           def update(signal: ActionSignal, publicState: PublicState): RivalBeliefState = this
 
@@ -105,12 +103,12 @@ class RivalKernelLawTest extends munit.FunSuite:
         new RivalBeliefState:
           def update(signal: ActionSignal, publicState: PublicState): RivalBeliefState = this
 
-    val blindOff = KernelConstructor.composeFullKernelForWorld(
-      ChainWorld(LearningChannel.Blind, ShowdownMode.Off), actionKernel, actionKernel, designKernel, sdKernel
-    )
-    val blindOn = KernelConstructor.composeFullKernelForWorld(
-      ChainWorld(LearningChannel.Blind, ShowdownMode.On), actionKernel, actionKernel, designKernel, sdKernel
-    )
+    val blindOff = KernelConstructor.composeFullKernelForWorldFull(
+      actionKernel, actionKernel, designKernel, sdKernel
+    )(ChainWorld(LearningChannel.Blind, ShowdownMode.Off))
+    val blindOn = KernelConstructor.composeFullKernelForWorldFull(
+      actionKernel, actionKernel, designKernel, sdKernel
+    )(ChainWorld(LearningChannel.Blind, ShowdownMode.On))
 
     val sd = ShowdownSignal(Vector(RevealedHand(PlayerId("v1"), Vector.empty)))
     val signal = TotalSignal(dummySignal, Some(sd))

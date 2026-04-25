@@ -5,11 +5,9 @@ import sicfun.holdem.strategic.kernel.*
 import sicfun.holdem.strategic.safety.*
 import sicfun.holdem.strategic.exploitation.*
 
-import scala.annotation.nowarn
 import sicfun.core.{CardId, DiscreteDistribution}
 import sicfun.holdem.types.{Board, HoleCards, PokerAction, Position, Street}
 
-@nowarn("cat=deprecation")
 class DynamicsTest extends munit.FunSuite:
 
   private inline val Tol = 1e-12
@@ -363,12 +361,12 @@ class DynamicsTest extends munit.FunSuite:
   test("same signal under (Attrib,Off) and (Attrib,On) yields different results only via showdown"):
     val v1State = TestRivalState(uniformPrior, 0, "v1")
 
-    val actionKernel = new ActionKernel[TestRivalState]:
-      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+    val actionKernel = new ActionKernelFull[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal, publicState: PublicState): TestRivalState =
         TestRivalState(state.posterior, state.updateCount + 1, "action")
 
-    val designKernel = new ActionKernel[TestRivalState]:
-      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+    val designKernel = new ActionKernelFull[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal, publicState: PublicState): TestRivalState =
         TestRivalState(state.posterior, state.updateCount + 50, "design")
 
     val sdKernel = new ShowdownKernel[TestRivalState]:
@@ -378,8 +376,8 @@ class DynamicsTest extends munit.FunSuite:
     val attribOff = ChainWorld(LearningChannel.Attrib, ShowdownMode.Off)
     val attribOn = ChainWorld(LearningChannel.Attrib, ShowdownMode.On)
 
-    val offKernel = KernelConstructor.composeFullKernelForWorld(attribOff, actionKernel, actionKernel, designKernel, sdKernel)
-    val onKernel = KernelConstructor.composeFullKernelForWorld(attribOn, actionKernel, actionKernel, designKernel, sdKernel)
+    val offKernel = KernelConstructor.composeFullKernelForWorldFull(actionKernel, actionKernel, designKernel, sdKernel)(attribOff)
+    val onKernel = KernelConstructor.composeFullKernelForWorldFull(actionKernel, actionKernel, designKernel, sdKernel)(attribOn)
 
     val worldProfile = WorldIndexedKernelProfile(Map(
       (PlayerId("v1"), attribOff) -> offKernel,
@@ -401,12 +399,12 @@ class DynamicsTest extends munit.FunSuite:
   test("counterfactualReferenceWorld with ChainWorld(Ref, On) produces expected result"):
     val v1State = TestRivalState(uniformPrior, 0, "v1")
 
-    val actionKernel = new ActionKernel[TestRivalState]:
-      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+    val actionKernel = new ActionKernelFull[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal, publicState: PublicState): TestRivalState =
         TestRivalState(state.posterior, state.updateCount + 1, "ref-action")
 
-    val designKernel = new ActionKernel[TestRivalState]:
-      def apply(state: TestRivalState, signal: ActionSignal): TestRivalState =
+    val designKernel = new ActionKernelFull[TestRivalState]:
+      def apply(state: TestRivalState, signal: ActionSignal, publicState: PublicState): TestRivalState =
         TestRivalState(state.posterior, state.updateCount + 50, "design")
 
     val sdKernel = new ShowdownKernel[TestRivalState]:
@@ -414,7 +412,7 @@ class DynamicsTest extends munit.FunSuite:
         TestRivalState(state.posterior, state.updateCount + 100, state.label + "+sd")
 
     val refOn = ChainWorld(LearningChannel.Ref, ShowdownMode.On)
-    val refKernel = KernelConstructor.composeFullKernelForWorld(refOn, actionKernel, actionKernel, designKernel, sdKernel)
+    val refKernel = KernelConstructor.composeFullKernelForWorldFull(actionKernel, actionKernel, designKernel, sdKernel)(refOn)
 
     val worldProfile = WorldIndexedKernelProfile(Map(
       (PlayerId("v1"), refOn) -> refKernel
