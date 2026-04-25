@@ -156,7 +156,7 @@ object HandHistoryReviewServer:
   def main(args: Array[String]): Unit =
     start(args) match
       case Left(err) =>
-        System.err.println(err)
+        logError(err)
         sys.exit(1)
       case Right(server) =>
         val binding = server.binding
