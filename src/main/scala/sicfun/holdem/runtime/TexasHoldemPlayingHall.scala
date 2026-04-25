@@ -554,7 +554,7 @@ object TexasHoldemPlayingHall:
 
     private def recordHeroActions(result: HandResult): Unit =
       result.heroActions.foreach { action =>
-        val key = renderAction(action)
+        val key = HallFormat.renderAction(action)
         actionCounts.update(key, actionCounts(key) + 1)
       }
 
@@ -744,7 +744,7 @@ object TexasHoldemPlayingHall:
     private val foldedPositions = mutable.HashSet.empty[Position]
     private val allInPositions = mutable.HashSet.empty[Position]
     private val preflopFoldedPositions = mutable.ArrayBuffer.empty[Position]
-    private var pot = roundMoney(contributionByPosition.values.sum)
+    private var pot = HallFormat.roundMoney(contributionByPosition.values.sum)
     private var betHistory = Vector.empty[BetAction]
 
     private val villainTrainingSamples = mutable.ArrayBuffer.empty[(GameState, HoleCards, PokerAction)]
@@ -777,11 +777,11 @@ object TexasHoldemPlayingHall:
       if !handOver then playPostflopStreet(Street.River)
       strategicHelperOpt.foreach(_.endHand())
       val heroNet =
-        if handOver && outcome > 0 then roundMoney(pot - contributionOf(heroPosition))
+        if handOver && outcome > 0 then HallFormat.roundMoney(pot - contributionOf(heroPosition))
         else if handOver && outcome < 0 then -contributionOf(heroPosition)
         else
           val showdown = showdownResolution()
-          roundMoney(showdown.heroPayout - contributionOf(heroPosition))
+          HallFormat.roundMoney(showdown.heroPayout - contributionOf(heroPosition))
       outcome =
         if heroNet > MoneyEpsilon then 1
         else if heroNet < -MoneyEpsilon then -1
@@ -874,10 +874,10 @@ object TexasHoldemPlayingHall:
       * Marks the position as all-in if their remaining stack is zero.
       */
     private def payPosition(position: Position, amount: Double): Double =
-      val paid = roundMoney(math.max(0.0, math.min(amount, stackOf(position))))
-      stackByPosition.update(position, roundMoney(stackOf(position) - paid))
-      contributionByPosition.update(position, roundMoney(contributionOf(position) + paid))
-      pot = roundMoney(pot + paid)
+      val paid = HallFormat.roundMoney(math.max(0.0, math.min(amount, stackOf(position))))
+      stackByPosition.update(position, HallFormat.roundMoney(stackOf(position) - paid))
+      contributionByPosition.update(position, HallFormat.roundMoney(contributionOf(position) + paid))
+      pot = HallFormat.roundMoney(pot + paid)
       if stackOf(position) <= MoneyEpsilon then allInPositions += position
       paid
 
@@ -915,11 +915,11 @@ object TexasHoldemPlayingHall:
       street match
         case Street.Preflop => ()
         case Street.Flop =>
-          reviewHistoryLines += s"*** FLOP *** ${bracketedCards(flopBoard.cards)}"
+          reviewHistoryLines += s"*** FLOP *** ${HallFormat.bracketedCards(flopBoard.cards)}"
         case Street.Turn =>
-          reviewHistoryLines += s"*** TURN *** ${bracketedCards(flopBoard.cards)} ${bracketedCards(Vector(deal.board.cards(3)))}"
+          reviewHistoryLines += s"*** TURN *** ${HallFormat.bracketedCards(flopBoard.cards)} ${HallFormat.bracketedCards(Vector(deal.board.cards(3)))}"
         case Street.River =>
-          reviewHistoryLines += s"*** RIVER *** ${bracketedCards(turnBoard.cards)} ${bracketedCards(Vector(deal.board.cards(4)))}"
+          reviewHistoryLines += s"*** RIVER *** ${HallFormat.bracketedCards(turnBoard.cards)} ${HallFormat.bracketedCards(Vector(deal.board.cards(4)))}"
 
     private def appendFold(playerName: String): Unit =
       appendReviewLine(playerName, "folds")
@@ -928,17 +928,17 @@ object TexasHoldemPlayingHall:
       appendReviewLine(playerName, "checks")
 
     private def appendCall(playerName: String, amount: Double): Unit =
-      appendReviewLine(playerName, s"calls ${money(amount)}")
+      appendReviewLine(playerName, s"calls ${HallFormat.money(amount)}")
 
     private def appendRaiseTo(playerName: String, totalAmount: Double): Unit =
-      appendReviewLine(playerName, s"raises to ${money(totalAmount)}")
+      appendReviewLine(playerName, s"raises to ${HallFormat.money(totalAmount)}")
 
     private def totalContributionAfterRaise(
         currentContribution: Double,
         toCall: Double,
         raiseAmount: Double
     ): Double =
-      roundMoney(currentContribution + toCall + raiseAmount)
+      HallFormat.roundMoney(currentContribution + toCall + raiseAmount)
 
     private def actorName(position: Position): String =
       tableScenario.nameFor(position)
@@ -1434,7 +1434,7 @@ object TexasHoldemPlayingHall:
                 queue = orderAfter(actionOrder, actor).filter(position => canQueue(position, street))
                 if raiseReopensAction(amount, minimumRaiseAmount) then
                   raiseCount += 1
-                  minimumRaiseAmount = roundMoney(amount)
+                  minimumRaiseAmount = HallFormat.roundMoney(amount)
                   actedSinceFullRaise.clear()
                   actedSinceFullRaise += actor
                   raisingClosedFor.clear()
@@ -1763,12 +1763,6 @@ object TexasHoldemPlayingHall:
       case "preflop-too-tight"         => PreflopTooTight(severity)
       case _                           => NoLeak()
 
-  private def bracketedCards(cards: Seq[Card]): String =
-    s"[${cards.map(_.toToken).mkString(" ")}]"
-
-  private def money(amount: Double): String =
-    s"$$${fmt(roundMoney(amount), 2)}"
-
   /** Builds the candidate action set for a decision point. When facing a bet: Fold + Call,
     * plus Raise if allowed and the stack is deep enough. When not facing a bet: Check, plus
     * Raise if allowed. The raise-eligibility stack threshold is 25% of the raise size or 0.2 BB,
@@ -1802,7 +1796,7 @@ object TexasHoldemPlayingHall:
       allowRaise: Boolean,
       defaultRaise: Double
   ): PokerAction =
-    val effectiveStack = roundMoney(math.max(0.0, stackSize))
+    val effectiveStack = HallFormat.roundMoney(math.max(0.0, stackSize))
     action match
       case PokerAction.Check =>
         if toCall <= MoneyEpsilon then PokerAction.Check else PokerAction.Call
@@ -1820,10 +1814,10 @@ object TexasHoldemPlayingHall:
           else if toCall > MoneyEpsilon then
             if effectiveStack <= toCall + MoneyEpsilon then PokerAction.Call
             else
-              val affordableRaise = roundMoney(math.min(cleanAmount, effectiveStack - toCall))
+              val affordableRaise = HallFormat.roundMoney(math.min(cleanAmount, effectiveStack - toCall))
               if affordableRaise <= MoneyEpsilon then PokerAction.Call
               else PokerAction.Raise(affordableRaise)
-          else PokerAction.Raise(roundMoney(math.min(cleanAmount, effectiveStack)))
+          else PokerAction.Raise(HallFormat.roundMoney(math.min(cleanAmount, effectiveStack)))
 
   /** Returns true if the raise amount is at least the minimum raise size, meaning the raise
     * reopens the action for all other players. An under-minimum raise (e.g., a short all-in)
@@ -1833,7 +1827,7 @@ object TexasHoldemPlayingHall:
       raiseAmount: Double,
       minimumRaiseAmount: Double
   ): Boolean =
-    roundMoney(raiseAmount) + MoneyEpsilon >= roundMoney(minimumRaiseAmount)
+    HallFormat.roundMoney(raiseAmount) + MoneyEpsilon >= HallFormat.roundMoney(minimumRaiseAmount)
 
   /** Computes side-pot payouts for a multiway showdown. Iterates through distinct contribution
     * levels (sorted ascending), and for each level computes the pot slice, identifies which
@@ -1854,7 +1848,7 @@ object TexasHoldemPlayingHall:
       )
       val roundedContributions =
         contributions.iterator.map { case (position, amount) =>
-          position -> roundMoney(math.max(0.0, amount))
+          position -> HallFormat.roundMoney(math.max(0.0, amount))
         }.toMap
       val contributionLevels =
         roundedContributions.valuesIterator
@@ -1866,7 +1860,7 @@ object TexasHoldemPlayingHall:
       val payouts = mutable.HashMap.empty[Position, Double].withDefaultValue(0.0)
       var previousLevel = 0.0
       contributionLevels.foreach { level =>
-        val slice = roundMoney(level - previousLevel)
+        val slice = HallFormat.roundMoney(level - previousLevel)
         if slice > MoneyEpsilon then
           val potParticipants =
             roundedContributions.collect { case (position, amount) if amount + MoneyEpsilon >= level => position }.toVector
@@ -1881,7 +1875,7 @@ object TexasHoldemPlayingHall:
         previousLevel = level
       }
       payouts.iterator.map { case (position, amount) =>
-        position -> roundMoney(amount)
+        position -> HallFormat.roundMoney(amount)
       }.toMap
 
   /** Deals hole cards to all modeled positions plus a 5-card board by shuffling a prefix
@@ -1949,13 +1943,9 @@ object TexasHoldemPlayingHall:
       )
       case _ => Vector.empty
 
-  private def smallBlindPositionFor(playerCount: Int): Position =
-    if playerCount <= 2 then Position.Button
-    else Position.SmallBlind
-
   private def blindContributionFor(position: Position, playerCount: Int): Double =
     if position == Position.BigBlind then BigBlindAmount
-    else if position == smallBlindPositionFor(playerCount) then SmallBlindAmount
+    else if position == HallFormat.smallBlindPositionFor(playerCount) then SmallBlindAmount
     else 0.0
 
   /** Sort key for postflop action order: SB acts first, then BB, then early positions through
@@ -2138,10 +2128,10 @@ object TexasHoldemPlayingHall:
       maxLivePlayers: Int
   ): Unit =
     val boardToken = deal.board.cards.map(_.toToken).mkString(" ")
-    val heroAction = result.heroActions.headOption.map(renderAction).getOrElse("-")
-    val villainAction = result.villainActions.headOption.map(renderAction).getOrElse("-")
-    val heroActionTrace = if result.heroActions.nonEmpty then result.heroActions.map(renderAction).mkString("|") else "-"
-    val villainActionTrace = if result.villainActions.nonEmpty then result.villainActions.map(renderAction).mkString("|") else "-"
+    val heroAction = result.heroActions.headOption.map(HallFormat.renderAction).getOrElse("-")
+    val villainAction = result.villainActions.headOption.map(HallFormat.renderAction).getOrElse("-")
+    val heroActionTrace = if result.heroActions.nonEmpty then result.heroActions.map(HallFormat.renderAction).mkString("|") else "-"
+    val villainActionTrace = if result.villainActions.nonEmpty then result.villainActions.map(HallFormat.renderAction).mkString("|") else "-"
     val foldedToken =
       if foldedPositions.isEmpty then "-"
       else foldedPositions.map(_.toString).mkString("|")
@@ -2167,7 +2157,7 @@ object TexasHoldemPlayingHall:
       boardToken,
       heroAction,
       villainAction,
-      fmt(result.heroNet, 4),
+      HallFormat.fmt(result.heroNet, 4),
       modelId,
       archetype,
       result.streetsPlayed.toString,
@@ -2193,17 +2183,17 @@ object TexasHoldemPlayingHall:
     val tableLabel =
       if tableScenario.playerCount <= 2 then "2-max"
       else s"${tableScenario.playerCount}-max"
-    val header = s"PokerStars Hand #${1000 + hand}:  Hold'em No Limit (${money(0.5)}/${money(1.0)} USD) - ${startedAt.format(ReviewTimestampFormatter)} ET"
+    val header = s"PokerStars Hand #${1000 + hand}:  Hold'em No Limit (${HallFormat.money(0.5)}/${HallFormat.money(1.0)} USD) - ${startedAt.format(ReviewTimestampFormatter)} ET"
     val tableLine = s"Table 'SICFUN Proof $tableId' $tableLabel Seat #${tableScenario.buttonSeatNumber} is the button"
-    val heroCardsLine = s"Dealt to $ReviewHeroName ${bracketedCards(deal.holeCardsFor(tableScenario.heroPosition).toVector)}"
+    val heroCardsLine = s"Dealt to $ReviewHeroName ${HallFormat.bracketedCards(deal.holeCardsFor(tableScenario.heroPosition).toVector)}"
     val seatLines =
       tableScenario.modeledPositions.map { position =>
-        s"Seat ${tableScenario.seatNumberByPosition(position)}: ${tableScenario.nameFor(position)} (${money(ReviewStartingStack)} in chips)"
+        s"Seat ${tableScenario.seatNumberByPosition(position)}: ${tableScenario.nameFor(position)} (${HallFormat.money(ReviewStartingStack)} in chips)"
       }
-    val smallBlindPosition = smallBlindPositionFor(tableScenario.playerCount)
+    val smallBlindPosition = HallFormat.smallBlindPositionFor(tableScenario.playerCount)
     val blindLines = Vector(
-      s"${tableScenario.nameFor(smallBlindPosition)}: posts small blind ${money(SmallBlindAmount)}",
-      s"${tableScenario.nameFor(Position.BigBlind)}: posts big blind ${money(BigBlindAmount)}"
+      s"${tableScenario.nameFor(smallBlindPosition)}: posts small blind ${HallFormat.money(SmallBlindAmount)}",
+      s"${tableScenario.nameFor(Position.BigBlind)}: posts big blind ${HallFormat.money(BigBlindAmount)}"
     )
 
     writeLine(writer, header)
@@ -2248,12 +2238,12 @@ object TexasHoldemPlayingHall:
     val (state, hole, action) = sample
     val row = Vector(
       state.street.toString,
-      boardToken(state.board),
+      HallFormat.boardToken(state.board),
       state.pot.toString,
       state.toCall.toString,
       state.position.toString,
       state.stackSize.toString,
-      actionToken(action),
+      HallFormat.actionToken(action),
       s"${hole.first.toToken} ${hole.second.toToken}",
       hand.toString,
       tableId.toString
@@ -2281,7 +2271,7 @@ object TexasHoldemPlayingHall:
       tableId.toString,
       sample.decisionIndex.toString,
       sample.state.street.toString,
-      boardToken(sample.state.board),
+      HallFormat.boardToken(sample.state.board),
       sample.state.pot.toString,
       sample.state.toCall.toString,
       sample.state.position.toString,
@@ -2298,15 +2288,11 @@ object TexasHoldemPlayingHall:
     ).mkString("\t")
     writeLine(writer, row)
 
-  private def boardToken(board: Board): String =
-    if board.cards.isEmpty then "-"
-    else board.cards.map(_.toToken).mkString(" ")
-
   private def serializeBetHistory(history: Vector[BetAction]): String =
     if history.isEmpty then "-"
     else
       history.map { item =>
-        s"p=${item.player},a=${actionToken(item.action)}"
+        s"p=${item.player},a=${HallFormat.actionToken(item.action)}"
       }.mkString("|")
 
   private def serializeVillainObservations(observations: Vector[VillainObservation]): String =
@@ -2315,7 +2301,7 @@ object TexasHoldemPlayingHall:
       observations.map { item =>
         val observedState = item.state
         val encodedHistory = URLEncoder.encode(serializeBetHistory(observedState.betHistory), StandardCharsets.UTF_8)
-        s"st=${observedState.street},a=${actionToken(item.action)},pot=${observedState.pot},call=${observedState.toCall},pos=${observedState.position},board=${boardToken(observedState.board)},stack=${observedState.stackSize},history=$encodedHistory"
+        s"st=${observedState.street},a=${HallFormat.actionToken(item.action)},pot=${observedState.pot},call=${observedState.toCall},pos=${observedState.position},board=${HallFormat.boardToken(observedState.board)},stack=${observedState.stackSize},history=$encodedHistory"
       }.mkString("|")
 
   /** Serializes a hole-card probability distribution as a sparse string: "id:prob|id:prob|..."
@@ -2329,26 +2315,6 @@ object TexasHoldemPlayingHall:
       .sortBy(_._1)
     if entries.isEmpty then "-"
     else entries.map { case (id, probability) => s"$id:$probability" }.mkString("|")
-
-  private def actionToken(action: PokerAction): String =
-    action match
-      case PokerAction.Fold => "fold"
-      case PokerAction.Check => "check"
-      case PokerAction.Call => "call"
-      case PokerAction.Raise(amount) => s"raise:${fmt(amount, 3)}"
-
-  private def renderAction(action: PokerAction): String =
-    action match
-      case PokerAction.Fold => "Fold"
-      case PokerAction.Check => "Check"
-      case PokerAction.Call => "Call"
-      case PokerAction.Raise(amount) => s"Raise:${fmt(amount, 2)}"
-
-  private def fmt(value: Double, digits: Int): String =
-    String.format(Locale.ROOT, s"%.${digits}f", java.lang.Double.valueOf(value))
-
-  private def roundMoney(value: Double): Double =
-    math.round(value * 100.0) / 100.0
 
   private def parseLegacyHeroSeat(raw: String): Either[String, Position] =
     raw.trim.toLowerCase match
