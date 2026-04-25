@@ -204,7 +204,7 @@ final class AcpcTableDealer(
     val owed = currentBet - streetContribution(seat)
     val stack = stacks(seat)
     val contribution = streetContribution(seat)
-    val totalPot = contributions.values.sum + streetContribution.values.sum
+    val totalPot = contributions.values.sum
     val builder = scala.collection.mutable.Set[PokerAction]()
 
     builder += PokerAction.Fold

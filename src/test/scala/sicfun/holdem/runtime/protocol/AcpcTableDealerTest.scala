@@ -119,3 +119,15 @@ class AcpcTableDealerTest extends munit.FunSuite:
     val raises = menu.collect { case r: sicfun.holdem.types.PokerAction.Raise => r }
     assertEquals(raises.map(_.amount).toSet.size, raises.size,
       s"dedup failed: ${raises.map(_.amount)}")
+
+  test("legalActionsFor preflop pot size is not double-counted"):
+    val cfg = TableConfig(2, 1L, 2L, 0L, 200L)
+    val d = AcpcTableDealer(cfg, SeatId(0), 1L)
+    d.postBlinds()
+    d.dealHoleCards()
+    d.startStreet(sicfun.holdem.types.Street.Preflop)
+    // After blinds: pot = 1 + 2 = 3. SB owes 1 to call.
+    // PotRaise must be exactly 3 (the pot), not 6 (double-counted).
+    val menu = d.legalActionsFor(SeatId(0))
+    val raises = menu.collect { case sicfun.holdem.types.PokerAction.Raise(a) => a }
+    assert(raises.contains(3.0), s"expected pot-size raise of 3.0 in $raises (would be 6.0 if pot was double-counted)")
