@@ -11,6 +11,10 @@ import scala.util.Random
   * Verifies:
   *   - Canonical key symmetry: keyFor(A,B).value == keyFor(B,A).value with opposite flip flags
   *   - Suit invariance: suit-relabeled matchups produce identical canonical keys
+  *   - 4-suit cycle invariance: a non-trivial permutation of every suit preserves the key
+  *   - Card-order invariance: swapping cards within a hand does not move the key
+  *   - Disjoint precondition: overlapping hands raise IllegalArgumentException
+  *   - flipIfNeeded contract: involutive when flipped=true, identity when flipped=false
   *   - buildAll respects the maxMatchups limit on canonical key count
   *   - Determinism: same seed produces identical results regardless of parallelism level
   *
@@ -23,9 +27,12 @@ class HeadsUpEquityCanonicalTableTest extends FunSuite:
 
   private def hole(a: String, b: String): HoleCards =
     HoleCards.from(Vector(
-      sicfun.core.Card.parse(a).getOrElse(fail(s"invalid card: $a")),
-      sicfun.core.Card.parse(b).getOrElse(fail(s"invalid card: $b"))
+      card(a),
+      card(b)
     ))
+
+  private def card(token: String): sicfun.core.Card =
+    sicfun.core.Card.parse(token).getOrElse(fail(s"invalid card: $token"))
 
   test("keyFor is symmetric and flips orientation") {
     val h1 = hole("As", "Ks")
@@ -59,6 +66,60 @@ class HeadsUpEquityCanonicalTableTest extends FunSuite:
       )
       assertEquals(table.size, 50)
     }
+  }
+
+  test("keyFor rejects matchups whose hands share a card") {
+    val hero = hole("As", "Ks")
+    val sharedAs = HoleCards(card("As"), card("Qd"))
+    val ex = intercept[IllegalArgumentException] {
+      HeadsUpEquityCanonicalTable.keyFor(hero, sharedAs)
+    }
+    assert(
+      ex.getMessage.contains("non-overlapping"),
+      s"unexpected message: ${ex.getMessage}"
+    )
+  }
+
+  test("keyFor is invariant under a non-trivial 4-suit cycle") {
+    // Suit cycle s -> c, h -> s, d -> h, c -> d (every suit moves)
+    val k1 = HeadsUpEquityCanonicalTable.keyFor(hole("As", "Kh"), hole("Qd", "Jc"))
+    val k2 = HeadsUpEquityCanonicalTable.keyFor(hole("Ac", "Ks"), hole("Qh", "Jd"))
+    assertEquals(k1.value, k2.value, "canonical key must ignore the global suit relabel")
+    assertEquals(k1.flipped, k2.flipped, "flip flag must follow the same matchup orientation")
+  }
+
+  test("keyFor is invariant under card order within each hand") {
+    // Build hands with the case-class ctor (no normalization) so we can swap order.
+    val heroA = HoleCards(card("As"), card("Kh"))
+    val heroB = HoleCards(card("Kh"), card("As"))
+    val villainA = HoleCards(card("Qd"), card("Jc"))
+    val villainB = HoleCards(card("Jc"), card("Qd"))
+    val baseline = HeadsUpEquityCanonicalTable.keyFor(heroA, villainA)
+    val heroSwap = HeadsUpEquityCanonicalTable.keyFor(heroB, villainA)
+    val villainSwap = HeadsUpEquityCanonicalTable.keyFor(heroA, villainB)
+    val bothSwap = HeadsUpEquityCanonicalTable.keyFor(heroB, villainB)
+    assertEquals(heroSwap.value, baseline.value, "swapping hero cards must not change the key")
+    assertEquals(villainSwap.value, baseline.value, "swapping villain cards must not change the key")
+    assertEquals(bothSwap.value, baseline.value, "swapping both must not change the key")
+    assertEquals(heroSwap.flipped, baseline.flipped, "flip flag must be insensitive to card order")
+    assertEquals(villainSwap.flipped, baseline.flipped, "flip flag must be insensitive to card order")
+    assertEquals(bothSwap.flipped, baseline.flipped, "flip flag must be insensitive to card order")
+  }
+
+  test("flipIfNeeded swaps win/loss and is involutive when flipped=true") {
+    val r = EquityResultWithError(win = 0.42, tie = 0.04, loss = 0.54, stderr = 0.001)
+    val once = HeadsUpEquityCanonicalTable.flipIfNeeded(r, flipped = true)
+    assertEquals(once.win, r.loss, "single flip swaps win <-> loss")
+    assertEquals(once.loss, r.win, "single flip swaps win <-> loss")
+    assertEquals(once.tie, r.tie, "tie is symmetric, must not change")
+    assertEquals(once.stderr, r.stderr, "stderr is symmetric, must not change")
+    val twice = HeadsUpEquityCanonicalTable.flipIfNeeded(once, flipped = true)
+    assertEquals(twice, r, "flipping twice must be identity")
+  }
+
+  test("flipIfNeeded with flipped=false is the identity") {
+    val r = EquityResultWithError(win = 0.42, tie = 0.04, loss = 0.54, stderr = 0.001)
+    assertEquals(HeadsUpEquityCanonicalTable.flipIfNeeded(r, flipped = false), r)
   }
 
   test("buildAll MonteCarlo is deterministic across parallelism settings") {
