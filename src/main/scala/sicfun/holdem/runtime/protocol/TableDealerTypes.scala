@@ -47,6 +47,7 @@ final case class HandOutcome(
     netChange: Map[SeatId, Long],
     events: Vector[BettingRoundEvent]
 ):
+  require(netChange.nonEmpty, "HandOutcome.netChange must not be empty")
   /** A.1 invariant: chip conservation. Sum of net changes must be zero. */
   require(
     netChange.values.sum == 0L,
@@ -64,4 +65,14 @@ final case class TableSnapshot(
     actionHistory: Vector[BettingRoundEvent],
     buttonSeat: SeatId,
     activeSeats: Set[SeatId]
-)
+):
+  private def checkSeat(s: SeatId, label: String): Unit =
+    require(
+      s.index < config.numSeats,
+      s"$label seat index ${s.index} out of range for numSeats=${config.numSeats}"
+    )
+  checkSeat(heroSeat, "heroSeat")
+  checkSeat(buttonSeat, "buttonSeat")
+  activeSeats.foreach(checkSeat(_, "activeSeats"))
+  stacks.keys.foreach(checkSeat(_, "stacks"))
+  contributions.keys.foreach(checkSeat(_, "contributions"))

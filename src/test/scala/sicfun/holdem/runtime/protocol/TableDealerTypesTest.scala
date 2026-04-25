@@ -21,3 +21,43 @@ class TableDealerTypesTest extends munit.FunSuite:
   test("Street reuses sicfun.holdem.types.Street, not a new type"):
     val s: Street = Street.Flop
     assertEquals(s.expectedBoardSize, 3)
+
+  test("HandOutcome rejects empty netChange map"):
+    intercept[IllegalArgumentException](
+      HandOutcome(
+        potsDistributed = Vector.empty,
+        netChange = Map.empty[SeatId, Long],
+        events = Vector.empty
+      )
+    )
+
+  test("TableSnapshot rejects seat indices >= config.numSeats"):
+    val cfg6 = TableConfig(6, 1L, 2L, 0L, 200L)
+    intercept[IllegalArgumentException](
+      TableSnapshot(
+        config = cfg6,
+        heroSeat = SeatId(7),
+        holeCards = Vector.empty,
+        board = Vector.empty,
+        stacks = Map.empty,
+        contributions = Map.empty,
+        street = Street.Preflop,
+        actionHistory = Vector.empty,
+        buttonSeat = SeatId(0),
+        activeSeats = Set.empty
+      )
+    )
+    intercept[IllegalArgumentException](
+      TableSnapshot(
+        config = cfg6,
+        heroSeat = SeatId(0),
+        holeCards = Vector.empty,
+        board = Vector.empty,
+        stacks = Map(SeatId(7) -> 100L),
+        contributions = Map.empty,
+        street = Street.Preflop,
+        actionHistory = Vector.empty,
+        buttonSeat = SeatId(0),
+        activeSeats = Set.empty
+      )
+    )
