@@ -2598,10 +2598,10 @@ object HandHistoryReviewServer:
           response.headers.foreach { case (name, value) =>
             exchange.getResponseHeaders.add(name, value)
           }
-          writeJson(exchange, response.status, response.value)
+          WebResponses.writeJson(exchange, response.status, response.value)
       catch
         case NonFatal(e) =>
-          writeJson(exchange, 500, Obj("error" -> Str(s"internal server error: ${e.getMessage}")))
+          WebResponses.writeJson(exchange, 500, Obj("error" -> Str(s"internal server error: ${e.getMessage}")))
       finally
         exchange.close()
 
@@ -2615,19 +2615,19 @@ object HandHistoryReviewServer:
         applySecurityHeaders(exchange)
         if !ensureAuthenticatedStatic(exchange, basicAuth, platformAuth) then ()
         else if !exchange.getRequestMethod.equalsIgnoreCase("GET") then
-          writePlain(exchange, 405, "GET required", "text/plain; charset=utf-8")
+          WebResponses.writePlain(exchange, 405, "GET required", "text/plain; charset=utf-8")
         else
           val requestPath = Option(exchange.getRequestURI.getPath).getOrElse("/")
           val relative = if requestPath == "/" then Paths.get("index.html") else Paths.get(requestPath.dropWhile(_ == '/'))
           val resolved = staticDir.resolve(relative).normalize()
           if !resolved.startsWith(staticDir) then
-            writePlain(exchange, 403, "forbidden", "text/plain; charset=utf-8")
+            WebResponses.writePlain(exchange, 403, "forbidden", "text/plain; charset=utf-8")
           else
             val target =
               if Files.isDirectory(resolved) then resolved.resolve("index.html")
               else resolved
             if Files.exists(target) && Files.isRegularFile(target) then
-              exchange.getResponseHeaders.set("Content-Type", contentTypeFor(target))
+              exchange.getResponseHeaders.set("Content-Type", WebResponses.contentTypeFor(target))
               exchange.sendResponseHeaders(200, Files.size(target))
               val body = exchange.getResponseBody
               val input = Files.newInputStream(target)
@@ -2636,10 +2636,10 @@ object HandHistoryReviewServer:
                 body.flush()
               finally input.close()
             else
-              writePlain(exchange, 404, "not found", "text/plain; charset=utf-8")
+              WebResponses.writePlain(exchange, 404, "not found", "text/plain; charset=utf-8")
       catch
         case NonFatal(e) =>
-          writePlain(exchange, 500, s"internal server error: ${e.getMessage}", "text/plain; charset=utf-8")
+          WebResponses.writePlain(exchange, 500, s"internal server error: ${e.getMessage}", "text/plain; charset=utf-8")
       finally
         exchange.close()
 
@@ -2651,59 +2651,17 @@ object HandHistoryReviewServer:
         applySecurityHeaders(exchange)
         delegate(exchange) match
           case Left((status, error)) =>
-            writePlain(exchange, status, error, "text/plain; charset=utf-8")
+            WebResponses.writePlain(exchange, status, error, "text/plain; charset=utf-8")
           case Right(response) =>
             response.headers.foreach { case (name, value) =>
               exchange.getResponseHeaders.add(name, value)
             }
-            writeRedirect(exchange, response.status, response.location)
+            WebResponses.writeRedirect(exchange, response.status, response.location)
       catch
         case NonFatal(e) =>
-          writePlain(exchange, 500, s"internal server error: ${e.getMessage}", "text/plain; charset=utf-8")
+          WebResponses.writePlain(exchange, 500, s"internal server error: ${e.getMessage}", "text/plain; charset=utf-8")
       finally
         exchange.close()
-
-  private def writeJson(exchange: HttpExchange, status: Int, value: Value): Unit =
-    val bytes = ujson.write(value, indent = 2).getBytes(StandardCharsets.UTF_8)
-    writeBytes(exchange, status, bytes, "application/json; charset=utf-8")
-
-  private def writePlain(exchange: HttpExchange, status: Int, body: String, contentType: String): Unit =
-    writeBytes(exchange, status, body.getBytes(StandardCharsets.UTF_8), contentType)
-
-  private def writeRedirect(exchange: HttpExchange, status: Int, location: String): Unit =
-    exchange.getResponseHeaders.set("Location", location)
-    exchange.sendResponseHeaders(status, -1L)
-
-  private def writeBytes(
-      exchange: HttpExchange,
-      status: Int,
-      bytes: Array[Byte],
-      contentType: String
-  ): Unit =
-    exchange.getResponseHeaders.set("Content-Type", contentType)
-    exchange.getResponseHeaders.set("Cache-Control", "no-store")
-    exchange.sendResponseHeaders(status, bytes.length.toLong)
-    val body = exchange.getResponseBody
-    body.write(bytes)
-    body.flush()
-
-  private def contentTypeFor(path: Path): String =
-    path.getFileName.toString.toLowerCase match
-      case name if name.endsWith(".html") => "text/html; charset=utf-8"
-      case name if name.endsWith(".css") => "text/css; charset=utf-8"
-      case name if name.endsWith(".js") => "application/javascript; charset=utf-8"
-      case name if name.endsWith(".mjs") => "application/javascript; charset=utf-8"
-      case name if name.endsWith(".map") => "application/json; charset=utf-8"
-      case name if name.endsWith(".svg") => "image/svg+xml"
-      case name if name.endsWith(".png") => "image/png"
-      case name if name.endsWith(".jpg") || name.endsWith(".jpeg") => "image/jpeg"
-      case name if name.endsWith(".webp") => "image/webp"
-      case name if name.endsWith(".ico") => "image/x-icon"
-      case name if name.endsWith(".wasm") => "application/wasm"
-      case name if name.endsWith(".woff2") => "font/woff2"
-      case name if name.endsWith(".json") => "application/json; charset=utf-8"
-      case name if name.endsWith(".txt") => "text/plain; charset=utf-8"
-      case _ => "application/octet-stream"
 
   private def classifyAnalysisError(error: String): Int =
     if error.startsWith("analysis timed out after") then 504
@@ -2735,12 +2693,12 @@ object HandHistoryReviewServer:
               case None => true
               case Some(_) =>
                 exchange.getResponseHeaders.set("WWW-Authenticate", BasicAuthChallenge)
-                writeJson(exchange, 401, Obj("error" -> Str(AuthenticationRequiredMessage)))
+                WebResponses.writeJson(exchange, 401, Obj("error" -> Str(AuthenticationRequiredMessage)))
                 false
           case None if platformAuth.nonEmpty =>
             if authenticatedUser(exchange).nonEmpty then true
             else
-              writeJson(exchange, 401, Obj("error" -> Str(SessionAuthenticationRequiredMessage)))
+              WebResponses.writeJson(exchange, 401, Obj("error" -> Str(SessionAuthenticationRequiredMessage)))
               false
           case None => true
 
@@ -2765,7 +2723,7 @@ object HandHistoryReviewServer:
           s"request rate limited path=${requestPath(exchange)} client=${rejection.clientKey} bucket=${rejection.bucket.id} limitPerMinute=${rejection.limitPerMinute} retryAfterMs=${rejection.retryAfterMs}"
         )
         exchange.getResponseHeaders.set("Retry-After", retryAfter)
-        writeJson(
+        WebResponses.writeJson(
           exchange,
           429,
           Obj(
@@ -2788,7 +2746,7 @@ object HandHistoryReviewServer:
           case None => true
           case Some(_) =>
             exchange.getResponseHeaders.set("WWW-Authenticate", BasicAuthChallenge)
-            writePlain(exchange, 401, AuthenticationRequiredMessage, "text/plain; charset=utf-8")
+            WebResponses.writePlain(exchange, 401, AuthenticationRequiredMessage, "text/plain; charset=utf-8")
             false
       case None =>
         platformAuth.flatMap(_.resolveSession(cookieHeader(exchange))).foreach(user =>
