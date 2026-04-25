@@ -784,7 +784,7 @@ object AcpcHeadsUpDealer:
   /** Build the OS command to launch a player script, handling .cmd/.bat (cmd.exe),
     * .ps1 (PowerShell), and bare executables.  The host and port are passed as arguments.
     */
-  private def buildCommand(script: Path, host: String, port: Int): Vector[String] =
+  private[protocol] def buildCommand(script: Path, host: String, port: Int): Vector[String] =
     val lower = script.getFileName.toString.toLowerCase(Locale.ROOT)
     if lower.endsWith(".cmd") || lower.endsWith(".bat") then
       Vector("cmd.exe", "/c", script.toString, host, port.toString)
@@ -804,7 +804,7 @@ object AcpcHeadsUpDealer:
     * @param playerIdx    Which player to compute the result for (0 or 1).
     * @return             Signed chip result (positive = won, negative = lost).
     */
-  private def showdownValue(playerSpent: Vector[Int], playerRank: Vector[Int], playerIdx: Int): Double =
+  private[protocol] def showdownValue(playerSpent: Vector[Int], playerRank: Vector[Int], playerIdx: Int): Double =
     require(playerSpent.length == 2 && playerRank.length == 2, "heads-up showdown requires two players")
     val other = playerIdx ^ 1
     if playerRank(playerIdx) > playerRank(other) then playerSpent(other).toDouble
@@ -812,7 +812,7 @@ object AcpcHeadsUpDealer:
     else (playerSpent(other).toDouble - playerSpent(playerIdx).toDouble) / 2.0
 
   /** Convert net chips over N hands to the standard bb/100 win-rate metric. */
-  private def bbPer100(netChips: Double, hands: Int): Double =
+  private[protocol] def bbPer100(netChips: Double, hands: Int): Double =
     if hands > 0 then (netChips / BigBlindChips.toDouble / hands.toDouble) * 100.0 else 0.0
 
   private def closeQuietly(resource: AutoCloseable): Unit =
