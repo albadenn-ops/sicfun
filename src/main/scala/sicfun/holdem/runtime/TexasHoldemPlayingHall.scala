@@ -24,7 +24,6 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
-import java.util.Locale
 import scala.collection.mutable
 import scala.util.Random
 
@@ -73,18 +72,8 @@ import scala.util.Random
   * @see [[HandResolver]] for single-hand street-by-street resolution
   */
 object TexasHoldemPlayingHall:
-  /** How a villain player makes decisions during the simulation. */
-  private enum VillainMode:
-    case Archetype(style: PlayerArchetype)
-    case Gto
-    case LeakInjected(leakId: String, severity: Double)
-
-  /** A named villain with a decision mode and a human-readable label for logging. */
-  private final case class VillainProfile(
-      name: String,
-      mode: VillainMode,
-      label: String
-  )
+  // Villain configuration types and CLI parsing live in HallVillain (F6 split).
+  import HallVillain.{VillainMode, VillainProfile}
 
   /** All CLI-parsed configuration for a playing hall run. Controls hand count, table geometry,
     * hero/villain modes, learning schedule, raise sizing, inference budget, and output paths.
@@ -1640,77 +1629,7 @@ object TexasHoldemPlayingHall:
         .map { case (provider, count) => s"$provider:$count" }
         .mkString("{", ", ", "}")
 
-  private def villainModeLabel(mode: VillainMode): String =
-    mode match
-      case VillainMode.Archetype(style)             => style.toString
-      case VillainMode.Gto                          => "gto"
-      case VillainMode.LeakInjected(leakId, sev)    => s"Leak($leakId@$sev)"
 
-  private def villainModeSlug(mode: VillainMode): String =
-    mode match
-      case VillainMode.Archetype(style)             => style.toString.toLowerCase(Locale.ROOT)
-      case VillainMode.Gto                          => "gto"
-      case VillainMode.LeakInjected(leakId, _)      => leakId.replace("-", "").take(12)
-
-  /** Parses the `--villainPool` option (comma-separated list of villain mode tokens) into a
-    * vector of VillainProfiles. If no pool is specified, creates a single-villain pool from
-    * the fallback mode. Each profile gets a unique name like "Villain01_tag".
-    */
-  private def buildVillainPool(
-      fallbackMode: VillainMode,
-      rawPool: Option[String]
-  ): Either[String, Vector[VillainProfile]] =
-    rawPool.map(_.trim).filter(_.nonEmpty) match
-      case None =>
-        Right(Vector(VillainProfile(name = "Villain", mode = fallbackMode, label = villainModeLabel(fallbackMode))))
-      case Some(raw) =>
-        val tokens = raw.split(",").toVector.map(_.trim).filter(_.nonEmpty)
-        if tokens.isEmpty then Left("--villainPool must include at least one style")
-        else
-          tokens.zipWithIndex.foldLeft[Either[String, Vector[VillainProfile]]](Right(Vector.empty)) {
-            case (Left(error), _) => Left(error)
-            case (Right(acc), (token, idx)) =>
-              parseVillainModeToken(token).left.map(error => s"--villainPool: $error").map { mode =>
-                acc :+ VillainProfile(
-                  name = f"Villain${idx + 1}%02d_${villainModeSlug(mode)}",
-                  mode = mode,
-                  label = villainModeLabel(mode)
-                )
-              }
-          }
-
-  private def parseVillainModeToken(raw: String): Either[String, VillainMode] =
-    raw.trim.toLowerCase match
-      case "nit"            => Right(VillainMode.Archetype(PlayerArchetype.Nit))
-      case "tag"            => Right(VillainMode.Archetype(PlayerArchetype.Tag))
-      case "lag"            => Right(VillainMode.Archetype(PlayerArchetype.Lag))
-      case "callingstation" => Right(VillainMode.Archetype(PlayerArchetype.CallingStation))
-      case "station"        => Right(VillainMode.Archetype(PlayerArchetype.CallingStation))
-      case "maniac"         => Right(VillainMode.Archetype(PlayerArchetype.Maniac))
-      case "gto"            => Right(VillainMode.Gto)
-      case s if s.startsWith("leak:") =>
-        parseLeakToken(s)
-      case _ =>
-        Left("style must be one of: nit, tag, lag, callingstation, station, maniac, gto, leak:<type>:<severity>")
-
-  private def parseLeakToken(raw: String): Either[String, VillainMode] =
-    val parts = raw.split(":")
-    if parts.length != 3 then Left(s"leak token must be leak:<type>:<severity>, got: $raw")
-    else
-      val leakType = parts(1)
-      val severityStr = parts(2)
-      for
-        severity <- try Right(severityStr.toDouble) catch case _: NumberFormatException =>
-          Left(s"invalid severity: $severityStr")
-        leakId <- leakType match
-          case "overfold"      => Right("overfold-river-aggression")
-          case "overcall"      => Right("overcall-big-bets")
-          case "turnbluff"     => Right("overbluff-turn-barrel")
-          case "passive"       => Right("passive-big-pots")
-          case "prefloploose"  => Right("preflop-too-loose")
-          case "prefloptight"  => Right("preflop-too-tight")
-          case _               => Left(s"unknown leak type: $leakType (use: overfold, overcall, turnbluff, passive, prefloploose, prefloptight)")
-      yield VillainMode.LeakInjected(leakId, severity)
 
   /** Quick Monte Carlo equity estimate of a hand against a random opponent, used as a baseline
     * for the equity-based strategy in leak-injected villain mode. Shuffles remaining cards to
@@ -2367,8 +2286,8 @@ object TexasHoldemPlayingHall:
         heroMode <- heroModeOpt(options, "heroStyle", HeroMode.Adaptive)
         heroPosition <- resolveHeroPosition(options, playerCount)
         gtoMode <- gtoModeOpt(options, "gtoMode", GtoMode.Exact)
-        villainMode <- villainModeOpt(options, "villainStyle", VillainMode.Archetype(PlayerArchetype.Tag))
-        villainPool <- buildVillainPool(villainMode, options.get("villainPool"))
+        villainMode <- HallVillain.villainModeOpt(options, "villainStyle", VillainMode.Archetype(PlayerArchetype.Tag))
+        villainPool <- HallVillain.buildVillainPool(villainMode, options.get("villainPool"))
         heroExplorationRate <- doubleOpt(options, "heroExplorationRate", 0.05)
         _ <- if heroExplorationRate >= 0.0 && heroExplorationRate <= 1.0 then Right(())
         else Left("--heroExplorationRate must be in [0,1]")
@@ -2465,16 +2384,6 @@ object TexasHoldemPlayingHall:
           case "fast"  => Right(GtoMode.Fast)
           case "exact" => Right(GtoMode.Exact)
           case _       => Left("--gtoMode must be one of: fast, exact")
-
-  private def villainModeOpt(
-      options: Map[String, String],
-      key: String,
-      default: VillainMode
-  ): Either[String, VillainMode] =
-    options.get(key) match
-      case None => Right(default)
-      case Some(raw) =>
-        parseVillainModeToken(raw).left.map(_ => "--villainStyle must be one of: nit, tag, lag, callingstation, station, maniac, gto")
 
   private val usage =
     """Usage:
