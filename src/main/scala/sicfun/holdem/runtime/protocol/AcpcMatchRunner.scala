@@ -589,7 +589,7 @@ private[holdem] object AcpcActionCodec:
       betHistory = betHistory
     )
 
-  private def boardForStreet(fullBoard: Board, street: Street): Board =
+  private[protocol] def boardForStreet(fullBoard: Board, street: Street): Board =
     val expected = street.expectedBoardSize
     require(
       fullBoard.size >= expected,
@@ -597,7 +597,7 @@ private[holdem] object AcpcActionCodec:
     )
     Board.from(fullBoard.cards.take(expected))
 
-  private def streetIndexForBoard(board: Board): Int =
+  private[protocol] def streetIndexForBoard(board: Board): Int =
     board.size match
       case 0 => 0
       case 3 => 1
@@ -605,7 +605,7 @@ private[holdem] object AcpcActionCodec:
       case 5 => 3
       case other => throw new IllegalArgumentException(s"unsupported board size: $other")
 
-  private def streetFromIndex(streetIdx: Int): Street =
+  private[protocol] def streetFromIndex(streetIdx: Int): Street =
     streetIdx match
       case 0 => Street.Preflop
       case 1 => Street.Flop
@@ -613,7 +613,7 @@ private[holdem] object AcpcActionCodec:
       case 3 => Street.River
       case other => throw new IllegalArgumentException(s"invalid street index: $other")
 
-  private def relativeActorId(actualActor: Int, heroActual: Int): Int =
+  private[protocol] def relativeActorId(actualActor: Int, heroActual: Int): Int =
     if actualActor == heroActual then 0 else 1
 
   /** Compute the signed chip result for a player at showdown, with side-pot resolution.
@@ -635,7 +635,7 @@ private[holdem] object AcpcActionCodec:
     * @param playerIdx    Which player to compute the result for.
     * @return             Signed chip result (positive = won, negative = lost).
     */
-  private def showdownValue(
+  private[protocol] def showdownValue(
       playerSpent: Vector[Int],
       playerRank: Vector[Int],
       playerIdx: Int
