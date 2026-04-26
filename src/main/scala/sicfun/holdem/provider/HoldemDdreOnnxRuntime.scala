@@ -2,7 +2,11 @@ package sicfun.holdem.provider
 import sicfun.holdem.io.*
 import sicfun.holdem.gpu.*
 
+import ai.onnxruntime.{OnnxTensor, OnnxValue, OrtEnvironment, OrtException, OrtSession}
+import ai.onnxruntime.OrtSession.{Result, SessionOptions}
+
 import java.nio.file.{Files, Path, Paths}
+import scala.util.control.NonFatal
 
 /** Optional ONNX Runtime adapter for DDRE posterior inference.
   *
@@ -306,18 +310,25 @@ private[holdem] object HoldemDdreOnnxRuntime:
       else
         runOnnx(prior, likelihoods, observationCount, hypothesisCount, config)
 
-  /** Core ONNX inference implementation using reflection.
+  /** Core ONNX inference implementation using the typed `ai.onnxruntime` API.
     *
     * Steps:
-    *  1. Load OrtEnvironment and create SessionOptions (via reflection)
-    *  2. Create an OrtSession from the model file
-    *  3. Convert prior (double[]) to float[][] and likelihoods to float[][]
-    *  4. Create OnnxTensor inputs via reflection
-    *  5. Run the session and extract the posterior output
-    *  6. Close all ONNX resources (tensors, result, session, options)
+    *  1. Acquire the singleton OrtEnvironment.
+    *  2. Build SessionOptions (intra/inter-op threads, CUDA EP if requested).
+    *  3. Open an OrtSession from the configured model path.
+    *  4. Convert prior (double[]) -> float[1][hypothesisCount] and
+    *     likelihoods (double[obs*hyp]) -> float[obs][hyp].
+    *  5. Build named OnnxTensor inputs.
+    *  6. Run the session, extract the posterior output, flatten to double[].
+    *  7. Close every ONNX resource (tensors, result, session, options).
     *
     * When observationCount=0, a dummy row of all-ones likelihoods is used
     * (the model is expected to handle this as a no-op observation).
+    *
+    * Errors are surfaced as `Left` strings: typed `OrtException` carries the
+    * native error message when available; other non-fatal failures fall back
+    * to the exception's class name. Fatal errors (OOM, StackOverflow, etc.)
+    * propagate via `NonFatal` rather than being swallowed.
     */
   private def runOnnx(
       prior: Array[Double],
@@ -326,20 +337,17 @@ private[holdem] object HoldemDdreOnnxRuntime:
       hypothesisCount: Int,
       config: Config
   ): Either[String, Array[Double]] =
+    var session: OrtSession = null
+    var sessionOptions: SessionOptions = null
+    var priorTensor: OnnxTensor = null
+    var likelihoodTensor: OnnxTensor = null
+    var result: Result = null
     try
-      val ortEnvironmentClass = Class.forName("ai.onnxruntime.OrtEnvironment")
-      val ortSessionClass = Class.forName("ai.onnxruntime.OrtSession")
-      val sessionOptionsClass = Class.forName("ai.onnxruntime.OrtSession$SessionOptions")
-      val onnxTensorClass = Class.forName("ai.onnxruntime.OnnxTensor")
+      val environment = OrtEnvironment.getEnvironment()
+      sessionOptions = new SessionOptions()
+      configureSessionOptions(sessionOptions, config)
 
-      val environment = ortEnvironmentClass.getMethod("getEnvironment").invoke(null).asInstanceOf[AnyRef]
-      val sessionOptions = sessionOptionsClass.getConstructor().newInstance().asInstanceOf[AnyRef]
-      configureSessionOptions(sessionOptionsClass, sessionOptions, config)
-
-      val session = ortEnvironmentClass
-        .getMethod("createSession", classOf[String], sessionOptionsClass)
-        .invoke(environment, config.modelPath, sessionOptions)
-        .asInstanceOf[AnyRef]
+      session = environment.createSession(config.modelPath, sessionOptions)
 
       val priorInput = Array(prior.map(_.toFloat))
       val likelihoodInput =
@@ -352,118 +360,79 @@ private[holdem] object HoldemDdreOnnxRuntime:
         else
           Array(Array.fill(hypothesisCount)(1.0f))
 
-      val createTensor = onnxTensorClass.getMethod("createTensor", ortEnvironmentClass, classOf[Object])
-      val priorTensor = createTensor
-        .invoke(null, environment, priorInput.asInstanceOf[Object])
-        .asInstanceOf[AnyRef]
-      val likelihoodTensor = createTensor
-        .invoke(null, environment, likelihoodInput.asInstanceOf[Object])
-        .asInstanceOf[AnyRef]
+      priorTensor = OnnxTensor.createTensor(environment, priorInput)
+      likelihoodTensor = OnnxTensor.createTensor(environment, likelihoodInput)
 
-      val inputs = new java.util.HashMap[String, AnyRef]()
+      val inputs = new java.util.HashMap[String, OnnxTensor]()
       inputs.put(config.priorInputName, priorTensor)
       inputs.put(config.likelihoodInputName, likelihoodTensor)
 
-      val result = ortSessionClass
-        .getMethod("run", classOf[java.util.Map[?, ?]])
-        .invoke(session, inputs)
-        .asInstanceOf[AnyRef]
-
-      val outputEither = extractPosteriorFromResult(result, config.outputName, hypothesisCount)
-      closeQuietly(priorTensor)
-      closeQuietly(likelihoodTensor)
-      closeQuietly(result)
-      closeQuietly(session)
-      closeQuietly(sessionOptions)
-      outputEither
+      result = session.run(inputs)
+      extractPosteriorFromResult(result, config.outputName, hypothesisCount)
     catch
-      case _: ClassNotFoundException =>
-        Left("ai.onnxruntime classes not found on classpath; add ONNX Runtime dependency")
-      case ex: Throwable =>
+      case ex: OrtException =>
+        Left(
+          Option(ex.getMessage)
+            .map(_.trim)
+            .filter(_.nonEmpty)
+            .map(m => s"ONNX runtime error: $m")
+            .getOrElse(s"ONNX runtime error (${ex.getClass.getSimpleName})")
+        )
+      case NonFatal(ex) =>
         Left(
           Option(ex.getMessage)
             .map(_.trim)
             .filter(_.nonEmpty)
             .getOrElse(ex.getClass.getSimpleName)
         )
+    finally
+      closeQuietly(priorTensor)
+      closeQuietly(likelihoodTensor)
+      closeQuietly(result)
+      closeQuietly(session)
+      closeQuietly(sessionOptions)
 
   /** Configures ONNX session options: thread counts and CUDA execution provider.
-    * All configuration is done via reflection; failures are silently swallowed
-    * since these are optional performance hints.
+    * Each setter is wrapped in a typed try/catch so an OrtException from one
+    * optional configuration call doesn't abort the others. CUDA registration
+    * tries the `addCUDA(int)` variant first, falls back to `addCUDA()` for
+    * older runtimes.
     */
   private def configureSessionOptions(
-      sessionOptionsClass: Class[?],
-      sessionOptions: AnyRef,
+      sessionOptions: SessionOptions,
       config: Config
   ): Unit =
     config.intraOpThreads.foreach { threads =>
-      try
-        sessionOptionsClass
-          .getMethod("setIntraOpNumThreads", classOf[Int])
-          .invoke(sessionOptions, Int.box(threads))
-      catch
-        case _: Throwable => ()
+      try sessionOptions.setIntraOpNumThreads(threads)
+      catch case _: OrtException => ()
     }
     config.interOpThreads.foreach { threads =>
-      try
-        sessionOptionsClass
-          .getMethod("setInterOpNumThreads", classOf[Int])
-          .invoke(sessionOptions, Int.box(threads))
-      catch
-        case _: Throwable => ()
+      try sessionOptions.setInterOpNumThreads(threads)
+      catch case _: OrtException => ()
     }
     if config.executionProvider == "cuda" then
-      try
-        sessionOptionsClass
-          .getMethod("addCUDA", classOf[Int])
-          .invoke(sessionOptions, Int.box(config.cudaDevice))
+      try sessionOptions.addCUDA(config.cudaDevice)
       catch
-        case _: Throwable =>
-          try
-            sessionOptionsClass.getMethod("addCUDA").invoke(sessionOptions)
-          catch
-            case _: Throwable => ()
+        case _: OrtException =>
+          try sessionOptions.addCUDA()
+          catch case _: OrtException => ()
 
   /** Extracts the posterior array from the ONNX Result object.
-    * Tries named output first (`get(String)`), then falls back to index-based (`get(0)`).
-    * Supports float[], double[], float[][], and double[][] output shapes.
+    * Looks the named output up via `Result.get(String): Optional[OnnxValue]`.
+    * Supports float[], double[], float[][], and double[][] output shapes via
+    * [[flattenNumericOutput]].
     */
   private def extractPosteriorFromResult(
-      result: AnyRef,
+      result: Result,
       outputName: String,
       expectedSize: Int
   ): Either[String, Array[Double]] =
-    val resultClass = result.getClass
-
-    val outputValueOpt =
-      resultClass.getMethods.find(m =>
-        m.getName == "get" &&
-          m.getParameterCount == 1 &&
-          m.getParameterTypes.head == classOf[String]
-      ) match
-        case Some(getByName) =>
-          val named = getByName.invoke(result, outputName)
-          named match
-            case optional: java.util.Optional[?] =>
-              if optional.isPresent then Some(optional.get().asInstanceOf[AnyRef]) else None
-            case any if any != null => Some(any.asInstanceOf[AnyRef])
-            case _ => None
-        case None =>
-          resultClass.getMethods.find(m =>
-            m.getName == "get" &&
-              m.getParameterCount == 1 &&
-              m.getParameterTypes.head == classOf[Int]
-          ) match
-            case Some(getByIndex) =>
-              Option(getByIndex.invoke(result, Int.box(0))).map(_.asInstanceOf[AnyRef])
-            case None => None
-
-    outputValueOpt match
-      case None =>
-        Left(s"ddre onnx output '$outputName' not found")
-      case Some(outputValue) =>
-        val value = outputValue.getClass.getMethod("getValue").invoke(outputValue)
-        flattenNumericOutput(value, expectedSize)
+    val opt = result.get(outputName)
+    if !opt.isPresent then
+      Left(s"ddre onnx output '$outputName' not found")
+    else
+      val onnxValue: OnnxValue = opt.get()
+      flattenNumericOutput(onnxValue.getValue, expectedSize)
 
   /** Flattens various ONNX output types (1D array, 2D matrix, Java List) into
     * a flat Double array. Validates that the result has the expected size.
@@ -497,12 +466,12 @@ private[holdem] object HoldemDdreOnnxRuntime:
     else
       Right(flattened)
 
-  /** Calls `close()` on an ONNX resource via reflection, swallowing any exceptions.
-    * Used to clean up tensors, sessions, and results without leaking native memory.
+  /** Calls `close()` on an ONNX AutoCloseable resource, swallowing only
+    * non-fatal exceptions. Used to clean up tensors, sessions, options, and
+    * results in `finally` blocks without leaking native memory or hiding
+    * fatal errors like OOM.
     */
-  private def closeQuietly(resource: AnyRef): Unit =
+  private def closeQuietly(resource: AutoCloseable): Unit =
     if resource != null then
-      try
-        resource.getClass.getMethod("close").invoke(resource)
-      catch
-        case _: Throwable => ()
+      try resource.close()
+      catch case NonFatal(_) => ()
