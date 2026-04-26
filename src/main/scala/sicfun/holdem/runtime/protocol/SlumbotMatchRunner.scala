@@ -542,26 +542,27 @@ object SlumbotMatchRunner:
       value.arr.iterator.map(_.str).toVector
 
   def main(args: Array[String]): Unit =
+    val log = sicfun.holdem.types.ConsoleLogger.stdout()
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
       case Right(summary) =>
-        println("=== Slumbot Match Runner ===")
-        println(s"handsPlayed: ${summary.handsPlayed}")
-        println(s"heroNetChips: ${summary.heroNetChips.toInt}")
-        println(s"heroBbPer100: ${PokerFormatting.fmtDouble(summary.heroBbPer100, 3)}")
-        println(s"heroWins: ${summary.heroWins}")
-        println(s"heroTies: ${summary.heroTies}")
-        println(s"heroLosses: ${summary.heroLosses}")
-        println(s"buttonHands: ${summary.buttonHands}")
-        println(s"buttonNetChips: ${summary.buttonNetChips.toInt}")
-        println(s"bigBlindHands: ${summary.bigBlindHands}")
-        println(s"bigBlindNetChips: ${summary.bigBlindNetChips.toInt}")
-        println(s"modelId: ${summary.modelId}")
-        println(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
+        log.info("=== Slumbot Match Runner ===")
+        log.info(s"handsPlayed: ${summary.handsPlayed}")
+        log.info(s"heroNetChips: ${summary.heroNetChips.toInt}")
+        log.info(s"heroBbPer100: ${PokerFormatting.fmtDouble(summary.heroBbPer100, 3)}")
+        log.info(s"heroWins: ${summary.heroWins}")
+        log.info(s"heroTies: ${summary.heroTies}")
+        log.info(s"heroLosses: ${summary.heroLosses}")
+        log.info(s"buttonHands: ${summary.buttonHands}")
+        log.info(s"buttonNetChips: ${summary.buttonNetChips.toInt}")
+        log.info(s"bigBlindHands: ${summary.bigBlindHands}")
+        log.info(s"bigBlindNetChips: ${summary.bigBlindNetChips.toInt}")
+        log.info(s"modelId: ${summary.modelId}")
+        log.info(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
       case Left(error) =>
-        if wantsHelp then println(error)
+        if wantsHelp then log.info(error)
         else
-          System.err.println(error)
+          log.error(error)
           sys.exit(1)
 
   def run(args: Array[String]): Either[String, MatchRunnerSupport.RunSummary] =
@@ -852,9 +853,11 @@ object SlumbotMatchRunner:
         wireAction = apiAction
       )
 
+    private val reportLogger = sicfun.holdem.types.ConsoleLogger.stdout()
+
     private def maybeReport(handNo: Int): Unit =
       if config.reportEvery > 0 && (handNo % config.reportEvery == 0 || handNo == config.hands) then
-        println(
+        reportLogger.info(
           s"[slumbot] hands=${stats.currentHandsPlayed} netChips=${stats.currentHeroNetChips.toInt} bb100=${PokerFormatting.fmtDouble(stats.currentBbPer100(SlumbotActionCodec.BigBlindChips.toDouble), 3)} mode=${PokerFormatting.heroModeLabel(config.heroMode)} model=$modelId"
         )
 
