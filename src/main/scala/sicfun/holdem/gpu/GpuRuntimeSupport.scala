@@ -1,6 +1,6 @@
 package sicfun.holdem.gpu
 import sicfun.holdem.*
-import sicfun.holdem.types.ScopedRuntimeProperties
+import sicfun.holdem.types.{ConsoleLogger, ScopedRuntimeProperties}
 
 import java.io.File
 import java.util.Locale
@@ -42,13 +42,22 @@ private[holdem] object GpuRuntimeSupport:
     resolveNonEmpty(VerboseProperty, VerboseEnv)
       .exists(parseTruthy)
 
+  /** Underlying ConsoleLogger -- routed through `routes` so we control the per-level
+    * stream choice. log() is gated on `verbose`; warn() always emits to stderr.
+    */
+  private val consoleLogger: ConsoleLogger = ConsoleLogger.routes(
+    infoEmit = msg => System.out.println(msg),
+    warnEmit = msg => System.err.println(msg),
+    errorEmit = msg => System.err.println(msg)
+  )
+
   /** Info-level log: only prints when `sicfun.verbose=true`. */
   private[holdem] def log(msg: => String): Unit =
-    if verbose then println(msg)
+    if verbose then consoleLogger.info(msg)
 
   /** Warning-level log: always prints to stderr. */
   private[holdem] def warn(msg: => String): Unit =
-    System.err.println(msg)
+    consoleLogger.warn(msg)
 
   /** Resolves a configuration value by checking (in priority order):
     *  1. `ScopedRuntimeProperties` thread-local overlay (set by tests)
