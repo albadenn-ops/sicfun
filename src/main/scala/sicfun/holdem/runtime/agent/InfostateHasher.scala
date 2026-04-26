@@ -1,12 +1,7 @@
 package sicfun.holdem.runtime.agent
 
+import sicfun.holdem.runtime.PlaceholderMarker
 import sicfun.holdem.runtime.protocol.{SeatId, TableSnapshot}
-
-/** PlaceholderMarker is defined fully in Task 18. We forward-declare a minimal
-  * stub here that Task 18 will move to its canonical location. Keep the trait
-  * definition compatible: `def placeholderReason: String`. */
-trait PlaceholderMarker:
-  def placeholderReason: String
 
 trait InfostateHasher:
   def hashFor(snapshot: TableSnapshot, seat: SeatId): Long
