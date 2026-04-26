@@ -288,6 +288,63 @@ final class AcpcTableDealer(
       SeatId((_buttonSeat.index + off) % config.numSeats)
     }.filter(seats.contains).toVector
 
+  /** True when the hand can no longer make progress in betting:
+    * either only one (or zero) non-folded seat remains, or the river round
+    * has closed and we are ready to finalize. */
+  def handEnded: Boolean =
+    val activeNonFolded = (0 until config.numSeats).map(SeatId(_))
+      .count(s => !folded.contains(s))
+    activeNonFolded <= 1 ||
+      (currentStreet == Street.River && roundClosed)
+
+  /** Finalize the hand: compute side pots, evaluate showdown (or assign
+    * unopposed-fold ranks), distribute pots to winners, and emit
+    * [[BettingRoundEvent.PotAwarded]] events. Returns a [[HandOutcome]] whose
+    * `netChange` is required (by construction) to sum to zero — the A.1
+    * chip-conservation invariant. */
+  def finalizeHand(): HandOutcome =
+    val nonFolded = (0 until config.numSeats).map(SeatId(_))
+      .filterNot(folded.contains)
+      .toVector
+
+    val ranks: Map[SeatId, HandRank] =
+      if nonFolded.size <= 1 then
+        // Unopposed fold (or fully-folded edge case): assign topRank to the
+        // sole survivor (if any) and bottomRank to no one else — folded seats
+        // are excluded from `eligibleSeats` so they need no rank.
+        nonFolded.headOption match
+          case Some(winner) => Map(winner -> topRankForFinalize)
+          case None         => Map.empty[SeatId, HandRank]
+      else
+        // Showdown path: complete the board if the hand short-circuited
+        // (e.g., everyone went all-in pre-river) and evaluate.
+        if boardBuf.size < 3 then dealCommunity(Street.Flop)
+        if boardBuf.size < 4 then dealCommunity(Street.Turn)
+        if boardBuf.size < 5 then dealCommunity(Street.River)
+        evaluateShowdown()
+
+    val distributed = distributePots(ranks)
+    val distributedBySeat: Map[SeatId, Long] =
+      distributed.flatMap(_._2).groupMapReduce(_._1)(_._2)(_ + _)
+    val netChange: Map[SeatId, Long] =
+      (0 until config.numSeats).map { i =>
+        val s = SeatId(i)
+        s -> (distributedBySeat.getOrElse(s, 0L) - contributions(s))
+      }.toMap
+
+    distributed.foreach { case (pot, dist) =>
+      eventBuffer += BettingRoundEvent.PotAwarded(pot, dist)
+    }
+
+    HandOutcome(distributed, netChange, eventBuffer.toVector)
+
+  /** Synthetic high rank used to mark the unopposed-fold winner. The actual
+    * value never matters for distribution because there is at most one
+    * contender per pot in that branch — but it must be a real, evaluable
+    * [[HandRank]] so [[distributePots]] does not crash. */
+  private def topRankForFinalize: HandRank =
+    HandEvaluator.evaluate7(Deck.full.takeRight(7).toVector)
+
   // Test-only shims
   private[protocol] def setStateForTest(
       stacks: Map[SeatId, Long],
@@ -297,6 +354,16 @@ final class AcpcTableDealer(
     stacks.foreach { case (s, v) => this.stacks(s) = v }
     contributions.foreach { case (s, v) => this.contributions(s) = v }
     folded.foreach(this.folded += _)
+
+  private[protocol] def setStackForTest(seat: SeatId, value: Long): Unit =
+    stacks(seat) = value
+
+  private[protocol] def streetContributionForTest(seat: SeatId): Long =
+    streetContribution(seat)
+
+  private[protocol] def currentBetForTest: Long = currentBet
+
+  private[protocol] def foldedSetForTest: Set[SeatId] = folded.toSet
 
   private[protocol] def scriptedSevenForTest(seat: SeatId): Vector[Card] =
     Deck.full.take(7).toVector
