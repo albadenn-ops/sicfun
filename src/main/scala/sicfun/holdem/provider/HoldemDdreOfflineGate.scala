@@ -110,15 +110,17 @@ object HoldemDdreOfflineGate:
 
   private val Eps = 1e-12
 
+  private val log: ConsoleLogger = ConsoleLogger.stdout()
+
   def main(args: Array[String]): Unit =
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
       case Right(summary) =>
         printSummary(summary)
       case Left(err) =>
-        if wantsHelp then println(err)
+        if wantsHelp then log.info(err)
         else
-          System.err.println(err)
+          log.error(err)
           sys.exit(1)
 
   def run(args: Array[String]): Either[String, GateSummary] =
@@ -381,18 +383,18 @@ object HoldemDdreOfflineGate:
         sorted(lo) * (1.0 - w) + sorted(hi) * w
 
   private def printSummary(summary: GateSummary): Unit =
-    println("=== Holdem DDRE Offline Gate ===")
-    println(s"artifactId: ${summary.artifactId}")
-    println(s"artifactDir: ${summary.artifactDir.toAbsolutePath.normalize()}")
-    println(s"totalSamples: ${summary.totalSamples}")
-    println(s"successfulSamples: ${summary.successfulSamples}")
-    println(f"meanNll: ${summary.meanNll}%.6f")
-    println(f"meanKlVsBayes: ${summary.meanKlVsBayes}%.6f")
-    println(f"blockerViolationRate: ${summary.blockerViolationRate}%.6f")
-    println(f"failureRate: ${summary.failureRate}%.6f")
-    println(f"p50LatencyMillis: ${summary.p50LatencyMillis}%.6f")
-    println(f"p95LatencyMillis: ${summary.p95LatencyMillis}%.6f")
-    println(s"gate: ${if summary.gatePass then "PASS" else "FAIL"}")
+    log.info("=== Holdem DDRE Offline Gate ===")
+    log.info(s"artifactId: ${summary.artifactId}")
+    log.info(s"artifactDir: ${summary.artifactDir.toAbsolutePath.normalize()}")
+    log.info(s"totalSamples: ${summary.totalSamples}")
+    log.info(s"successfulSamples: ${summary.successfulSamples}")
+    log.info(f"meanNll: ${summary.meanNll}%.6f")
+    log.info(f"meanKlVsBayes: ${summary.meanKlVsBayes}%.6f")
+    log.info(f"blockerViolationRate: ${summary.blockerViolationRate}%.6f")
+    log.info(f"failureRate: ${summary.failureRate}%.6f")
+    log.info(f"p50LatencyMillis: ${summary.p50LatencyMillis}%.6f")
+    log.info(f"p95LatencyMillis: ${summary.p95LatencyMillis}%.6f")
+    log.info(s"gate: ${if summary.gatePass then "PASS" else "FAIL"}")
 
   private def writeSummary(path: Path, summary: GateSummary): Unit =
     Option(path.getParent).foreach(parent => Files.createDirectories(parent))
