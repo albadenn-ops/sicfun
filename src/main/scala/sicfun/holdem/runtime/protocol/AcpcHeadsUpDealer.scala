@@ -459,22 +459,23 @@ object AcpcHeadsUpDealer:
       holeSections.mkString("|") + boardSections.map("/" + _).mkString
 
   def main(args: Array[String]): Unit =
+    val log = sicfun.holdem.types.ConsoleLogger.stdout()
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
       case Right(summary) =>
-        println("=== ACPC Heads-Up Dealer ===")
-        println(s"handsPlayed: ${summary.handsPlayed}")
-        println(s"elapsedSeconds: ${fmt(summary.elapsedSeconds, 3)}")
-        println(s"handsPerSecond: ${fmt(summary.handsPerSecond, 3)}")
-        println(s"${summary.playerAName}NetChips: ${fmt(summary.playerANetChips, 3)}")
-        println(s"${summary.playerAName}BbPer100: ${fmt(summary.playerABbPer100, 3)}")
-        println(s"${summary.playerBName}NetChips: ${fmt(summary.playerBNetChips, 3)}")
-        println(s"${summary.playerBName}BbPer100: ${fmt(summary.playerBBbPer100, 3)}")
-        println(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
+        log.info("=== ACPC Heads-Up Dealer ===")
+        log.info(s"handsPlayed: ${summary.handsPlayed}")
+        log.info(s"elapsedSeconds: ${fmt(summary.elapsedSeconds, 3)}")
+        log.info(s"handsPerSecond: ${fmt(summary.handsPerSecond, 3)}")
+        log.info(s"${summary.playerAName}NetChips: ${fmt(summary.playerANetChips, 3)}")
+        log.info(s"${summary.playerAName}BbPer100: ${fmt(summary.playerABbPer100, 3)}")
+        log.info(s"${summary.playerBName}NetChips: ${fmt(summary.playerBNetChips, 3)}")
+        log.info(s"${summary.playerBName}BbPer100: ${fmt(summary.playerBBbPer100, 3)}")
+        log.info(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
       case Left(error) =>
-        if wantsHelp then println(error)
+        if wantsHelp then log.info(error)
         else
-          System.err.println(error)
+          log.error(error)
           sys.exit(1)
 
   def run(args: Array[String]): Either[String, MatchSummary] =
@@ -678,10 +679,14 @@ object AcpcHeadsUpDealer:
         ).mkString("\t")
       )
 
-    /** Print a progress line to stdout at the configured reporting interval. */
+    /** Print a progress line at the configured reporting interval. Routed through
+      * ConsoleLogger.info so packaged-service deployments can capture it.
+      */
+    private val reportLogger = sicfun.holdem.types.ConsoleLogger.stdout()
+
     private def maybeReport(handNumber: Int): Unit =
       if config.reportEvery > 0 && (handNumber % config.reportEvery == 0 || handNumber == config.hands) then
-        println(
+        reportLogger.info(
           s"[acpc-hu] hand=$handNumber ${config.playerAName}=${fmt(playerNet(0), 3)} ${config.playerBName}=${fmt(playerNet(1), 3)}"
         )
 
