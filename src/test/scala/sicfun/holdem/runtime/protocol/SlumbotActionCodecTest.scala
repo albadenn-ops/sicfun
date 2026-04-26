@@ -85,3 +85,61 @@ class SlumbotActionCodecTest extends FunSuite:
     val parsed = SlumbotActionCodec.parse("", heroActual = 1, fullBoard = Board.empty).fold(fail(_), identity)
     assertEquals(SlumbotActionCodec.incrementForAction(parsed, PokerAction.Raise(2.0)), "b300")
   }
+
+  test("incrementForAction maps Fold to single-char 'f'") {
+    val parsed = SlumbotActionCodec.parse("", heroActual = 1, fullBoard = Board.empty).fold(fail(_), identity)
+    assertEquals(SlumbotActionCodec.incrementForAction(parsed, PokerAction.Fold), "f")
+  }
+
+  test("incrementForAction encodes Check as 'k' when nothing is owed, 'c' when toCall>0") {
+    val afterLimp = SlumbotActionCodec.parse("c", heroActual = 0, fullBoard = Board.empty).fold(fail(_), identity)
+    assertEquals(SlumbotActionCodec.incrementForAction(afterLimp, PokerAction.Check), "k",
+      "with toCall=0, Check encodes as k")
+    val initial = SlumbotActionCodec.parse("", heroActual = 1, fullBoard = Board.empty).fold(fail(_), identity)
+    assertEquals(SlumbotActionCodec.incrementForAction(initial, PokerAction.Check), "c",
+      "with toCall>0, Check round-trips as c")
+  }
+
+  test("incrementForAction encodes Call symmetrically (c when owed, k when free)") {
+    val initial = SlumbotActionCodec.parse("", heroActual = 1, fullBoard = Board.empty).fold(fail(_), identity)
+    assertEquals(SlumbotActionCodec.incrementForAction(initial, PokerAction.Call), "c")
+    val afterLimp = SlumbotActionCodec.parse("c", heroActual = 0, fullBoard = Board.empty).fold(fail(_), identity)
+    assertEquals(SlumbotActionCodec.incrementForAction(afterLimp, PokerAction.Call), "k")
+  }
+
+  test("positionForActual: actual 0 = BigBlind, actual 1 = Button (Slumbot reverse-blind seating)") {
+    assertEquals(SlumbotActionCodec.positionForActual(0), Position.BigBlind)
+    assertEquals(SlumbotActionCodec.positionForActual(1), Position.Button)
+  }
+
+  test("positionForActual rejects invalid actual indices") {
+    intercept[IllegalArgumentException] { SlumbotActionCodec.positionForActual(-1) }
+    intercept[IllegalArgumentException] { SlumbotActionCodec.positionForActual(2) }
+  }
+
+  test("chipsToBb / bbToChips round-trip at the BigBlind=100 scale") {
+    assertEquals(SlumbotActionCodec.chipsToBb(0), 0.0)
+    assertEquals(SlumbotActionCodec.chipsToBb(100), 1.0)
+    assertEquals(SlumbotActionCodec.chipsToBb(250), 2.5)
+    assertEquals(SlumbotActionCodec.bbToChips(0.0), 0)
+    assertEquals(SlumbotActionCodec.bbToChips(1.0), 100)
+    assertEquals(SlumbotActionCodec.bbToChips(2.5), 250)
+  }
+
+  test("bbToChips floors at zero (no negative chip counts)") {
+    assertEquals(SlumbotActionCodec.bbToChips(-1.0), 0,
+      "negative BB amounts must clamp to 0 to keep chip counts non-negative")
+    assertEquals(SlumbotActionCodec.bbToChips(-0.001), 0)
+  }
+
+  test("bbToChips rounds via math.round (half-up at the .5 boundary)") {
+    // math.round on Java/Scala uses HALF_UP for positive values: floor(x + 0.5)
+    // 0.005 BB = 0.5 chips -> rounds to 1
+    assertEquals(SlumbotActionCodec.bbToChips(0.005), 1)
+    // 0.999 BB = 99.9 chips -> rounds to 100
+    assertEquals(SlumbotActionCodec.bbToChips(0.999), 100)
+    // 0.004 BB = 0.4 chips -> rounds to 0
+    assertEquals(SlumbotActionCodec.bbToChips(0.004), 0)
+    // 0.014 BB = 1.4 chips -> rounds to 1
+    assertEquals(SlumbotActionCodec.bbToChips(0.014), 1)
+  }
