@@ -1,6 +1,6 @@
 # SICFUN Tech Debt — live register
 
-**Anchor:** `6b5f441dff8253a72c0223ab797e168eceb5690f` (HEAD on `claude/vibrant-kalam-e96d51`), captured 2026-04-26 (refreshed).
+**Anchor:** `c4110d34cae942b3a14541f5814b508714d59402` (HEAD on `claude/vibrant-kalam-e96d51`), captured 2026-04-26 (refreshed).
 **Original anchor:** [`fcbc3a8a`](docs/audits/2026-04-25_anchor_fcbc3a8a.md) (frozen historical audit, 2026-04-25).
 
 Status legend:
@@ -14,7 +14,7 @@ Status legend:
 | ID | Severity | Status | Anchor (file:line) | One-line |
 |---|---|---|---|---|
 | F1 | High (Test) | partial | `tablegen/`, `equity/HeadsUpEquityCanonicalTable.scala` | `tablegen/` zero-tests; canonical-key invariants + binary-IO roundtrip + Exact-vs-MC parity now pinned in `equity/`. |
-| F2 | High (Code) | partial | `runtime/`, `cfr/`, `provider/` `println` sites | `ConsoleLogger` trait shipped; migrated: `AdaptiveProofHarness`, `HandHistoryReviewServer` (full local logger), `LiveHandSimulator`, `AlwaysOnDecisionLoop`, `HandHistoryAnalyzer`, `AcpcHeadsUpDealer`. Remaining: `AcpcMatchRunner`/`SlumbotMatchRunner` (16+16 sites), `TexasHoldemPlayingHall` (dense), `cfr/` files, `provider/` files. `PokerAdvisor` interactive prompts intentionally stay on stdout per audit guidance. |
+| F2 | High (Code) | closed-needs-verification | covered packages: `runtime/`, `validation/`, `provider/`, `equity/`, `model/`, `cfr/`, `gpu/` | All audit Phase 2 + step 3 packages migrated to `ConsoleLogger`. Closed files: AdaptiveProofHarness, HandHistoryReviewServer (full local logger), LiveHandSimulator, AlwaysOnDecisionLoop, HandHistoryAnalyzer, AcpcHeadsUpDealer, AcpcMatchRunner, SlumbotMatchRunner, TexasHoldemPlayingHall, ValidationRunner, HoldemDdreOfflineGate, HeadsUpTableInfo, TrainPokerActionModel, all 5 cfr/ tools, GpuRuntimeSupport (routed). Intentionally on `println`: `PokerAdvisor` interactive REPL (user UI per audit guidance), `analysis/`, `history/`, `tablegen/` CLIs (stdout-as-output contract per audit B2 step 4). The 6 remaining println-shaped lines are stream-sink leaves inside the loggers themselves. |
 | F3 | High (Arch) | partial | `web/HandHistoryReviewServer.scala` | 3057-LOC monolith; `WebResponses` extracted (5 fns); routing/auth/job-store/rate-limit/csrf splits open. |
 | F4 | High (Test/Arch) | partial | `runtime/` (9,247 LOC, ratio 0.31) | Multi-table tableId schedule pinned; `AcpcHeadsUpDealer` + `AcpcActionCodec` (16 internals tests, incl. multiway side-pot resolver chip-conservation) pure helpers pinned; protocol street-math deduplicated into `ProtocolStreetMath`. `AdvisorSession` state machine + `SlumbotMatchRunner` non-shared internals still untested. |
 | F5 | Med (Arch) | open | `cfr/HoldemCfrSolver.scala` | 3728-LOC god-file, 18 top-level decls; multi-sprint split. Lower urgency until other items land. |
@@ -36,7 +36,7 @@ Status legend:
 | A2 | — | closed | `provider/HoldemDdreOnnxRuntime.scala` | See F14 — typed-API rewrite landed. |
 | A3 | — | closed | `test/strategic/ReductionismManifestTest.scala` | Gate armed: `assert(true)` → structural invariant; Silent + Orphan severities now `fail()` with offender list; gate fire verified by injected fixture. |
 | B1 | — | partial | `cfr/`, `gpu/`, 5 files | NonFatal substituted across audit-listed sites; CUDA/OpenCL/CPU device-discovery failures now visible via `GpuRuntimeSupport.warn`. Per-provider failure counters exposed via `/health` deferred. |
-| B2 | — | partial | `validation/AdaptiveProofHarness.scala`, `web/HandHistoryReviewServer.scala` | `ConsoleLogger` trait shipped; AdaptiveProofHarness + HHRS migrated; `runtime/` and `runtime/protocol/` migrations open. |
+| B2 | — | closed-needs-verification | every audit-listed package | See F2 -- the audit Phase 2 + step 3 migration is complete. Phase 4 step 4 (analysis/history/tablegen CLIs) explicitly stays on stdout per audit guidance. |
 | B3 | — | partial | `runtime/`, `web/` | 5 extractions landed (`HallFormat`, `HallVillain`, `HallConfig`, `WebResponses`, `ProtocolStreetMath` dedupe); web routing/auth-stack/job-store/rate-limit splits remain. |
 | B4 | — | deferred | `project/plugins.sbt` | scoverage adoption is a build-engineering decision (test-time dep, CI threshold strategy); not actionable as a single bounded commit. |
 | C1 | — | closed | this file | Audit doc renamed to `docs/audits/2026-04-25_anchor_fcbc3a8a.md` and frozen; this register replaces the old single-file audit. Per-finding sub-files deferred — overhead exceeded value at current finding count. |
