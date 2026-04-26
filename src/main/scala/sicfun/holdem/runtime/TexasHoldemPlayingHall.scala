@@ -4,10 +4,10 @@ import sicfun.holdem.model.*
 import sicfun.holdem.engine.*
 import sicfun.holdem.engine.inference.*
 import sicfun.holdem.engine.villain.*
-import sicfun.holdem.engine.GtoSolveEngine.{GtoMode, GtoSolveCacheKey, GtoCachedPolicy, GtoCacheStats}
+import sicfun.holdem.engine.GtoSolveEngine.{GtoSolveCacheKey, GtoCachedPolicy, GtoCacheStats}
 import sicfun.holdem.provider.*
 import sicfun.holdem.equity.*
-import sicfun.holdem.cli.*
+
 import sicfun.holdem.runtime.protocol.{OverlayMetricsAccumulator, OverlayStats}
 import sicfun.holdem.strategic.types.PlayerId
 
@@ -21,7 +21,7 @@ import sicfun.holdem.validation.{
 import java.io.BufferedWriter
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import scala.collection.mutable
@@ -72,35 +72,10 @@ import scala.util.Random
   * @see [[HandResolver]] for single-hand street-by-street resolution
   */
 object TexasHoldemPlayingHall:
-  // Villain configuration types and CLI parsing live in HallVillain (F6 split).
+  // Villain types + CLI parsing live in HallVillain (F6 split).
   import HallVillain.{VillainMode, VillainProfile}
-
-  /** All CLI-parsed configuration for a playing hall run. Controls hand count, table geometry,
-    * hero/villain modes, learning schedule, raise sizing, inference budget, and output paths.
-    */
-  private final case class Config(
-      hands: Int,
-      tableCount: Int,
-      playerCount: Int,
-      reportEvery: Int,
-      learnEveryHands: Int,
-      learningWindowSamples: Int,
-      seed: Long,
-      outDir: Path,
-      modelArtifactDir: Option[Path],
-      heroMode: HeroMode,
-      heroPosition: Position,
-      gtoMode: GtoMode,
-      villainPool: Vector[VillainProfile],
-      heroExplorationRate: Double,
-      raiseSize: Double,
-      bunchingTrials: Int,
-      equityTrials: Int,
-      saveTrainingTsv: Boolean,
-      saveDdreTrainingTsv: Boolean,
-      saveReviewHandHistory: Boolean,
-      fullRing: Boolean
-  )
+  // Top-level CLI Config + parseArgs + helpers live in HallConfig (F6 split).
+  import HallConfig.Config
 
   /** Aggregate results from a completed playing hall run, exposed as the public return type.
     * Includes win/loss/tie counts, net chips, bb/100 win-rate, action frequency breakdown,
@@ -300,14 +275,14 @@ object TexasHoldemPlayingHall:
     * @return Right(summary) on success, Left(errorMessage) on argument parsing or runtime failure.
     */
   def run(args: Array[String]): Either[String, HallSummary] =
-    parseArgs(args).flatMap(cfg => runConfig(cfg))
+    HallConfig.parseArgs(args).flatMap(cfg => runConfig(cfg))
 
   /** Programmatic entry with a caller-supplied cancel signal. Same semantics as `run(args)`
     * but the runner checks the signal after each completed hand; if true, the run stops
     * taking new hands and returns a Summary with `handsPlayed` reflecting actual progress.
     */
   def runWithCancel(args: Array[String], cancelSignal: () => Boolean): Either[String, HallSummary] =
-    parseArgs(args).flatMap(cfg => runConfig(cfg, cancelSignal))
+    HallConfig.parseArgs(args).flatMap(cfg => runConfig(cfg, cancelSignal))
 
   private def runConfig(
       config: Config,
@@ -1831,37 +1806,6 @@ object TexasHoldemPlayingHall:
   /** Maps player count (2-9) to the canonical vector of table positions in preflop action order.
     * For 2-max: Button, BigBlind. For full ring (9-max): UTG through BigBlind.
     */
-  private def modeledPositionsForPlayerCount(playerCount: Int): Vector[Position] =
-    playerCount match
-      case 2 => Vector(Position.Button, Position.BigBlind)
-      case 3 => Vector(Position.Button, Position.SmallBlind, Position.BigBlind)
-      case 4 => Vector(Position.Cutoff, Position.Button, Position.SmallBlind, Position.BigBlind)
-      case 5 => Vector(Position.Middle, Position.Cutoff, Position.Button, Position.SmallBlind, Position.BigBlind)
-      case 6 => Vector(Position.UTG, Position.Middle, Position.Cutoff, Position.Button, Position.SmallBlind, Position.BigBlind)
-      case 7 => Vector(Position.UTG, Position.UTG1, Position.Middle, Position.Cutoff, Position.Button, Position.SmallBlind, Position.BigBlind)
-      case 8 => Vector(
-        Position.UTG,
-        Position.UTG1,
-        Position.UTG2,
-        Position.Middle,
-        Position.Cutoff,
-        Position.Button,
-        Position.SmallBlind,
-        Position.BigBlind
-      )
-      case 9 => Vector(
-        Position.UTG,
-        Position.UTG1,
-        Position.UTG2,
-        Position.Middle,
-        Position.Hijack,
-        Position.Cutoff,
-        Position.Button,
-        Position.SmallBlind,
-        Position.BigBlind
-      )
-      case _ => Vector.empty
-
   private def blindContributionFor(position: Position, playerCount: Int): Double =
     if position == Position.BigBlind then BigBlindAmount
     else if position == HallFormat.smallBlindPositionFor(playerCount) then SmallBlindAmount
@@ -1895,7 +1839,7 @@ object TexasHoldemPlayingHall:
       forceAllActive: Boolean,
       rng: Random
   ): TableScenario =
-    val modeledPositions = modeledPositionsForPlayerCount(playerCount)
+    val modeledPositions = HallConfig.modeledPositionsForPlayerCount(playerCount)
     require(modeledPositions.contains(heroPosition), s"hero position $heroPosition is not valid for playerCount=$playerCount")
     val availableVillains = modeledPositions.filterNot(_ == heroPosition)
     val activeVillainPositions =
@@ -2235,181 +2179,3 @@ object TexasHoldemPlayingHall:
     if entries.isEmpty then "-"
     else entries.map { case (id, probability) => s"$id:$probability" }.mkString("|")
 
-  private def parseLegacyHeroSeat(raw: String): Either[String, Position] =
-    raw.trim.toLowerCase match
-      case "button" => Right(Position.Button)
-      case "bigblind" | "bb" => Right(Position.BigBlind)
-      case _ => Left("--heroSeat must be one of: button, bigblind")
-
-  private def resolveHeroPosition(
-      options: Map[String, String],
-      playerCount: Int
-  ): Either[String, Position] =
-    val rawPosition =
-      options.get("heroPosition") match
-        case Some(raw) =>
-          CliHelpers.parsePositionOptionEither(options, "heroPosition", Position.Button)
-        case None =>
-          options.get("heroSeat") match
-            case Some(raw) => parseLegacyHeroSeat(raw)
-            case None => Right(Position.Button)
-    rawPosition.flatMap { position =>
-      val modeledPositions = modeledPositionsForPlayerCount(playerCount)
-      if modeledPositions.contains(position) then Right(position)
-      else Left(s"--heroPosition $position is not valid for playerCount=$playerCount")
-    }
-
-  /** Parses CLI arguments into a validated Config. Uses a for-comprehension over Either to
-    * chain validation: each parameter is parsed with a typed helper, then range-checked.
-    * Returns Left(errorMessage) on the first validation failure.
-    */
-  private def parseArgs(args: Array[String]): Either[String, Config] =
-    if args.contains("--help") || args.contains("-h") then Left(usage)
-    else
-      for
-        options <- CliHelpers.parseOptions(args)
-        hands <- intOpt(options, "hands", 100000)
-        _ <- if hands > 0 then Right(()) else Left("--hands must be > 0")
-        tableCount <- intOpt(options, "tableCount", 1)
-        _ <- if tableCount > 0 then Right(()) else Left("--tableCount must be > 0")
-        playerCount <- intOpt(options, "playerCount", 2)
-        _ <- if playerCount >= 2 && playerCount <= 9 then Right(()) else Left("--playerCount must be in [2,9]")
-        reportEvery <- intOpt(options, "reportEvery", 10000)
-        _ <- if reportEvery > 0 then Right(()) else Left("--reportEvery must be > 0")
-        learnEveryHands <- intOpt(options, "learnEveryHands", 50000)
-        _ <- if learnEveryHands >= 0 then Right(()) else Left("--learnEveryHands must be >= 0")
-        learningWindowSamples <- intOpt(options, "learningWindowSamples", 200000)
-        _ <- if learningWindowSamples >= 0 then Right(()) else Left("--learningWindowSamples must be >= 0")
-        seed <- longOpt(options, "seed", 42L)
-        outDir <- pathOpt(options, "outDir", Paths.get("data/playing-hall"))
-        modelArtifactDir <- optionalPathOpt(options, "modelArtifactDir")
-        heroMode <- heroModeOpt(options, "heroStyle", HeroMode.Adaptive)
-        heroPosition <- resolveHeroPosition(options, playerCount)
-        gtoMode <- gtoModeOpt(options, "gtoMode", GtoMode.Exact)
-        villainMode <- HallVillain.villainModeOpt(options, "villainStyle", VillainMode.Archetype(PlayerArchetype.Tag))
-        villainPool <- HallVillain.buildVillainPool(villainMode, options.get("villainPool"))
-        heroExplorationRate <- doubleOpt(options, "heroExplorationRate", 0.05)
-        _ <- if heroExplorationRate >= 0.0 && heroExplorationRate <= 1.0 then Right(())
-        else Left("--heroExplorationRate must be in [0,1]")
-        raiseSize <- doubleOpt(options, "raiseSize", 2.5)
-        _ <- if raiseSize > 0.0 then Right(()) else Left("--raiseSize must be > 0")
-        bunchingTrials <- intOpt(options, "bunchingTrials", 80)
-        _ <- if bunchingTrials > 0 then Right(()) else Left("--bunchingTrials must be > 0")
-        equityTrials <- intOpt(options, "equityTrials", 700)
-        _ <- if equityTrials > 0 then Right(()) else Left("--equityTrials must be > 0")
-        saveTrainingTsv <- boolOpt(options, "saveTrainingTsv", true)
-        saveDdreTrainingTsv <- boolOpt(options, "saveDdreTrainingTsv", false)
-        saveReviewHandHistory <- boolOpt(options, "saveReviewHandHistory", false)
-        fullRing <- boolOpt(options, "fullRing", false)
-      yield Config(
-        hands = hands,
-        tableCount = tableCount,
-        playerCount = playerCount,
-        reportEvery = reportEvery,
-        learnEveryHands = learnEveryHands,
-        learningWindowSamples = learningWindowSamples,
-        seed = seed,
-        outDir = outDir,
-        modelArtifactDir = modelArtifactDir,
-        heroMode = heroMode,
-        heroPosition = heroPosition,
-        gtoMode = gtoMode,
-        villainPool = villainPool,
-        heroExplorationRate = heroExplorationRate,
-        raiseSize = raiseSize,
-        bunchingTrials = bunchingTrials,
-        equityTrials = equityTrials,
-        saveTrainingTsv = saveTrainingTsv,
-        saveDdreTrainingTsv = saveDdreTrainingTsv,
-        saveReviewHandHistory = saveReviewHandHistory,
-        fullRing = fullRing
-      )
-
-  private def intOpt(options: Map[String, String], key: String, default: Int): Either[String, Int] =
-    options.get(key) match
-      case None => Right(default)
-      case Some(raw) =>
-        raw.toIntOption.toRight(s"--$key must be an integer")
-
-  private def longOpt(options: Map[String, String], key: String, default: Long): Either[String, Long] =
-    options.get(key) match
-      case None => Right(default)
-      case Some(raw) =>
-        raw.toLongOption.toRight(s"--$key must be a long")
-
-  private def doubleOpt(options: Map[String, String], key: String, default: Double): Either[String, Double] =
-    options.get(key) match
-      case None => Right(default)
-      case Some(raw) =>
-        raw.toDoubleOption.toRight(s"--$key must be a double")
-
-  private def boolOpt(options: Map[String, String], key: String, default: Boolean): Either[String, Boolean] =
-    options.get(key) match
-      case None => Right(default)
-      case Some(raw) =>
-        raw.trim.toLowerCase match
-          case "true"  => Right(true)
-          case "false" => Right(false)
-          case _       => Left(s"--$key must be true or false")
-
-  private def pathOpt(options: Map[String, String], key: String, default: Path): Either[String, Path] =
-    Right(options.get(key).map(Paths.get(_)).getOrElse(default))
-
-  private def optionalPathOpt(options: Map[String, String], key: String): Either[String, Option[Path]] =
-    Right(options.get(key).map(Paths.get(_)))
-
-  private def heroModeOpt(
-      options: Map[String, String],
-      key: String,
-      default: HeroMode
-  ): Either[String, HeroMode] =
-    options.get(key) match
-      case None => Right(default)
-      case Some(raw) =>
-        raw.trim.toLowerCase match
-          case "adaptive"  => Right(HeroMode.Adaptive)
-          case "gto"       => Right(HeroMode.Gto)
-          case "strategic" => Right(HeroMode.Strategic)
-          case _           => Left("--heroStyle must be one of: adaptive, gto, strategic")
-
-  private def gtoModeOpt(
-      options: Map[String, String],
-      key: String,
-      default: GtoMode
-  ): Either[String, GtoMode] =
-    options.get(key) match
-      case None => Right(default)
-      case Some(raw) =>
-        raw.trim.toLowerCase match
-          case "fast"  => Right(GtoMode.Fast)
-          case "exact" => Right(GtoMode.Exact)
-          case _       => Left("--gtoMode must be one of: fast, exact")
-
-  private val usage =
-    """Usage:
-      |  runMain sicfun.holdem.runtime.TexasHoldemPlayingHall [--key=value ...]
-      |
-      |  --hands=<int>                 default 100000
-      |  --tableCount=<int>            default 1
-      |  --playerCount=<int>           table seats to model (2..9, default 2)
-      |  --reportEvery=<int>           default 10000
-      |  --learnEveryHands=<int>       default 50000 (0 disables learning)
-      |  --learningWindowSamples=<int> default 200000 (0 = unbounded)
-      |  --seed=<long>                 default 42
-      |  --outDir=<path>               default data/playing-hall
-      |  --modelArtifactDir=<path>     optional initial trained model
-      |  --heroStyle=<style>           adaptive|gto
-      |  --heroPosition=<Position>     explicit table position (defaults to Button)
-      |  --heroSeat=<seat>             legacy heads-up alias: button|bigblind
-      |  --gtoMode=<mode>              fast|exact (default exact)
-      |  --villainStyle=<style>        nit|tag|lag|callingstation|station|maniac|gto
-      |  --villainPool=<styles>        optional comma-separated villain pool overriding villainStyle
-      |  --heroExplorationRate=<double> default 0.05 (epsilon-greedy, [0,1])
-      |  --raiseSize=<double>          default 2.5
-      |  --bunchingTrials=<int>        default 80
-      |  --equityTrials=<int>          default 700
-      |  --saveTrainingTsv=<bool>      default true
-      |  --saveDdreTrainingTsv=<bool>  default false
-      |  --saveReviewHandHistory=<bool> default false
-      |  --fullRing=<bool>             default false (all villains always active)
-      |""".stripMargin
