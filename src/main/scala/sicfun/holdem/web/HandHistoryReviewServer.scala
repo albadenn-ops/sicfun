@@ -27,7 +27,7 @@ import java.util.concurrent.{
   ThreadPoolExecutor,
   TimeUnit
 }
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
@@ -61,6 +61,10 @@ import scala.util.control.NonFatal
   * @see [[PlatformUserAuth]] for the authentication module
   */
 object HandHistoryReviewServer:
+  // Rate-limit bucket types live in WebRateLimiter (F3 split). The rejection
+  // record is also there but its type is inferred at call sites here.
+  import WebRateLimiter.RateLimitBucket
+
   private val AnalyzeJobPathPrefix = "/api/analyze-hand-history/jobs/"
   private val PlayingHallPath = "/api/playing-hall"
   private val PlayingHallJobPathPrefix = "/api/playing-hall/jobs/"
@@ -74,7 +78,6 @@ object HandHistoryReviewServer:
   private val DefaultAnalysisTimeoutMs = 120000L
   private val DefaultPlayingHallTimeoutMs = 900000L
   private val DefaultShutdownGraceMs = 5000L
-  private val DefaultRateLimitWindowMs = 60L * 1000L
   private val DefaultRateLimitSubmitsPerMinute = 6
   private val DefaultRateLimitStatusPerMinute = 240
   private val ReadyReasonAcceptingTraffic = "accepting-traffic"
@@ -219,11 +222,11 @@ object HandHistoryReviewServer:
     val serverExecutor = newServerExecutor()
     val analysisExecutor = newAnalysisExecutor(config.maxConcurrentJobs, config.maxQueuedJobs)
     val analysisTimeoutExecutor = newTimeoutExecutor()
-    val rateLimiter = new RequestRateLimiter(
+    val rateLimiter = new WebRateLimiter(
       submitsPerMinute = config.rateLimitSubmitsPerMinute,
       statusPerMinute = config.rateLimitStatusPerMinute,
-      trustedClientIpHeader = config.rateLimitClientIpHeader,
-      trustedProxyIps = config.rateLimitTrustedProxyIps
+      clientKeyFor = exchange =>
+        rateLimitClientKey(exchange, config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)
     )
     val startedAtEpochMs = System.currentTimeMillis()
     val draining = new AtomicBoolean(false)
@@ -1747,31 +1750,8 @@ object HandHistoryReviewServer:
       timedOutWorkersInFlight: Int
   )
 
-  private enum RateLimitBucket:
-    case Submit, JobStatus
-
-    def id: String = this match
-      case Submit => "submit"
-      case JobStatus => "job-status"
-
-    def description: String = this match
-      case Submit => "submit"
-      case JobStatus => "job status"
-
   private enum AuthRequirement:
     case None, Optional, Required
-
-  private final case class RateLimitState(
-      windowStartedAtMs: Long,
-      requestCount: Int
-  )
-
-  private final case class RateLimitRejection(
-      bucket: RateLimitBucket,
-      limitPerMinute: Int,
-      retryAfterMs: Long,
-      clientKey: String
-  )
 
   private sealed trait AnalysisJobState:
     def status: String
@@ -2403,60 +2383,9 @@ object HandHistoryReviewServer:
           jobOwners.remove(entry.getKey)
           iterator.remove()
 
-  private final class RequestRateLimiter(
-      submitsPerMinute: Int,
-      statusPerMinute: Int,
-      trustedClientIpHeader: Option[String],
-      trustedProxyIps: Set[String],
-      nowMillis: () => Long = () => System.currentTimeMillis()
-  ):
-    private val windows = new ConcurrentHashMap[String, RateLimitState]()
-    private val lastCleanupAtMs = new AtomicLong(0L)
-
-    def check(
-        exchange: HttpExchange,
-        bucket: RateLimitBucket,
-        principalKey: Option[String] = None
-    ): Option[RateLimitRejection] =
-      val limitPerMinute = bucket match
-        case RateLimitBucket.Submit => submitsPerMinute
-        case RateLimitBucket.JobStatus => statusPerMinute
-      if limitPerMinute <= 0 then None
-      else
-        val now = nowMillis()
-        cleanupIfDue(now)
-        val clientKey = principalKey.getOrElse(rateLimitClientKey(exchange, trustedClientIpHeader, trustedProxyIps))
-        val key = s"${bucket.id}|$clientKey"
-        var rejection = Option.empty[RateLimitRejection]
-        windows.compute(
-          key,
-          (_, existing) =>
-            if existing == null || now - existing.windowStartedAtMs >= DefaultRateLimitWindowMs then
-              RateLimitState(windowStartedAtMs = now, requestCount = 1)
-            else if existing.requestCount < limitPerMinute then
-              existing.copy(requestCount = existing.requestCount + 1)
-            else
-              rejection = Some(
-                RateLimitRejection(
-                  bucket = bucket,
-                  limitPerMinute = limitPerMinute,
-                  retryAfterMs = math.max(1L, DefaultRateLimitWindowMs - (now - existing.windowStartedAtMs)),
-                  clientKey = clientKey
-                )
-              )
-              existing
-        )
-        rejection
-
-    private def cleanupIfDue(now: Long): Unit =
-      val lastCleanup = lastCleanupAtMs.get()
-      if now - lastCleanup >= DefaultRateLimitWindowMs && lastCleanupAtMs.compareAndSet(lastCleanup, now) then
-        val cutoff = now - (DefaultRateLimitWindowMs * 2L)
-        val iterator = windows.entrySet().iterator()
-        while iterator.hasNext do
-          val entry = iterator.next()
-          if entry.getValue.windowStartedAtMs < cutoff then
-            iterator.remove()
+  // RequestRateLimiter moved to WebRateLimiter (F3 split). The new class takes
+  // a `clientKeyFor: HttpExchange => String` callback so the windowing code has
+  // no coupling to the server's IP-resolution helpers.
 
   private def renderHealth(
       config: ServerConfig,
@@ -2584,7 +2513,7 @@ object HandHistoryReviewServer:
       basicAuth: Option[BasicAuthConfig] = None,
       platformAuth: Option[PlatformUserAuth.Service] = None,
       authRequirement: AuthRequirement = AuthRequirement.None,
-      rateLimiter: Option[RequestRateLimiter] = None,
+      rateLimiter: Option[WebRateLimiter] = None,
       rateLimitBucket: Option[RateLimitBucket] = None
   ) extends HttpHandler:
     override def handle(exchange: HttpExchange): Unit =
@@ -2705,7 +2634,7 @@ object HandHistoryReviewServer:
 
   private def ensureWithinRateLimitJson(
       exchange: HttpExchange,
-      rateLimiter: Option[RequestRateLimiter],
+      rateLimiter: Option[WebRateLimiter],
       rateLimitBucket: Option[RateLimitBucket]
   ): Boolean =
     rateLimitBucket.flatMap(bucket =>
