@@ -27,6 +27,24 @@ object ConsoleLogger:
   def writingTo(out: PrintStream, err: PrintStream): ConsoleLogger =
     new PrintStreamLogger(out, err)
 
+  /** Logger built from per-level emit callbacks. Use this when you need full control
+    * over message formatting and stream routing -- e.g. the embedded HTTP server
+    * wants `[timestamp] [LEVEL] [service] msg` with WARN routed to stderr (operator
+    * attention) instead of the default WARN-to-stdout.
+    *
+    * Each callback receives the raw message string; the callback is responsible
+    * for prefixing, timestamping, synchronisation, and stream choice.
+    */
+  def routes(
+      infoEmit: String => Unit,
+      warnEmit: String => Unit,
+      errorEmit: String => Unit
+  ): ConsoleLogger =
+    new ConsoleLogger:
+      def info(message: => String): Unit = infoEmit(message)
+      def warn(message: => String): Unit = warnEmit(message)
+      def error(message: => String): Unit = errorEmit(message)
+
   /** Logger that swallows every message. Useful for tests that only want to silence output. */
   val silent: ConsoleLogger = new ConsoleLogger:
     def info(message: => String): Unit = ()

@@ -84,3 +84,32 @@ class ConsoleLoggerTest extends FunSuite:
     // silent never emits, so the by-name body is never forced.
     assertEquals(evaluated, 0)
   }
+
+  test("routes factory dispatches each level to its dedicated callback") {
+    val infoMessages = scala.collection.mutable.ArrayBuffer.empty[String]
+    val warnMessages = scala.collection.mutable.ArrayBuffer.empty[String]
+    val errorMessages = scala.collection.mutable.ArrayBuffer.empty[String]
+    val logger = ConsoleLogger.routes(
+      infoEmit = infoMessages += _,
+      warnEmit = warnMessages += _,
+      errorEmit = errorMessages += _
+    )
+    logger.info("a")
+    logger.warn("b")
+    logger.error("c")
+    logger.info("d")
+    assertEquals(infoMessages.toVector, Vector("a", "d"))
+    assertEquals(warnMessages.toVector, Vector("b"))
+    assertEquals(errorMessages.toVector, Vector("c"))
+  }
+
+  test("routes factory passes the raw message (no prefix added)") {
+    var captured = ""
+    val logger = ConsoleLogger.routes(
+      infoEmit = m => captured = m,
+      warnEmit = _ => (),
+      errorEmit = _ => ()
+    )
+    logger.info("plain message")
+    assertEquals(captured, "plain message", "routes must not inject any prefix")
+  }

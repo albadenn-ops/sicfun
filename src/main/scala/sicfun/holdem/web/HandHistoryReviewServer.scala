@@ -3,6 +3,7 @@ package sicfun.holdem.web
 import sicfun.holdem.cli.CliHelpers
 import sicfun.holdem.history.HandHistorySite
 import sicfun.holdem.runtime.TexasHoldemPlayingHall
+import sicfun.holdem.types.ConsoleLogger
 
 import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 import ujson.{Arr, Obj, Str, Value}
@@ -2969,19 +2970,26 @@ object HandHistoryReviewServer:
   private def remoteAddress(exchange: HttpExchange): String =
     Option(exchange.getRemoteAddress).map(address => s"${address.getHostString}:${address.getPort}").getOrElse("-")
 
-  private def logInfo(message: String): Unit =
-    log("INFO", message, System.out)
+  /** ConsoleLogger backing the per-level helpers. Routes INFO to stdout, WARN and
+    * ERROR to stderr (operator attention) -- a stricter routing than the default
+    * `ConsoleLogger.stdout()` (which sends WARN to stdout). Each emit synchronises
+    * on its target stream so concurrent server threads can't interleave bytes
+    * within a single log line.
+    */
+  private val log: ConsoleLogger = ConsoleLogger.routes(
+    infoEmit = message => emitToStream(System.out, "INFO", message),
+    warnEmit = message => emitToStream(System.err, "WARN", message),
+    errorEmit = message => emitToStream(System.err, "ERROR", message)
+  )
 
-  private def logWarn(message: String): Unit =
-    log("WARN", message, System.err)
-
-  private def logError(message: String): Unit =
-    log("ERROR", message, System.err)
-
-  private def log(level: String, message: String, stream: java.io.PrintStream): Unit =
+  private def emitToStream(stream: java.io.PrintStream, level: String, message: String): Unit =
     stream.synchronized {
       stream.println(s"[${Instant.now()}] [$level] [hand-history-review] $message")
     }
+
+  private def logInfo(message: String): Unit = log.info(message)
+  private def logWarn(message: String): Unit = log.warn(message)
+  private def logError(message: String): Unit = log.error(message)
 
   private val usage =
     """Usage:
