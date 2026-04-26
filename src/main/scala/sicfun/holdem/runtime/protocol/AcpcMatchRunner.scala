@@ -236,7 +236,7 @@ private[holdem] object AcpcActionCodec:
           streetLastBetTo = streetLastBetTo,
           betHistory = betHistory
         )
-        val relativeActor = relativeActorId(actor, heroActual)
+        val relativeActor = ProtocolStreetMath.relativeActorId(actor, heroActual)
         val streetContributionBefore = streetContribution.toVector
         val totalContributionBefore = totalContribution.toVector
 
@@ -274,7 +274,7 @@ private[holdem] object AcpcActionCodec:
                   i += 1
                 handOver = true
                 nextActor = -1
-                streetIdx = math.max(streetIdx, streetIndexForBoard(fullBoard))
+                streetIdx = math.max(streetIdx, ProtocolStreetMath.streetIndexForBoard(fullBoard))
               else if checkOrCallEndsStreet then
                 if i < betting.length then
                   require(betting.charAt(i) == '/', "missing slash after street-ending call")
@@ -374,7 +374,7 @@ private[holdem] object AcpcActionCodec:
                   i += 1
                 handOver = true
                 nextActor = -1
-                streetIdx = math.max(streetIdx, streetIndexForBoard(fullBoard))
+                streetIdx = math.max(streetIdx, ProtocolStreetMath.streetIndexForBoard(fullBoard))
               else if checkOrCallEndsStreet then
                 if i < betting.length then
                   require(betting.charAt(i) == '/', "missing slash after street-ending call")
@@ -436,8 +436,8 @@ private[holdem] object AcpcActionCodec:
         handOver = true
         nextActor = -1
 
-      val currentStreet = streetFromIndex(streetIdx)
-      val currentBoard = boardForStreet(fullBoard, currentStreet)
+      val currentStreet = ProtocolStreetMath.streetFromIndex(streetIdx)
+      val currentBoard = ProtocolStreetMath.boardForStreet(fullBoard, currentStreet)
       val potChips = totalContribution.sum
       val toCallChips =
         if nextActor < 0 then 0
@@ -580,8 +580,8 @@ private[holdem] object AcpcActionCodec:
       betHistory: Vector[BetAction]
   ): GameState =
     GameState(
-      street = streetFromIndex(streetIdx),
-      board = boardForStreet(fullBoard, streetFromIndex(streetIdx)),
+      street = ProtocolStreetMath.streetFromIndex(streetIdx),
+      board = ProtocolStreetMath.boardForStreet(fullBoard, ProtocolStreetMath.streetFromIndex(streetIdx)),
       pot = chipsToBb(totalContribution.sum),
       toCall = chipsToBb(streetLastBetTo - streetContribution(actor)),
       position = positionForActual(actor),
@@ -589,32 +589,10 @@ private[holdem] object AcpcActionCodec:
       betHistory = betHistory
     )
 
-  private[protocol] def boardForStreet(fullBoard: Board, street: Street): Board =
-    val expected = street.expectedBoardSize
-    require(
-      fullBoard.size >= expected,
-      s"board has size ${fullBoard.size} but street $street requires at least $expected cards"
-    )
-    Board.from(fullBoard.cards.take(expected))
-
-  private[protocol] def streetIndexForBoard(board: Board): Int =
-    board.size match
-      case 0 => 0
-      case 3 => 1
-      case 4 => 2
-      case 5 => 3
-      case other => throw new IllegalArgumentException(s"unsupported board size: $other")
-
-  private[protocol] def streetFromIndex(streetIdx: Int): Street =
-    streetIdx match
-      case 0 => Street.Preflop
-      case 1 => Street.Flop
-      case 2 => Street.Turn
-      case 3 => Street.River
-      case other => throw new IllegalArgumentException(s"invalid street index: $other")
-
-  private[protocol] def relativeActorId(actualActor: Int, heroActual: Int): Int =
-    if actualActor == heroActual then 0 else 1
+  // Shared protocol street-math helpers (boardForStreet / streetIndexForBoard /
+  // streetFromIndex / relativeActorId) live in ProtocolStreetMath -- they are
+  // byte-identical between this codec and SlumbotMatchRunner, so the F4-cont
+  // slice extracted them to one home.
 
   /** Compute the signed chip result for a player at showdown, with side-pot resolution.
     *

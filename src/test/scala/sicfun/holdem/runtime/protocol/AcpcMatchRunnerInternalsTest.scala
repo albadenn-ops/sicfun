@@ -29,44 +29,44 @@ class AcpcMatchRunnerInternalsTest extends FunSuite:
   // ---- boardForStreet ----
 
   test("boardForStreet returns empty Board for Preflop") {
-    assertEquals(AcpcActionCodec.boardForStreet(fullBoard, Street.Preflop).cards, Vector.empty)
+    assertEquals(ProtocolStreetMath.boardForStreet(fullBoard, Street.Preflop).cards, Vector.empty)
   }
 
   test("boardForStreet slices Flop to first 3 cards") {
-    val flop = AcpcActionCodec.boardForStreet(fullBoard, Street.Flop)
+    val flop = ProtocolStreetMath.boardForStreet(fullBoard, Street.Flop)
     assertEquals(flop.cards, fullBoard.cards.take(3))
   }
 
   test("boardForStreet slices Turn to first 4 cards") {
-    val turn = AcpcActionCodec.boardForStreet(fullBoard, Street.Turn)
+    val turn = ProtocolStreetMath.boardForStreet(fullBoard, Street.Turn)
     assertEquals(turn.cards, fullBoard.cards.take(4))
   }
 
   test("boardForStreet returns full 5-card board for River") {
-    val river = AcpcActionCodec.boardForStreet(fullBoard, Street.River)
+    val river = ProtocolStreetMath.boardForStreet(fullBoard, Street.River)
     assertEquals(river.cards, fullBoard.cards)
   }
 
   test("boardForStreet rejects board with fewer cards than the street requires") {
     val flopOnly = Board.from(fullBoard.cards.take(3))
     intercept[IllegalArgumentException] {
-      AcpcActionCodec.boardForStreet(flopOnly, Street.Turn)
+      ProtocolStreetMath.boardForStreet(flopOnly, Street.Turn)
     }
   }
 
   // ---- streetIndexForBoard ----
 
   test("streetIndexForBoard maps board size to street index 0..3") {
-    assertEquals(AcpcActionCodec.streetIndexForBoard(Board.empty), 0)
-    assertEquals(AcpcActionCodec.streetIndexForBoard(Board.from(fullBoard.cards.take(3))), 1)
-    assertEquals(AcpcActionCodec.streetIndexForBoard(Board.from(fullBoard.cards.take(4))), 2)
-    assertEquals(AcpcActionCodec.streetIndexForBoard(Board.from(fullBoard.cards.take(5))), 3)
+    assertEquals(ProtocolStreetMath.streetIndexForBoard(Board.empty), 0)
+    assertEquals(ProtocolStreetMath.streetIndexForBoard(Board.from(fullBoard.cards.take(3))), 1)
+    assertEquals(ProtocolStreetMath.streetIndexForBoard(Board.from(fullBoard.cards.take(4))), 2)
+    assertEquals(ProtocolStreetMath.streetIndexForBoard(Board.from(fullBoard.cards.take(5))), 3)
   }
 
   test("streetIndexForBoard rejects unsupported board sizes (1, 2)") {
     val twoCards = Board.from(fullBoard.cards.take(2))
     intercept[IllegalArgumentException] {
-      AcpcActionCodec.streetIndexForBoard(twoCards)
+      ProtocolStreetMath.streetIndexForBoard(twoCards)
     }
   }
 
@@ -76,11 +76,11 @@ class AcpcMatchRunnerInternalsTest extends FunSuite:
     val sizes = Vector(0, 3, 4, 5)
     sizes.zipWithIndex.foreach { case (size, expectedIdx) =>
       val board = Board.from(fullBoard.cards.take(size))
-      val idx = AcpcActionCodec.streetIndexForBoard(board)
+      val idx = ProtocolStreetMath.streetIndexForBoard(board)
       assertEquals(idx, expectedIdx, s"size=$size")
-      val street = AcpcActionCodec.streetFromIndex(idx)
+      val street = ProtocolStreetMath.streetFromIndex(idx)
       assertEquals(
-        AcpcActionCodec.boardForStreet(fullBoard, street).cards,
+        ProtocolStreetMath.boardForStreet(fullBoard, street).cards,
         board.cards,
         s"round-trip failed at size=$size"
       )
@@ -88,17 +88,17 @@ class AcpcMatchRunnerInternalsTest extends FunSuite:
   }
 
   test("streetFromIndex rejects out-of-range indices") {
-    intercept[IllegalArgumentException] { AcpcActionCodec.streetFromIndex(-1) }
-    intercept[IllegalArgumentException] { AcpcActionCodec.streetFromIndex(4) }
+    intercept[IllegalArgumentException] { ProtocolStreetMath.streetFromIndex(-1) }
+    intercept[IllegalArgumentException] { ProtocolStreetMath.streetFromIndex(4) }
   }
 
   // ---- relativeActorId ----
 
   test("relativeActorId returns 0 when actor is hero, 1 otherwise") {
-    assertEquals(AcpcActionCodec.relativeActorId(actualActor = 0, heroActual = 0), 0)
-    assertEquals(AcpcActionCodec.relativeActorId(actualActor = 1, heroActual = 0), 1)
-    assertEquals(AcpcActionCodec.relativeActorId(actualActor = 0, heroActual = 1), 1)
-    assertEquals(AcpcActionCodec.relativeActorId(actualActor = 1, heroActual = 1), 0)
+    assertEquals(ProtocolStreetMath.relativeActorId(actualActor = 0, heroActual = 0), 0)
+    assertEquals(ProtocolStreetMath.relativeActorId(actualActor = 1, heroActual = 0), 1)
+    assertEquals(ProtocolStreetMath.relativeActorId(actualActor = 0, heroActual = 1), 1)
+    assertEquals(ProtocolStreetMath.relativeActorId(actualActor = 1, heroActual = 1), 0)
   }
 
   // ---- showdownValue (multiway side-pot resolver) ----

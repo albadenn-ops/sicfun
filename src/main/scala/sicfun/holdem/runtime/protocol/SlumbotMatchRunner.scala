@@ -147,7 +147,7 @@ private[holdem] object SlumbotActionCodec:
           streetLastBetTo = streetLastBetTo,
           betHistory = betHistory
         )
-        val relativeActor = relativeActorId(actor, heroActual)
+        val relativeActor = ProtocolStreetMath.relativeActorId(actor, heroActual)
         val streetContributionBefore = streetContribution.toVector
         val totalContributionBefore = totalContribution.toVector
         action.charAt(i) match
@@ -214,7 +214,7 @@ private[holdem] object SlumbotActionCodec:
                 i += 1
               handOver = true
               nextActor = -1
-              streetIdx = math.max(streetIdx, streetIndexForBoard(fullBoard))
+              streetIdx = math.max(streetIdx, ProtocolStreetMath.streetIndexForBoard(fullBoard))
             else if checkOrCallEndsStreet then
               if i < action.length then
                 require(action.charAt(i) == '/', "missing slash after street-ending call")
@@ -297,8 +297,8 @@ private[holdem] object SlumbotActionCodec:
           case other =>
             throw new IllegalArgumentException(s"unexpected token '$other' in Slumbot action string")
 
-      val currentStreet = streetFromIndex(streetIdx)
-      val currentBoard = boardForStreet(fullBoard, currentStreet)
+      val currentStreet = ProtocolStreetMath.streetFromIndex(streetIdx)
+      val currentBoard = ProtocolStreetMath.boardForStreet(fullBoard, currentStreet)
       val potChips = totalContribution.sum
       val toCallChips =
         if nextActor < 0 then 0
@@ -368,8 +368,8 @@ private[holdem] object SlumbotActionCodec:
       betHistory: Vector[BetAction]
   ): GameState =
     GameState(
-      street = streetFromIndex(streetIdx),
-      board = boardForStreet(fullBoard, streetFromIndex(streetIdx)),
+      street = ProtocolStreetMath.streetFromIndex(streetIdx),
+      board = ProtocolStreetMath.boardForStreet(fullBoard, ProtocolStreetMath.streetFromIndex(streetIdx)),
       pot = chipsToBb(totalContribution.sum),
       toCall = chipsToBb(streetLastBetTo - streetContribution(actor)),
       position = positionForActual(actor),
@@ -377,32 +377,8 @@ private[holdem] object SlumbotActionCodec:
       betHistory = betHistory
     )
 
-  private def boardForStreet(fullBoard: Board, street: Street): Board =
-    val expected = street.expectedBoardSize
-    require(
-      fullBoard.size >= expected,
-      s"board has size ${fullBoard.size} but street $street requires at least $expected cards"
-    )
-    Board.from(fullBoard.cards.take(expected))
-
-  private def streetIndexForBoard(board: Board): Int =
-    board.size match
-      case 0 => 0
-      case 3 => 1
-      case 4 => 2
-      case 5 => 3
-      case other => throw new IllegalArgumentException(s"unsupported board size: $other")
-
-  private def streetFromIndex(streetIdx: Int): Street =
-    streetIdx match
-      case 0 => Street.Preflop
-      case 1 => Street.Flop
-      case 2 => Street.Turn
-      case 3 => Street.River
-      case other => throw new IllegalArgumentException(s"invalid street index: $other")
-
-  private def relativeActorId(actualActor: Int, heroActual: Int): Int =
-    if actualActor == heroActual then 0 else 1
+  // Shared protocol street-math helpers live in ProtocolStreetMath
+  // (deduplicated from AcpcActionCodec).
 
 /** Match runner that plays heads-up hands against the Slumbot HTTP API.
   *
