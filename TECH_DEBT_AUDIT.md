@@ -1,6 +1,6 @@
 # SICFUN Tech Debt — live register
 
-**Anchor:** `f92c9b4cbb7dfb27fce58ac70a00ae054b751960` (HEAD on `claude/vibrant-kalam-e96d51`), captured 2026-04-26.
+**Anchor:** `efd63ba4fd50e12b3bcfcea168e31567b22824bc` (HEAD on `claude/vibrant-kalam-e96d51`), captured 2026-04-26 (refreshed).
 **Original anchor:** [`fcbc3a8a`](docs/audits/2026-04-25_anchor_fcbc3a8a.md) (frozen historical audit, 2026-04-25).
 
 Status legend:
@@ -16,9 +16,9 @@ Status legend:
 | F1 | High (Test) | partial | `tablegen/`, `equity/HeadsUpEquityCanonicalTable.scala` | `tablegen/` zero-tests; canonical-key invariants + binary-IO roundtrip + Exact-vs-MC parity now pinned in `equity/`. |
 | F2 | High (Code) | partial | 507 `println` sites in `src/main` | `ConsoleLogger` trait shipped; `AdaptiveProofHarness` and `HandHistoryReviewServer` migrated; remaining `runtime/`/`provider/`/`cfr/` files open. |
 | F3 | High (Arch) | partial | `web/HandHistoryReviewServer.scala` | 3057-LOC monolith; `WebResponses` extracted (5 fns); routing/auth/job-store/rate-limit/csrf splits open. |
-| F4 | High (Test/Arch) | partial | `runtime/` (9,247 LOC, ratio 0.31) | Multi-table tableId schedule pinned; `AcpcHeadsUpDealer` pure helpers pinned; bigger runtime files (AcpcMatchRunner 1255, SlumbotMatchRunner 1083) still under-tested. |
+| F4 | High (Test/Arch) | partial | `runtime/` (9,247 LOC, ratio 0.31) | Multi-table tableId schedule pinned; `AcpcHeadsUpDealer` + `AcpcActionCodec` (16 internals tests, incl. multiway side-pot resolver chip-conservation) pure helpers pinned; protocol street-math deduplicated into `ProtocolStreetMath`. `AdvisorSession` state machine + `SlumbotMatchRunner` non-shared internals still untested. |
 | F5 | Med (Arch) | open | `cfr/HoldemCfrSolver.scala` | 3728-LOC god-file, 18 top-level decls; multi-sprint split. Lower urgency until other items land. |
-| F6 | Med (Arch) | partial | `runtime/TexasHoldemPlayingHall.scala` | 2,500-LOC monolith; `HallFormat` (8 fns) + `HallVillain` (VillainMode types + CLI parsing) extracted. `HallConfig`/`TableSimulator`/`TrainingRetrainHook` extractions open. |
+| F6 | Med (Arch) | partial | `runtime/TexasHoldemPlayingHall.scala` | Monolith down from 2,540 -> 2,181 LOC. `HallFormat` (8 fns), `HallVillain` (VillainMode types + CLI parsing), `HallConfig` (Config + parseArgs + 9 *Opt helpers + position resolution + usage) all extracted with their own tests. `TableSimulator`/`TrainingRetrainHook` extractions open. |
 | F7 | Med (Code) | closed | `KernelConstructor.scala`, 3 strategic test files | All 3 test files migrated off deprecated `composeFullKernelForWorld` / `buildDesignKernel`; `@nowarn("cat=deprecation")` removed. Deprecated overloads themselves stay (may have external consumers). |
 | F8 | Low (Test) | closed | `bench/BenchSupport.scala` | `BenchSupportTest` pre-existed and covers critical paths. Audit explicitly says "do not chase coverage of benchmark drivers". |
 | F9 | Low (Docs) | closed | `ROADMAP.md:74` | Path corrected to `docs/ai/AI_CONTEXT_ARCHIVE.md` in commit `33ebae2`. |
@@ -30,14 +30,14 @@ Status legend:
 | F15 | Low (Infra) | deferred | `scripts/*.ps1`, `build.sbt:142–175` | PowerShell-only is a design choice on Windows-only host; only matters if Linux build becomes a goal. |
 | F16 | Low (Docs) | open | `data/phase2-a3/`, `data/phase2-a4/` | 4 tracked files violate README "data/ is not repo content"; needs user judgment on move target vs README revision. |
 | F17 | Med (Arch) | open | 110 `sys.props` / env reads across ≥20 files | Cross-cutting refactor; `HeadsUpGpuExactParityGate.buildSlice` mutates process-wide props. Needs `ScopedRuntimeProperties` design before touching. |
-| F18 | Low (Docs) | open | `docs/superpowers/plans/`, `docs/superpowers/specs/` | 47 dated plan/spec files, no status front-matter; cheap fix is a status convention + index file. |
+| F18 | Low (Docs) | partial | `docs/superpowers/README.md`, `docs/superpowers/plans/`, `docs/superpowers/specs/` | Index + forward-looking front-matter convention (status: draft\|active\|landed\|abandoned) shipped in `docs/superpowers/README.md`. Back-fill of front-matter into the 44 existing files is per-file research work, deferred. |
 | F19 | Low (Infra) | closed | repo root `hs_err_pid*.log` etc. | Already covered by `.gitignore:125-127`; nothing tracked, nothing to do. |
 | A1 | — | phantom | (referenced `build.sbt:54`) | `productionMode` setting key does not exist in this branch (`git grep -E productionMode` returns nothing); the proceed-pass plan referenced state not present here. |
 | A2 | — | closed | `provider/HoldemDdreOnnxRuntime.scala` | See F14 — typed-API rewrite landed. |
 | A3 | — | closed | `test/strategic/ReductionismManifestTest.scala` | Gate armed: `assert(true)` → structural invariant; Silent + Orphan severities now `fail()` with offender list; gate fire verified by injected fixture. |
 | B1 | — | partial | `cfr/`, `gpu/`, 5 files | NonFatal substituted across audit-listed sites; CUDA/OpenCL/CPU device-discovery failures now visible via `GpuRuntimeSupport.warn`. Per-provider failure counters exposed via `/health` deferred. |
 | B2 | — | partial | `validation/AdaptiveProofHarness.scala`, `web/HandHistoryReviewServer.scala` | `ConsoleLogger` trait shipped; AdaptiveProofHarness + HHRS migrated; `runtime/` and `runtime/protocol/` migrations open. |
-| B3 | — | partial | `runtime/`, `web/` | 4 extractions landed (`HallFormat`, `HallVillain`, `WebResponses`); web routing/auth-stack/job-store splits remain. |
+| B3 | — | partial | `runtime/`, `web/` | 5 extractions landed (`HallFormat`, `HallVillain`, `HallConfig`, `WebResponses`, `ProtocolStreetMath` dedupe); web routing/auth-stack/job-store/rate-limit splits remain. |
 | B4 | — | deferred | `project/plugins.sbt` | scoverage adoption is a build-engineering decision (test-time dep, CI threshold strategy); not actionable as a single bounded commit. |
 | C1 | — | closed | this file | Audit doc renamed to `docs/audits/2026-04-25_anchor_fcbc3a8a.md` and frozen; this register replaces the old single-file audit. Per-finding sub-files deferred — overhead exceeded value at current finding count. |
 | C2 | — | closed | `ROADMAP.md` | M5/M6/M9/M10/M11 ROADMAP claims aligned with code reality. |
