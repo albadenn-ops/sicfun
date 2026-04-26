@@ -232,43 +232,44 @@ object TexasHoldemPlayingHall:
     * Returns exit code 1 on failure (unless `--help` was requested).
     */
   def main(args: Array[String]): Unit =
+    val log = ConsoleLogger.stdout()
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
       case Right(summary) =>
-        println("=== Texas Hold'em Playing Hall ===")
-        println(s"handsPlayed: ${summary.handsPlayed}")
-        println(s"tableCount: ${summary.tableCount}")
-        println(s"playerCount: ${summary.playerCount}")
-        println(f"heroNetChips: ${summary.heroNetChips}%.4f")
-        println(f"heroBbPer100: ${summary.heroBbPer100}%.3f")
-        println(s"heroWins: ${summary.heroWins}")
-        println(s"heroTies: ${summary.heroTies}")
-        println(s"heroLosses: ${summary.heroLosses}")
-        println(s"actionCounts: ${summary.actionCounts}")
-        println(s"retrains: ${summary.retrains}")
+        log.info("=== Texas Hold'em Playing Hall ===")
+        log.info(s"handsPlayed: ${summary.handsPlayed}")
+        log.info(s"tableCount: ${summary.tableCount}")
+        log.info(s"playerCount: ${summary.playerCount}")
+        log.info(f"heroNetChips: ${summary.heroNetChips}%.4f")
+        log.info(f"heroBbPer100: ${summary.heroBbPer100}%.3f")
+        log.info(s"heroWins: ${summary.heroWins}")
+        log.info(s"heroTies: ${summary.heroTies}")
+        log.info(s"heroLosses: ${summary.heroLosses}")
+        log.info(s"actionCounts: ${summary.actionCounts}")
+        log.info(s"retrains: ${summary.retrains}")
         if summary.exactGtoCacheTotal > 0 then
-          println(s"exactGtoCacheHits: ${summary.exactGtoCacheHits}")
-          println(s"exactGtoCacheMisses: ${summary.exactGtoCacheMisses}")
-          println(f"exactGtoCacheHitRate: ${summary.exactGtoCacheHitRate * 100.0}%.1f%%")
-          println(s"exactGtoSolvedByProvider: ${formatLongCountMap(summary.exactGtoSolvedByProvider)}")
-          println(s"exactGtoServedByProvider: ${formatLongCountMap(summary.exactGtoServedByProvider)}")
-        println(s"modelId: ${summary.modelId}")
-        println(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
+          log.info(s"exactGtoCacheHits: ${summary.exactGtoCacheHits}")
+          log.info(s"exactGtoCacheMisses: ${summary.exactGtoCacheMisses}")
+          log.info(f"exactGtoCacheHitRate: ${summary.exactGtoCacheHitRate * 100.0}%.1f%%")
+          log.info(s"exactGtoSolvedByProvider: ${formatLongCountMap(summary.exactGtoSolvedByProvider)}")
+          log.info(s"exactGtoServedByProvider: ${formatLongCountMap(summary.exactGtoServedByProvider)}")
+        log.info(s"modelId: ${summary.modelId}")
+        log.info(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
         summary.overlayStats.foreach { os =>
-          println(s"overlayDecisions: ${os.decisions}")
-          println(f"overlayChangeRate: ${os.overlayChangeRate * 100.0}%.1f%%")
-          println(f"vetoRate: ${os.vetoRate * 100.0}%.1f%%")
-          println(s"decisionsWithVeto: ${os.decisionsWithVeto}")
-          println(s"totalVetoedActions: ${os.totalVetoedActions}")
-          println(f"meanLatencyMs: ${os.meanLatencyMs}%.3f")
-          println(f"p95LatencyMs: ${os.p95LatencyMs}%.3f")
-          println(f"p99LatencyMs: ${os.p99LatencyMs}%.3f")
-          println(s"actionDistribution: ${os.actionDistribution.toVector.sortBy(-_._2).map((k,v) => s"$k=$v").mkString(", ")}")
+          log.info(s"overlayDecisions: ${os.decisions}")
+          log.info(f"overlayChangeRate: ${os.overlayChangeRate * 100.0}%.1f%%")
+          log.info(f"vetoRate: ${os.vetoRate * 100.0}%.1f%%")
+          log.info(s"decisionsWithVeto: ${os.decisionsWithVeto}")
+          log.info(s"totalVetoedActions: ${os.totalVetoedActions}")
+          log.info(f"meanLatencyMs: ${os.meanLatencyMs}%.3f")
+          log.info(f"p95LatencyMs: ${os.p95LatencyMs}%.3f")
+          log.info(f"p99LatencyMs: ${os.p99LatencyMs}%.3f")
+          log.info(s"actionDistribution: ${os.actionDistribution.toVector.sortBy(-_._2).map((k,v) => s"$k=$v").mkString(", ")}")
         }
       case Left(error) =>
-        if wantsHelp then println(error)
+        if wantsHelp then log.info(error)
         else
-          System.err.println(error)
+          log.error(error)
           sys.exit(1)
 
   /** Programmatic entry point: parses CLI args and runs the full simulation.
@@ -522,10 +523,12 @@ object TexasHoldemPlayingHall:
         actionCounts.update(key, actionCounts(key) + 1)
       }
 
+    private val reportLogger = ConsoleLogger.stdout()
+
     private def maybeReport(handNo: Int): Unit =
       if config.reportEvery > 0 && (handNo % config.reportEvery == 0 || handNo == config.hands) then
         val bb100 = if handNo > 0 then (heroNet / handNo.toDouble) * 100.0 else 0.0
-        println(
+        reportLogger.info(
           f"[hall] hand=$handNo%,d net=${heroNet}%.2f bb100=$bb100%.2f retrains=$retrains model=${activeArtifact.version.id}"
         )
 
