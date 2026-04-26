@@ -77,23 +77,24 @@ object LiveHandSimulator:
   )
 
   def main(args: Array[String]): Unit =
+    val log = ConsoleLogger.stdout()
     run(args) match
       case Right(result) =>
-        println("=== Live Hand Simulator ===")
-        println(s"bestAction: ${renderAction(result.bestAction)}")
-        println(s"heroEquityMean: ${fmt(result.heroEquityMean, 5)}")
-        println(s"heroEquityStdErr: ${fmt(result.heroEquityStdErr, 6)}")
-        println(s"archetypeMap: ${result.archetypeMap}")
-        println(s"signalCount: ${result.signalCount}")
+        log.info("=== Live Hand Simulator ===")
+        log.info(s"bestAction: ${renderAction(result.bestAction)}")
+        log.info(s"heroEquityMean: ${fmt(result.heroEquityMean, 5)}")
+        log.info(s"heroEquityStdErr: ${fmt(result.heroEquityStdErr, 6)}")
+        log.info(s"archetypeMap: ${result.archetypeMap}")
+        log.info(s"signalCount: ${result.signalCount}")
         result.artifactRoot match
-          case Some(path) => println(s"artifactRoot: ${path.toAbsolutePath.normalize()}")
-          case None => println("artifactRoot: <deleted>")
-        println("topPosterior:")
+          case Some(path) => log.info(s"artifactRoot: ${path.toAbsolutePath.normalize()}")
+          case None => log.info("artifactRoot: <deleted>")
+        log.info("topPosterior:")
         result.topPosterior.foreach { case (hand, prob) =>
-          println(s"  ${hand.toToken} -> ${fmt(prob, 6)}")
+          log.info(s"  ${hand.toToken} -> ${fmt(prob, 6)}")
         }
       case Left(error) =>
-        System.err.println(error)
+        log.error(error)
         sys.exit(1)
 
   def run(args: Array[String]): Either[String, RunResult] =
