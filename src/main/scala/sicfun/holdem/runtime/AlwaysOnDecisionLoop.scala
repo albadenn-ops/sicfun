@@ -125,19 +125,20 @@ object AlwaysOnDecisionLoop:
   )
 
   def main(args: Array[String]): Unit =
+    val log = ConsoleLogger.stdout()
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
       case Right(result) =>
-        println("=== Always-On Decision Loop ===")
-        println(s"processedEvents: ${result.processedEvents}")
-        println(s"decisionsEmitted: ${result.decisionsEmitted}")
-        println(s"retrainCount: ${result.retrainCount}")
-        println(s"latestModelDir: ${result.latestModelDir.toAbsolutePath.normalize()}")
-        println(s"outputDir: ${result.outputDir.toAbsolutePath.normalize()}")
+        log.info("=== Always-On Decision Loop ===")
+        log.info(s"processedEvents: ${result.processedEvents}")
+        log.info(s"decisionsEmitted: ${result.decisionsEmitted}")
+        log.info(s"retrainCount: ${result.retrainCount}")
+        log.info(s"latestModelDir: ${result.latestModelDir.toAbsolutePath.normalize()}")
+        log.info(s"outputDir: ${result.outputDir.toAbsolutePath.normalize()}")
       case Left(error) =>
-        if wantsHelp then println(error)
+        if wantsHelp then log.info(error)
         else
-          System.err.println(error)
+          log.error(error)
           sys.exit(1)
 
   def run(args: Array[String]): Either[String, RunSummary] =

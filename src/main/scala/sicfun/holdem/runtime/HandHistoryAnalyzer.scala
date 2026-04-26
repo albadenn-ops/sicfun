@@ -117,12 +117,13 @@ object HandHistoryAnalyzer:
     roundDecisionEv(decision.evDifference) < 0.0
 
   def main(args: Array[String]): Unit =
+    val log = ConsoleLogger.stdout()
     run(args) match
       case Left(err) =>
-        System.err.println(err)
+        log.error(err)
         sys.exit(1)
       case Right(summary) =>
-        printSummary(summary)
+        printSummary(summary, log)
 
   def run(args: Array[String]): Either[String, AnalysisSummary] =
     for
@@ -417,20 +418,20 @@ object HandHistoryAnalyzer:
 
   // ---- Output ----
 
-  private def printSummary(summary: AnalysisSummary): Unit =
-    println("=== Hand History Analysis ===")
-    println(f"  Hands analyzed: ${summary.handsAnalyzed}")
-    println(f"  Decisions analyzed: ${summary.decisionsAnalyzed}")
-    println(f"  Mistakes: ${summary.mistakes} (${if summary.decisionsAnalyzed > 0 then summary.mistakes * 100.0 / summary.decisionsAnalyzed else 0.0}%.1f%%)")
-    println(f"  Total EV lost: ${summary.totalEvLost}%.2f")
-    println(f"  Biggest mistake: ${summary.biggestMistakeEv}%.2f")
+  private def printSummary(summary: AnalysisSummary, log: ConsoleLogger): Unit =
+    log.info("=== Hand History Analysis ===")
+    log.info(f"  Hands analyzed: ${summary.handsAnalyzed}")
+    log.info(f"  Decisions analyzed: ${summary.decisionsAnalyzed}")
+    log.info(f"  Mistakes: ${summary.mistakes} (${if summary.decisionsAnalyzed > 0 then summary.mistakes * 100.0 / summary.decisionsAnalyzed else 0.0}%.1f%%)")
+    log.info(f"  Total EV lost: ${summary.totalEvLost}%.2f")
+    log.info(f"  Biggest mistake: ${summary.biggestMistakeEv}%.2f")
 
     if summary.decisions.nonEmpty then
-      println()
-      println("  Per-decision breakdown:")
+      log.info("")
+      log.info("  Per-decision breakdown:")
       summary.decisions.foreach { d =>
         val mark = if countsAsMistake(d) then "MISS" else "OK"
-        println(f"    ${d.handId} ${d.street}: actual=${renderAction(d.actualAction)} rec=${renderAction(d.recommendedAction)} ev_diff=${d.evDifference}%+.2f $mark")
+        log.info(f"    ${d.handId} ${d.street}: actual=${renderAction(d.actualAction)} rec=${renderAction(d.recommendedAction)} ev_diff=${d.evDifference}%+.2f $mark")
       }
 
   // ---- Helpers ----
