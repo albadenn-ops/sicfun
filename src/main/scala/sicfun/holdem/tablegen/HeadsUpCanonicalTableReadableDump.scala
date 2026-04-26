@@ -18,7 +18,7 @@ import scala.collection.mutable
   */
 object HeadsUpCanonicalTableReadableDump:
   /** A single decoded row ready for TSV output, with both raw hand tokens and class labels. */
-  private final case class Row(
+  private[tablegen] final case class Row(
       key: Int,
       hero: String,
       villain: String,
@@ -126,7 +126,7 @@ object HeadsUpCanonicalTableReadableDump:
     }
     out.toMap
 
-  private def sortRows(rows: Vector[Row], sortBy: String, order: String): Vector[Row] =
+  private[tablegen] def sortRows(rows: Vector[Row], sortBy: String, order: String): Vector[Row] =
     val ascending =
       sortBy match
         case "key" => rows.sortBy(_.key)
@@ -166,7 +166,7 @@ object HeadsUpCanonicalTableReadableDump:
   /** Converts a specific hole card combo to its hand class token (e.g., "AKs", "TT", "72o").
     * Pairs get two characters (e.g., "AA"), non-pairs get three (high+low+suitedness).
     */
-  private def handClass(hand: HoleCards): String =
+  private[tablegen] def handClass(hand: HoleCards): String =
     val r1 = hand.first.rank
     val r2 = hand.second.rank
     val c1 = r1.toChar
