@@ -5,7 +5,7 @@ import sicfun.holdem.equity.{TableFormat, TableRanges}
 import sicfun.holdem.history.{ExploitHint, HandHistoryImport, HandHistorySite, OpponentProfile}
 import sicfun.holdem.model.{PokerActionModel, PokerActionModelArtifactIO}
 import sicfun.holdem.strategic.bridge.StrategicSnapshot
-import sicfun.holdem.types.{GameState, PokerAction, Position, Street}
+import sicfun.holdem.types.{ConsoleLogger, GameState, PokerAction, Position, Street}
 import sicfun.holdem.web.HandHistoryReviewServer
 
 import java.nio.file.{Files, Path, Paths}
@@ -18,6 +18,9 @@ import java.nio.file.{Files, Path, Paths}
   *   5. Produce scorecard
   */
 object ValidationRunner:
+
+  private val log: ConsoleLogger = ConsoleLogger.stdout()
+
 
   /** Configuration for a validation run.
     *
@@ -104,26 +107,26 @@ object ValidationRunner:
     val population = config.severityFilter match
       case Some(sev) => defaultPopulation.filter(_._2.endsWith(s"_$sev"))
       case None      => defaultPopulation
-    println("=== Profiling Validation Harness ===")
-    println(s"Players: ${population.size}")
-    println(s"Hands per player: ${config.handsPerPlayer}")
-    println(s"Total hands: ${population.size.toLong * config.handsPerPlayer}")
-    println()
+    log.info("=== Profiling Validation Harness ===")
+    log.info(s"Players: ${population.size}")
+    log.info(s"Hands per player: ${config.handsPerPlayer}")
+    log.info(s"Total hands: ${population.size.toLong * config.handsPerPlayer}")
+    log.info("")
 
     val results = population.zipWithIndex.map { case ((leak, villainName), idx) =>
-      println(s"[${idx + 1}/${population.size}] Simulating $villainName ...")
+      log.info(s"[${idx + 1}/${population.size}] Simulating $villainName ...")
       val result = runOnePlayer(config, leak, villainName, playerSeed = config.seed + idx)
-      println(f"  -> ${result.leakFiredCount} leaks fired, hero EV ${result.heroNetBbPer100}%+.1f bb/100")
+      log.info(f"  -> ${result.leakFiredCount} leaks fired, hero EV ${result.heroNetBbPer100}%+.1f bb/100")
       result
     }
 
     val report = ValidationScorecard.format(results)
-    println()
-    println(report)
+    log.info("")
+    log.info(report)
 
     val reportPath = config.outputDir.resolve("scorecard.txt")
     Files.writeString(reportPath, report)
-    println(s"Scorecard saved to $reportPath")
+    log.info(s"Scorecard saved to $reportPath")
 
     results
 
@@ -262,7 +265,7 @@ object ValidationRunner:
         case Left(err) =>
           parseFailures += 1
           if parseFailures <= 3 then
-            System.err.println(s"  [WARN] Parse failure at chunk ${chunk.chunkIndex} for $villainName: $err")
+            log.warn(s"Parse failure at chunk ${chunk.chunkIndex} for $villainName: $err")
         case Right(hands) =>
           allParsedHands ++= hands
     }
@@ -295,7 +298,7 @@ object ValidationRunner:
           val turnRaises = turnEvts.count(_.action.category == PokerAction.Category.Raise)
           val riverFacing = evts.filter(e => e.street == Street.River && e.toCall > 0)
           val riverFolds = riverFacing.count(_.action == PokerAction.Fold)
-          println(f"  [DBG] $villainName: evts=${evts.size} turn(n=${turnEvts.size} r=$turnRaises) rvr(facing=${riverFacing.size} folds=$riverFolds) hints=$hints")
+          log.info(f"  [DBG] $villainName: evts=${evts.size} turn(n=${turnEvts.size} r=$turnRaises) rvr(facing=${riverFacing.size} folds=$riverFolds) hints=$hints")
       }
 
     // Deferred enhancement: add cluster analysis using PlayerSignature.compute for assignment.
@@ -324,7 +327,7 @@ object ValidationRunner:
     // Pick severe variants for spot-checking (most visible leaks)
     val severeResults = results.filter(_.severity >= 0.9)
     if severeResults.isEmpty then
-      println("No severe-severity players to spot-check.")
+      log.info("No severe-severity players to spot-check.")
       return
 
     // Copy sample chunks to a spot-check directory the web UI can reference
@@ -338,11 +341,11 @@ object ValidationRunner:
         Files.copy(chunkFile, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
     }
 
-    println()
-    println("=== Web Spot-Check Mode ===")
-    println(s"Starting HandHistoryReviewServer...")
-    println(s"Upload files from: ${spotCheckDir.toAbsolutePath.normalize()}")
-    println()
+    log.info("")
+    log.info("=== Web Spot-Check Mode ===")
+    log.info(s"Starting HandHistoryReviewServer...")
+    log.info(s"Upload files from: ${spotCheckDir.toAbsolutePath.normalize()}")
+    log.info("")
 
     val serverArgs = Array(
       s"--port=8090",
@@ -353,14 +356,14 @@ object ValidationRunner:
     )
     HandHistoryReviewServer.start(serverArgs) match
       case Right(server) =>
-        println(s"Web server running at http://127.0.0.1:8090/")
-        println(s"Upload the chunk files above to analyze in the browser.")
-        println("Press Ctrl+C to stop.")
+        log.info(s"Web server running at http://127.0.0.1:8090/")
+        log.info(s"Upload the chunk files above to analyze in the browser.")
+        log.info("Press Ctrl+C to stop.")
         try Thread.currentThread().join()
         catch case _: InterruptedException => ()
         finally server.close()
       case Left(err) =>
-        println(s"Failed to start web server: $err")
+        log.info(s"Failed to start web server: $err")
 
   /** Check if any exploit hint text matches the injected leak concept.
     *
