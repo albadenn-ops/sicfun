@@ -103,6 +103,7 @@ data/slumbot-*/
 data/playing-hall-*/
 data/benchmarks/
 data/manual-bench-auto/
+data/matches/
 
 ### Retained phase rerun summaries ###
 data/phase2-*/*/**
