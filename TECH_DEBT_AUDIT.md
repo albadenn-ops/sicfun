@@ -1,6 +1,6 @@
 # SICFUN Tech Debt — live register
 
-**Anchor:** `c4110d34cae942b3a14541f5814b508714d59402` (HEAD on `claude/vibrant-kalam-e96d51`), captured 2026-04-26 (refreshed).
+**Anchor:** `90725e01123aebcc5c59fa08d248ddba88c2ff35` (HEAD on `claude/vibrant-kalam-e96d51`), captured 2026-04-26 (refreshed).
 **Original anchor:** [`fcbc3a8a`](docs/audits/2026-04-25_anchor_fcbc3a8a.md) (frozen historical audit, 2026-04-25).
 
 Status legend:
@@ -13,10 +13,10 @@ Status legend:
 
 | ID | Severity | Status | Anchor (file:line) | One-line |
 |---|---|---|---|---|
-| F1 | High (Test) | partial | `tablegen/`, `equity/HeadsUpEquityCanonicalTable.scala` | `tablegen/` zero-tests; canonical-key invariants + binary-IO roundtrip + Exact-vs-MC parity now pinned in `equity/`. |
+| F1 | High (Test) | partial | `tablegen/`, `equity/HeadsUpEquityCanonicalTable.scala` | Canonical-key invariants + binary-IO roundtrip + Exact-vs-MC parity pinned in `equity/`. `tablegen/` test directory now exists with HeadsUpCanonicalTableReadableDumpTest pinning `handClass` + `sortRows` (11 tests). Other tablegen runners (Generate*, Inspect*, *Tuner) still untested -- they're CLI mains with file-IO side effects. |
 | F2 | High (Code) | closed-needs-verification | covered packages: `runtime/`, `validation/`, `provider/`, `equity/`, `model/`, `cfr/`, `gpu/` | All audit Phase 2 + step 3 packages migrated to `ConsoleLogger`. Closed files: AdaptiveProofHarness, HandHistoryReviewServer (full local logger), LiveHandSimulator, AlwaysOnDecisionLoop, HandHistoryAnalyzer, AcpcHeadsUpDealer, AcpcMatchRunner, SlumbotMatchRunner, TexasHoldemPlayingHall, ValidationRunner, HoldemDdreOfflineGate, HeadsUpTableInfo, TrainPokerActionModel, all 5 cfr/ tools, GpuRuntimeSupport (routed). Intentionally on `println`: `PokerAdvisor` interactive REPL (user UI per audit guidance), `analysis/`, `history/`, `tablegen/` CLIs (stdout-as-output contract per audit B2 step 4). The 6 remaining println-shaped lines are stream-sink leaves inside the loggers themselves. |
-| F3 | High (Arch) | partial | `web/HandHistoryReviewServer.scala` | 3057-LOC monolith; `WebResponses` extracted (5 fns); routing/auth/job-store/rate-limit/csrf splits open. |
-| F4 | High (Test/Arch) | partial | `runtime/` (9,247 LOC, ratio 0.31) | Multi-table tableId schedule pinned; `AcpcHeadsUpDealer` + `AcpcActionCodec` (16 internals tests, incl. multiway side-pot resolver chip-conservation) pure helpers pinned; protocol street-math deduplicated into `ProtocolStreetMath`. `AdvisorSession` state machine + `SlumbotMatchRunner` non-shared internals still untested. |
+| F3 | High (Arch) | partial | `web/HandHistoryReviewServer.scala` | Monolith down from 3057 -> 2901 LOC. Extracted: `WebResponses` (5 fns), `WebRateLimiter` (windowing + bucket types, with 9 unit tests via clientKeyFor callback), `AnalysisJobState` (shared ADT). Routing / AuthStack / AnalysisJobStore / PlayingHallJobStore extractions still open; each is ~290 LOC and tightly coupled. |
+| F4 | High (Test/Arch) | partial | `runtime/` (9,247 LOC, ratio 0.31) | Multi-table tableId schedule pinned; `AcpcHeadsUpDealer` + `AcpcActionCodec` (16 internals tests including multiway side-pot resolver chip-conservation) pure helpers pinned; protocol street-math deduplicated into `ProtocolStreetMath`; `SlumbotActionCodec` non-parse helpers (incrementForAction inverse, positionForActual, chipsToBb / bbToChips edge cases) pinned. `AdvisorSession` state machine has 37 existing tests already; uncovered surfaces are CLI runners + integration paths. |
 | F5 | Med (Arch) | open | `cfr/HoldemCfrSolver.scala` | 3728-LOC god-file, 18 top-level decls; multi-sprint split. Lower urgency until other items land. |
 | F6 | Med (Arch) | partial | `runtime/TexasHoldemPlayingHall.scala` | Monolith down from 2,540 -> 2,181 LOC. `HallFormat` (8 fns), `HallVillain` (VillainMode types + CLI parsing), `HallConfig` (Config + parseArgs + 9 *Opt helpers + position resolution + usage) all extracted with their own tests. `TableSimulator`/`TrainingRetrainHook` extractions open. |
 | F7 | Med (Code) | closed | `KernelConstructor.scala`, 3 strategic test files | All 3 test files migrated off deprecated `composeFullKernelForWorld` / `buildDesignKernel`; `@nowarn("cat=deprecation")` removed. Deprecated overloads themselves stay (may have external consumers). |
@@ -37,7 +37,7 @@ Status legend:
 | A3 | — | closed | `test/strategic/ReductionismManifestTest.scala` | Gate armed: `assert(true)` → structural invariant; Silent + Orphan severities now `fail()` with offender list; gate fire verified by injected fixture. |
 | B1 | — | partial | `cfr/`, `gpu/`, 5 files | NonFatal substituted across audit-listed sites; CUDA/OpenCL/CPU device-discovery failures now visible via `GpuRuntimeSupport.warn`. Per-provider failure counters exposed via `/health` deferred. |
 | B2 | — | closed-needs-verification | every audit-listed package | See F2 -- the audit Phase 2 + step 3 migration is complete. Phase 4 step 4 (analysis/history/tablegen CLIs) explicitly stays on stdout per audit guidance. |
-| B3 | — | partial | `runtime/`, `web/` | 5 extractions landed (`HallFormat`, `HallVillain`, `HallConfig`, `WebResponses`, `ProtocolStreetMath` dedupe); web routing/auth-stack/job-store/rate-limit splits remain. |
+| B3 | — | partial | `runtime/`, `web/` | 7 extractions landed (`HallFormat`, `HallVillain`, `HallConfig`, `WebResponses`, `WebRateLimiter`, `AnalysisJobState`, `ProtocolStreetMath` dedupe). Web routing/auth-stack/job-store splits remain; rate-limit windowing now extractable + unit-testable. |
 | B4 | — | deferred | `project/plugins.sbt` | scoverage adoption is a build-engineering decision (test-time dep, CI threshold strategy); not actionable as a single bounded commit. |
 | C1 | — | closed | this file | Audit doc renamed to `docs/audits/2026-04-25_anchor_fcbc3a8a.md` and frozen; this register replaces the old single-file audit. Per-finding sub-files deferred — overhead exceeded value at current finding count. |
 | C2 | — | closed | `ROADMAP.md` | M5/M6/M9/M10/M11 ROADMAP claims aligned with code reality. |
