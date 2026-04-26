@@ -1,6 +1,6 @@
 # SICFUN Tech Debt — live register
 
-**Anchor:** `efd63ba4fd50e12b3bcfcea168e31567b22824bc` (HEAD on `claude/vibrant-kalam-e96d51`), captured 2026-04-26 (refreshed).
+**Anchor:** `6b5f441dff8253a72c0223ab797e168eceb5690f` (HEAD on `claude/vibrant-kalam-e96d51`), captured 2026-04-26 (refreshed).
 **Original anchor:** [`fcbc3a8a`](docs/audits/2026-04-25_anchor_fcbc3a8a.md) (frozen historical audit, 2026-04-25).
 
 Status legend:
@@ -14,7 +14,7 @@ Status legend:
 | ID | Severity | Status | Anchor (file:line) | One-line |
 |---|---|---|---|---|
 | F1 | High (Test) | partial | `tablegen/`, `equity/HeadsUpEquityCanonicalTable.scala` | `tablegen/` zero-tests; canonical-key invariants + binary-IO roundtrip + Exact-vs-MC parity now pinned in `equity/`. |
-| F2 | High (Code) | partial | 507 `println` sites in `src/main` | `ConsoleLogger` trait shipped; `AdaptiveProofHarness` and `HandHistoryReviewServer` migrated; remaining `runtime/`/`provider/`/`cfr/` files open. |
+| F2 | High (Code) | partial | `runtime/`, `cfr/`, `provider/` `println` sites | `ConsoleLogger` trait shipped; migrated: `AdaptiveProofHarness`, `HandHistoryReviewServer` (full local logger), `LiveHandSimulator`, `AlwaysOnDecisionLoop`, `HandHistoryAnalyzer`, `AcpcHeadsUpDealer`. Remaining: `AcpcMatchRunner`/`SlumbotMatchRunner` (16+16 sites), `TexasHoldemPlayingHall` (dense), `cfr/` files, `provider/` files. `PokerAdvisor` interactive prompts intentionally stay on stdout per audit guidance. |
 | F3 | High (Arch) | partial | `web/HandHistoryReviewServer.scala` | 3057-LOC monolith; `WebResponses` extracted (5 fns); routing/auth/job-store/rate-limit/csrf splits open. |
 | F4 | High (Test/Arch) | partial | `runtime/` (9,247 LOC, ratio 0.31) | Multi-table tableId schedule pinned; `AcpcHeadsUpDealer` + `AcpcActionCodec` (16 internals tests, incl. multiway side-pot resolver chip-conservation) pure helpers pinned; protocol street-math deduplicated into `ProtocolStreetMath`. `AdvisorSession` state machine + `SlumbotMatchRunner` non-shared internals still untested. |
 | F5 | Med (Arch) | open | `cfr/HoldemCfrSolver.scala` | 3728-LOC god-file, 18 top-level decls; multi-sprint split. Lower urgency until other items land. |
