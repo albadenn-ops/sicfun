@@ -1,5 +1,7 @@
 package sicfun.holdem.equity
 
+import sicfun.holdem.types.ConsoleLogger
+
 import java.io.{DataInputStream, File, FileInputStream}
 import java.time.Instant
 
@@ -13,14 +15,15 @@ import java.time.Instant
   */
 object HeadsUpTableInfo:
   def main(args: Array[String]): Unit =
+    val log = ConsoleLogger.stdout()
     if args.length < 1 then
-      System.err.println("Usage: HeadsUpTableInfo <pathToTableFile>")
+      log.error("Usage: HeadsUpTableInfo <pathToTableFile>")
       sys.exit(1)
 
     val path = args(0)
     val file = new File(path).getAbsoluteFile
     if !file.exists() then
-      System.err.println(s"File not found: $path")
+      log.error(s"File not found: $path")
       sys.exit(2)
 
     val in = new DataInputStream(new FileInputStream(file))
@@ -29,15 +32,15 @@ object HeadsUpTableInfo:
       val coverage = HeadsUpEquityTableFormat.coverage(meta)
       val createdAt = Instant.ofEpochMilli(meta.createdAtMillis)
 
-      println(s"path: ${file.getAbsolutePath}")
-      println(s"canonical: ${meta.canonical}")
-      println(s"formatVersion: ${meta.formatVersion}")
-      println(s"mode: ${meta.mode}")
-      println(s"trials: ${meta.trials}")
-      println(s"seed: ${meta.seed}")
-      println(s"maxMatchups: ${meta.maxMatchups}")
-      println(s"totalMatchups: ${meta.totalMatchups}")
-      println(s"count: ${meta.count}")
-      println(f"coverage: ${coverage * 100.0}%.4f%%")
-      println(s"createdAt: $createdAt")
+      log.info(s"path: ${file.getAbsolutePath}")
+      log.info(s"canonical: ${meta.canonical}")
+      log.info(s"formatVersion: ${meta.formatVersion}")
+      log.info(s"mode: ${meta.mode}")
+      log.info(s"trials: ${meta.trials}")
+      log.info(s"seed: ${meta.seed}")
+      log.info(s"maxMatchups: ${meta.maxMatchups}")
+      log.info(s"totalMatchups: ${meta.totalMatchups}")
+      log.info(s"count: ${meta.count}")
+      log.info(f"coverage: ${coverage * 100.0}%.4f%%")
+      log.info(s"createdAt: $createdAt")
     finally in.close()

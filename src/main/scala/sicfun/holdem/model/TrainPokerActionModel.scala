@@ -1,5 +1,6 @@
 package sicfun.holdem.model
 import sicfun.holdem.cli.*
+import sicfun.holdem.types.ConsoleLogger
 
 import java.nio.file.{Path, Paths}
 
@@ -50,22 +51,23 @@ object TrainPokerActionModel:
 
   /** Main entry point: trains the model and prints results to stdout, or errors to stderr with exit(1). */
   def main(args: Array[String]): Unit =
+    val log = ConsoleLogger.stdout()
     run(args) match
       case Right(result) =>
         val artifact = result.artifact
-        println(s"artifactDir: ${result.outputDir.toAbsolutePath.normalize()}")
-        println(s"modelId: ${artifact.version.id}")
-        println(s"schemaVersion: ${artifact.version.schemaVersion}")
-        println(s"source: ${artifact.version.source}")
-        println(s"trainedAtEpochMillis: ${artifact.version.trainedAtEpochMillis}")
-        println(s"trainingSampleCount: ${artifact.trainingSampleCount}")
-        println(s"evaluationSampleCount: ${artifact.evaluationSampleCount}")
-        println(s"evaluationStrategy: ${artifact.evaluationStrategy}")
-        println(s"maxMeanBrierScore: ${artifact.gate.maxMeanBrierScore}")
-        println(f"meanBrierScore: ${artifact.calibration.meanBrierScore}%.8f")
-        println(s"gatePassed: ${artifact.gatePassed}")
+        log.info(s"artifactDir: ${result.outputDir.toAbsolutePath.normalize()}")
+        log.info(s"modelId: ${artifact.version.id}")
+        log.info(s"schemaVersion: ${artifact.version.schemaVersion}")
+        log.info(s"source: ${artifact.version.source}")
+        log.info(s"trainedAtEpochMillis: ${artifact.version.trainedAtEpochMillis}")
+        log.info(s"trainingSampleCount: ${artifact.trainingSampleCount}")
+        log.info(s"evaluationSampleCount: ${artifact.evaluationSampleCount}")
+        log.info(s"evaluationStrategy: ${artifact.evaluationStrategy}")
+        log.info(s"maxMeanBrierScore: ${artifact.gate.maxMeanBrierScore}")
+        log.info(f"meanBrierScore: ${artifact.calibration.meanBrierScore}%.8f")
+        log.info(s"gatePassed: ${artifact.gatePassed}")
       case Left(error) =>
-        System.err.println(error)
+        log.error(error)
         sys.exit(1)
 
   /** Parses arguments and runs the training pipeline. Returns Left(error) or Right(result). */
