@@ -1753,59 +1753,8 @@ object HandHistoryReviewServer:
   private enum AuthRequirement:
     case None, Optional, Required
 
-  private sealed trait AnalysisJobState:
-    def status: String
-    def submittedAtEpochMs: Long
-    def startedAtEpochMs: Option[Long]
-    def completedAtEpochMs: Option[Long]
-    def isTerminal: Boolean
-
-  private object AnalysisJobState:
-    final case class Queued(submittedAtEpochMs: Long) extends AnalysisJobState:
-      override val status = "queued"
-      override val startedAtEpochMs = None
-      override val completedAtEpochMs = None
-      override val isTerminal = false
-
-    final case class Running(submittedAtEpochMs: Long, startedAt: Long) extends AnalysisJobState:
-      override val status = "running"
-      override val startedAtEpochMs = Some(startedAt)
-      override val completedAtEpochMs = None
-      override val isTerminal = false
-
-    final case class Completed(
-        submittedAtEpochMs: Long,
-        startedAt: Long,
-        completedAt: Long,
-        result: Value
-    ) extends AnalysisJobState:
-      override val status = "completed"
-      override val startedAtEpochMs = Some(startedAt)
-      override val completedAtEpochMs = Some(completedAt)
-      override val isTerminal = true
-
-    final case class Failed(
-        submittedAtEpochMs: Long,
-        startedAt: Long,
-        completedAt: Long,
-        errorStatus: Int,
-        error: String
-  ) extends AnalysisJobState:
-      override val status = "failed"
-      override val startedAtEpochMs = Some(startedAt)
-      override val completedAtEpochMs = Some(completedAt)
-      override val isTerminal = true
-
-    final case class Cancelled(
-        submittedAtEpochMs: Long,
-        startedAt: Option[Long],
-        completedAt: Long,
-        result: Option[Value]
-    ) extends AnalysisJobState:
-      override val status = "cancelled"
-      override val startedAtEpochMs = startedAt
-      override val completedAtEpochMs = Some(completedAt)
-      override val isTerminal = true
+  // AnalysisJobState ADT (Queued/Running/Completed/Failed/Cancelled) lives in
+  // its own file -- it's shared by both AnalysisJobStore and PlayingHallJobStore.
 
   private final class AnalysisJobStore(
       executor: ThreadPoolExecutor,
