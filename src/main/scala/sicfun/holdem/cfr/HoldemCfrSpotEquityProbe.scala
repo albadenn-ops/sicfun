@@ -2,6 +2,7 @@ package sicfun.holdem.cfr
 
 import sicfun.holdem.analysis.EvAnalysis
 import sicfun.holdem.equity.HoldemEquity
+import sicfun.holdem.types.ConsoleLogger
 
 /** Prints exact equity and immediate call EV for selected approximation spots.
   *
@@ -29,6 +30,7 @@ object HoldemCfrSpotEquityProbe:
     * If no arguments are given, probes all spots in [[HoldemCfrApproximationReport.DefaultSuite]].
     */
   def main(args: Array[String]): Unit =
+    val log = ConsoleLogger.stdout()
     // If no spot ids given on the command line, probe every spot in the default suite
     val requestedIds =
       if args.isEmpty then HoldemCfrApproximationReport.DefaultSuite.map(_.id).toSet
@@ -47,10 +49,10 @@ object HoldemCfrSpotEquityProbe:
           if spot.state.toCall > 0.0 then
             (exact.equity * (spot.state.pot + spot.state.toCall)) - spot.state.toCall
           else exact.equity * spot.state.pot
-        println(s"spot=${spot.id}")
-        println(f"  equity=${exact.equity}%.6f win=${exact.win}%.6f tie=${exact.tie}%.6f loss=${exact.loss}%.6f")
-        println(f"  immediateCallEv=$immediateCallEv%.6f pot=${spot.state.pot}%.3f toCall=${spot.state.toCall}%.3f")
-        println(
+        log.info(s"spot=${spot.id}")
+        log.info(f"  equity=${exact.equity}%.6f win=${exact.win}%.6f tie=${exact.tie}%.6f loss=${exact.loss}%.6f")
+        log.info(f"  immediateCallEv=$immediateCallEv%.6f pot=${spot.state.pot}%.3f toCall=${spot.state.toCall}%.3f")
+        log.info(
           f"  varianceMean=${variance.mean}%.6f variance=${variance.variance}%.6f stderr=${variance.stderr}%.6f hands=${variance.handCount}%d"
         )
       }

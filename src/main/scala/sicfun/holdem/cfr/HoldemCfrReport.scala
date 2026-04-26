@@ -30,6 +30,8 @@ import scala.jdk.CollectionConverters.*
   * Usage: `runMain sicfun.holdem.cfr.HoldemCfrReport --hero=AcKh --board=Ts9h8d ...`
   */
 object HoldemCfrReport:
+  private val log: ConsoleLogger = ConsoleLogger.stdout()
+
   /** ISO-8601 UTC formatter for timestamping generated reports. */
   private val IsoFormatter = DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC)
 
@@ -65,27 +67,27 @@ object HoldemCfrReport:
     run(args) match
       case Right(result) =>
         val solution = result.solution
-        println("=== Holdem CFR Report ===")
-        println(s"bestAction: ${renderAction(solution.bestAction)}")
-        println(f"expectedValuePlayer0: ${solution.expectedValuePlayer0}%.6f")
-        println(f"heroRootBestResponse: ${solution.heroRootBestResponseValue}%.6f")
-        println(f"villainBestResponse: ${solution.villainBestResponseValue}%.6f")
-        println(f"rootDeviationGap: ${solution.rootDeviationGap}%.6f")
-        println(f"villainDeviationGap: ${solution.villainDeviationGap}%.6f")
-        println(f"localExploitability: ${solution.localExploitability}%.6f")
-        println(s"iterations: ${solution.iterations}")
-        println(s"provider: ${solution.provider}")
-        println(s"villainSupport: ${solution.villainSupport}")
-        println("policy:")
+        log.info("=== Holdem CFR Report ===")
+        log.info(s"bestAction: ${renderAction(solution.bestAction)}")
+        log.info(f"expectedValuePlayer0: ${solution.expectedValuePlayer0}%.6f")
+        log.info(f"heroRootBestResponse: ${solution.heroRootBestResponseValue}%.6f")
+        log.info(f"villainBestResponse: ${solution.villainBestResponseValue}%.6f")
+        log.info(f"rootDeviationGap: ${solution.rootDeviationGap}%.6f")
+        log.info(f"villainDeviationGap: ${solution.villainDeviationGap}%.6f")
+        log.info(f"localExploitability: ${solution.localExploitability}%.6f")
+        log.info(s"iterations: ${solution.iterations}")
+        log.info(s"provider: ${solution.provider}")
+        log.info(s"villainSupport: ${solution.villainSupport}")
+        log.info("policy:")
         solution.actionProbabilities.toVector.sortBy(-_._2).foreach { case (action, probability) =>
-          println(f"  ${renderAction(action)}%-12s ${probability * 100.0}%6.2f%%")
+          log.info(f"  ${renderAction(action)}%-12s ${probability * 100.0}%6.2f%%")
         }
-        result.outDir.foreach(path => println(s"outDir: ${path.toAbsolutePath.normalize()}"))
-        result.trackFile.foreach(path => println(s"trackFile: ${path.toAbsolutePath.normalize()}"))
+        result.outDir.foreach(path => log.info(s"outDir: ${path.toAbsolutePath.normalize()}"))
+        result.trackFile.foreach(path => log.info(s"trackFile: ${path.toAbsolutePath.normalize()}"))
       case Left(error) =>
-        if wantsHelp then println(error)
+        if wantsHelp then log.info(error)
         else
-          System.err.println(error)
+          log.error(error)
           sys.exit(1)
 
   /** Parses CLI arguments and runs the solver, returning the result or an error message.

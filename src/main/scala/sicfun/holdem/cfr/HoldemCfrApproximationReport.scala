@@ -43,6 +43,7 @@ import ujson.{Arr, Num, Obj, Str, Value}
   *  - River bet-or-check from big blind
   */
 object HoldemCfrApproximationReport:
+  private val log: ConsoleLogger = ConsoleLogger.stdout()
   private val IsoFormatter = DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC)
 
   /** A diagnostic spot definition: a fully specified poker decision point that
@@ -254,21 +255,21 @@ object HoldemCfrApproximationReport:
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
       case Right(result) =>
-        println("=== Holdem CFR Approximation Report ===")
-        println(s"suite: ${result.suiteName}")
-        println(s"spots: ${result.aggregate.spotCount}")
-        println(s"meanLocalExploitability: ${formatDouble(result.aggregate.meanLocalExploitability, 6)}")
-        println(s"maxLocalExploitability: ${formatDouble(result.aggregate.maxLocalExploitability, 6)}")
-        println(s"meanRootDeviationGap: ${formatDouble(result.aggregate.meanRootDeviationGap, 6)}")
-        println(s"maxRootDeviationGap: ${formatDouble(result.aggregate.maxRootDeviationGap, 6)}")
-        println(s"meanVillainDeviationGap: ${formatDouble(result.aggregate.meanVillainDeviationGap, 6)}")
-        println(s"maxVillainDeviationGap: ${formatDouble(result.aggregate.maxVillainDeviationGap, 6)}")
-        println(s"providerCounts: ${result.aggregate.providerCounts.toVector.sortBy(_._1).mkString(", ")}")
-        result.outDir.foreach(path => println(s"outDir: ${path.toAbsolutePath.normalize()}"))
+        log.info("=== Holdem CFR Approximation Report ===")
+        log.info(s"suite: ${result.suiteName}")
+        log.info(s"spots: ${result.aggregate.spotCount}")
+        log.info(s"meanLocalExploitability: ${formatDouble(result.aggregate.meanLocalExploitability, 6)}")
+        log.info(s"maxLocalExploitability: ${formatDouble(result.aggregate.maxLocalExploitability, 6)}")
+        log.info(s"meanRootDeviationGap: ${formatDouble(result.aggregate.meanRootDeviationGap, 6)}")
+        log.info(s"maxRootDeviationGap: ${formatDouble(result.aggregate.maxRootDeviationGap, 6)}")
+        log.info(s"meanVillainDeviationGap: ${formatDouble(result.aggregate.meanVillainDeviationGap, 6)}")
+        log.info(s"maxVillainDeviationGap: ${formatDouble(result.aggregate.maxVillainDeviationGap, 6)}")
+        log.info(s"providerCounts: ${result.aggregate.providerCounts.toVector.sortBy(_._1).mkString(", ")}")
+        result.outDir.foreach(path => log.info(s"outDir: ${path.toAbsolutePath.normalize()}"))
       case Left(error) =>
-        if wantsHelp then println(error)
+        if wantsHelp then log.info(error)
         else
-          System.err.println(error)
+          log.error(error)
           sys.exit(1)
 
   def run(args: Array[String]): Either[String, RunResult] =

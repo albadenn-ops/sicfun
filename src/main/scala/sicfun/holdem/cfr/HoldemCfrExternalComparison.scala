@@ -1,6 +1,7 @@
 package sicfun.holdem.cfr
 
 import sicfun.holdem.cli.CliHelpers
+import sicfun.holdem.types.ConsoleLogger
 import sicfun.core.Card
 
 import java.nio.charset.StandardCharsets
@@ -44,6 +45,8 @@ import ujson.{Arr, Num, Obj, Str, Value}
   * Usage: `runMain sicfun.holdem.cfr.HoldemCfrExternalComparison --reference=... --external=... --maxMeanTv=0.001`
   */
 object HoldemCfrExternalComparison:
+  private val log: ConsoleLogger = ConsoleLogger.stdout()
+
   /** Epsilon for floating-point comparison when validating that a declared bestAction
     * is consistent with the action values. Allows for minor rounding differences.
     */
@@ -162,34 +165,34 @@ object HoldemCfrExternalComparison:
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
       case Right(result) =>
-        println("=== Holdem CFR External Comparison ===")
-        println(s"reference: ${result.referenceLabel}")
-        println(s"external: ${result.externalLabel}")
-        println(s"matchedSpots: ${result.aggregate.matchedSpotCount}/${result.aggregate.referenceSpotCount}")
-        println(
+        log.info("=== Holdem CFR External Comparison ===")
+        log.info(s"reference: ${result.referenceLabel}")
+        log.info(s"external: ${result.externalLabel}")
+        log.info(s"matchedSpots: ${result.aggregate.matchedSpotCount}/${result.aggregate.referenceSpotCount}")
+        log.info(
           s"matchingSpotSignatures: ${result.aggregate.matchingSpotSignatureCount}/${result.aggregate.matchedSpotCount}"
         )
-        println(s"meanTvDistance: ${formatDouble(result.aggregate.meanTvDistance, 6)}")
-        println(s"maxTvDistance: ${formatDouble(result.aggregate.maxTvDistance, 6)}")
-        println(s"meanMaxActionProbabilityGap: ${formatDouble(result.aggregate.meanMaxActionProbabilityGap, 6)}")
-        println(
+        log.info(s"meanTvDistance: ${formatDouble(result.aggregate.meanTvDistance, 6)}")
+        log.info(s"maxTvDistance: ${formatDouble(result.aggregate.maxTvDistance, 6)}")
+        log.info(s"meanMaxActionProbabilityGap: ${formatDouble(result.aggregate.meanMaxActionProbabilityGap, 6)}")
+        log.info(
           s"bestActionAgreement: ${result.aggregate.bestActionAgreementCount}/${result.aggregate.matchedSpotCount} " +
             s"(${formatPercent(result.aggregate.bestActionAgreementRate)})"
         )
-        println(
+        log.info(
           s"meanEvRmse: ${result.aggregate.meanEvRmse.map(formatDouble(_, 6)).getOrElse("n/a")}"
         )
-        println(
+        log.info(
           s"maxEvGap: ${result.aggregate.maxEvGap.map(formatDouble(_, 6)).getOrElse("n/a")}"
         )
-        println(s"gate: ${if result.gate.passed then "PASS" else "FAIL"}")
+        log.info(s"gate: ${if result.gate.passed then "PASS" else "FAIL"}")
         if result.gate.failures.nonEmpty then
-          result.gate.failures.foreach(reason => println(s"  - $reason"))
-        result.outDir.foreach(path => println(s"outDir: ${path.toAbsolutePath.normalize()}"))
+          result.gate.failures.foreach(reason => log.info(s"  - $reason"))
+        result.outDir.foreach(path => log.info(s"outDir: ${path.toAbsolutePath.normalize()}"))
       case Left(error) =>
-        if wantsHelp then println(error)
+        if wantsHelp then log.info(error)
         else
-          System.err.println(error)
+          log.error(error)
           sys.exit(1)
 
   def run(args: Array[String]): Either[String, RunResult] =

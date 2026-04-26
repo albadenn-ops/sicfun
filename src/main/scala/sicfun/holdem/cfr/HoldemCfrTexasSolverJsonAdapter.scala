@@ -1,6 +1,7 @@
 package sicfun.holdem.cfr
 
 import sicfun.holdem.cli.CliHelpers
+import sicfun.holdem.types.ConsoleLogger
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
@@ -70,17 +71,18 @@ object HoldemCfrTexasSolverJsonAdapter:
   )
 
   def main(args: Array[String]): Unit =
+    val log = ConsoleLogger.stdout()
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
       case Right(result) =>
-        println("=== Holdem CFR TexasSolver Adapter ===")
-        println(s"provider: ${result.providerName}")
-        println(s"spots: ${result.spotCount}")
-        println(s"out: ${result.outPath.toAbsolutePath.normalize()}")
+        log.info("=== Holdem CFR TexasSolver Adapter ===")
+        log.info(s"provider: ${result.providerName}")
+        log.info(s"spots: ${result.spotCount}")
+        log.info(s"out: ${result.outPath.toAbsolutePath.normalize()}")
       case Left(error) =>
-        if wantsHelp then println(error)
+        if wantsHelp then log.info(error)
         else
-          System.err.println(error)
+          log.error(error)
           sys.exit(1)
 
   def run(args: Array[String]): Either[String, RunResult] =
