@@ -13,8 +13,8 @@ object AbstractAction:
 
 final class BlueprintOnlyAgent(
     override val seatId: SeatId,
-    store: BlueprintStore,
-    hasher: InfostateHasher,
+    val store: BlueprintStore,
+    val hasher: InfostateHasher,
     rngSeed: Long
 ) extends SeatAgent:
   private val rng = new Random(rngSeed)
