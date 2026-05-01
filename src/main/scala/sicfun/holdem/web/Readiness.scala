@@ -8,14 +8,13 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import ujson.{Bool, Num, Obj, Str}
 
 import sicfun.holdem.web.HandHistoryReviewServer.{
-  AnalysisJobStore,
   JsonResponse,
-  PlayingHallJobStore,
   ServerConfig,
   authenticationEnabled,
   authenticationMode,
   healthModelSource
 }
+import sicfun.holdem.web.JobQueue.{AnalysisJobStore, PlayingHallJobStore}
 import sicfun.holdem.web.RateLimit.rateLimitClientIpSource
 
 private[web] object Readiness:
