@@ -1,0 +1,164 @@
+package sicfun.holdem.web
+
+import com.sun.net.httpserver.{HttpExchange, HttpHandler}
+
+import java.nio.file.Files
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
+
+import ujson.{Bool, Num, Obj, Str}
+
+import sicfun.holdem.web.HandHistoryReviewServer.{
+  AnalysisJobStore,
+  JsonResponse,
+  PlayingHallJobStore,
+  ServerConfig,
+  authenticationEnabled,
+  authenticationMode,
+  healthModelSource
+}
+import sicfun.holdem.web.RateLimit.rateLimitClientIpSource
+
+private[web] object Readiness:
+  private val ReadyReasonAcceptingTraffic = "accepting-traffic"
+  private val ReadyReasonDraining = "draining"
+  private val ReadyReasonTimedOutWorker = "timed-out-worker"
+  private val ReadyReasonQueueFull = "queue-full"
+
+  final case class ReadinessStatus(
+      ready: Boolean,
+      reason: String,
+      draining: Boolean,
+      acceptingAnalysisJobs: Boolean,
+      drainSignalPresent: Boolean,
+      timedOutWorkersInFlight: Int
+  )
+
+  def readinessStatus(
+      config: ServerConfig,
+      jobStore: AnalysisJobStore,
+      playingHallJobStore: PlayingHallJobStore,
+      draining: AtomicBoolean
+  ): ReadinessStatus =
+    val metrics = jobStore.metrics
+    val drainSignalPresent = config.drainSignalFile.exists(path => Files.exists(path))
+    val drainingNow = draining.get() || drainSignalPresent || jobStore.isShuttingDown
+    val timedOutWorkers = metrics.timedOutWorkersInFlight + playingHallJobStore.timedOutWorkersInFlightCount
+    val acceptingAnalysisJobs = !drainingNow && timedOutWorkers == 0 && jobStore.acceptingNewJobs
+    val reason =
+      if drainingNow then ReadyReasonDraining
+      else if timedOutWorkers > 0 then ReadyReasonTimedOutWorker
+      else if acceptingAnalysisJobs then ReadyReasonAcceptingTraffic
+      else ReadyReasonQueueFull
+    ReadinessStatus(
+      ready = acceptingAnalysisJobs,
+      reason = reason,
+      draining = drainingNow,
+      acceptingAnalysisJobs = acceptingAnalysisJobs,
+      drainSignalPresent = drainSignalPresent,
+      timedOutWorkersInFlight = timedOutWorkers
+    )
+
+  def renderHealth(
+      config: ServerConfig,
+      boundPort: Int,
+      startedAtEpochMs: Long,
+      jobStore: AnalysisJobStore,
+      playingHallJobStore: PlayingHallJobStore,
+      activeHttpRequests: Int,
+      draining: AtomicBoolean
+  ): JsonResponse =
+    val metrics = jobStore.metrics
+    val readiness = readinessStatus(config, jobStore, playingHallJobStore, draining)
+    val otherActiveHttpRequests = math.max(0, activeHttpRequests - 1)
+    JsonResponse(
+      status = 200,
+      value = Obj(
+        "ok" -> Bool(true),
+        "ready" -> Bool(readiness.ready),
+        "readyReason" -> Str(readiness.reason),
+        "draining" -> Bool(readiness.draining),
+        "acceptingAnalysisJobs" -> Bool(readiness.acceptingAnalysisJobs),
+        "authenticationEnabled" -> Bool(authenticationEnabled(config.basicAuth, config.platformAuth)),
+        "authenticationMode" -> Str(authenticationMode(config.basicAuth, config.platformAuth)),
+        "service" -> Str("hand-history-review"),
+        "host" -> Str(config.host),
+        "port" -> Num(boundPort.toDouble),
+        "startedAtEpochMs" -> Num(startedAtEpochMs.toDouble),
+        "uptimeMs" -> Num((System.currentTimeMillis() - startedAtEpochMs).toDouble),
+        "modelConfigured" -> Bool(config.serviceConfig.modelDir.nonEmpty),
+        "modelSource" -> Str(healthModelSource(config.serviceConfig)),
+        "drainSignalConfigured" -> Bool(config.drainSignalFile.nonEmpty),
+        "drainSignalPresent" -> Bool(readiness.drainSignalPresent),
+        "maxUploadBytes" -> Num(config.maxUploadBytes.toDouble),
+        "analysisTimeoutMs" -> Num(config.analysisTimeoutMs.toDouble),
+        "playingHallTimeoutMs" -> Num(config.playingHallTimeoutMs.toDouble),
+        "rateLimitSubmitsPerMinute" -> Num(config.rateLimitSubmitsPerMinute.toDouble),
+        "rateLimitStatusPerMinute" -> Num(config.rateLimitStatusPerMinute.toDouble),
+        "rateLimitClientIpSource" -> Str(rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)),
+        "maxConcurrentJobs" -> Num(metrics.maxConcurrentJobs.toDouble),
+        "maxQueuedJobs" -> Num(metrics.maxQueuedJobs.toDouble),
+        "activeHttpRequests" -> Num(otherActiveHttpRequests.toDouble),
+        "queuedJobs" -> Num(metrics.queuedJobs.toDouble),
+        "runningJobs" -> Num(metrics.runningJobs.toDouble),
+        "timedOutWorkersInFlight" -> Num(readiness.timedOutWorkersInFlight.toDouble),
+        "retainedTerminalJobs" -> Num(metrics.retainedTerminalJobs.toDouble)
+      )
+    )
+
+  def renderReadiness(
+      config: ServerConfig,
+      boundPort: Int,
+      jobStore: AnalysisJobStore,
+      playingHallJobStore: PlayingHallJobStore,
+      activeHttpRequests: Int,
+      draining: AtomicBoolean
+  ): JsonResponse =
+    val metrics = jobStore.metrics
+    val readiness = readinessStatus(config, jobStore, playingHallJobStore, draining)
+    val otherActiveHttpRequests = math.max(0, activeHttpRequests - 1)
+    JsonResponse(
+      status = if readiness.ready then 200 else 503,
+      value = Obj(
+        "service" -> Str("hand-history-review"),
+        "host" -> Str(config.host),
+        "port" -> Num(boundPort.toDouble),
+        "ready" -> Bool(readiness.ready),
+        "reason" -> Str(readiness.reason),
+        "draining" -> Bool(readiness.draining),
+        "acceptingAnalysisJobs" -> Bool(readiness.acceptingAnalysisJobs),
+        "authenticationEnabled" -> Bool(authenticationEnabled(config.basicAuth, config.platformAuth)),
+        "authenticationMode" -> Str(authenticationMode(config.basicAuth, config.platformAuth)),
+        "drainSignalConfigured" -> Bool(config.drainSignalFile.nonEmpty),
+        "drainSignalPresent" -> Bool(readiness.drainSignalPresent),
+        "analysisTimeoutMs" -> Num(config.analysisTimeoutMs.toDouble),
+        "playingHallTimeoutMs" -> Num(config.playingHallTimeoutMs.toDouble),
+        "rateLimitSubmitsPerMinute" -> Num(config.rateLimitSubmitsPerMinute.toDouble),
+        "rateLimitStatusPerMinute" -> Num(config.rateLimitStatusPerMinute.toDouble),
+        "rateLimitClientIpSource" -> Str(rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)),
+        "activeHttpRequests" -> Num(otherActiveHttpRequests.toDouble),
+        "maxConcurrentJobs" -> Num(metrics.maxConcurrentJobs.toDouble),
+        "maxQueuedJobs" -> Num(metrics.maxQueuedJobs.toDouble),
+        "queuedJobs" -> Num(metrics.queuedJobs.toDouble),
+        "runningJobs" -> Num(metrics.runningJobs.toDouble),
+        "timedOutWorkersInFlight" -> Num(readiness.timedOutWorkersInFlight.toDouble)
+      )
+    )
+
+  def admissionRejectedMessage(
+      readiness: ReadinessStatus,
+      serviceName: String = "analysis"
+  ): String =
+    readiness.reason match
+      case ReadyReasonDraining => s"$serviceName service is draining; try another instance or retry later"
+      case ReadyReasonTimedOutWorker => s"$serviceName worker timed out; instance is waiting for recovery"
+      case _ => s"$serviceName queue is full; try again later"
+
+  def trackActiveRequests(
+      activeHttpRequests: AtomicInteger,
+      delegate: HttpHandler
+  ): HttpHandler =
+    new HttpHandler:
+      override def handle(exchange: HttpExchange): Unit =
+        activeHttpRequests.incrementAndGet()
+        try delegate.handle(exchange)
+        finally activeHttpRequests.decrementAndGet()

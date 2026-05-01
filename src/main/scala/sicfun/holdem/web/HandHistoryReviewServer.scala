@@ -29,6 +29,7 @@ import java.util.concurrent.{
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import scala.util.control.NonFatal
 import sicfun.holdem.web.RateLimit.*
+import sicfun.holdem.web.Readiness.*
 import sicfun.holdem.web.WebResponses.*
 
 /** Embedded HTTP server for hand-history review analysis, auth, and static UI hosting.
@@ -76,10 +77,6 @@ object HandHistoryReviewServer:
   private val DefaultShutdownGraceMs = 5000L
   private val DefaultRateLimitSubmitsPerMinute = 6
   private val DefaultRateLimitStatusPerMinute = 240
-  private val ReadyReasonAcceptingTraffic = "accepting-traffic"
-  private val ReadyReasonDraining = "draining"
-  private val ReadyReasonTimedOutWorker = "timed-out-worker"
-  private val ReadyReasonQueueFull = "queue-full"
   private val BasicAuthRealm = "sicfun-hand-history-review"
   private val BasicAuthChallenge = s"""Basic realm="$BasicAuthRealm", charset="UTF-8""""
   private val AuthenticationRequiredMessage = "authentication required"
@@ -610,15 +607,6 @@ object HandHistoryReviewServer:
         "Retry-After" -> retryAfterSeconds(accepted.pollAfterMs)
       )
     )
-
-  private def admissionRejectedMessage(
-      readiness: ReadinessStatus,
-      serviceName: String = "analysis"
-  ): String =
-    readiness.reason match
-      case ReadyReasonDraining => s"$serviceName service is draining; try another instance or retry later"
-      case ReadyReasonTimedOutWorker => s"$serviceName worker timed out; instance is waiting for recovery"
-      case _ => s"$serviceName queue is full; try again later"
 
   private def handleAnalyzeJobStatus(
       exchange: HttpExchange,
@@ -1682,7 +1670,7 @@ object HandHistoryReviewServer:
       case value if value.startsWith("127.") => false
       case _ => true
 
-  private final case class JsonResponse(
+  private[web] final case class JsonResponse(
       status: Int,
       value: Value,
       headers: Vector[(String, String)] = Vector.empty
@@ -1725,22 +1713,13 @@ object HandHistoryReviewServer:
     def logSummary: String =
       s"hands=$hands tableCount=$tableCount playerCount=$playerCount heroStyle=$heroStyle heroPosition=$heroPosition gtoMode=$gtoMode villainPool=${villainPool.mkString(",")} seed=$seed"
 
-  private final case class AnalysisJobMetrics(
+  private[web] final case class AnalysisJobMetrics(
       maxConcurrentJobs: Int,
       maxQueuedJobs: Int,
       queuedJobs: Int,
       runningJobs: Int,
       timedOutWorkersInFlight: Int,
       retainedTerminalJobs: Int
-  )
-
-  private final case class ReadinessStatus(
-      ready: Boolean,
-      reason: String,
-      draining: Boolean,
-      acceptingAnalysisJobs: Boolean,
-      drainSignalPresent: Boolean,
-      timedOutWorkersInFlight: Int
   )
 
   private enum AuthRequirement:
@@ -1800,7 +1779,7 @@ object HandHistoryReviewServer:
       override val completedAtEpochMs = Some(completedAt)
       override val isTerminal = true
 
-  private final class AnalysisJobStore(
+  private[web] final class AnalysisJobStore(
       executor: ThreadPoolExecutor,
       timeoutExecutor: ScheduledExecutorService,
       backend: AnalysisBackend,
@@ -1813,7 +1792,7 @@ object HandHistoryReviewServer:
     private val jobOwners = new ConcurrentHashMap[String, String]()
     private val timedOutWorkersInFlight = new AtomicInteger(0)
 
-    def submit(
+    private[HandHistoryReviewServer] def submit(
         request: HandHistoryReviewService.AnalysisRequest,
         ownerUserId: Option[String] = None,
         rejectIfUnavailable: () => Option[String] = () => None
@@ -2083,7 +2062,7 @@ object HandHistoryReviewServer:
           jobOwners.remove(entry.getKey)
           iterator.remove()
 
-  private final class PlayingHallJobStore(
+  private[web] final class PlayingHallJobStore(
       executor: ThreadPoolExecutor,
       timeoutExecutor: ScheduledExecutorService,
       backend: PlayingHallBackend,
@@ -2097,7 +2076,7 @@ object HandHistoryReviewServer:
     private val cancelFlags = new ConcurrentHashMap[String, AtomicBoolean]()
     private val timedOutWorkersInFlight = new AtomicInteger(0)
 
-    def submit(
+    private[HandHistoryReviewServer] def submit(
         request: PlayingHallRequest,
         ownerUserId: Option[String] = None,
         rejectIfUnavailable: () => Option[String] = () => None
@@ -2376,127 +2355,6 @@ object HandHistoryReviewServer:
           jobOwners.remove(entry.getKey)
           iterator.remove()
 
-  private def renderHealth(
-      config: ServerConfig,
-      boundPort: Int,
-      startedAtEpochMs: Long,
-      jobStore: AnalysisJobStore,
-      playingHallJobStore: PlayingHallJobStore,
-      activeHttpRequests: Int,
-      draining: AtomicBoolean
-  ): JsonResponse =
-    val metrics = jobStore.metrics
-    val readiness = readinessStatus(config, jobStore, playingHallJobStore, draining)
-    val otherActiveHttpRequests = math.max(0, activeHttpRequests - 1)
-    JsonResponse(
-      status = 200,
-      value = Obj(
-        "ok" -> ujson.Bool(true),
-        "ready" -> ujson.Bool(readiness.ready),
-        "readyReason" -> Str(readiness.reason),
-        "draining" -> ujson.Bool(readiness.draining),
-        "acceptingAnalysisJobs" -> ujson.Bool(readiness.acceptingAnalysisJobs),
-        "authenticationEnabled" -> ujson.Bool(authenticationEnabled(config.basicAuth, config.platformAuth)),
-        "authenticationMode" -> Str(authenticationMode(config.basicAuth, config.platformAuth)),
-        "service" -> Str("hand-history-review"),
-        "host" -> Str(config.host),
-        "port" -> ujson.Num(boundPort.toDouble),
-        "startedAtEpochMs" -> ujson.Num(startedAtEpochMs.toDouble),
-        "uptimeMs" -> ujson.Num((System.currentTimeMillis() - startedAtEpochMs).toDouble),
-        "modelConfigured" -> ujson.Bool(config.serviceConfig.modelDir.nonEmpty),
-        "modelSource" -> Str(healthModelSource(config.serviceConfig)),
-        "drainSignalConfigured" -> ujson.Bool(config.drainSignalFile.nonEmpty),
-        "drainSignalPresent" -> ujson.Bool(readiness.drainSignalPresent),
-        "maxUploadBytes" -> ujson.Num(config.maxUploadBytes.toDouble),
-        "analysisTimeoutMs" -> ujson.Num(config.analysisTimeoutMs.toDouble),
-        "playingHallTimeoutMs" -> ujson.Num(config.playingHallTimeoutMs.toDouble),
-        "rateLimitSubmitsPerMinute" -> ujson.Num(config.rateLimitSubmitsPerMinute.toDouble),
-        "rateLimitStatusPerMinute" -> ujson.Num(config.rateLimitStatusPerMinute.toDouble),
-        "rateLimitClientIpSource" -> Str(rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)),
-        "maxConcurrentJobs" -> ujson.Num(metrics.maxConcurrentJobs.toDouble),
-        "maxQueuedJobs" -> ujson.Num(metrics.maxQueuedJobs.toDouble),
-        "activeHttpRequests" -> ujson.Num(otherActiveHttpRequests.toDouble),
-        "queuedJobs" -> ujson.Num(metrics.queuedJobs.toDouble),
-        "runningJobs" -> ujson.Num(metrics.runningJobs.toDouble),
-        "timedOutWorkersInFlight" -> ujson.Num(readiness.timedOutWorkersInFlight.toDouble),
-        "retainedTerminalJobs" -> ujson.Num(metrics.retainedTerminalJobs.toDouble)
-      )
-    )
-
-  private def renderReadiness(
-      config: ServerConfig,
-      boundPort: Int,
-      jobStore: AnalysisJobStore,
-      playingHallJobStore: PlayingHallJobStore,
-      activeHttpRequests: Int,
-      draining: AtomicBoolean
-  ): JsonResponse =
-    val metrics = jobStore.metrics
-    val readiness = readinessStatus(config, jobStore, playingHallJobStore, draining)
-    val otherActiveHttpRequests = math.max(0, activeHttpRequests - 1)
-    JsonResponse(
-      status = if readiness.ready then 200 else 503,
-      value = Obj(
-        "service" -> Str("hand-history-review"),
-        "host" -> Str(config.host),
-        "port" -> ujson.Num(boundPort.toDouble),
-        "ready" -> ujson.Bool(readiness.ready),
-        "reason" -> Str(readiness.reason),
-        "draining" -> ujson.Bool(readiness.draining),
-        "acceptingAnalysisJobs" -> ujson.Bool(readiness.acceptingAnalysisJobs),
-        "authenticationEnabled" -> ujson.Bool(authenticationEnabled(config.basicAuth, config.platformAuth)),
-        "authenticationMode" -> Str(authenticationMode(config.basicAuth, config.platformAuth)),
-        "drainSignalConfigured" -> ujson.Bool(config.drainSignalFile.nonEmpty),
-        "drainSignalPresent" -> ujson.Bool(readiness.drainSignalPresent),
-        "analysisTimeoutMs" -> ujson.Num(config.analysisTimeoutMs.toDouble),
-        "playingHallTimeoutMs" -> ujson.Num(config.playingHallTimeoutMs.toDouble),
-        "rateLimitSubmitsPerMinute" -> ujson.Num(config.rateLimitSubmitsPerMinute.toDouble),
-        "rateLimitStatusPerMinute" -> ujson.Num(config.rateLimitStatusPerMinute.toDouble),
-        "rateLimitClientIpSource" -> Str(rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)),
-        "activeHttpRequests" -> ujson.Num(otherActiveHttpRequests.toDouble),
-        "maxConcurrentJobs" -> ujson.Num(metrics.maxConcurrentJobs.toDouble),
-        "maxQueuedJobs" -> ujson.Num(metrics.maxQueuedJobs.toDouble),
-        "queuedJobs" -> ujson.Num(metrics.queuedJobs.toDouble),
-        "runningJobs" -> ujson.Num(metrics.runningJobs.toDouble),
-        "timedOutWorkersInFlight" -> ujson.Num(readiness.timedOutWorkersInFlight.toDouble)
-      )
-    )
-
-  private def readinessStatus(
-      config: ServerConfig,
-      jobStore: AnalysisJobStore,
-      playingHallJobStore: PlayingHallJobStore,
-      draining: AtomicBoolean
-  ): ReadinessStatus =
-    val metrics = jobStore.metrics
-    val drainSignalPresent = config.drainSignalFile.exists(path => Files.exists(path))
-    val drainingNow = draining.get() || drainSignalPresent || jobStore.isShuttingDown
-    val timedOutWorkers = metrics.timedOutWorkersInFlight + playingHallJobStore.timedOutWorkersInFlightCount
-    val acceptingAnalysisJobs = !drainingNow && timedOutWorkers == 0 && jobStore.acceptingNewJobs
-    val reason =
-      if drainingNow then ReadyReasonDraining
-      else if timedOutWorkers > 0 then ReadyReasonTimedOutWorker
-      else if acceptingAnalysisJobs then ReadyReasonAcceptingTraffic
-      else ReadyReasonQueueFull
-    ReadinessStatus(
-      ready = acceptingAnalysisJobs,
-      reason = reason,
-      draining = drainingNow,
-      acceptingAnalysisJobs = acceptingAnalysisJobs,
-      drainSignalPresent = drainSignalPresent,
-      timedOutWorkersInFlight = timedOutWorkers
-    )
-
-  private def trackActiveRequests(
-      activeHttpRequests: AtomicInteger,
-      delegate: HttpHandler
-  ): HttpHandler =
-    new HttpHandler:
-      override def handle(exchange: HttpExchange): Unit =
-        activeHttpRequests.incrementAndGet()
-        try delegate.handle(exchange)
-        finally activeHttpRequests.decrementAndGet()
-
   private final class JsonHandler(
       handle: HttpExchange => Either[(Int, String), JsonResponse],
       basicAuth: Option[BasicAuthConfig] = None,
@@ -2738,10 +2596,10 @@ object HandHistoryReviewServer:
   private def modelSource(config: HandHistoryReviewService.ServiceConfig): String =
     config.modelDir.map(_.toAbsolutePath.normalize().toString).getOrElse("uniform fallback")
 
-  private def healthModelSource(config: HandHistoryReviewService.ServiceConfig): String =
+  private[web] def healthModelSource(config: HandHistoryReviewService.ServiceConfig): String =
     if config.modelDir.nonEmpty then "configured artifact dir" else "uniform fallback"
 
-  private def authenticationMode(
+  private[web] def authenticationMode(
       basicAuth: Option[BasicAuthConfig],
       platformAuth: Option[?]
   ): String =
@@ -2749,7 +2607,7 @@ object HandHistoryReviewServer:
     else if platformAuth.nonEmpty then "users"
     else "none"
 
-  private def authenticationEnabled(
+  private[web] def authenticationEnabled(
       basicAuth: Option[BasicAuthConfig],
       platformAuth: Option[?]
   ): Boolean =
