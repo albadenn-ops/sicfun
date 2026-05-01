@@ -269,6 +269,75 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("static handler returns 405 for non-GET methods") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val response = postJson(s"$baseUri/index.html", "{}")
+        assertEquals(response.statusCode(), 405)
+        assertEquals(response.body(), "GET required")
+      }
+    }
+  }
+
+  test("static handler blocks path traversal attempts with 403") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val response = get(s"$baseUri/../etc/passwd")
+        assertEquals(response.statusCode(), 403)
+        assertEquals(response.body(), "forbidden")
+      }
+    }
+  }
+
+  test("static handler returns 404 for non-existent files") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val response = get(s"$baseUri/missing-file.html")
+        assertEquals(response.statusCode(), 404)
+        assertEquals(response.body(), "not found")
+      }
+    }
+  }
+
+  test("static handler resolves / to index.html with text/html content-type") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val response = get(s"$baseUri/")
+        assertEquals(response.statusCode(), 200)
+        assert(response.body().contains("Runtime smoke page"))
+        assertEquals(headerValue(response, "Content-Type"), Some("text/html; charset=utf-8"))
+      }
+    }
+  }
+
+  test("static handler emits correct Content-Type for representative extensions") {
+    withStaticSite { staticDir =>
+      val cases = Seq(
+        "test.css" -> "text/css; charset=utf-8",
+        "test.js" -> "application/javascript; charset=utf-8",
+        "test.svg" -> "image/svg+xml",
+        "test.png" -> "image/png",
+        "test.ico" -> "image/x-icon",
+        "test.wasm" -> "application/wasm"
+      )
+      cases.foreach { case (filename, _) =>
+        Files.writeString(staticDir.resolve(filename), "x", StandardCharsets.UTF_8)
+      }
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        cases.foreach { case (filename, expectedContentType) =>
+          val response = get(s"$baseUri/$filename")
+          assertEquals(response.statusCode(), 200, clue = s"file=$filename")
+          assertEquals(headerValue(response, "Content-Type"), Some(expectedContentType), clue = s"file=$filename")
+        }
+      }
+    }
+  }
+
   test("optional basic auth protects the UI and analysis routes while leaving health and readiness open") {
     withStaticSite { staticDir =>
       val authConfig = HandHistoryReviewServer.BasicAuthConfig(username = "operator", password = "s3cr3t-pass")
