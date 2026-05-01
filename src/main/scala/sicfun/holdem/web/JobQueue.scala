@@ -577,6 +577,7 @@ private[web] object JobQueue:
         else
           jobs.put(jobId, completedState)
           completedState
+      cancelFlags.remove(jobId)
       if timedOut.get() then
         timedOutWorkersInFlight.decrementAndGet()
       finalState match
@@ -609,6 +610,7 @@ private[web] object JobQueue:
               override def run(): Unit =
                 if tryMarkTimedOut(jobId, submittedAt, startedAt) then
                   timedOut.set(true)
+                  cancelFlags.remove(jobId)
                   timedOutWorkersInFlight.incrementAndGet()
                   logWarn(
                     s"playing hall job timed out jobId=$jobId timeoutMs=$analysisTimeoutMs queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
@@ -721,6 +723,7 @@ private[web] object JobQueue:
         val state = entry.getValue
         if state.isTerminal && state.completedAtEpochMs.exists(_ < cutoff) then
           jobOwners.remove(entry.getKey)
+          cancelFlags.remove(entry.getKey)
           iterator.remove()
 
 

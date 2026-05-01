@@ -615,6 +615,62 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("playing hall running job can be cancelled with DELETE") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, playingHallBackend = backend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val submissionResponse = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(submissionResponse.statusCode(), 202)
+        val statusUri = s"$baseUri${jsonBody(submissionResponse)("statusUrl").str}"
+
+        assert(backend.started.await(3, TimeUnit.SECONDS), "playing hall backend never started")
+        try
+          val cancelResponse = delete(statusUri)
+          assertEquals(cancelResponse.statusCode(), 200)
+          val cancelBody = jsonBody(cancelResponse)
+          assertEquals(cancelBody("status").str, "cancelled")
+
+          backend.release.countDown()
+          val cancelled = awaitTerminalJob(statusUri)
+          assertEquals(cancelled("status").str, "cancelled")
+          assertEquals(cancelled("result")("summary")("handsPlayed").num.toInt, 240)
+        finally
+          backend.release.countDown()
+      }
+    }
+  }
+
+  test("playing hall cancellation returns 404 for unknown jobs") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val response = delete(s"$baseUri/api/playing-hall/jobs/not-a-real-job")
+        assertEquals(response.statusCode(), 404)
+        assert(jsonBody(response)("error").str.contains("not found"))
+      }
+    }
+  }
+
+  test("playing hall cancellation returns 409 for terminal jobs") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val submissionResponse = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(submissionResponse.statusCode(), 202)
+        val statusUri = s"$baseUri${jsonBody(submissionResponse)("statusUrl").str}"
+
+        val completed = awaitTerminalJob(statusUri)
+        assertEquals(completed("status").str, "completed")
+
+        val response = delete(statusUri)
+        assertEquals(response.statusCode(), 409)
+        assert(jsonBody(response)("error").str.contains("already terminal"))
+      }
+    }
+  }
+
   test("playing hall submission validates the payload") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>
@@ -1281,7 +1337,7 @@ class HandHistoryReviewServerTest extends FunSuite:
     while System.nanoTime() < deadlineNanos do
       val body = jsonBody(get(uri, headers))
       lastStatus = body("status").str
-      if lastStatus == "completed" || lastStatus == "failed" then
+      if lastStatus == "completed" || lastStatus == "failed" || lastStatus == "cancelled" then
         return body
       Thread.sleep(50)
     fail(s"job did not reach a terminal state, last status=$lastStatus")
@@ -1365,6 +1421,12 @@ class HandHistoryReviewServerTest extends FunSuite:
     val request = builder
       .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
       .build()
+    httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+
+  private def delete(uri: String, headers: Map[String, String] = Map.empty): HttpResponse[String] =
+    val builder = HttpRequest.newBuilder(URI.create(uri))
+    headers.foreach { case (name, value) => builder.header(name, value) }
+    val request = builder.DELETE().build()
     httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
 
   private def basicAuthHeaders(username: String, password: String): Map[String, String] =
