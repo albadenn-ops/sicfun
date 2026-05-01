@@ -9,7 +9,7 @@ import ujson.{Arr, Obj, Str, Value}
 
 import java.io.ByteArrayOutputStream
 import java.time.Instant
-import java.net.{BindException, InetAddress, InetSocketAddress, URI, URLDecoder}
+import java.net.{BindException, InetSocketAddress, URI, URLDecoder}
 import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
@@ -26,9 +26,9 @@ import java.util.concurrent.{
   ThreadPoolExecutor,
   TimeUnit
 }
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
-import scala.jdk.CollectionConverters.*
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import scala.util.control.NonFatal
+import sicfun.holdem.web.RateLimit.*
 import sicfun.holdem.web.WebResponses.*
 
 /** Embedded HTTP server for hand-history review analysis, auth, and static UI hosting.
@@ -74,7 +74,6 @@ object HandHistoryReviewServer:
   private val DefaultAnalysisTimeoutMs = 120000L
   private val DefaultPlayingHallTimeoutMs = 900000L
   private val DefaultShutdownGraceMs = 5000L
-  private val DefaultRateLimitWindowMs = 60L * 1000L
   private val DefaultRateLimitSubmitsPerMinute = 6
   private val DefaultRateLimitStatusPerMinute = 240
   private val ReadyReasonAcceptingTraffic = "accepting-traffic"
@@ -86,7 +85,6 @@ object HandHistoryReviewServer:
   private val AuthenticationRequiredMessage = "authentication required"
   private val SessionAuthenticationRequiredMessage = "sign in required"
   private val SessionCsrfRequiredMessage = "missing or invalid csrf token"
-  private val RateLimitClientIpSourceRemoteAddress = "remote-address"
   private val AuthenticatedUserAttribute = "sicfun.hand-history.authenticated-user"
   private val DefaultPlayingHallRoot = Paths.get("data", "web-playing-hall")
   private val DefaultPlayingHallHands = 240
@@ -1745,31 +1743,8 @@ object HandHistoryReviewServer:
       timedOutWorkersInFlight: Int
   )
 
-  private enum RateLimitBucket:
-    case Submit, JobStatus
-
-    def id: String = this match
-      case Submit => "submit"
-      case JobStatus => "job-status"
-
-    def description: String = this match
-      case Submit => "submit"
-      case JobStatus => "job status"
-
   private enum AuthRequirement:
     case None, Optional, Required
-
-  private final case class RateLimitState(
-      windowStartedAtMs: Long,
-      requestCount: Int
-  )
-
-  private final case class RateLimitRejection(
-      bucket: RateLimitBucket,
-      limitPerMinute: Int,
-      retryAfterMs: Long,
-      clientKey: String
-  )
 
   private sealed trait AnalysisJobState:
     def status: String
@@ -2401,61 +2376,6 @@ object HandHistoryReviewServer:
           jobOwners.remove(entry.getKey)
           iterator.remove()
 
-  private final class RequestRateLimiter(
-      submitsPerMinute: Int,
-      statusPerMinute: Int,
-      trustedClientIpHeader: Option[String],
-      trustedProxyIps: Set[String],
-      nowMillis: () => Long = () => System.currentTimeMillis()
-  ):
-    private val windows = new ConcurrentHashMap[String, RateLimitState]()
-    private val lastCleanupAtMs = new AtomicLong(0L)
-
-    def check(
-        exchange: HttpExchange,
-        bucket: RateLimitBucket,
-        principalKey: Option[String] = None
-    ): Option[RateLimitRejection] =
-      val limitPerMinute = bucket match
-        case RateLimitBucket.Submit => submitsPerMinute
-        case RateLimitBucket.JobStatus => statusPerMinute
-      if limitPerMinute <= 0 then None
-      else
-        val now = nowMillis()
-        cleanupIfDue(now)
-        val clientKey = principalKey.getOrElse(rateLimitClientKey(exchange, trustedClientIpHeader, trustedProxyIps))
-        val key = s"${bucket.id}|$clientKey"
-        var rejection = Option.empty[RateLimitRejection]
-        windows.compute(
-          key,
-          (_, existing) =>
-            if existing == null || now - existing.windowStartedAtMs >= DefaultRateLimitWindowMs then
-              RateLimitState(windowStartedAtMs = now, requestCount = 1)
-            else if existing.requestCount < limitPerMinute then
-              existing.copy(requestCount = existing.requestCount + 1)
-            else
-              rejection = Some(
-                RateLimitRejection(
-                  bucket = bucket,
-                  limitPerMinute = limitPerMinute,
-                  retryAfterMs = math.max(1L, DefaultRateLimitWindowMs - (now - existing.windowStartedAtMs)),
-                  clientKey = clientKey
-                )
-              )
-              existing
-        )
-        rejection
-
-    private def cleanupIfDue(now: Long): Unit =
-      val lastCleanup = lastCleanupAtMs.get()
-      if now - lastCleanup >= DefaultRateLimitWindowMs && lastCleanupAtMs.compareAndSet(lastCleanup, now) then
-        val cutoff = now - (DefaultRateLimitWindowMs * 2L)
-        val iterator = windows.entrySet().iterator()
-        while iterator.hasNext do
-          val entry = iterator.next()
-          if entry.getValue.windowStartedAtMs < cutoff then
-            iterator.remove()
-
   private def renderHealth(
       config: ServerConfig,
       boundPort: Int,
@@ -2837,87 +2757,6 @@ object HandHistoryReviewServer:
 
   private def requestPath(exchange: HttpExchange): String =
     Option(exchange.getRequestURI).map(_.getPath).filter(_.nonEmpty).getOrElse("/")
-
-  private def rateLimitClientIpSource(
-      trustedClientIpHeader: Option[String],
-      trustedProxyIps: Set[String]
-  ): String =
-    trustedClientIpHeader match
-      case Some(header) if trustedProxyIps.nonEmpty =>
-        s"header:$header via loopback-or-allowlisted-proxy"
-      case Some(header) =>
-        s"header:$header via loopback-only"
-      case None =>
-        RateLimitClientIpSourceRemoteAddress
-
-  private def trustedProxyIpSummary(trustedProxyIps: Set[String]): String =
-    trustedProxyIps.toVector.sorted match
-      case Vector() => "-"
-      case values => values.mkString(",")
-
-  private def rateLimitClientKey(
-      exchange: HttpExchange,
-      trustedClientIpHeader: Option[String],
-      trustedProxyIps: Set[String]
-  ): String =
-    trustedClientIpHeader
-      .filter(_ => trustsRateLimitClientIpHeader(remoteInetAddress(exchange), trustedProxyIps))
-      .flatMap(headerName => forwardedClientKey(exchange, headerName).map(value => s"header:$value"))
-      .getOrElse(s"remote:${clientAddressKey(exchange)}")
-
-  private def forwardedClientKey(exchange: HttpExchange, headerName: String): Option[String] =
-    Option(exchange.getRequestHeaders.get(headerName))
-      .map(_.asScala.toVector.map(_.trim).filter(_.nonEmpty))
-      .collect { case Vector(singleValue) if !singleValue.contains(',') => singleValue }
-      .flatMap(parseTrustedClientIpLiteral)
-
-  private[web] def parseTrustedProxyIps(raw: Option[String]): Either[String, Set[String]] =
-    raw match
-      case None => Right(Set.empty)
-      case Some(value) =>
-        val entries = value.split(",").toVector.map(_.trim).filter(_.nonEmpty)
-        entries.foldLeft[Either[String, Vector[String]]](Right(Vector.empty)) { (acc, entry) =>
-          for
-            parsed <- acc
-            normalized <- parseTrustedClientIpLiteral(entry)
-              .toRight(s"--rateLimitTrustedProxyIps must contain comma-separated IP literals; invalid entry: $entry")
-          yield parsed :+ normalized
-        }.map(_.toSet)
-
-  private def parseTrustedClientIpLiteral(value: String): Option[String] =
-    val looksLikeIpLiteral =
-      value.nonEmpty &&
-        value.exists(_.isDigit) &&
-        (value.contains(".") || value.contains(":")) &&
-        value.forall(ch =>
-          ch.isDigit ||
-            ch == '.' ||
-            ch == ':' ||
-            ch == '%' ||
-            (ch >= 'a' && ch <= 'f') ||
-            (ch >= 'A' && ch <= 'F')
-        )
-    if !looksLikeIpLiteral then None
-    else
-      try
-        Some(InetAddress.getByName(value).getHostAddress)
-      catch
-        case _: Exception => None
-
-  private[web] def trustsRateLimitClientIpHeader(
-      remoteAddress: Option[InetAddress],
-      trustedProxyIps: Set[String]
-  ): Boolean =
-    remoteAddress.exists(address => address.isLoopbackAddress || trustedProxyIps.contains(address.getHostAddress))
-
-  private def remoteInetAddress(exchange: HttpExchange): Option[InetAddress] =
-    Option(exchange.getRemoteAddress).flatMap(address => Option(address.getAddress))
-
-  private def clientAddressKey(exchange: HttpExchange): String =
-    Option(exchange.getRemoteAddress)
-      .flatMap(address => Option(address.getAddress).map(_.getHostAddress).orElse(Option(address.getHostString)))
-      .filter(_.nonEmpty)
-      .getOrElse("unknown")
 
   private def remoteAddress(exchange: HttpExchange): String =
     Option(exchange.getRemoteAddress).map(address => s"${address.getHostString}:${address.getPort}").getOrElse("-")

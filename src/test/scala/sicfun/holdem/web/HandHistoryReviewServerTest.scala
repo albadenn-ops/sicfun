@@ -839,14 +839,14 @@ class HandHistoryReviewServerTest extends FunSuite:
   }
 
   test("trusted client IP header is only trusted for loopback or allowlisted proxies") {
-    assert(HandHistoryReviewServer.trustsRateLimitClientIpHeader(Some(InetAddress.getByName("127.0.0.1")), Set.empty))
-    assert(HandHistoryReviewServer.trustsRateLimitClientIpHeader(Some(InetAddress.getByName("::1")), Set.empty))
-    assert(!HandHistoryReviewServer.trustsRateLimitClientIpHeader(Some(InetAddress.getByName("203.0.113.10")), Set.empty))
-    assert(HandHistoryReviewServer.trustsRateLimitClientIpHeader(
+    assert(RateLimit.trustsRateLimitClientIpHeader(Some(InetAddress.getByName("127.0.0.1")), Set.empty))
+    assert(RateLimit.trustsRateLimitClientIpHeader(Some(InetAddress.getByName("::1")), Set.empty))
+    assert(!RateLimit.trustsRateLimitClientIpHeader(Some(InetAddress.getByName("203.0.113.10")), Set.empty))
+    assert(RateLimit.trustsRateLimitClientIpHeader(
       Some(InetAddress.getByName("203.0.113.10")),
       Set("203.0.113.10")
     ))
-    assert(!HandHistoryReviewServer.trustsRateLimitClientIpHeader(None, Set("203.0.113.10")))
+    assert(!RateLimit.trustsRateLimitClientIpHeader(None, Set("203.0.113.10")))
   }
 
   test("invalid trusted proxy IP allowlist fails startup parsing") {
