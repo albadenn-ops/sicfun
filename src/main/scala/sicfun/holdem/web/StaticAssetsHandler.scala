@@ -5,7 +5,8 @@ import com.sun.net.httpserver.{HttpExchange, HttpHandler}
 import java.nio.file.{Files, Path, Paths}
 import scala.util.control.NonFatal
 
-import sicfun.holdem.web.HandHistoryReviewServer.{BasicAuthConfig, ensureAuthenticatedStatic}
+import sicfun.holdem.web.AuthStack.ensureAuthenticatedStatic
+import sicfun.holdem.web.HandHistoryReviewServer.BasicAuthConfig
 import sicfun.holdem.web.WebResponses.{applySecurityHeaders, contentTypeFor, writePlain}
 
 private[web] final class StaticAssetsHandler(

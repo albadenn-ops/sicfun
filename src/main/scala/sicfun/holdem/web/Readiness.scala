@@ -7,11 +7,10 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import ujson.{Bool, Num, Obj, Str}
 
+import sicfun.holdem.web.AuthStack.{authenticationEnabled, authenticationMode}
 import sicfun.holdem.web.HandHistoryReviewServer.{
   JsonResponse,
   ServerConfig,
-  authenticationEnabled,
-  authenticationMode,
   healthModelSource
 }
 import sicfun.holdem.web.JobQueue.{AnalysisJobStore, PlayingHallJobStore}
