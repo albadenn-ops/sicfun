@@ -10,15 +10,15 @@ import scala.util.control.NonFatal
 
 import ujson.{Arr, Obj, Str}
 
-import sicfun.holdem.web.HandHistoryReviewServer.{
-  BasicAuthConfig,
+import sicfun.holdem.web.HandHistoryReviewServer.BasicAuthConfig
+import sicfun.holdem.web.HandHistoryReviewServerApi.{
   JsonResponse,
   optionalString,
   readRequestBody,
   requiredString,
-  retryAfterSeconds,
-  logWarn
+  retryAfterSeconds
 }
+import sicfun.holdem.web.HandHistoryReviewServerRuntime.logWarn
 import sicfun.holdem.web.RateLimit.{RateLimitBucket, RequestRateLimiter}
 import sicfun.holdem.web.WebResponses.*
 

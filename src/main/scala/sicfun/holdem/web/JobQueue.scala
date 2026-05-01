@@ -18,13 +18,8 @@ import scala.util.control.NonFatal
 
 import ujson.{Obj, Str, Value}
 
-import sicfun.holdem.web.HandHistoryReviewServer.{
-  JsonResponse,
-  PlayingHallRequest,
-  logInfo,
-  logWarn,
-  retryAfterSeconds
-}
+import sicfun.holdem.web.HandHistoryReviewServerApi.{JsonResponse, PlayingHallRequest, retryAfterSeconds}
+import sicfun.holdem.web.HandHistoryReviewServerRuntime.{logInfo, logWarn}
 
 /** Asynchronous job-processing machinery for [[HandHistoryReviewServer]].
   *
