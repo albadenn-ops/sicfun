@@ -29,6 +29,7 @@ import java.util.concurrent.{
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
+import sicfun.holdem.web.WebResponses.*
 
 /** Embedded HTTP server for hand-history review analysis, auth, and static UI hosting.
   *
@@ -86,8 +87,6 @@ object HandHistoryReviewServer:
   private val SessionAuthenticationRequiredMessage = "sign in required"
   private val SessionCsrfRequiredMessage = "missing or invalid csrf token"
   private val RateLimitClientIpSourceRemoteAddress = "remote-address"
-  private val ContentSecurityPolicy =
-    "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'"
   private val AuthenticatedUserAttribute = "sicfun.hand-history.authenticated-user"
   private val DefaultPlayingHallRoot = Paths.get("data", "web-playing-hall")
   private val DefaultPlayingHallHands = 240
@@ -2663,48 +2662,6 @@ object HandHistoryReviewServer:
       finally
         exchange.close()
 
-  private def writeJson(exchange: HttpExchange, status: Int, value: Value): Unit =
-    val bytes = ujson.write(value, indent = 2).getBytes(StandardCharsets.UTF_8)
-    writeBytes(exchange, status, bytes, "application/json; charset=utf-8")
-
-  private def writePlain(exchange: HttpExchange, status: Int, body: String, contentType: String): Unit =
-    writeBytes(exchange, status, body.getBytes(StandardCharsets.UTF_8), contentType)
-
-  private def writeRedirect(exchange: HttpExchange, status: Int, location: String): Unit =
-    exchange.getResponseHeaders.set("Location", location)
-    exchange.sendResponseHeaders(status, -1L)
-
-  private def writeBytes(
-      exchange: HttpExchange,
-      status: Int,
-      bytes: Array[Byte],
-      contentType: String
-  ): Unit =
-    exchange.getResponseHeaders.set("Content-Type", contentType)
-    exchange.getResponseHeaders.set("Cache-Control", "no-store")
-    exchange.sendResponseHeaders(status, bytes.length.toLong)
-    val body = exchange.getResponseBody
-    body.write(bytes)
-    body.flush()
-
-  private def contentTypeFor(path: Path): String =
-    path.getFileName.toString.toLowerCase match
-      case name if name.endsWith(".html") => "text/html; charset=utf-8"
-      case name if name.endsWith(".css") => "text/css; charset=utf-8"
-      case name if name.endsWith(".js") => "application/javascript; charset=utf-8"
-      case name if name.endsWith(".mjs") => "application/javascript; charset=utf-8"
-      case name if name.endsWith(".map") => "application/json; charset=utf-8"
-      case name if name.endsWith(".svg") => "image/svg+xml"
-      case name if name.endsWith(".png") => "image/png"
-      case name if name.endsWith(".jpg") || name.endsWith(".jpeg") => "image/jpeg"
-      case name if name.endsWith(".webp") => "image/webp"
-      case name if name.endsWith(".ico") => "image/x-icon"
-      case name if name.endsWith(".wasm") => "application/wasm"
-      case name if name.endsWith(".woff2") => "font/woff2"
-      case name if name.endsWith(".json") => "application/json; charset=utf-8"
-      case name if name.endsWith(".txt") => "text/plain; charset=utf-8"
-      case _ => "application/octet-stream"
-
   private def classifyAnalysisError(error: String): Int =
     if error.startsWith("analysis timed out after") then 504
     else if error.startsWith("analysis failed:") then 500
@@ -2851,14 +2808,6 @@ object HandHistoryReviewServer:
         .map(_.trim)
         .contains(user.csrfToken)
     }
-
-  private def applySecurityHeaders(exchange: HttpExchange): Unit =
-    val headers = exchange.getResponseHeaders
-    headers.set("Cache-Control", "no-store")
-    headers.set("Content-Security-Policy", ContentSecurityPolicy)
-    headers.set("Referrer-Policy", "no-referrer")
-    headers.set("X-Content-Type-Options", "nosniff")
-    headers.set("X-Frame-Options", "DENY")
 
   private def retryAfterSeconds(pollAfterMs: Long): String =
     math.max(1L, (pollAfterMs + 999L) / 1000L).toString
