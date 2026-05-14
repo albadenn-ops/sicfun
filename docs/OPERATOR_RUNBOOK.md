@@ -43,6 +43,11 @@ powershell -ExecutionPolicy Bypass -File scripts/validation/prove-pipeline.ps1
 
 - Includes the hand-history review end-to-end proof: playing-hall export -> import -> analysis service -> async HTTP job completion.
 
+## 1A. Test Suite Quirks
+
+- `scripts/validation/prove-pipeline.ps1` is the supported proof path. It runs a pinned suite list via `sbt testOnly ...` with retries instead of a single aggregated `sbt test`.
+- Full aggregated `sbt test` can still show order- or timing-dependent failures on the current machine even when the failing suite passes in isolation. Re-run the failing suite directly before treating that result as a real regression.
+
 ## 2. Main Workload: Playing Hall
 
 Single-process hall run (good for functional checks and controlled experiments):
@@ -302,6 +307,18 @@ Uninstall the service:
 powershell -ExecutionPolicy Bypass -File dist/hand-history-web/bin/uninstall-hand-history-web-service.ps1
 ```
 
+Click-to-run installer variant:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/release-hand-history-web-installer.ps1
+```
+
+- Wraps `scripts/release-hand-history-web.ps1` then adds a jlink-trimmed JDK under `runtime/bin/java.exe`, patches the launcher to prefer the embedded runtime, emits `Setup.cmd` at the bundle root, regenerates `manifest.sha256`, and zips to `dist/hand-history-web-<version>.zip` with a sibling `.sha256`.
+- Use this variant when shipping to hosts that may not have Java pre-installed; use the base `release-hand-history-web.ps1` for hosts that already have Java 17+ on `PATH`.
+- After unzip, the operator double-clicks `Setup.cmd` to verify the manifest and start the service. The default JDK source is Eclipse Temurin 25 LTS; override with `-JdkPath <abs-path>`.
+- `Setup.cmd` calls `bin/verify-if-needed.ps1` instead of running the full SHA-256 sweep on every launch. That helper writes a `.manifest-verified` marker at the bundle root after a successful check and short-circuits subsequent launches as long as the marker's mtime is at least as recent as `manifest.sha256`. Re-extracting the ZIP advances `manifest.sha256`'s mtime and forces a fresh verify. Delete the marker manually to force a re-check.
+- Step 6.5 of the installer boots the patched launcher on `127.0.0.1:18081`, asserts the running `java.exe` is the embedded runtime (not PATH-Java), polls `/api/health`, exercises the static index + Cache-Control + ETag, and runs a full Playing Hall job through to DELETE-after-completed. Catches jlink module-set gaps that the base script's smoke (which uses full-classpath JDK) cannot.
+
 Operator notes:
 - The packaged release serves the upload UI from `dist/hand-history-web/static`.
 - The packaged release now includes a handoff guide at `dist/hand-history-web/README.md`. Give operators the packaged directory, not repo-only docs.
@@ -309,7 +326,7 @@ Operator notes:
 - Run `powershell -ExecutionPolicy Bypass -File dist/hand-history-web/bin/verify-release-manifest.ps1` after copying the bundle to a target machine to confirm it still matches `manifest.sha256`.
 - `bin/run-hand-history-web.ps1` now loads `conf/hand-history-web.env` by default. Override with `-ConfigFile <path>` or `CONFIG_FILE=<path>` when you need a different config file.
 - The source and packaged launchers bind to `127.0.0.1` by default. Pass `-Host 0.0.0.0` only if you intentionally want network exposure.
-- Optional built-in HTTP Basic auth now protects `/`, `/api/analyze-hand-history`, and `/api/analyze-hand-history/jobs/{id}` while leaving `/api/health` and `/api/ready` open for service managers and probes. Set `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD` in `conf/hand-history-web.env` or via process env. Prefer config/env over CLI flags so credentials do not appear in the Java command line.
+- Optional built-in HTTP Basic auth now protects `/`, `/api/analyze-hand-history`, `/api/analyze-hand-history/jobs/{id}`, `/api/playing-hall`, and `/api/playing-hall/jobs/{id}` (GET/DELETE) while leaving `/api/health` and `/api/ready` open for service managers and probes. Set `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD` in `conf/hand-history-web.env` or via process env. Prefer config/env over CLI flags so credentials do not appear in the Java command line.
 - To reduce accidental exposure, non-loopback binds now require `BASIC_AUTH_*`, `USER_STORE_PATH`, or an explicit `ALLOW_UNAUTHENTICATED_PUBLIC_BIND=true` / `--allowUnauthenticatedPublicBind=true` override for a trusted private network.
 - Platform-user auth is available as a separate mode. Set `USER_STORE_PATH` to enable persistent local users, profile defaults, browser sessions, and per-user job ownership. Leave `BASIC_AUTH_*` unset when using platform-user auth; the modes are mutually exclusive.
 - Non-loopback platform-user auth now also requires `USER_AUTH_COOKIE_SECURE=true` unless you explicitly set `ALLOW_INSECURE_USER_AUTH=true` / `--allowInsecureUserAuth=true` for trusted private-network testing.
@@ -321,20 +338,21 @@ Operator notes:
 - The service install script configures stdout/stderr capture under `dist/hand-history-web/logs/` and enables basic Windows service restart-on-failure recovery.
 - `bin/start-hand-history-web-service.ps1` now fails fast if the service stops during startup and includes the latest readiness/health summary plus recent stdout/stderr tail when readiness does not come up cleanly.
 - `bin/drain-stop-hand-history-web-service.ps1` now includes the last readiness/health probe summary when drain mode does not flip or jobs do not fully drain before the forced stop.
-- Uploads are accepted quickly and processed as background jobs; the page polls `/api/analyze-hand-history/jobs/{id}` until the review finishes.
+- Uploads are accepted quickly and processed as background jobs; the page polls `/api/analyze-hand-history/jobs/{id}` (or `/api/playing-hall/jobs/{id}` for hall simulations) until the work finishes. Playing Hall jobs additionally accept `DELETE` on the job URL for cooperative cancellation; the server returns `200` with `status=cancelled` while running, `409` if already terminal, `404` if unknown.
 - Analysis admission is now bounded. Use `-MaxConcurrentJobs`, `-MaxQueuedJobs`, and `-ShutdownGraceMs` or the matching `MAX_CONCURRENT_JOBS`, `MAX_QUEUED_JOBS`, and `SHUTDOWN_GRACE_MS` environment variables to control saturation and shutdown drain behavior.
 - Use `-AnalysisTimeoutMs` or `ANALYSIS_TIMEOUT_MS` to cap a single analysis job. `0` disables the timeout, but the deployment-safe default is a bounded run so one stuck review cannot pin the worker pool indefinitely.
 - `SHUTDOWN_GRACE_MS` is tracked in milliseconds, but the underlying HTTP listener drains in whole-second steps. Sub-second values round up when the listener is stopping.
 - `/api/health` is the liveness/metrics endpoint. It stays `200` while the process is up and now reports readiness summary, auth mode, model mode, upload limit, analysis timeout, submit/status rate-limit settings, the trusted client-IP source used for rate limiting, queue limits, queued jobs, running jobs, timed-out workers still unwinding, and retained terminal-job count in addition to `ok=true`.
 - `/api/ready` is the readiness endpoint for reverse proxies / service managers. It returns `200` only when the instance is accepting new analysis work and switches to `503` when the queue is saturated, the instance is draining, or a timed-out worker is still unwinding. The response also reports the configured `analysisTimeoutMs`, `timedOutWorkersInFlight`, auth mode, submit/status rate-limit settings, and the trusted client-IP source used for rate limiting.
-- Use `-DrainSignalFile <path>` or `DRAIN_SIGNAL_FILE=<path>` when you want external deployment tooling to mark the instance unready before shutdown. While that file exists, `/api/ready` returns `503` and new `POST /api/analyze-hand-history` submissions are rejected, but health checks and in-flight job polling still work.
+- Use `-DrainSignalFile <path>` or `DRAIN_SIGNAL_FILE=<path>` when you want external deployment tooling to mark the instance unready before shutdown. While that file exists, `/api/ready` returns `503` and new `POST /api/analyze-hand-history` and `POST /api/playing-hall` submissions are rejected, but health checks and in-flight job polling still work.
 - `bin/drain-stop-hand-history-web-service.ps1` turns on the configured drain signal, waits for readiness to fail plus in-memory jobs and in-flight HTTP requests to drain to zero, then stops the Windows service.
 - Runtime state is still in-memory only. Queued and running review jobs are lost on process restart, and completed-job status is retained for only 15 minutes.
 - Under platform-user auth, account/profile data persists in `USER_STORE_PATH`, but browser sessions and in-flight review jobs remain in-memory only. A restart signs users out and drops queued/running jobs.
 - The raw server now emits baseline security headers (`Content-Security-Policy`, `X-Content-Type-Options`, `X-Frame-Options`, and `Referrer-Policy`), can enforce built-in Basic auth, and applies a best-effort in-process rate limiter on the expensive API routes, but that is still not a substitute for TLS termination or edge rate limiting.
+- Static assets are served with weak `ETag` headers and path-aware `Cache-Control`: `vendor/*` files get `public, max-age=31536000` (vendored libs are pinned per filename), all other static assets get `public, max-age=0, must-revalidate`. Browsers revalidate with `If-None-Match`; matching ETags get `304 Not Modified` with no body. API responses still emit `Cache-Control: no-store`. A reverse proxy with caching enabled (e.g., nginx with proxy_cache_path) can respect these directives directly; do not strip them.
 - Do not expose the raw app directly to the public internet without HTTPS in front of it. Built-in Basic auth and the in-process limiter help with access control and abuse containment, but you still want a reverse proxy / ingress layer for TLS termination, network policy, and stronger rate limiting.
-- `scripts/release-hand-history-web.ps1` validates the required static assets and smoke-checks packaged fail-closed non-loopback config rejection, auth-enabled `/`, `/api/health`, `/api/ready`, async `/api/analyze-hand-history`, trusted-header submit rate limiting, drain-mode readiness, oversized-upload rejection, and packaged manifest verification before declaring the build ready.
-- The web server supports `CONFIG_FILE`, `HOST`, `PORT`, `STATIC_DIR`, `MODEL_DIR`, `MAX_UPLOAD_BYTES`, `ANALYSIS_TIMEOUT_MS`, `MAX_CONCURRENT_JOBS`, `MAX_QUEUED_JOBS`, `SHUTDOWN_GRACE_MS`, `RATE_LIMIT_SUBMITS_PER_MINUTE`, `RATE_LIMIT_STATUS_PER_MINUTE`, `RATE_LIMIT_CLIENT_IP_HEADER`, `RATE_LIMIT_TRUSTED_PROXY_IPS`, `DRAIN_SIGNAL_FILE`, `BASIC_AUTH_USER`, `BASIC_AUTH_PASSWORD`, `ALLOW_UNAUTHENTICATED_PUBLIC_BIND`, and `ALLOW_INSECURE_USER_AUTH` environment-variable overrides in addition to CLI flags.
+- `scripts/release-hand-history-web.ps1` validates the required static assets, asserts that every `src=`/`href=` reference in `index.html` resolves to a file under the static root, then smoke-checks packaged fail-closed non-loopback config rejection, auth-enabled `/` with security-header presence and weak-ETag emission, `/api/health`, `/api/ready`, async `/api/analyze-hand-history`, trusted-header submit rate limiting, the full `/api/playing-hall` lifecycle (POST auth gating, GET poll, DELETE-after-completed → 409), drain-mode readiness rejecting both analysis and Playing Hall submissions, the chart-stack assets (`site-charts.js`, `vendor/uPlot.iife.min.js`, `vendor/uPlot.min.css`) with correct Content-Type plus 304 revalidation via `If-None-Match`, oversized-upload rejection, and packaged manifest verification before declaring the build ready. The installer variant adds Step 6.5 which repeats the basic smoke against the patched bundle through the embedded jlink runtime.
+- The web server supports `CONFIG_FILE`, `HOST`, `PORT`, `STATIC_DIR`, `MODEL_DIR`, `MAX_UPLOAD_BYTES`, `ANALYSIS_TIMEOUT_MS`, `PLAYING_HALL_TIMEOUT_MS`, `MAX_CONCURRENT_JOBS`, `MAX_QUEUED_JOBS`, `SHUTDOWN_GRACE_MS`, `RATE_LIMIT_SUBMITS_PER_MINUTE`, `RATE_LIMIT_STATUS_PER_MINUTE`, `RATE_LIMIT_CLIENT_IP_HEADER`, `RATE_LIMIT_TRUSTED_PROXY_IPS`, `DRAIN_SIGNAL_FILE`, `BASIC_AUTH_USER`, `BASIC_AUTH_PASSWORD`, `USER_STORE_PATH`, `ALLOW_UNAUTHENTICATED_PUBLIC_BIND`, and `ALLOW_INSECURE_USER_AUTH` environment-variable overrides in addition to CLI flags. The `MAX_CONCURRENT_JOBS` and `MAX_QUEUED_JOBS` budgets are shared across both job stores (analysis and Playing Hall).
 
 ## 6. Troubleshooting
 
