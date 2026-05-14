@@ -503,6 +503,12 @@ pause >nul
     }
 
     $postPort = $SmokePort + 1
+    # Sandbox the smoke's working directory so any artifacts the launcher creates
+    # (specifically the Playing Hall job's data/web-playing-hall/<timestamp>/ run dir,
+    # which the server resolves relative to JVM CWD) land in a temp tree we delete.
+    # Without this, every Step 6.5 run leaks a run directory into the repo's data/.
+    $smokeCwd = Join-Path ([System.IO.Path]::GetTempPath()) ("sicfun-installer-smoke-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $smokeCwd -Force | Out-Null
     $smokeJob = $null
     try {
       # Step 6.5 invokes the launcher directly rather than going through launch-with-log.ps1.
@@ -513,9 +519,11 @@ pause >nul
       # against this same bundle. Step 6.5's job here is to validate that the patched bundle
       # (jlink runtime + patched launcher) actually serves traffic.
       $smokeJob = Start-Job -ScriptBlock {
-        param($launcher, $port)
+        param($launcher, $port, $cwd)
+        Set-Location -LiteralPath $cwd
+        [System.IO.Directory]::SetCurrentDirectory($cwd)
         & powershell -NoProfile -ExecutionPolicy Bypass -File $launcher -BindHost "127.0.0.1" -Port $port
-      } -ArgumentList $launcherPath, $postPort
+      } -ArgumentList $launcherPath, $postPort, $smokeCwd
 
       $readyUri = "http://127.0.0.1:$postPort/api/ready"
       $healthUri = "http://127.0.0.1:$postPort/api/health"
@@ -685,6 +693,12 @@ pause >nul
         }
       foreach ($p in $lingering) {
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+      }
+      # Brief sleep so the JVM fully releases its handles on the sandboxed CWD before we
+      # delete it -- Windows file locks can outlive a kill by a few hundred ms.
+      Start-Sleep -Milliseconds 500
+      if (Test-Path -LiteralPath $smokeCwd) {
+        Remove-Item -LiteralPath $smokeCwd -Recurse -Force -ErrorAction SilentlyContinue
       }
     }
   }
