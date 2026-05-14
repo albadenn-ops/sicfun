@@ -7,6 +7,7 @@ import sicfun.holdem.model.PokerActionModel
 import sicfun.holdem.types.*
 import sicfun.core.MultinomialLogistic
 
+import java.io.{ByteArrayOutputStream, PrintStream}
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
@@ -41,6 +42,15 @@ class TexasHoldemPlayingHallTest extends FunSuite:
 
   private def withScalaCfrProvider[A](thunk: => A): A =
     TestSystemPropertyScope.withSystemProperties(Seq("sicfun.cfr.provider" -> Some("scala")))(thunk)
+
+  private def captureStdout(body: => Unit): String =
+    val bytes = new ByteArrayOutputStream()
+    val out = new PrintStream(bytes, true, "UTF-8")
+    try
+      Console.withOut(out)(body)
+      out.flush()
+      bytes.toString("UTF-8")
+    finally out.close()
 
   test("contribution gap preserves the full big blind call amount after a small blind raise") {
     assertEquals(TexasHoldemPlayingHall.contributionGap(targetContribution = 3.5, currentContribution = 1.0), 2.5)
@@ -752,6 +762,68 @@ class TexasHoldemPlayingHallTest extends FunSuite:
           s"expected early stop near $cancelAfter, got ${summary.handsPlayed}"
         )
         assert(summary.handsPlayed < 100, "expected cancel to stop before full hand count")
+      finally
+        deleteRecursively(outDir)
+    }
+  }
+
+  test("main help prints raw usage without logger prefixes") {
+    val rendered = captureStdout {
+      TexasHoldemPlayingHall.main(Array("--help"))
+    }
+
+    assert(rendered.contains("Usage:"))
+    assert(!rendered.contains("[INFO]"))
+    assert(!rendered.contains("[ERROR]"))
+  }
+
+  test("main emits logger-prefixed summary and progress output") {
+    val root = Files.createTempDirectory("playing-hall-main-test-")
+    try
+      val out = root.resolve("hall-main-out")
+      val rendered = captureStdout {
+        TexasHoldemPlayingHall.main(Array(
+          "--hands=1",
+          "--tableCount=1",
+          "--reportEvery=1",
+          "--learnEveryHands=0",
+          "--seed=17",
+          s"--outDir=$out",
+          "--villainStyle=tag",
+          "--raiseSize=2.5",
+          "--bunchingTrials=10",
+          "--equityTrials=40",
+          "--saveTrainingTsv=false",
+          "--saveDdreTrainingTsv=false"
+        ))
+      }
+
+      assert(rendered.contains("[INFO] [texas-holdem-playing-hall]"))
+      assert(rendered.contains("=== Texas Hold'em Playing Hall ==="))
+      assert(rendered.contains("handsPlayed: 1"))
+      assert(rendered.contains("hand=1"))
+      assert(!rendered.contains("[hall] hand="))
+    finally
+      deleteRecursively(root)
+  }
+
+  test("playing hall: hero net + per-villain nets sum to zero (zero-sum conservation)") {
+    withScalaCfrProvider {
+      val outDir = Files.createTempDirectory("hall-conservation-")
+      try
+        val Right(summary) = TexasHoldemPlayingHall.run(Array(
+          "--hands=200", "--tables=1", "--players=3",
+          "--heroStyle=adaptive", "--heroPosition=Button",
+          "--gtoMode=exact", "--villainPool=tag,gto",
+          "--seed=42", s"--outDir=${outDir.toString}",
+          "--equityTrials=60", "--bunchingTrials=20"
+        )): @unchecked
+        val totalVillainNet = summary.perVillainNetChips.values.sum
+        val delta = math.abs(summary.heroNetChips + totalVillainNet)
+        assert(
+          delta < 0.01,
+          s"zero-sum violated: heroNet=${summary.heroNetChips} sumVillainNet=$totalVillainNet delta=$delta"
+        )
       finally
         deleteRecursively(outDir)
     }

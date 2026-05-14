@@ -204,6 +204,7 @@ object TexasHoldemPlayingHall:
     */
   private final case class HandResult(
       heroNet: Double,
+      perPositionNet: Map[Position, Double],
       outcome: Int,
       tableScenario: TableScenario,
       villainDecision: Option[(GameState, PokerAction)],
@@ -218,10 +219,15 @@ object TexasHoldemPlayingHall:
       maxLivePlayers: Int
   )
 
-  /** The amount of chips hero receives at showdown (before subtracting hero's own contribution). */
+  /** Per-position payouts at hand resolution (showdown or last-standing). Folded positions
+    * are absent from the map (they receive 0). Net chips per position =
+    * payouts(pos) - contribution(pos).
+    */
   private final case class ShowdownResolution(
-      heroPayout: Double
-  )
+      payouts: Map[Position, Double]
+  ):
+    def heroPayout(heroPosition: Position): Double =
+      payouts.getOrElse(heroPosition, 0.0)
 
   /** A single training example for the Deep Distributional Range Estimation (DDRE) model.
     * Captures the full inference context at a hero decision point: the game state, both
@@ -263,6 +269,7 @@ object TexasHoldemPlayingHall:
   private val MultiwayExactMaxEvaluations = 250_000L  // cap on exact multiway equity enumerations
   private val ReviewBaseTimestamp = LocalDateTime.of(2026, 3, 10, 12, 0, 0)  // synthetic timestamp base for HH export
   private val ReviewTimestampFormatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
+  private val log = ConsoleLogger.fromConfig("texas-holdem-playing-hall")
 
   /** CLI entry point. Parses args, runs the hall, and prints the summary to stdout.
     * Returns exit code 1 on failure (unless `--help` was requested).
@@ -271,40 +278,40 @@ object TexasHoldemPlayingHall:
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
       case Right(summary) =>
-        println("=== Texas Hold'em Playing Hall ===")
-        println(s"handsPlayed: ${summary.handsPlayed}")
-        println(s"tableCount: ${summary.tableCount}")
-        println(s"playerCount: ${summary.playerCount}")
-        println(f"heroNetChips: ${summary.heroNetChips}%.4f")
-        println(f"heroBbPer100: ${summary.heroBbPer100}%.3f")
-        println(s"heroWins: ${summary.heroWins}")
-        println(s"heroTies: ${summary.heroTies}")
-        println(s"heroLosses: ${summary.heroLosses}")
-        println(s"actionCounts: ${summary.actionCounts}")
-        println(s"retrains: ${summary.retrains}")
+        log.info("=== Texas Hold'em Playing Hall ===")
+        log.info(s"handsPlayed: ${summary.handsPlayed}")
+        log.info(s"tableCount: ${summary.tableCount}")
+        log.info(s"playerCount: ${summary.playerCount}")
+        log.info(f"heroNetChips: ${summary.heroNetChips}%.4f")
+        log.info(f"heroBbPer100: ${summary.heroBbPer100}%.3f")
+        log.info(s"heroWins: ${summary.heroWins}")
+        log.info(s"heroTies: ${summary.heroTies}")
+        log.info(s"heroLosses: ${summary.heroLosses}")
+        log.info(s"actionCounts: ${summary.actionCounts}")
+        log.info(s"retrains: ${summary.retrains}")
         if summary.exactGtoCacheTotal > 0 then
-          println(s"exactGtoCacheHits: ${summary.exactGtoCacheHits}")
-          println(s"exactGtoCacheMisses: ${summary.exactGtoCacheMisses}")
-          println(f"exactGtoCacheHitRate: ${summary.exactGtoCacheHitRate * 100.0}%.1f%%")
-          println(s"exactGtoSolvedByProvider: ${formatLongCountMap(summary.exactGtoSolvedByProvider)}")
-          println(s"exactGtoServedByProvider: ${formatLongCountMap(summary.exactGtoServedByProvider)}")
-        println(s"modelId: ${summary.modelId}")
-        println(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
+          log.info(s"exactGtoCacheHits: ${summary.exactGtoCacheHits}")
+          log.info(s"exactGtoCacheMisses: ${summary.exactGtoCacheMisses}")
+          log.info(f"exactGtoCacheHitRate: ${summary.exactGtoCacheHitRate * 100.0}%.1f%%")
+          log.info(s"exactGtoSolvedByProvider: ${formatLongCountMap(summary.exactGtoSolvedByProvider)}")
+          log.info(s"exactGtoServedByProvider: ${formatLongCountMap(summary.exactGtoServedByProvider)}")
+        log.info(s"modelId: ${summary.modelId}")
+        log.info(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
         summary.overlayStats.foreach { os =>
-          println(s"overlayDecisions: ${os.decisions}")
-          println(f"overlayChangeRate: ${os.overlayChangeRate * 100.0}%.1f%%")
-          println(f"vetoRate: ${os.vetoRate * 100.0}%.1f%%")
-          println(s"decisionsWithVeto: ${os.decisionsWithVeto}")
-          println(s"totalVetoedActions: ${os.totalVetoedActions}")
-          println(f"meanLatencyMs: ${os.meanLatencyMs}%.3f")
-          println(f"p95LatencyMs: ${os.p95LatencyMs}%.3f")
-          println(f"p99LatencyMs: ${os.p99LatencyMs}%.3f")
-          println(s"actionDistribution: ${os.actionDistribution.toVector.sortBy(-_._2).map((k,v) => s"$k=$v").mkString(", ")}")
+          log.info(s"overlayDecisions: ${os.decisions}")
+          log.info(f"overlayChangeRate: ${os.overlayChangeRate * 100.0}%.1f%%")
+          log.info(f"vetoRate: ${os.vetoRate * 100.0}%.1f%%")
+          log.info(s"decisionsWithVeto: ${os.decisionsWithVeto}")
+          log.info(s"totalVetoedActions: ${os.totalVetoedActions}")
+          log.info(f"meanLatencyMs: ${os.meanLatencyMs}%.3f")
+          log.info(f"p95LatencyMs: ${os.p95LatencyMs}%.3f")
+          log.info(f"p99LatencyMs: ${os.p99LatencyMs}%.3f")
+          log.info(s"actionDistribution: ${os.actionDistribution.toVector.sortBy(-_._2).map((k,v) => s"$k=$v").mkString(", ")}")
         }
       case Left(error) =>
         if wantsHelp then println(error)
         else
-          System.err.println(error)
+          log.error(error)
           sys.exit(1)
 
   /** Programmatic entry point: parses CLI args and runs the full simulation.
@@ -549,8 +556,11 @@ object TexasHoldemPlayingHall:
       if result.outcome > 0 then heroWins += 1
       else if result.outcome < 0 then heroLosses += 1
       else heroTies += 1
-      val primaryName = tableScenario.primaryVillainProfile.name
-      perVillainNet.update(primaryName, perVillainNet(primaryName) + result.heroNet)
+      tableScenario.activeVillainPositions.foreach { position =>
+        val villainName = tableScenario.villainProfileByPosition(position).name
+        val villainDelta = result.perPositionNet.getOrElse(position, 0.0)
+        perVillainNet.update(villainName, perVillainNet(villainName) + villainDelta)
+      }
 
     private def recordHeroActions(result: HandResult): Unit =
       result.heroActions.foreach { action =>
@@ -561,8 +571,8 @@ object TexasHoldemPlayingHall:
     private def maybeReport(handNo: Int): Unit =
       if config.reportEvery > 0 && (handNo % config.reportEvery == 0 || handNo == config.hands) then
         val bb100 = if handNo > 0 then (heroNet / handNo.toDouble) * 100.0 else 0.0
-        println(
-          f"[hall] hand=$handNo%,d net=${heroNet}%.2f bb100=$bb100%.2f retrains=$retrains model=${activeArtifact.version.id}"
+        log.info(
+          f"hand=$handNo%,d net=${heroNet}%.2f bb100=$bb100%.2f retrains=$retrains model=${activeArtifact.version.id}"
         )
 
     /** Retrains the PokerActionModel from accumulated villain samples every `learnEveryHands`
@@ -776,12 +786,15 @@ object TexasHoldemPlayingHall:
       if !handOver then playPostflopStreet(Street.Turn)
       if !handOver then playPostflopStreet(Street.River)
       strategicHelperOpt.foreach(_.endHand())
-      val heroNet =
-        if handOver && outcome > 0 then roundMoney(pot - contributionOf(heroPosition))
-        else if handOver && outcome < 0 then -contributionOf(heroPosition)
-        else
-          val showdown = showdownResolution()
-          roundMoney(showdown.heroPayout - contributionOf(heroPosition))
+
+      val resolution = showdownResolution()
+      val perPositionNet: Map[Position, Double] =
+        tableScenario.activePositions.iterator.map { position =>
+          val payout = resolution.payouts.getOrElse(position, 0.0)
+          position -> roundMoney(payout - contributionOf(position))
+        }.toMap
+
+      val heroNet = perPositionNet.getOrElse(heroPosition, 0.0)
       outcome =
         if heroNet > MoneyEpsilon then 1
         else if heroNet < -MoneyEpsilon then -1
@@ -789,6 +802,7 @@ object TexasHoldemPlayingHall:
 
       HandResult(
         heroNet = heroNet,
+        perPositionNet = perPositionNet,
         outcome = outcome,
         tableScenario = tableScenario,
         villainDecision = firstVillainDecision,
@@ -1004,7 +1018,6 @@ object TexasHoldemPlayingHall:
       * GtoSolveEngine for equilibrium play. The result is normalized (e.g., Check->Call if
       * facing a bet) and recorded as an observation.
       */
-    @scala.annotation.nowarn("msg=deprecated")
     private def decideHero(
         street: Street,
         board: Board,
@@ -1299,21 +1312,20 @@ object TexasHoldemPlayingHall:
             totalContributionAfterRaise(contributionOf(position), toCallBefore, amount)
           )
 
-    /** Marks a position as folded. If hero folds, the hand is over with outcome = -1.
-      * If all villains have folded, hero wins uncontested with outcome = +1.
-      * Preflop folds are tracked separately for bunching-fold inference.
+    /** Marks a position as folded. The hand ends only when at most one live contestant
+      * remains; hero folding mid-multi-way no longer short-circuits the betting round, so
+      * remaining villains continue acting under their own decision policies until one is
+      * left standing or the river showdown resolves. Preflop folds are tracked separately
+      * for bunching-fold inference. The hand outcome (±1/0) is finalised in play() from the
+      * resolved per-position net, not here.
       */
     private def markFolded(position: Position, street: Street): Unit =
       if !foldedPositions.contains(position) then
         foldedPositions += position
         if street == Street.Preflop && !preflopFoldedPositions.contains(position) then
           preflopFoldedPositions += position
-      if position == heroPosition then
+      if liveContestants.size <= 1 then
         handOver = true
-        outcome = -1
-      else if !foldedPositions.contains(heroPosition) && liveVillains.isEmpty then
-        handOver = true
-        outcome = 1
 
     /** Mutates game state for the given action: folds mark the position out, calls pay the
       * to-call amount, raises pay the to-call plus the raise increment. Appends to the
@@ -1467,14 +1479,16 @@ object TexasHoldemPlayingHall:
           maxRaises = 1
         )
 
-    /** Evaluates all remaining players' 7-card hands and distributes the pot via side-pot
-      * logic. Returns hero's payout (the total chips hero receives from all side pots).
-      * If hero is not among the remaining players (shouldn't happen at this call site,
-      * but defensive), returns zero payout.
+    /** Resolves the hand for every live contestant: an uncontested last-standing position
+      * takes the full pot; otherwise side-pot distribution by 7-card hand strength awards
+      * each contribution slice to its eligible winner(s). Returns the per-position payouts
+      * map; folded positions are absent and receive zero.
       */
     private def showdownResolution(): ShowdownResolution =
       val remainingPlayers = liveContestants
-      if !remainingPlayers.contains(heroPosition) then ShowdownResolution(heroPayout = 0.0)
+      if remainingPlayers.isEmpty then ShowdownResolution(payouts = Map.empty)
+      else if remainingPlayers.size == 1 then
+        ShowdownResolution(payouts = Map(remainingPlayers.head -> roundMoney(pot)))
       else
         val boardCards = deal.board.cards
         val ranked = remainingPlayers.map { position =>
@@ -1494,7 +1508,7 @@ object TexasHoldemPlayingHall:
           remainingPlayers = remainingPlayers,
           handStrengthByPosition = ranked
         )
-        ShowdownResolution(heroPayout = payouts.getOrElse(heroPosition, 0.0))
+        ShowdownResolution(payouts = payouts)
 
   /** Computes the amount a player must put in to match the current highest contribution.
     * Returns 0 if they have already matched or exceeded it.
