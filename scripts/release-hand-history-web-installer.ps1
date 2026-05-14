@@ -370,6 +370,59 @@ Write-Host "Manifest verified; marker written for skip-on-relaunch."
     }
     Write-Host "  verify-if-needed.ps1 written: $verifyIfNeeded"
 
+    $launchWithLog = Join-Path $releaseRoot "bin\launch-with-log.ps1"
+    $launchWithLogHelper = @'
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Continue"
+
+$launcherDir = $PSScriptRoot
+$releaseRoot = Split-Path -Parent $launcherDir
+$logsDir = Join-Path $releaseRoot "logs"
+if (-not (Test-Path -LiteralPath $logsDir)) {
+  New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+}
+
+$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$logPath = Join-Path $logsDir ("setup-launcher-" + $timestamp + ".log")
+$launcher = Join-Path $launcherDir "run-hand-history-web.ps1"
+if (-not (Test-Path -LiteralPath $launcher)) {
+  Write-Error ("Launcher not found: " + $launcher)
+  exit 1
+}
+
+Write-Host "=== SICFUN hand-history-web ==="
+Write-Host ("Launcher: " + $launcher)
+Write-Host ("Log:      " + $logPath)
+Write-Host ""
+
+$logStream = [System.IO.StreamWriter]::new($logPath, $false, [System.Text.Encoding]::UTF8)
+try {
+  & $launcher *>&1 | ForEach-Object {
+    $line = $_.ToString()
+    Write-Host $line
+    $logStream.WriteLine($line)
+    $logStream.Flush()
+  }
+}
+finally {
+  $logStream.Dispose()
+}
+exit $LASTEXITCODE
+'@
+    Set-Content -LiteralPath $launchWithLog -Value $launchWithLogHelper -Encoding utf8 -NoNewline
+
+    $lwlTokens = $null
+    $lwlErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($launchWithLog, [ref]$lwlTokens, [ref]$lwlErrors)
+    if ($null -ne $lwlErrors -and $lwlErrors.Count -gt 0) {
+      $summary = ($lwlErrors | ForEach-Object { "$($_.Extent.StartLineNumber):$($_.Extent.StartColumnNumber) $($_.Message)" } | Select-Object -First 5) -join "; "
+      throw "Step 5 emitted launch-with-log.ps1 does not parse as valid PowerShell: $summary"
+    }
+    Write-Host "  launch-with-log.ps1 written: $launchWithLog"
+
     $setup = @"
 @echo off
 setlocal
@@ -387,9 +440,10 @@ if errorlevel 1 (
 )
 echo.
 echo [2/2] Launching service. Bound to http://127.0.0.1:8080 by default.
+echo Output also captured to logs\setup-launcher-*.log
 echo Close this window or press Ctrl+C to stop the service.
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -File "bin\run-hand-history-web.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "bin\launch-with-log.ps1"
 echo.
 echo Service exited with code %ERRORLEVEL%. Press any key to close this window.
 pause >nul

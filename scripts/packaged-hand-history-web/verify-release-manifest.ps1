@@ -32,10 +32,14 @@ foreach ($line in Get-Content -LiteralPath $manifestPath) {
 }
 
 $actual = @{}
-# Skip the manifest itself and any runtime marker files at the release root (e.g. .manifest-verified
-# written by Setup.cmd's verify-if-needed.ps1 to skip re-verification on subsequent launches).
+# Skip the manifest itself, any runtime marker files at the release root (e.g. .manifest-verified
+# written by Setup.cmd's verify-if-needed.ps1 to skip re-verification on subsequent launches), and
+# anything under logs/ (written at runtime by launch-with-log.ps1 and NSSM service capture).
 $files = Get-ChildItem -Path $ReleaseRoot -File -Recurse | Where-Object {
-  $_.FullName -ne $manifestPath -and -not ($_.Directory.FullName -eq $ReleaseRoot -and $_.Name.StartsWith('.'))
+  $rel = $_.FullName.Substring($ReleaseRoot.Length).TrimStart('\','/').Replace('\','/')
+  $_.FullName -ne $manifestPath -and
+  -not ($_.Directory.FullName -eq $ReleaseRoot -and $_.Name.StartsWith('.')) -and
+  -not $rel.StartsWith('logs/', [System.StringComparison]::OrdinalIgnoreCase)
 }
 foreach ($file in $files) {
   $relative = $file.FullName.Substring($ReleaseRoot.Length).TrimStart('\', '/').Replace('\', '/')
