@@ -5,12 +5,14 @@ import sicfun.holdem.runtime.TexasHoldemPlayingHall
 import munit.FunSuite
 import ujson.Value
 
+import java.io.ByteArrayInputStream
 import java.net.{InetAddress, URI}
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import java.util.Base64
 import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.zip.GZIPInputStream
 import scala.jdk.CollectionConverters.*
 
 /** Tests for [[HandHistoryReviewServer]], the embedded HTTP server that
@@ -556,6 +558,41 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(headerValue(plain, "Vary"), Some("Accept-Encoding"))
         assert(headerValue(plain, "ETag").exists(t => !t.endsWith("-gz\"")),
           s"plain response ETag should not carry -gz suffix, got ${headerValue(plain, "ETag")}")
+      }
+    }
+  }
+
+  test("static handler gzip output round-trips back to the original bytes") {
+    withStaticSite { staticDir =>
+      val plainBytes = Files.readAllBytes(staticDir.resolve("index.html"))
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        // Bypass the default String body handler so we receive the raw gzipped bytes
+        // exactly as they came off the wire, then decompress manually.
+        val request = HttpRequest.newBuilder(URI.create(s"$baseUri/"))
+          .header("Accept-Encoding", "gzip")
+          .GET().build()
+        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray())
+        assertEquals(response.statusCode(), 200)
+        assertEquals(
+          Option(response.headers().firstValue("Content-Encoding").orElse(null)),
+          Some("gzip")
+        )
+
+        val gzipped = response.body()
+        assert(gzipped.length > 0, "gzipped body must not be empty")
+        // Valid gzip stream starts with the two-byte magic 0x1f 0x8b.
+        assertEquals(gzipped(0), 0x1f.toByte, clue = "gzip magic byte 1 must be 0x1f")
+        assertEquals(gzipped(1), 0x8b.toByte, clue = "gzip magic byte 2 must be 0x8b")
+
+        val gz = new GZIPInputStream(new ByteArrayInputStream(gzipped))
+        val decompressed =
+          try gz.readAllBytes()
+          finally gz.close()
+        assertEquals(decompressed.length, plainBytes.length,
+          clue = s"decompressed length ${decompressed.length} should equal source ${plainBytes.length}")
+        assert(java.util.Arrays.equals(decompressed, plainBytes),
+          "decompressed bytes must exactly equal the source index.html bytes")
       }
     }
   }
