@@ -107,7 +107,9 @@ function Assert-RequiredStaticFiles {
     "index.html",
     "site.css",
     "site.js",
-    "range-heatmap.svg"
+    "site-charts.js",
+    "vendor/uPlot.iife.min.js",
+    "vendor/uPlot.min.css"
   )
 
   foreach ($relativePath in $requiredRelativePaths) {
@@ -115,6 +117,48 @@ function Assert-RequiredStaticFiles {
     if (-not (Test-Path -LiteralPath $candidate)) {
       throw "Required static asset missing: $candidate"
     }
+  }
+}
+
+function Assert-IndexReferencedAssetsExist {
+  param(
+    [string]$StaticRoot
+  )
+
+  $indexPath = Join-Path $StaticRoot "index.html"
+  if (-not (Test-Path -LiteralPath $indexPath)) {
+    throw "index.html not found under static root: $StaticRoot"
+  }
+
+  $content = Get-Content -LiteralPath $indexPath -Raw
+  $matches = [regex]::Matches($content, '(?:src|href)=["'']([^"'']+)["'']')
+  $missing = [System.Collections.Generic.List[string]]::new()
+  $checked = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($match in $matches) {
+    $url = $match.Groups[1].Value
+    if ([string]::IsNullOrWhiteSpace($url)) { continue }
+    if ($url.StartsWith('data:', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    if ($url.StartsWith('http://', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    if ($url.StartsWith('https://', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    if ($url.StartsWith('mailto:', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    if ($url.StartsWith('tel:', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    if ($url.StartsWith('//')) { continue }
+    if ($url.StartsWith('/')) { continue }
+    if ($url.StartsWith('#')) { continue }
+    $clean = $url
+    $queryIdx = $clean.IndexOf('?')
+    if ($queryIdx -ge 0) { $clean = $clean.Substring(0, $queryIdx) }
+    $hashIdx = $clean.IndexOf('#')
+    if ($hashIdx -ge 0) { $clean = $clean.Substring(0, $hashIdx) }
+    if ([string]::IsNullOrWhiteSpace($clean)) { continue }
+    if (-not $checked.Add($clean)) { continue }
+    $candidate = Join-Path $StaticRoot $clean
+    if (-not (Test-Path -LiteralPath $candidate)) {
+      $missing.Add($clean)
+    }
+  }
+  if ($missing.Count -gt 0) {
+    throw "index.html references static assets that do not exist under ${StaticRoot}: $($missing -join ', ')"
   }
 }
 
@@ -308,6 +352,14 @@ function Invoke-ReleaseSmoke {
     Authorization = New-BasicAuthHeaderValue -Username $basicAuthUser -Password $basicAuthPassword
   }
   $thirdClientHeaders[$rateLimitClientIpHeader] = "198.51.100.12"
+  $playingHallClientHeaders = @{
+    Authorization = New-BasicAuthHeaderValue -Username $basicAuthUser -Password $basicAuthPassword
+  }
+  $playingHallClientHeaders[$rateLimitClientIpHeader] = "198.51.100.13"
+  $playingHallDrainClientHeaders = @{
+    Authorization = New-BasicAuthHeaderValue -Username $basicAuthUser -Password $basicAuthPassword
+  }
+  $playingHallDrainClientHeaders[$rateLimitClientIpHeader] = "198.51.100.14"
   $job = $null
 
   try {
@@ -453,8 +505,79 @@ function Invoke-ReleaseSmoke {
     }
 
     $indexResponse = Invoke-WebRequest -Uri $indexUri -Headers $firstClientHeaders -UseBasicParsing -TimeoutSec 5
-    if ($indexResponse.Content -notmatch 'id="hand-upload-form"' -or $indexResponse.Content -notmatch 'id="review-panel"') {
-      throw "Packaged site smoke check failed: upload UI markers not found"
+    if ($indexResponse.Content -notmatch 'id="hand-upload-form"' -or $indexResponse.Content -notmatch 'id="review-panel"' -or $indexResponse.Content -notmatch 'id="playing-hall-form"') {
+      throw "Packaged site smoke check failed: upload UI, review, or Playing Hall form markers not found"
+    }
+
+    $requiredSecurityHeaders = @{
+      "X-Content-Type-Options"  = "nosniff"
+      "X-Frame-Options"         = "DENY"
+      "Referrer-Policy"         = "no-referrer"
+      "Content-Security-Policy" = "default-src"
+    }
+    foreach ($headerName in $requiredSecurityHeaders.Keys) {
+      $actual = [string]$indexResponse.Headers.$headerName
+      $expectedFragment = $requiredSecurityHeaders[$headerName]
+      if ([string]::IsNullOrWhiteSpace($actual) -or $actual -notmatch [regex]::Escape($expectedFragment)) {
+        throw "Packaged site smoke check failed: index response missing or wrong $headerName (got '$actual', expected to contain '$expectedFragment')"
+      }
+    }
+
+    $chartAssetContentTypes = @{
+      "site-charts.js"            = "application/javascript"
+      "vendor/uPlot.iife.min.js"  = "application/javascript"
+      "vendor/uPlot.min.css"      = "text/css"
+    }
+    foreach ($chartAsset in $chartAssetContentTypes.Keys) {
+      $assetUri = "http://127.0.0.1:$Port/$chartAsset"
+      $assetResponse = Invoke-WebRequest -Uri $assetUri -Headers $firstClientHeaders -UseBasicParsing -TimeoutSec 5
+      if ($assetResponse.StatusCode -ne 200) {
+        throw "Packaged static asset smoke check failed: $chartAsset returned $($assetResponse.StatusCode)"
+      }
+      if ([string]::IsNullOrEmpty($assetResponse.Content) -or $assetResponse.RawContentLength -le 0) {
+        throw "Packaged static asset smoke check failed: $chartAsset served empty body"
+      }
+      $expectedType = $chartAssetContentTypes[$chartAsset]
+      $actualType = [string]$assetResponse.Headers."Content-Type"
+      if ([string]::IsNullOrWhiteSpace($actualType) -or -not $actualType.StartsWith($expectedType, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Packaged static asset smoke check failed: $chartAsset served with Content-Type '$actualType' (expected to start with '$expectedType')"
+      }
+      $assetEtag = [string]$assetResponse.Headers."ETag"
+      if ([string]::IsNullOrWhiteSpace($assetEtag) -or -not $assetEtag.StartsWith('W/"')) {
+        throw "Packaged static asset smoke check failed: $chartAsset missing weak ETag (got '$assetEtag')"
+      }
+      $expectedCacheFragment = if ($chartAsset.StartsWith("vendor/")) { "max-age=31536000" } else { "must-revalidate" }
+      $assetCacheControl = [string]$assetResponse.Headers."Cache-Control"
+      if ($assetCacheControl -notmatch [regex]::Escape($expectedCacheFragment)) {
+        throw "Packaged static asset smoke check failed: $chartAsset has Cache-Control '$assetCacheControl' (expected to contain '$expectedCacheFragment')"
+      }
+
+      $revalHeaders = @{}
+      foreach ($k in $firstClientHeaders.Keys) { $revalHeaders[$k] = $firstClientHeaders[$k] }
+      $revalHeaders["If-None-Match"] = $assetEtag
+      $gotNotModified = $false
+      try {
+        $revalResponse = Invoke-WebRequest -Uri $assetUri -Headers $revalHeaders -UseBasicParsing -TimeoutSec 5
+        if ($revalResponse.StatusCode -eq 304) {
+          $gotNotModified = $true
+          $revalEtag = [string]$revalResponse.Headers."ETag"
+          if ($revalEtag -ne $assetEtag) {
+            throw "Packaged static asset smoke check failed: $chartAsset 304 response changed ETag ('$revalEtag' vs '$assetEtag')"
+          }
+        }
+      }
+      catch {
+        $response = $_.Exception.Response
+        if ($null -ne $response -and [int]$response.StatusCode -eq 304) {
+          $gotNotModified = $true
+        }
+        else {
+          throw
+        }
+      }
+      if (-not $gotNotModified) {
+        throw "Packaged static asset smoke check failed: $chartAsset did not return 304 with valid If-None-Match"
+      }
     }
 
     $sampleHand = @'
@@ -597,6 +720,84 @@ Hero: folds
       $tcpClient.Dispose()
     }
 
+    $playingHallUri = "http://127.0.0.1:$Port/api/playing-hall"
+    $playingHallPayload = @{
+      hands = 1
+      tableCount = 1
+      playerCount = 2
+      heroStyle = "adaptive"
+      heroPosition = "Button"
+      gtoMode = "fast"
+      villainPool = @("tag")
+      bunchingTrials = 1
+      equityTrials = 1
+      learnEveryHands = 0
+      learningWindowSamples = 0
+    } | ConvertTo-Json -Compress
+
+    try {
+      Invoke-WebRequest -Uri $playingHallUri -Method Post -ContentType "application/json" -Body $playingHallPayload -UseBasicParsing -TimeoutSec 5 | Out-Null
+      throw "Packaged playing-hall submit route allowed unauthenticated access"
+    }
+    catch {
+      if (-not $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 401) {
+        throw
+      }
+    }
+
+    $playingHallSubmitResponse = Invoke-WebRequest -Uri $playingHallUri -Method Post -Headers $playingHallClientHeaders -ContentType "application/json" -Body $playingHallPayload -UseBasicParsing -TimeoutSec 20
+    $playingHallSubmission = $playingHallSubmitResponse.Content | ConvertFrom-Json
+    $playingHallStatusUrl =
+      if ($playingHallSubmission.statusUrl) { [string]$playingHallSubmission.statusUrl }
+      else { [string]$playingHallSubmitResponse.Headers.Location }
+    if ([string]::IsNullOrWhiteSpace([string]$playingHallSubmission.jobId) -or [string]::IsNullOrWhiteSpace($playingHallStatusUrl) -or $playingHallSubmission.status -ne "queued") {
+      $playingHallSubmissionJson = $playingHallSubmission | ConvertTo-Json -Depth 8
+      throw "Packaged playing-hall submission smoke check failed: $playingHallSubmissionJson"
+    }
+
+    $playingHallStatusUri = Resolve-JobUri -BaseUri "http://127.0.0.1:$Port" -StatusUrl $playingHallStatusUrl
+    try {
+      Invoke-WebRequest -Uri $playingHallStatusUri -UseBasicParsing -TimeoutSec 5 | Out-Null
+      throw "Packaged playing-hall status route allowed unauthenticated access"
+    }
+    catch {
+      if (-not $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 401) {
+        throw
+      }
+    }
+
+    $playingHallResult = Wait-AnalysisJobResult -BaseUri "http://127.0.0.1:$Port" -StatusUrl $playingHallStatusUrl -Headers $playingHallClientHeaders -TimeoutSeconds 120
+    if ($null -eq $playingHallResult) {
+      throw "Packaged playing-hall job completed with a null result payload"
+    }
+
+    try {
+      Invoke-WebRequest -Uri $playingHallStatusUri -Method Delete -UseBasicParsing -TimeoutSec 5 | Out-Null
+      throw "Packaged playing-hall cancel route allowed unauthenticated access"
+    }
+    catch {
+      if (-not $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 401) {
+        throw
+      }
+    }
+
+    $playingHallAlreadyTerminal = $false
+    try {
+      Invoke-WebRequest -Uri $playingHallStatusUri -Method Delete -Headers $playingHallClientHeaders -UseBasicParsing -TimeoutSec 10 | Out-Null
+    }
+    catch {
+      $response = $_.Exception.Response
+      if ($null -ne $response -and [int]$response.StatusCode -eq 409) {
+        $playingHallAlreadyTerminal = $true
+      }
+      else {
+        throw
+      }
+    }
+    if (-not $playingHallAlreadyTerminal) {
+      throw "Packaged playing-hall DELETE on completed job did not return 409 already-terminal"
+    }
+
     Set-Content -Path $drainSignalFile -Value "draining" -Encoding ascii
     $draining = $false
     for ($attempt = 0; $attempt -lt 10; $attempt++) {
@@ -641,6 +842,23 @@ Hero: folds
     if (-not $drainRejected) {
       throw "Packaged analysis submission was not rejected while drain mode was active"
     }
+
+    $playingHallDrainRejected = $false
+    try {
+      Invoke-WebRequest -Uri $playingHallUri -Method Post -Headers $playingHallDrainClientHeaders -ContentType "application/json" -Body $playingHallPayload -UseBasicParsing -TimeoutSec 20 | Out-Null
+    }
+    catch {
+      $response = $_.Exception.Response
+      if ($null -ne $response -and [int]$response.StatusCode -eq 503) {
+        $playingHallDrainRejected = $true
+      }
+      else {
+        throw
+      }
+    }
+    if (-not $playingHallDrainRejected) {
+      throw "Packaged playing-hall submission was not rejected while drain mode was active"
+    }
   }
   finally {
     if ($null -ne $job) {
@@ -684,6 +902,7 @@ try {
 
   Invoke-Step "Validate static site assets" {
     Assert-RequiredStaticFiles -StaticRoot $resolvedStaticDir
+    Assert-IndexReferencedAssetsExist -StaticRoot $resolvedStaticDir
   }
 
   Invoke-Step "Build runtime jars" {
