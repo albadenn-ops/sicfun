@@ -2,20 +2,35 @@ package sicfun.holdem.web
 
 import com.sun.net.httpserver.{HttpExchange, HttpHandler}
 
+import java.io.ByteArrayOutputStream
 import java.nio.file.{Files, Path, Paths}
 import java.time.{Instant, ZoneOffset, ZonedDateTime}
 import java.time.format.DateTimeFormatter
+import java.util.zip.GZIPOutputStream
 import scala.util.control.NonFatal
 
 import sicfun.holdem.web.AuthStack.ensureAuthenticatedStatic
 import sicfun.holdem.web.HandHistoryReviewServer.BasicAuthConfig
 import sicfun.holdem.web.WebResponses.{applySecurityHeaders, contentTypeFor, writePlain}
 
+private[web] object StaticAssetsHandler:
+  // Text-shaped MIME types we'll gzip when the client opts in via Accept-Encoding.
+  // Skip already-compressed binaries (png, woff2, wasm, jpg, ico): gzip would either
+  // not shrink them or actively inflate them, while burning CPU.
+  private[web] def isCompressibleType(contentType: String): Boolean =
+    val lower = contentType.toLowerCase
+    lower.startsWith("text/") ||
+      lower.startsWith("application/javascript") ||
+      lower.startsWith("application/json") ||
+      lower.startsWith("image/svg+xml")
+
 private[web] final class StaticAssetsHandler(
     staticDir: Path,
     basicAuth: Option[BasicAuthConfig] = None,
     platformAuth: Option[PlatformUserAuth.Service] = None
 ) extends HttpHandler:
+  import StaticAssetsHandler.isCompressibleType
+
   override def handle(exchange: HttpExchange): Unit =
     try
       applySecurityHeaders(exchange)
@@ -48,13 +63,30 @@ private[web] final class StaticAssetsHandler(
             val lastModifiedSecond = (lastModified / 1000L) * 1000L
             val lastModifiedHttp = DateTimeFormatter.RFC_1123_DATE_TIME
               .format(ZonedDateTime.ofInstant(Instant.ofEpochMilli(lastModifiedSecond), ZoneOffset.UTC))
-            val etag = s"""W/"$size-$lastModified""""
+            val contentType = contentTypeFor(target)
+            val compressible = isCompressibleType(contentType)
+            val acceptsGzip = Option(exchange.getRequestHeaders.getFirst("Accept-Encoding"))
+              .exists { raw =>
+                raw.split(',').iterator.map(_.trim.toLowerCase).exists { token =>
+                  token == "gzip" || token.startsWith("gzip;")
+                }
+              }
+            val willCompress = compressible && acceptsGzip && isGet
+            // Variant ETag: gzipped and uncompressed are different representations.
+            // RFC 7232 sec 2.3.1: weak ETags MAY indicate equivalent representations,
+            // but conservative caches that key only on ETag (ignoring Vary) need
+            // distinct values to avoid serving the wrong encoding.
+            val etag = s"""W/"$size-$lastModified${if willCompress then "-gz" else ""}""""
             val cacheControl =
               if requestPath.startsWith("/vendor/") then "public, max-age=31536000"
               else "public, max-age=0, must-revalidate"
             exchange.getResponseHeaders.set("Cache-Control", cacheControl)
             exchange.getResponseHeaders.set("ETag", etag)
             exchange.getResponseHeaders.set("Last-Modified", lastModifiedHttp)
+            // Vary: Accept-Encoding for compressible types so caches store gzipped and
+            // uncompressed variants separately even when keying on URL + Vary headers.
+            if compressible then
+              exchange.getResponseHeaders.set("Vary", "Accept-Encoding")
             val ifNoneMatch = Option(exchange.getRequestHeaders.getFirst("If-None-Match"))
             val ifModifiedSince = Option(exchange.getRequestHeaders.getFirst("If-Modified-Since"))
             // RFC 7232 sec 3.3: ignore If-Modified-Since when If-None-Match is present.
@@ -79,10 +111,27 @@ private[web] final class StaticAssetsHandler(
             if notModified then
               exchange.sendResponseHeaders(304, -1L)
             else if isHead then
-              exchange.getResponseHeaders.set("Content-Type", contentTypeFor(target))
+              exchange.getResponseHeaders.set("Content-Type", contentType)
+              if willCompress then
+                exchange.getResponseHeaders.set("Content-Encoding", "gzip")
               exchange.sendResponseHeaders(200, -1L)
+            else if willCompress then
+              // Compress in memory: static files are small (top of bundle ~50 KB),
+              // and the in-memory buffer is simpler than streaming gzip + chunked transfer.
+              val buffer = new ByteArrayOutputStream(math.max(1024, (size / 4).toInt))
+              val gz = new GZIPOutputStream(buffer)
+              val input = Files.newInputStream(target)
+              try input.transferTo(gz) finally input.close()
+              gz.close()
+              val compressed = buffer.toByteArray
+              exchange.getResponseHeaders.set("Content-Type", contentType)
+              exchange.getResponseHeaders.set("Content-Encoding", "gzip")
+              exchange.sendResponseHeaders(200, compressed.length.toLong)
+              val body = exchange.getResponseBody
+              body.write(compressed)
+              body.flush()
             else
-              exchange.getResponseHeaders.set("Content-Type", contentTypeFor(target))
+              exchange.getResponseHeaders.set("Content-Type", contentType)
               exchange.sendResponseHeaders(200, size)
               val body = exchange.getResponseBody
               val input = Files.newInputStream(target)

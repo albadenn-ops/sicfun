@@ -496,6 +496,42 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("static handler gzips compressible content when client accepts gzip") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val compressed = get(s"$baseUri/", Map("Accept-Encoding" -> "gzip, deflate"))
+        assertEquals(compressed.statusCode(), 200)
+        assertEquals(headerValue(compressed, "Content-Encoding"), Some("gzip"))
+        assertEquals(headerValue(compressed, "Vary"), Some("Accept-Encoding"))
+        assert(headerValue(compressed, "ETag").exists(_.endsWith("-gz\"")),
+          s"gzipped response ETag should carry -gz suffix, got ${headerValue(compressed, "ETag")}")
+
+        val plain = get(s"$baseUri/")
+        assertEquals(plain.statusCode(), 200)
+        assertEquals(headerValue(plain, "Content-Encoding"), None)
+        assertEquals(headerValue(plain, "Vary"), Some("Accept-Encoding"))
+        assert(headerValue(plain, "ETag").exists(t => !t.endsWith("-gz\"")),
+          s"plain response ETag should not carry -gz suffix, got ${headerValue(plain, "ETag")}")
+      }
+    }
+  }
+
+  test("static handler does not gzip non-compressible binary content") {
+    withStaticSite { staticDir =>
+      Files.write(staticDir.resolve("logo.png"), Array[Byte](0x89.toByte, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val response = get(s"$baseUri/logo.png", Map("Accept-Encoding" -> "gzip"))
+        assertEquals(response.statusCode(), 200)
+        assertEquals(headerValue(response, "Content-Encoding"), None,
+          clue = "image/png is not in the compressible whitelist")
+        assertEquals(headerValue(response, "Vary"), None,
+          clue = "non-compressible responses don't need Vary: Accept-Encoding")
+      }
+    }
+  }
+
   test("static handler caches vendor assets aggressively") {
     withStaticSite { staticDir =>
       Files.createDirectories(staticDir.resolve("vendor"))
