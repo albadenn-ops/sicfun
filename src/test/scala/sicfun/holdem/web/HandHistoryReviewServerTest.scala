@@ -197,6 +197,43 @@ class HandHistoryReviewServerTest extends FunSuite:
   private val validPlayingHallPayload =
     """{"hands":120,"tableCount":2,"playerCount":6,"heroStyle":"adaptive","heroPosition":"Button","gtoMode":"exact","villainPool":["tag","gto"],"heroExplorationRate":0,"raiseSize":2.5,"bunchingTrials":40,"equityTrials":240}"""
 
+  test("API JSON responses gzip when the client accepts gzip and the payload is large enough") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val compressed = get(s"$baseUri/api/health", Map("Accept-Encoding" -> "gzip"))
+        assertEquals(compressed.statusCode(), 200)
+        assertEquals(headerValue(compressed, "Content-Encoding"), Some("gzip"))
+        assertEquals(headerValue(compressed, "Vary"), Some("Accept-Encoding"))
+        assertEquals(headerValue(compressed, "Cache-Control"), Some("no-store"))
+
+        val plain = get(s"$baseUri/api/health")
+        assertEquals(plain.statusCode(), 200)
+        assertEquals(headerValue(plain, "Content-Encoding"), None)
+        assertEquals(headerValue(plain, "Vary"), Some("Accept-Encoding"),
+          clue = "Vary must still be set even when the response itself is not compressed")
+      }
+    }
+  }
+
+  test("responses below the gzip threshold skip compression even when accepted") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        // The 403 path-traversal response is "forbidden" (9 bytes), well under the 256-byte
+        // MinGzipSize threshold. text/plain is compressible, so Vary is still set.
+        val tinyResponse = get(s"$baseUri/../etc/passwd", Map("Accept-Encoding" -> "gzip"))
+        assertEquals(tinyResponse.statusCode(), 403)
+        assertEquals(tinyResponse.body(), "forbidden")
+        assertEquals(headerValue(tinyResponse, "Content-Encoding"), None,
+          clue = s"tiny response (${tinyResponse.body().length} bytes) should not be gzipped")
+        assertEquals(headerValue(tinyResponse, "Vary"), Some("Accept-Encoding"),
+          clue = "Vary still set so caches partition variants by Accept-Encoding")
+      }
+    }
+  }
+
   test("shutdown grace milliseconds round up to whole HttpServer stop seconds") {
     assertEquals(HandHistoryReviewServer.shutdownDelaySeconds(0L), 0)
     assertEquals(HandHistoryReviewServer.shutdownDelaySeconds(1L), 1)

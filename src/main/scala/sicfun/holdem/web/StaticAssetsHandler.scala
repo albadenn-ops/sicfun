@@ -11,25 +11,13 @@ import scala.util.control.NonFatal
 
 import sicfun.holdem.web.AuthStack.ensureAuthenticatedStatic
 import sicfun.holdem.web.HandHistoryReviewServer.BasicAuthConfig
-import sicfun.holdem.web.WebResponses.{applySecurityHeaders, contentTypeFor, writePlain}
-
-private[web] object StaticAssetsHandler:
-  // Text-shaped MIME types we'll gzip when the client opts in via Accept-Encoding.
-  // Skip already-compressed binaries (png, woff2, wasm, jpg, ico): gzip would either
-  // not shrink them or actively inflate them, while burning CPU.
-  private[web] def isCompressibleType(contentType: String): Boolean =
-    val lower = contentType.toLowerCase
-    lower.startsWith("text/") ||
-      lower.startsWith("application/javascript") ||
-      lower.startsWith("application/json") ||
-      lower.startsWith("image/svg+xml")
+import sicfun.holdem.web.WebResponses.{applySecurityHeaders, contentTypeFor, isCompressibleType, writePlain}
 
 private[web] final class StaticAssetsHandler(
     staticDir: Path,
     basicAuth: Option[BasicAuthConfig] = None,
     platformAuth: Option[PlatformUserAuth.Service] = None
 ) extends HttpHandler:
-  import StaticAssetsHandler.isCompressibleType
 
   override def handle(exchange: HttpExchange): Unit =
     try

@@ -3,8 +3,10 @@ package sicfun.holdem.web
 import com.sun.net.httpserver.HttpExchange
 import ujson.Value
 
+import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
+import java.util.zip.GZIPOutputStream
 
 /** Shared HTTP response writers and security headers.
   */
@@ -12,6 +14,28 @@ private[web] object WebResponses:
 
   private val ContentSecurityPolicy =
     "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'"
+
+  // Threshold below which gzip overhead can exceed the savings. A 256-byte JSON
+  // typically compresses to 200-250 bytes once the gzip header (~20 bytes) is
+  // included -- not worth the CPU. Standard nginx/apache default is 256-1024.
+  private val MinGzipSize = 256
+
+  /** Text-shaped MIME types we'll gzip when the client opts in via Accept-Encoding.
+    * Shared with [[StaticAssetsHandler]] so the policy is consistent across static
+    * file serving and API JSON responses. */
+  def isCompressibleType(contentType: String): Boolean =
+    val lower = contentType.toLowerCase
+    lower.startsWith("text/") ||
+      lower.startsWith("application/javascript") ||
+      lower.startsWith("application/json") ||
+      lower.startsWith("image/svg+xml")
+
+  private def clientAcceptsGzip(exchange: HttpExchange): Boolean =
+    Option(exchange.getRequestHeaders.getFirst("Accept-Encoding")).exists { raw =>
+      raw.split(',').iterator.map(_.trim.toLowerCase).exists { token =>
+        token == "gzip" || token.startsWith("gzip;")
+      }
+    }
 
   def applySecurityHeaders(exchange: HttpExchange): Unit =
     val headers = exchange.getResponseHeaders
@@ -38,12 +62,27 @@ private[web] object WebResponses:
       bytes: Array[Byte],
       contentType: String
   ): Unit =
+    val compressible = isCompressibleType(contentType)
     exchange.getResponseHeaders.set("Content-Type", contentType)
     exchange.getResponseHeaders.set("Cache-Control", "no-store")
-    exchange.sendResponseHeaders(status, bytes.length.toLong)
-    val body = exchange.getResponseBody
-    body.write(bytes)
-    body.flush()
+    if compressible then
+      exchange.getResponseHeaders.set("Vary", "Accept-Encoding")
+    val shouldCompress = compressible && bytes.length >= MinGzipSize && clientAcceptsGzip(exchange)
+    if shouldCompress then
+      val buffer = new ByteArrayOutputStream(math.max(256, bytes.length / 4))
+      val gz = new GZIPOutputStream(buffer)
+      try gz.write(bytes) finally gz.close()
+      val compressed = buffer.toByteArray
+      exchange.getResponseHeaders.set("Content-Encoding", "gzip")
+      exchange.sendResponseHeaders(status, compressed.length.toLong)
+      val body = exchange.getResponseBody
+      body.write(compressed)
+      body.flush()
+    else
+      exchange.sendResponseHeaders(status, bytes.length.toLong)
+      val body = exchange.getResponseBody
+      body.write(bytes)
+      body.flush()
 
   def contentTypeFor(path: Path): String =
     path.getFileName.toString.toLowerCase match
