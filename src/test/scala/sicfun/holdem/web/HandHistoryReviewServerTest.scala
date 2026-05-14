@@ -678,6 +678,22 @@ class HandHistoryReviewServerTest extends FunSuite:
           val registerJson = jsonBody(register)
           assertEquals(registerJson("authenticated").bool, true)
           assertEquals(registerJson("user")("email").str, "alice@example.com")
+
+          // Lock in the session cookie's wire-format attributes so a future refactor
+          // of sessionCookieHeader can't silently drop the protections.
+          val setCookie = headerValue(register, "Set-Cookie")
+            .getOrElse(fail("expected Set-Cookie on registration response"))
+          assert(setCookie.contains("HttpOnly"),
+            s"session cookie must be HttpOnly to block JS read access; got: $setCookie")
+          assert(setCookie.contains("SameSite=Lax"),
+            s"session cookie must be SameSite=Lax for CSRF defense; got: $setCookie")
+          assert(setCookie.contains("Path=/"),
+            s"session cookie must scope to Path=/; got: $setCookie")
+          assert(setCookie.contains("Max-Age="),
+            s"session cookie must declare Max-Age so browsers expire it on schedule; got: $setCookie")
+          assert(!setCookie.contains("Secure"),
+            s"loopback test deployment with cookieSecure=false must NOT set Secure (would prevent cookie over HTTP); got: $setCookie")
+
           val ownerHeaders = authSessionHeaders(register, registerJson("csrfToken").str)
 
           val profile = postJson(
