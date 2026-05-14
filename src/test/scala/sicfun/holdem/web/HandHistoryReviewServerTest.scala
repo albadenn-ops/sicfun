@@ -455,6 +455,47 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("static handler emits Last-Modified header and honors If-Modified-Since") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val first = get(s"$baseUri/")
+        assertEquals(first.statusCode(), 200)
+        val lastModifiedHttp = headerValue(first, "Last-Modified")
+          .getOrElse(fail("expected Last-Modified header on first response"))
+
+        val sameTime = get(s"$baseUri/", Map("If-Modified-Since" -> lastModifiedHttp))
+        assertEquals(sameTime.statusCode(), 304, clue = s"IMS=$lastModifiedHttp")
+        assertEquals(sameTime.body(), "")
+        assertEquals(headerValue(sameTime, "Last-Modified"), Some(lastModifiedHttp))
+
+        val pastTime = get(s"$baseUri/", Map("If-Modified-Since" -> "Sun, 06 Nov 1994 08:49:37 GMT"))
+        assertEquals(pastTime.statusCode(), 200)
+        assert(pastTime.body().nonEmpty)
+      }
+    }
+  }
+
+  test("static handler ignores If-Modified-Since when If-None-Match is also present") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val first = get(s"$baseUri/")
+        val etag = headerValue(first, "ETag").getOrElse(fail("expected ETag"))
+        val lastModifiedHttp = headerValue(first, "Last-Modified").getOrElse(fail("expected Last-Modified"))
+
+        // ETag mismatch + IMS that says "not modified": RFC 7232 sec 3.3 says ETag wins,
+        // so the response must be 200 (full body), not 304.
+        val response = get(s"$baseUri/", Map(
+          "If-None-Match" -> "\"a-different-etag\"",
+          "If-Modified-Since" -> lastModifiedHttp
+        ))
+        assertEquals(response.statusCode(), 200, clue = s"ETag $etag should win over IMS $lastModifiedHttp")
+        assert(response.body().nonEmpty)
+      }
+    }
+  }
+
   test("static handler caches vendor assets aggressively") {
     withStaticSite { staticDir =>
       Files.createDirectories(staticDir.resolve("vendor"))
