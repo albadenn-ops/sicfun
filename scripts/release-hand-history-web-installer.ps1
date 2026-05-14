@@ -685,8 +685,9 @@ pause >nul
       } -ArgumentList $wrapperPath, $wrapperPort
 
       $readyUri = "http://127.0.0.1:$wrapperPort/api/ready"
+      $healthUri = "http://127.0.0.1:$wrapperPort/api/health"
       $ready = $false
-      for ($attempt = 0; $attempt -lt 30; $attempt++) {
+      for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 750
         try {
           $r = Invoke-WebRequest -Uri $readyUri -UseBasicParsing -TimeoutSec 5
@@ -697,7 +698,19 @@ pause >nul
         } catch { }
       }
       if (-not $ready) {
-        throw "Wrapper smoke service did not become ready on port $wrapperPort within 22s"
+        throw "Wrapper smoke service did not become ready on port $wrapperPort within 30s"
+      }
+
+      # Quick health probe to confirm the wrapper-launched service is serving JSON,
+      # not just listening. Catches a wrapper that boots the launcher but somehow
+      # corrupts stdout enough to break server initialization without a hard crash.
+      $health = Invoke-WebRequest -Uri $healthUri -UseBasicParsing -TimeoutSec 5
+      if ($health.StatusCode -ne 200) {
+        throw "Wrapper smoke /api/health returned $($health.StatusCode), expected 200"
+      }
+      $healthBody = $health.Content | ConvertFrom-Json
+      if (-not $healthBody.ok -or [int]$healthBody.port -ne $wrapperPort) {
+        throw "Wrapper smoke /api/health body invalid (expected ok=true, port=$wrapperPort): $($health.Content)"
       }
 
       Start-Sleep -Milliseconds 500
