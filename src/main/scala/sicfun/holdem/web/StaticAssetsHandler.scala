@@ -11,7 +11,7 @@ import scala.util.control.NonFatal
 
 import sicfun.holdem.web.AuthStack.ensureAuthenticatedStatic
 import sicfun.holdem.web.HandHistoryReviewServer.BasicAuthConfig
-import sicfun.holdem.web.WebResponses.{applySecurityHeaders, contentTypeFor, isCompressibleType, writePlain}
+import sicfun.holdem.web.WebResponses.{applySecurityHeaders, clientAcceptsGzip, contentTypeFor, isCompressibleType, writePlain}
 
 private[web] final class StaticAssetsHandler(
     staticDir: Path,
@@ -53,12 +53,7 @@ private[web] final class StaticAssetsHandler(
               .format(ZonedDateTime.ofInstant(Instant.ofEpochMilli(lastModifiedSecond), ZoneOffset.UTC))
             val contentType = contentTypeFor(target)
             val compressible = isCompressibleType(contentType)
-            val acceptsGzip = Option(exchange.getRequestHeaders.getFirst("Accept-Encoding"))
-              .exists { raw =>
-                raw.split(',').iterator.map(_.trim.toLowerCase).exists { token =>
-                  token == "gzip" || token.startsWith("gzip;")
-                }
-              }
+            val acceptsGzip = clientAcceptsGzip(exchange)
             val willCompress = compressible && acceptsGzip && isGet
             // Variant ETag: gzipped and uncompressed are different representations.
             // RFC 7232 sec 2.3.1: weak ETags MAY indicate equivalent representations,

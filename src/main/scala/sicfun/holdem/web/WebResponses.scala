@@ -30,12 +30,27 @@ private[web] object WebResponses:
       lower.startsWith("application/json") ||
       lower.startsWith("image/svg+xml")
 
-  private def clientAcceptsGzip(exchange: HttpExchange): Boolean =
+  /** RFC 7231 sec 5.3.4: an Accept-Encoding value is acceptable iff the matching
+    * codec is listed with no q parameter (default q=1) or with q>0. A value of
+    * "gzip;q=0" explicitly _rejects_ gzip and must be honored. Shared with
+    * [[StaticAssetsHandler]] so the policy is consistent. */
+  def clientAcceptsGzip(exchange: HttpExchange): Boolean =
     Option(exchange.getRequestHeaders.getFirst("Accept-Encoding")).exists { raw =>
-      raw.split(',').iterator.map(_.trim.toLowerCase).exists { token =>
-        token == "gzip" || token.startsWith("gzip;")
-      }
+      raw.split(',').iterator.map(_.trim.toLowerCase).exists(tokenAcceptsGzip)
     }
+
+  private def tokenAcceptsGzip(token: String): Boolean =
+    if token == "gzip" then true
+    else if !token.startsWith("gzip;") && !token.startsWith("gzip ") then false
+    else
+      // gzip with parameters; q-value optional. Parse "q=..." param if present.
+      val params = token.substring(4).stripPrefix(";").stripPrefix(" ").split(';')
+      val qParam = params.iterator.map(_.trim).find(_.startsWith("q="))
+      qParam match
+        case None => true
+        case Some(q) =>
+          try q.substring(2).toDouble > 0.0
+          catch case _: NumberFormatException => true
 
   def applySecurityHeaders(exchange: HttpExchange): Unit =
     val headers = exchange.getResponseHeaders

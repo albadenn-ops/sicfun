@@ -554,6 +554,26 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("static handler honors Accept-Encoding: gzip;q=0 by sending plain") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // RFC 7231 sec 5.3.4: q=0 explicitly rejects this encoding.
+        val rejected = get(s"$baseUri/", Map("Accept-Encoding" -> "gzip;q=0"))
+        assertEquals(rejected.statusCode(), 200)
+        assertEquals(headerValue(rejected, "Content-Encoding"), None,
+          clue = "q=0 must be honored; server must not compress")
+        assertEquals(headerValue(rejected, "Vary"), Some("Accept-Encoding"))
+
+        // Sanity: positive q is still accepted.
+        val accepted = get(s"$baseUri/", Map("Accept-Encoding" -> "gzip;q=0.5"))
+        assertEquals(accepted.statusCode(), 200)
+        assertEquals(headerValue(accepted, "Content-Encoding"), Some("gzip"))
+      }
+    }
+  }
+
   test("static handler does not gzip non-compressible binary content") {
     withStaticSite { staticDir =>
       Files.write(staticDir.resolve("logo.png"), Array[Byte](0x89.toByte, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
