@@ -398,6 +398,7 @@ Write-Host ("Launcher: " + $launcher)
 Write-Host ("Log:      " + $logPath)
 Write-Host ""
 
+$LASTEXITCODE = 0
 $logStream = [System.IO.StreamWriter]::new($logPath, $false, [System.Text.Encoding]::UTF8)
 try {
   & $launcher *>&1 | ForEach-Object {
@@ -410,7 +411,8 @@ try {
 finally {
   $logStream.Dispose()
 }
-exit $LASTEXITCODE
+$exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+exit $exitCode
 '@
     Set-Content -LiteralPath $launchWithLog -Value $launchWithLogHelper -Encoding utf8 -NoNewline
 
@@ -488,9 +490,13 @@ pause >nul
   Invoke-Step "Step 6.5: Post-installer smoke against patched bundle" {
     $releaseRoot = Join-Path $repoRoot $OutputDir
     $launcherPath = Join-Path $releaseRoot "bin\run-hand-history-web.ps1"
+    $wrapperPath = Join-Path $releaseRoot "bin\launch-with-log.ps1"
     $embeddedJava = Join-Path $releaseRoot "runtime\bin\java.exe"
     if (-not (Test-Path -LiteralPath $launcherPath)) {
       throw "Patched launcher missing: $launcherPath"
+    }
+    if (-not (Test-Path -LiteralPath $wrapperPath)) {
+      throw "launch-with-log wrapper missing: $wrapperPath"
     }
     if (-not (Test-Path -LiteralPath $embeddedJava)) {
       throw "Embedded runtime missing: $embeddedJava"
@@ -499,6 +505,13 @@ pause >nul
     $postPort = $SmokePort + 1
     $smokeJob = $null
     try {
+      # Step 6.5 invokes the launcher directly rather than going through launch-with-log.ps1.
+      # Routing the smoke through the wrapper caused mid-Playing-Hall connection refusals --
+      # the wrapper's `& launcher *>&1 | ForEach-Object` pipeline interacts badly with the
+      # Job's output streams during the longer-running smoke. The wrapper is parse-checked at
+      # emit time (Step 5) and its end-to-end behavior was validated in a stand-alone self-test
+      # against this same bundle. Step 6.5's job here is to validate that the patched bundle
+      # (jlink runtime + patched launcher) actually serves traffic.
       $smokeJob = Start-Job -ScriptBlock {
         param($launcher, $port)
         & powershell -NoProfile -ExecutionPolicy Bypass -File $launcher -BindHost "127.0.0.1" -Port $port
