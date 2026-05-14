@@ -32,7 +32,11 @@ foreach ($line in Get-Content -LiteralPath $manifestPath) {
 }
 
 $actual = @{}
-$files = Get-ChildItem -Path $ReleaseRoot -File -Recurse | Where-Object { $_.FullName -ne $manifestPath }
+# Skip the manifest itself and any runtime marker files at the release root (e.g. .manifest-verified
+# written by Setup.cmd's verify-if-needed.ps1 to skip re-verification on subsequent launches).
+$files = Get-ChildItem -Path $ReleaseRoot -File -Recurse | Where-Object {
+  $_.FullName -ne $manifestPath -and -not ($_.Directory.FullName -eq $ReleaseRoot -and $_.Name.StartsWith('.'))
+}
 foreach ($file in $files) {
   $relative = $file.FullName.Substring($ReleaseRoot.Length).TrimStart('\', '/').Replace('\', '/')
   $actual[$relative] = (Get-FileHash -Path $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

@@ -2,6 +2,17 @@
 
 This guide is for the packaged Windows hand-history review product under `dist/hand-history-web`.
 
+## Two Release Variants
+
+Two release scripts produce two artifact shapes. Both serve the same web app; the difference is what they bundle for the host.
+
+| Script | Output | Java handling | Click-to-run |
+|---|---|---|---|
+| `scripts/release-hand-history-web.ps1` | `dist/hand-history-web/` directory only | Requires Java 17+ on `PATH` | No |
+| `scripts/release-hand-history-web-installer.ps1` | Same directory **plus** versioned outer ZIP at `dist/hand-history-web-<version>.zip` | Embeds a jlink runtime under `runtime/bin/java.exe`; falls back to PATH if missing | Yes: `Setup.cmd` verifies the manifest then launches the service |
+
+Use the installer variant when the target host may not have Java pre-installed.
+
 ## What You Ship
 
 The release bundle contains:
@@ -17,12 +28,18 @@ The release bundle contains:
 - `lib/`: application jars
 - `model/`: optional packaged model artifacts if they were included at build time
 
+Installer-variant additions:
+
+- `Setup.cmd`: click-to-run entry point that verifies the manifest then launches the service
+- `runtime/`: jlink-trimmed Java runtime; the launcher and service-common shim prefer this over `PATH`
+- `runtime/BUILD_INFO.txt`: source JDK version and jdeps-detected module list
+
 ## Host Prerequisites
 
 - Windows host
 - PowerShell 5.1+
-- Java 17+ on `PATH` before startup
-- NSSM if you want the Windows service workflow
+- Java 17+ on `PATH` before startup (not required for the installer variant — `runtime/` is embedded)
+- NSSM if you want the Windows service workflow (drop `nssm.exe` into `bin/` before zipping or pass `-NssmPath` at install time; auto-download is disabled because corporate AV often blocks `nssm.cc`)
 
 ## Quick Start
 
@@ -39,6 +56,27 @@ Default behavior:
 - Serves the upload UI from `static/`
 - Loads settings from `conf/hand-history-web.env`
 - Exposes `/api/health` for liveness and `/api/ready` for readiness
+- Exposes async job endpoints for hand-history analysis and Playing Hall simulation (see "HTTP Endpoints" below)
+
+## HTTP Endpoints
+
+`/api/health` and `/api/ready` are unauthenticated. The hand-history analysis and Playing Hall job routes always require auth (Basic auth or platform-user) and are rate-limited (Submit / JobStatus buckets — see "Rate limiting" below). Auth bootstrap routes under `/api/auth/*` are open by design (login/register cannot require an existing session). Submissions return `202 Accepted` with `Location` and `Retry-After` headers plus a JSON body containing `jobId`, `status`, `statusUrl`, `submittedAtEpochMs`, `pollAfterMs`.
+
+Hand-history analysis:
+
+- `POST /api/analyze-hand-history` — submit a hand history for analysis. Body: JSON `{handHistoryText, heroName?, site?}`. Rate-limited as Submit.
+- `GET /api/analyze-hand-history/jobs/{jobId}` — poll job status. Returns `queued` / `running` / `completed` / `failed`. Rate-limited as JobStatus.
+
+Playing Hall simulation:
+
+- `POST /api/playing-hall` — submit a hall simulation. JSON body fields: `hands`, `tableCount`, `playerCount`, `heroStyle` (`adaptive`/`gto`/`strategic`), `heroPosition` (`SmallBlind`/`BigBlind`/`UTG`/`UTG1`/`UTG2`/`Middle`/`Hijack`/`Cutoff`/`Button`), `gtoMode` (`fast`/`exact`), `villainPool`, `heroExplorationRate`, `raiseSize`, `bunchingTrials`, `equityTrials`. Rate-limited as Submit; admission shares the same `MAX_CONCURRENT_JOBS` / `MAX_QUEUED_JOBS` budget as hand-history analysis.
+- `GET /api/playing-hall/jobs/{jobId}` — poll job status. Rate-limited as JobStatus.
+- `DELETE /api/playing-hall/jobs/{jobId}` — request cooperative cancellation of an in-flight Playing Hall job. Returns `200` with `status=cancelled` once accepted, `409` if the job already finished, `404` if unknown. Rate-limited as JobStatus.
+
+Platform-user auth (when `USER_STORE_PATH` is set):
+
+- `GET /api/auth/me`, `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/logout`, `POST /api/auth/profile`
+- Optional OIDC start/callback at `/api/auth/oidc/{provider}/start` and `/api/auth/oidc/{provider}/callback` (e.g. `/api/auth/oidc/google/callback`) when the matching `*_OIDC_*` settings are configured.
 
 ## Core Configuration
 
@@ -49,11 +87,12 @@ Common settings:
 - `HOST` / `PORT`: bind address and port
 - `ALLOW_UNAUTHENTICATED_PUBLIC_BIND`: explicit override for non-loopback binds without auth on a trusted private network
 - `MODEL_DIR`: optional model artifact directory
-- `MAX_UPLOAD_BYTES`: upload cap
-- `ANALYSIS_TIMEOUT_MS`: per-job timeout
-- `MAX_CONCURRENT_JOBS` / `MAX_QUEUED_JOBS`: admission limits
+- `MAX_UPLOAD_BYTES`: upload cap (applies to both `/api/analyze-hand-history` and `/api/playing-hall` request bodies)
+- `ANALYSIS_TIMEOUT_MS`: per-job timeout for `/api/analyze-hand-history` jobs
+- `PLAYING_HALL_TIMEOUT_MS`: per-job timeout for `/api/playing-hall` jobs (default `900000`, i.e. 15 min); `0` disables it
+- `MAX_CONCURRENT_JOBS` / `MAX_QUEUED_JOBS`: admission limits shared across both job stores
 - `SHUTDOWN_GRACE_MS`: graceful shutdown budget
-- `DRAIN_SIGNAL_FILE`: path used to mark the instance unready before shutdown
+- `DRAIN_SIGNAL_FILE`: path used to mark the instance unready before shutdown; while present, new submissions for both analysis and Playing Hall are rejected with `503`
 
 Auth modes:
 
@@ -132,4 +171,6 @@ Verify the shipped bundle after copy/deploy:
 powershell -ExecutionPolicy Bypass -File .\bin\verify-release-manifest.ps1
 ```
 
-That script checks every shipped file against `manifest.sha256` and fails if a file is missing, added, or modified.
+That script checks every shipped file against `manifest.sha256` and fails if a file is missing, added, or modified. Runtime marker files at the bundle root (filenames starting with `.`, e.g. `.manifest-verified` written by the installer-variant's `Setup.cmd`) are intentionally ignored.
+
+The installer variant's `Setup.cmd` calls `bin\verify-if-needed.ps1` instead of running the full verifier on every launch. That helper writes a `.manifest-verified` marker after a successful check and short-circuits subsequent launches as long as the marker's timestamp is at least as new as `manifest.sha256`. Re-extracting the bundle advances `manifest.sha256`'s mtime and triggers a fresh verification. To force a re-verify manually, delete `.manifest-verified` at the bundle root.
