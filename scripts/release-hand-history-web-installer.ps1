@@ -659,6 +659,89 @@ pause >nul
     }
   }
 
+  # Step 6.6: Short stand-alone smoke of the launch-with-log.ps1 wrapper.
+  # Step 6.5 deliberately does not route through the wrapper (the long Playing Hall stage
+  # interacts badly with Start-Job's pipeline buffering). This step boots the wrapper just
+  # long enough to confirm it creates a non-empty log file from the launcher startup, then
+  # kills it. Catches wrapper regressions (e.g. StreamWriter open failure, ForEach-Object
+  # tee loop drops, $LASTEXITCODE plumbing breakage) that the customer would otherwise
+  # discover on first Setup.cmd launch.
+  Invoke-Step "Step 6.6: Stand-alone launch-with-log.ps1 wrapper smoke" {
+    $releaseRoot = Join-Path $repoRoot $OutputDir
+    $wrapperPath = Join-Path $releaseRoot "bin\launch-with-log.ps1"
+    $logsDir = Join-Path $releaseRoot "logs"
+    if (-not (Test-Path -LiteralPath $wrapperPath)) {
+      throw "launch-with-log wrapper missing: $wrapperPath"
+    }
+
+    $wrapperPort = $SmokePort + 2
+    $wrapperJob = $null
+    try {
+      $wrapperJob = Start-Job -ScriptBlock {
+        param($wrapper, $port)
+        $env:HOST = "127.0.0.1"
+        $env:PORT = "$port"
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $wrapper
+      } -ArgumentList $wrapperPath, $wrapperPort
+
+      $readyUri = "http://127.0.0.1:$wrapperPort/api/ready"
+      $ready = $false
+      for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        Start-Sleep -Milliseconds 750
+        try {
+          $r = Invoke-WebRequest -Uri $readyUri -UseBasicParsing -TimeoutSec 5
+          if ($r.StatusCode -eq 200) {
+            $ready = $true
+            break
+          }
+        } catch { }
+      }
+      if (-not $ready) {
+        throw "Wrapper smoke service did not become ready on port $wrapperPort within 22s"
+      }
+
+      Start-Sleep -Milliseconds 500
+    }
+    finally {
+      if ($null -ne $wrapperJob) {
+        Stop-Job -Job $wrapperJob -ErrorAction SilentlyContinue | Out-Null
+        Receive-Job -Job $wrapperJob -ErrorAction SilentlyContinue | Out-Null
+        Remove-Job -Job $wrapperJob -Force -ErrorAction SilentlyContinue | Out-Null
+      }
+      $lingering = Get-CimInstance Win32_Process -Filter "Name='java.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+          $cmd = $_.CommandLine
+          $null -ne $cmd -and $cmd.Contains("--port=$wrapperPort") -and $cmd.Contains($releaseRoot)
+        }
+      foreach ($p in $lingering) {
+        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+      }
+    }
+
+    Start-Sleep -Milliseconds 500
+    if (-not (Test-Path -LiteralPath $logsDir)) {
+      throw "launch-with-log wrapper did not create logs/ directory"
+    }
+    $smokeLog = Get-ChildItem -LiteralPath $logsDir -Filter 'setup-launcher-*.log' -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($null -eq $smokeLog) {
+      throw "launch-with-log wrapper did not write a setup-launcher-*.log file under $logsDir"
+    }
+    if ($smokeLog.Length -le 0) {
+      throw "launch-with-log produced an empty log file: $($smokeLog.FullName)"
+    }
+    $logHead = Get-Content -LiteralPath $smokeLog.FullName -TotalCount 5 -ErrorAction SilentlyContinue
+    $logHeadText = ($logHead | Out-String).Trim()
+    if ($logHeadText -notmatch 'Using Java runtime') {
+      throw "launch-with-log log did not capture the launcher's 'Using Java runtime' preamble. First 5 lines:`n$logHeadText"
+    }
+    Write-Host "  Wrapper smoke OK ($($smokeLog.Name), $($smokeLog.Length) bytes, preamble captured)"
+
+    # Clean logs/ so the wrapper smoke's transient file does not ship in the zip.
+    # Customer-side verifier already skips logs/, but a clean bundle is preferable.
+    Remove-Item -LiteralPath $logsDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
   # Step 7: Compress + outer hash
   Invoke-Step "Step 7: Compress and generate outer SHA-256" {
     $releaseRoot = Join-Path $repoRoot $OutputDir
