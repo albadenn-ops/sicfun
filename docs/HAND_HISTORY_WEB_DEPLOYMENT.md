@@ -155,6 +155,11 @@ If drain/stop times out, `bin/drain-stop-hand-history-web-service.ps1` now repor
 - Put HTTPS and stronger edge rate limiting in front of the app for internet-facing deployments
 - Use `/api/ready` for load balancers and service managers
 - Use `/api/health` for liveness and coarse metrics
+- Configure the proxy to **preserve, not strip**, the response headers the origin emits:
+  - `Content-Encoding: gzip` + `Vary: Accept-Encoding` — the origin negotiates gzip itself; stripping `Vary` would cause the proxy to serve gzipped bodies to clients that don't accept gzip
+  - `ETag` + `Last-Modified` — preserve so the proxy and client can revalidate; the origin honors `If-None-Match` and `If-Modified-Since` and replies `304` to save bandwidth
+  - `Cache-Control` — `no-store` on API responses (do not cache), `public, max-age=...` on static assets (safe to cache and revalidate)
+  - `Content-Security-Policy`, `Permissions-Policy`, `X-Frame-Options`, `Referrer-Policy`, `X-Content-Type-Options` — defense-in-depth headers the origin sets on every response. A proxy that drops them weakens the browser-side protections.
 
 ## State And Backups
 
