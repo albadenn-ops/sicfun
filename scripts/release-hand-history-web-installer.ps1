@@ -203,12 +203,14 @@ try {
       }
     }
 
-    # Provenance
+    # Provenance: ship vendor + version, not the build machine's filesystem path.
+    # The build-machine JDK install location is not useful to the customer and
+    # would leak operator usernames / system layout. The java -version string
+    # already includes vendor + version + LTS designation.
     $buildInfoPath = Join-Path $runtimeDir "BUILD_INFO.txt"
     $buildInfo = @(
       "Embedded runtime built by scripts/release-hand-history-web-installer.ps1 (item 2)",
       "Generated at: $(Get-Date -Format o)",
-      "Source JDK path: $JdkPath",
       "Source JDK version: $($jdkVerStr -replace '\r?\n', ' | ')",
       "Modules: $allModules",
       "Embedded runtime version: $($rtVerStr -replace '\r?\n', ' | ')"
@@ -388,6 +390,9 @@ echo [2/2] Launching service. Bound to http://127.0.0.1:8080 by default.
 echo Close this window or press Ctrl+C to stop the service.
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "bin\run-hand-history-web.ps1"
+echo.
+echo Service exited with code %ERRORLEVEL%. Press any key to close this window.
+pause >nul
 "@
     Set-Content -LiteralPath $setupPath -Value $setup -Encoding ascii
     Write-Host "  Setup.cmd written: $setupPath"
