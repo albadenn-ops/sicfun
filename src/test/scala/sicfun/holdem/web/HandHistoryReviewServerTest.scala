@@ -373,6 +373,33 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("static handler honors If-None-Match: * by returning 304 for any existing resource") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val response = get(s"$baseUri/", Map("If-None-Match" -> "*"))
+        assertEquals(response.statusCode(), 304)
+        assertEquals(response.body(), "")
+        assert(headerValue(response, "ETag").exists(_.startsWith("W/\"")), "ETag must still be emitted on 304")
+      }
+    }
+  }
+
+  test("static handler matches one of several comma-separated If-None-Match values") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val first = get(s"$baseUri/")
+        val etag = headerValue(first, "ETag").getOrElse(fail("expected ETag on first response"))
+
+        val multi = s"""W/"00-0", $etag, "stale-tag""""
+        val response = get(s"$baseUri/", Map("If-None-Match" -> multi))
+        assertEquals(response.statusCode(), 304)
+        assertEquals(response.body(), "")
+      }
+    }
+  }
+
   test("static handler caches vendor assets aggressively") {
     withStaticSite { staticDir =>
       Files.createDirectories(staticDir.resolve("vendor"))

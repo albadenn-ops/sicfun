@@ -40,7 +40,11 @@ private[web] final class StaticAssetsHandler(
             exchange.getResponseHeaders.set("Cache-Control", cacheControl)
             exchange.getResponseHeaders.set("ETag", etag)
             val ifNoneMatch = Option(exchange.getRequestHeaders.getFirst("If-None-Match"))
-            if ifNoneMatch.contains(etag) then
+            val notModified = ifNoneMatch.exists { raw =>
+              val parts = raw.split(',').iterator.map(_.trim).filter(_.nonEmpty).toVector
+              parts.contains("*") || parts.contains(etag)
+            }
+            if notModified then
               exchange.sendResponseHeaders(304, -1L)
             else
               exchange.getResponseHeaders.set("Content-Type", contentTypeFor(target))
