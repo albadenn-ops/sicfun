@@ -31,14 +31,26 @@ private[web] final class StaticAssetsHandler(
             if Files.isDirectory(resolved) then resolved.resolve("index.html")
             else resolved
           if Files.exists(target) && Files.isRegularFile(target) then
-            exchange.getResponseHeaders.set("Content-Type", contentTypeFor(target))
-            exchange.sendResponseHeaders(200, Files.size(target))
-            val body = exchange.getResponseBody
-            val input = Files.newInputStream(target)
-            try
-              input.transferTo(body)
-              body.flush()
-            finally input.close()
+            val size = Files.size(target)
+            val lastModified = Files.getLastModifiedTime(target).toMillis
+            val etag = s"""W/"$size-$lastModified""""
+            val cacheControl =
+              if requestPath.startsWith("/vendor/") then "public, max-age=31536000"
+              else "public, max-age=0, must-revalidate"
+            exchange.getResponseHeaders.set("Cache-Control", cacheControl)
+            exchange.getResponseHeaders.set("ETag", etag)
+            val ifNoneMatch = Option(exchange.getRequestHeaders.getFirst("If-None-Match"))
+            if ifNoneMatch.contains(etag) then
+              exchange.sendResponseHeaders(304, -1L)
+            else
+              exchange.getResponseHeaders.set("Content-Type", contentTypeFor(target))
+              exchange.sendResponseHeaders(200, size)
+              val body = exchange.getResponseBody
+              val input = Files.newInputStream(target)
+              try
+                input.transferTo(body)
+                body.flush()
+              finally input.close()
           else
             writePlain(exchange, 404, "not found", "text/plain; charset=utf-8")
     catch

@@ -338,6 +338,49 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("static handler emits ETag and revalidation Cache-Control for non-vendor assets") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val response = get(s"$baseUri/")
+        assertEquals(response.statusCode(), 200)
+        assertEquals(headerValue(response, "Cache-Control"), Some("public, max-age=0, must-revalidate"))
+        assert(headerValue(response, "ETag").exists(_.startsWith("W/\"")), "ETag must be a weak validator")
+      }
+    }
+  }
+
+  test("static handler returns 304 when If-None-Match matches the current ETag") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val first = get(s"$baseUri/")
+        assertEquals(first.statusCode(), 200)
+        val etag = headerValue(first, "ETag").getOrElse(fail("expected ETag on first response"))
+
+        val revalidated = get(s"$baseUri/", Map("If-None-Match" -> etag))
+        assertEquals(revalidated.statusCode(), 304)
+        assertEquals(revalidated.body(), "")
+        assertEquals(headerValue(revalidated, "ETag"), Some(etag))
+        assertEquals(headerValue(revalidated, "Cache-Control"), Some("public, max-age=0, must-revalidate"))
+      }
+    }
+  }
+
+  test("static handler caches vendor assets aggressively") {
+    withStaticSite { staticDir =>
+      Files.createDirectories(staticDir.resolve("vendor"))
+      Files.writeString(staticDir.resolve("vendor").resolve("lib.js"), "x", StandardCharsets.UTF_8)
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val response = get(s"$baseUri/vendor/lib.js")
+        assertEquals(response.statusCode(), 200)
+        assertEquals(headerValue(response, "Cache-Control"), Some("public, max-age=31536000"))
+        assert(headerValue(response, "ETag").isDefined, "ETag must be present on vendor responses")
+      }
+    }
+  }
+
   test("optional basic auth protects the UI and analysis routes while leaving health and readiness open") {
     withStaticSite { staticDir =>
       val authConfig = HandHistoryReviewServer.BasicAuthConfig(username = "operator", password = "s3cr3t-pass")
