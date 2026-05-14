@@ -276,6 +276,8 @@ class HandHistoryReviewServerTest extends FunSuite:
         val response = postJson(s"$baseUri/index.html", "{}")
         assertEquals(response.statusCode(), 405)
         assertEquals(response.body(), "GET required")
+        assertEquals(headerValue(response, "Cache-Control"), Some("no-store"))
+        assertEquals(headerValue(response, "ETag"), None)
       }
     }
   }
@@ -287,6 +289,8 @@ class HandHistoryReviewServerTest extends FunSuite:
         val response = get(s"$baseUri/../etc/passwd")
         assertEquals(response.statusCode(), 403)
         assertEquals(response.body(), "forbidden")
+        assertEquals(headerValue(response, "Cache-Control"), Some("no-store"))
+        assertEquals(headerValue(response, "ETag"), None)
       }
     }
   }
@@ -298,6 +302,8 @@ class HandHistoryReviewServerTest extends FunSuite:
         val response = get(s"$baseUri/missing-file.html")
         assertEquals(response.statusCode(), 404)
         assertEquals(response.body(), "not found")
+        assertEquals(headerValue(response, "Cache-Control"), Some("no-store"))
+        assertEquals(headerValue(response, "ETag"), None)
       }
     }
   }
