@@ -17,9 +17,12 @@ private[web] final class StaticAssetsHandler(
   override def handle(exchange: HttpExchange): Unit =
     try
       applySecurityHeaders(exchange)
+      val method = exchange.getRequestMethod
+      val isHead = method.equalsIgnoreCase("HEAD")
+      val isGet = method.equalsIgnoreCase("GET")
       if !ensureAuthenticatedStatic(exchange, basicAuth, platformAuth) then ()
-      else if !exchange.getRequestMethod.equalsIgnoreCase("GET") then
-        writePlain(exchange, 405, "GET required", "text/plain; charset=utf-8")
+      else if !isGet && !isHead then
+        writePlain(exchange, 405, "GET or HEAD required", "text/plain; charset=utf-8")
       else
         val requestPath = Option(exchange.getRequestURI.getPath).getOrElse("/")
         val relative = if requestPath == "/" then Paths.get("index.html") else Paths.get(requestPath.dropWhile(_ == '/'))
@@ -46,6 +49,9 @@ private[web] final class StaticAssetsHandler(
             }
             if notModified then
               exchange.sendResponseHeaders(304, -1L)
+            else if isHead then
+              exchange.getResponseHeaders.set("Content-Type", contentTypeFor(target))
+              exchange.sendResponseHeaders(200, -1L)
             else
               exchange.getResponseHeaders.set("Content-Type", contentTypeFor(target))
               exchange.sendResponseHeaders(200, size)

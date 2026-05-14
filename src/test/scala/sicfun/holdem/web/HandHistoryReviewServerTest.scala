@@ -269,15 +269,54 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
-  test("static handler returns 405 for non-GET methods") {
+  test("static handler returns 405 for non-GET non-HEAD methods") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>
         val baseUri = s"http://${server.binding.host}:${server.binding.port}"
         val response = postJson(s"$baseUri/index.html", "{}")
         assertEquals(response.statusCode(), 405)
-        assertEquals(response.body(), "GET required")
+        assertEquals(response.body(), "GET or HEAD required")
         assertEquals(headerValue(response, "Cache-Control"), Some("no-store"))
         assertEquals(headerValue(response, "ETag"), None)
+      }
+    }
+  }
+
+  test("static handler answers HEAD with headers and no body") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val request = HttpRequest.newBuilder(URI.create(s"$baseUri/"))
+          .method("HEAD", HttpRequest.BodyPublishers.noBody())
+          .build()
+        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+        assertEquals(response.statusCode(), 200)
+        assertEquals(response.body(), "")
+        assert(headerValue(response, "ETag").exists(_.startsWith("W/\"")), "ETag must be present on HEAD")
+        assertEquals(headerValue(response, "Content-Type"), Some("text/html; charset=utf-8"))
+        assertEquals(headerValue(response, "Cache-Control"), Some("public, max-age=0, must-revalidate"))
+      }
+    }
+  }
+
+  test("static handler honors If-None-Match on HEAD by returning 304") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val firstHead = HttpRequest.newBuilder(URI.create(s"$baseUri/"))
+          .method("HEAD", HttpRequest.BodyPublishers.noBody())
+          .build()
+        val first = httpClient.send(firstHead, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+        val etag = headerValue(first, "ETag").getOrElse(fail("expected ETag on first HEAD"))
+
+        val revalidateHead = HttpRequest.newBuilder(URI.create(s"$baseUri/"))
+          .header("If-None-Match", etag)
+          .method("HEAD", HttpRequest.BodyPublishers.noBody())
+          .build()
+        val response = httpClient.send(revalidateHead, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+        assertEquals(response.statusCode(), 304)
+        assertEquals(response.body(), "")
+        assertEquals(headerValue(response, "ETag"), Some(etag))
       }
     }
   }
