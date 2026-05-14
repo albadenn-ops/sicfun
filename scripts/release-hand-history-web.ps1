@@ -420,10 +420,17 @@ function Invoke-ReleaseSmoke {
       "BASIC_AUTH_USER=$basicAuthUser",
       "BASIC_AUTH_PASSWORD=$basicAuthPassword"
     )
+    # Sandbox the smoke's working directory inside $tempRoot (already destined for cleanup
+    # in finally) so any artifacts the launcher's JVM creates by resolving Paths.get(...)
+    # against user.dir -- notably data/web-playing-hall/<timestamp>/ when a Playing Hall job
+    # runs -- land in the temp tree rather than leaking into the repo root. Mirrors the
+    # iteration 37 sandbox in release-hand-history-web-installer.ps1's Step 6.5.
     $job = Start-Job -ScriptBlock {
-      param($launcherPathArg, $configFileArg)
+      param($launcherPathArg, $configFileArg, $cwd)
+      Set-Location -LiteralPath $cwd
+      [System.IO.Directory]::SetCurrentDirectory($cwd)
       & powershell -NoProfile -ExecutionPolicy Bypass -File $launcherPathArg -ConfigFile $configFileArg
-    } -ArgumentList $launcherPath, $configFile
+    } -ArgumentList $launcherPath, $configFile, $tempRoot
 
     $healthUri = "http://127.0.0.1:$Port/api/health"
     $readyUri = "http://127.0.0.1:$Port/api/ready"
