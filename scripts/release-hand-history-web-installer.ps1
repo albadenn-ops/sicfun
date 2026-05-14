@@ -582,6 +582,10 @@ pause >nul
       if ($cacheControl -notmatch "must-revalidate") {
         throw "Patched bundle / Cache-Control should contain must-revalidate (got '$cacheControl')"
       }
+      $permissionsPolicy = [string]$index.Headers."Permissions-Policy"
+      if ($permissionsPolicy -notmatch "camera=\(\)") {
+        throw "Patched bundle / missing Permissions-Policy with camera=() (got '$permissionsPolicy')"
+      }
       Write-Host "  Index OK (markers present, ETag=$etag, Cache-Control=$cacheControl)"
 
       # Verify gzip negotiation works on the patched bundle. The inner smoke already
