@@ -572,6 +572,20 @@ pause >nul
       }
       Write-Host "  Index OK (markers present, ETag=$etag, Cache-Control=$cacheControl)"
 
+      # Verify gzip negotiation works on the patched bundle. The inner smoke already
+      # checks this against the source bundle, but the bundle gets repackaged in
+      # Steps 2-6 and a regression in jlink module set could theoretically break
+      # java.util.zip if a future jdeps run drops it.
+      $gzipIndex = Invoke-WebRequest -Uri $indexUri -Headers @{ "Accept-Encoding" = "gzip" } -UseBasicParsing -TimeoutSec 5
+      if ($gzipIndex.StatusCode -ne 200) {
+        throw "Patched bundle / with Accept-Encoding: gzip returned $($gzipIndex.StatusCode), expected 200"
+      }
+      $gzipContentEncoding = [string]$gzipIndex.Headers."Content-Encoding"
+      if ($gzipContentEncoding -ne "gzip") {
+        throw "Patched bundle / with Accept-Encoding: gzip returned Content-Encoding '$gzipContentEncoding', expected 'gzip' (embedded runtime may be missing java.util.zip)"
+      }
+      Write-Host "  Gzip OK (Content-Encoding=gzip with Accept-Encoding=gzip)"
+
       # Exercise /api/playing-hall against the embedded runtime. The inner smoke covers this
       # under a full-classpath JDK; doing it here catches jlink module-set incompleteness
       # that would only surface at customer runtime (e.g. Playing Hall's concurrent / JNI

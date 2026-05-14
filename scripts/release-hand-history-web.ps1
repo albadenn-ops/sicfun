@@ -523,6 +523,25 @@ function Invoke-ReleaseSmoke {
       }
     }
 
+    # Verify gzip Content-Encoding is honored on a fresh request from the same client.
+    # The static handler only emits Content-Encoding: gzip when Accept-Encoding includes
+    # gzip; a regression in that path would slip past the existing index check (which
+    # doesn't set Accept-Encoding) and only surface at browser load.
+    $gzipHeaders = $firstClientHeaders.Clone()
+    $gzipHeaders["Accept-Encoding"] = "gzip"
+    $gzipIndexResponse = Invoke-WebRequest -Uri $indexUri -Headers $gzipHeaders -UseBasicParsing -TimeoutSec 5
+    if ($gzipIndexResponse.StatusCode -ne 200) {
+      throw "Packaged index with Accept-Encoding: gzip returned $($gzipIndexResponse.StatusCode), expected 200"
+    }
+    $gzipContentEncoding = [string]$gzipIndexResponse.Headers."Content-Encoding"
+    if ($gzipContentEncoding -ne "gzip") {
+      throw "Packaged index with Accept-Encoding: gzip returned Content-Encoding '$gzipContentEncoding', expected 'gzip'"
+    }
+    $gzipVary = [string]$gzipIndexResponse.Headers."Vary"
+    if ($gzipVary -notmatch "Accept-Encoding") {
+      throw "Packaged index missing Vary: Accept-Encoding header (got '$gzipVary')"
+    }
+
     $chartAssetContentTypes = @{
       "site-charts.js"            = "application/javascript"
       "vendor/uPlot.iife.min.js"  = "application/javascript"
