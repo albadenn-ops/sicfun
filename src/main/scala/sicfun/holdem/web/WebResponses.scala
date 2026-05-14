@@ -15,6 +15,12 @@ private[web] object WebResponses:
   private val ContentSecurityPolicy =
     "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'"
 
+  // Defense-in-depth: explicitly deny browser features the app does not use, so any
+  // future inline-script-induced exploit (or compromised vendored library) cannot
+  // promote itself into the user's hardware. `interest-cohort=()` opts out of FLoC.
+  private val PermissionsPolicy =
+    "accelerometer=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), interest-cohort=(), magnetometer=(), microphone=(), payment=(), usb=()"
+
   // Threshold below which gzip overhead can exceed the savings. A 256-byte JSON
   // typically compresses to 200-250 bytes once the gzip header (~20 bytes) is
   // included -- not worth the CPU. Standard nginx/apache default is 256-1024.
@@ -56,6 +62,7 @@ private[web] object WebResponses:
     val headers = exchange.getResponseHeaders
     headers.set("Cache-Control", "no-store")
     headers.set("Content-Security-Policy", ContentSecurityPolicy)
+    headers.set("Permissions-Policy", PermissionsPolicy)
     headers.set("Referrer-Policy", "no-referrer")
     headers.set("X-Content-Type-Options", "nosniff")
     headers.set("X-Frame-Options", "DENY")

@@ -297,6 +297,12 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(headerValue(index, "X-Content-Type-Options"), Some("nosniff"))
         assertEquals(headerValue(index, "X-Frame-Options"), Some("DENY"))
         assert(headerValue(index, "Content-Security-Policy").exists(_.contains("default-src 'self'")))
+        val permissionsPolicy = headerValue(index, "Permissions-Policy").getOrElse(
+          fail("expected Permissions-Policy header on index response"))
+        assert(permissionsPolicy.contains("camera=()"), s"missing camera=() in: $permissionsPolicy")
+        assert(permissionsPolicy.contains("microphone=()"), s"missing microphone=() in: $permissionsPolicy")
+        assert(permissionsPolicy.contains("geolocation=()"), s"missing geolocation=() in: $permissionsPolicy")
+        assert(permissionsPolicy.contains("interest-cohort=()"), s"missing interest-cohort=() in: $permissionsPolicy")
 
         val oversizedPayload = s"""{"handHistoryText":"${"A" * 256}"}"""
         val oversizedResponse = postJson(s"$baseUri/api/analyze-hand-history", oversizedPayload)

@@ -514,6 +514,7 @@ function Invoke-ReleaseSmoke {
       "X-Frame-Options"         = "DENY"
       "Referrer-Policy"         = "no-referrer"
       "Content-Security-Policy" = "default-src"
+      "Permissions-Policy"      = "camera=()"
     }
     foreach ($headerName in $requiredSecurityHeaders.Keys) {
       $actual = [string]$indexResponse.Headers.$headerName
