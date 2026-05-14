@@ -557,6 +557,18 @@ pause >nul
       if ([int]$healthBody.port -ne $postPort) { throw "Patched bundle /api/health reported port $($healthBody.port), expected $postPort" }
       Write-Host "  /api/health OK (port=$($healthBody.port), modelSource=$($healthBody.modelSource))"
 
+      # Verify gzip negotiation also works on the JSON API path. The static and API paths
+      # use different gzip code (StaticAssetsHandler vs WebResponses.writeBytes); the
+      # iteration 26 vs 27 split means a regression in one wouldn't surface in the other.
+      $healthGzip = Invoke-WebRequest -Uri $healthUri -Headers @{ "Accept-Encoding" = "gzip" } -UseBasicParsing -TimeoutSec 5
+      if ([string]$healthGzip.Headers."Content-Encoding" -ne "gzip") {
+        throw "Patched bundle /api/health with Accept-Encoding: gzip returned Content-Encoding '$($healthGzip.Headers."Content-Encoding")', expected 'gzip'"
+      }
+      if ([string]$healthGzip.Headers."Vary" -notmatch "Accept-Encoding") {
+        throw "Patched bundle /api/health missing Vary: Accept-Encoding (got '$($healthGzip.Headers."Vary")')"
+      }
+      Write-Host "  /api/health gzip OK"
+
       $index = Invoke-WebRequest -Uri $indexUri -UseBasicParsing -TimeoutSec 5
       if ($index.StatusCode -ne 200) { throw "Patched bundle / returned $($index.StatusCode)" }
       if ($index.Content -notmatch 'id="hand-upload-form"' -or $index.Content -notmatch 'id="playing-hall-form"') {
