@@ -269,15 +269,31 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
-  test("static handler returns 405 for non-GET non-HEAD methods") {
+  test("static handler returns 405 with Allow header for unsupported methods") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>
         val baseUri = s"http://${server.binding.host}:${server.binding.port}"
         val response = postJson(s"$baseUri/index.html", "{}")
         assertEquals(response.statusCode(), 405)
-        assertEquals(response.body(), "GET or HEAD required")
+        assertEquals(response.body(), "GET, HEAD, or OPTIONS required")
+        assertEquals(headerValue(response, "Allow"), Some("GET, HEAD, OPTIONS"))
         assertEquals(headerValue(response, "Cache-Control"), Some("no-store"))
         assertEquals(headerValue(response, "ETag"), None)
+      }
+    }
+  }
+
+  test("static handler answers OPTIONS with 200 and Allow header") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val request = HttpRequest.newBuilder(URI.create(s"$baseUri/"))
+          .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+          .build()
+        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+        assertEquals(response.statusCode(), 200)
+        assertEquals(response.body(), "")
+        assertEquals(headerValue(response, "Allow"), Some("GET, HEAD, OPTIONS"))
       }
     }
   }

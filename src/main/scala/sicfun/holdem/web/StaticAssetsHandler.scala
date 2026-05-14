@@ -20,9 +20,14 @@ private[web] final class StaticAssetsHandler(
       val method = exchange.getRequestMethod
       val isHead = method.equalsIgnoreCase("HEAD")
       val isGet = method.equalsIgnoreCase("GET")
+      val isOptions = method.equalsIgnoreCase("OPTIONS")
       if !ensureAuthenticatedStatic(exchange, basicAuth, platformAuth) then ()
+      else if isOptions then
+        exchange.getResponseHeaders.set("Allow", "GET, HEAD, OPTIONS")
+        exchange.sendResponseHeaders(200, -1L)
       else if !isGet && !isHead then
-        writePlain(exchange, 405, "GET or HEAD required", "text/plain; charset=utf-8")
+        exchange.getResponseHeaders.set("Allow", "GET, HEAD, OPTIONS")
+        writePlain(exchange, 405, "GET, HEAD, or OPTIONS required", "text/plain; charset=utf-8")
       else
         val requestPath = Option(exchange.getRequestURI.getPath).getOrElse("/")
         val relative = if requestPath == "/" then Paths.get("index.html") else Paths.get(requestPath.dropWhile(_ == '/'))
