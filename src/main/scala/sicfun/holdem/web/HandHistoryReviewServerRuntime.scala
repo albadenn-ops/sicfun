@@ -395,23 +395,32 @@ private[web] object HandHistoryReviewServerRuntime:
     logError(s"$label method=$method path=$path exception=${e.getClass.getName} message=$message")
     e.printStackTrace()
 
-  /** Escapes the line-structural characters (`\`, `\n`, `\r`, `\0`) inside a log
-    * message so that user-controlled values flowing into a log line cannot forge
-    * fake log entries or confuse line-oriented tools. Several log call sites
-    * interpolate request paths, remote addresses, job ids, and error strings
-    * from HTTP requests; raw newlines would let an attacker submitting e.g.
-    * `GET /foo%0A%5BERROR%5D%20[hand-history-review]%20...` inject a fake
-    * `[ERROR]` line that fools log parsers / alerting rules, and a null byte
-    * from `%00` in a URL would silently truncate the line in many text
-    * tools (less, some grep variants, file viewers). Kept simple: just the
-    * four problem characters; tabs and most printable control chars pass
-    * through. */
+  /** Escapes control characters inside a log message so that user-controlled
+    * values flowing into a log line cannot forge fake log entries or confuse
+    * line-oriented tools. Log lines use spaces (0x20) as field separators and
+    * printable ASCII for keys/values; any C0 control char in a value (request
+    * path, remote address, job id, error string) is potentially line-eating
+    * or display-breaking.
+    *
+    * Recognised escapes: `\` `\n` `\r` `\0` `\t` (the common cases). Other C0
+    * control chars (0x01-0x08, 0x0B-0x0C, 0x0E-0x1F) and DEL (0x7F) are
+    * rendered as `\xHH` (lowercase hex) so operators see something readable
+    * rather than an invisible glyph. Backslash is handled first so the rest
+    * of the escapes are unambiguous. */
   private[web] def sanitizeLogMessage(message: String): String =
-    message
+    val intermediate = message
       .replace("\\", "\\\\")
       .replace("\n", "\\n")
       .replace("\r", "\\r")
       .replace("\u0000", "\\0")
+      .replace("\t", "\\t")
+    val sb = new StringBuilder(intermediate.length)
+    intermediate.foreach { ch =>
+      if (ch.toInt < 0x20 && ch != '\\') || ch.toInt == 0x7F then
+        sb.append("\\x%02x".format(ch.toInt))
+      else sb.append(ch)
+    }
+    sb.toString
 
   private def log(level: String, message: String, stream: java.io.PrintStream): Unit =
     stream.synchronized {
