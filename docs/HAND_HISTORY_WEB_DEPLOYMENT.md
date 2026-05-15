@@ -107,6 +107,7 @@ Auth modes:
 - For safety, non-loopback binds now require one of those auth modes unless you explicitly set `ALLOW_UNAUTHENTICATED_PUBLIC_BIND=true` for a trusted private network
 - For safety, non-loopback platform-user auth also requires `USER_AUTH_COOKIE_SECURE=true` unless you explicitly set `ALLOW_INSECURE_USER_AUTH=true` for trusted private-network testing
 - When `USER_AUTH_COOKIE_SECURE=true` the session cookie is emitted with the RFC 6265 `__Host-` prefix (`__Host-sicfun_session`) so the browser also blocks a sibling subdomain from overwriting or planting the session cookie. Operator-side log greps and proxy ACLs should account for both `sicfun_session` (insecure mode) and `__Host-sicfun_session` (secure mode).
+- `USER_AUTH_MAX_USERS` (default `100000`) caps the total number of registered users. Once reached, further registration attempts return `400` with `"registration is temporarily unavailable"`. Defends against slow disk-fill via public-registration abuse (the auth rate-limit alone caps in-flight attempts at 10/min/IP, but without a per-store cap a persistent bot can still grow the JSON file unbounded over days/weeks). Surfaced in `/api/health` as `userAuthMaxUsers` so dashboards can show "users used / max" and alert when capacity is being approached.
 
 Optional OIDC:
 

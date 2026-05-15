@@ -76,6 +76,11 @@ private[web] object Readiness:
         "acceptingAnalysisJobs" -> Bool(readiness.acceptingAnalysisJobs),
         "authenticationEnabled" -> Bool(authenticationEnabled(config.basicAuth, config.platformAuth)),
         "authenticationMode" -> Str(authenticationMode(config.basicAuth, config.platformAuth)),
+        // Surface the user-store cap so dashboards can show "users / maxUsers"
+        // and alert when capacity is being approached. Only present when
+        // platform-user auth is enabled (basic auth and no-auth modes have
+        // no user store).
+        "userAuthMaxUsers" -> config.platformAuth.map(c => Num(c.maxUsers.toDouble)).getOrElse(ujson.Null),
         "service" -> Str("hand-history-review"),
         "host" -> Str(config.host),
         "port" -> Num(boundPort.toDouble),
