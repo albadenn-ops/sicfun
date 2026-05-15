@@ -630,8 +630,20 @@ private[web] object HandHistoryReviewServerApi:
     // `application/json; charset=utf-8` and similar variants still work.
     val contentType = Option(exchange.getRequestHeaders.getFirst("Content-Type"))
       .map(_.trim.toLowerCase)
+    val contentEncoding = Option(exchange.getRequestHeaders.getFirst("Content-Encoding"))
+      .map(_.trim.toLowerCase)
+      .filter(_.nonEmpty)
     if !contentType.exists(value => value == "application/json" || value.startsWith("application/json;")) then
       Left(415 -> "Content-Type must be application/json")
+    else if contentEncoding.exists(_ != "identity") then
+      // The server reads the request body as raw UTF-8 bytes and parses as JSON;
+      // it does NOT decompress. A client sending Content-Encoding: gzip would
+      // otherwise produce a confusing "invalid JSON request" 400 (the body is
+      // gzip bytes, not JSON). Reject upfront with a clear 415. Skipping
+      // decompression is also a deliberate defense -- a hostile client could
+      // otherwise mail in a small compressed payload that decompresses to MB or
+      // GB of attacker-controlled JSON, defeating the maxUploadBytes cap.
+      Left(415 -> s"request Content-Encoding '${contentEncoding.get}' is not supported; send uncompressed application/json")
     else
       Option(exchange.getRequestHeaders.getFirst("Content-Length"))
         .flatMap(_.toLongOption)

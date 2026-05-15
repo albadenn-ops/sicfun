@@ -260,6 +260,52 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("body-reading endpoints reject Content-Encoding other than identity") {
+    // The server reads the request body as raw UTF-8 and parses as JSON; it
+    // does NOT decompress. Before this guard, a client that sent
+    // Content-Encoding: gzip would have its gzipped bytes treated as JSON,
+    // yielding a confusing 'invalid JSON request' 400. Worse, decompression
+    // support would have been a footgun -- a hostile client could mail in a
+    // small compressed payload that decompresses to many MB of JSON, evading
+    // the maxUploadBytes cap before parsing even starts. Reject explicitly
+    // with 415 so the client knows the contract.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val body = """{"email":"alice@example.com","password":"correct-horse-battery"}"""
+
+          // gzip Content-Encoding -> 415.
+          val gzipPost = HttpRequest.newBuilder(URI.create(s"$baseUri/api/auth/login"))
+            .header("Content-Type", "application/json")
+            .header("Content-Encoding", "gzip")
+            .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+            .build()
+          val gzipResp = httpClient.send(gzipPost, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+          assertEquals(gzipResp.statusCode(), 415,
+            clue = "Content-Encoding: gzip must be rejected with 415")
+          assert(jsonBody(gzipResp)("error").str.contains("Content-Encoding"),
+            clue = "415 error body should mention Content-Encoding so the client can see what failed")
+
+          // identity Content-Encoding -> accepted (gets a normal 401 for bad creds).
+          // RFC 7231 permits clients to explicitly send Content-Encoding: identity
+          // to assert no encoding; reject only the actually-encoded forms.
+          val identityPost = HttpRequest.newBuilder(URI.create(s"$baseUri/api/auth/login"))
+            .header("Content-Type", "application/json")
+            .header("Content-Encoding", "identity")
+            .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+            .build()
+          val identityResp = httpClient.send(identityPost, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+          assertEquals(identityResp.statusCode(), 401,
+            clue = "Content-Encoding: identity must be accepted (bad creds is the legitimate downstream outcome)")
+        }
+      }
+    }
+  }
+
   test("body-reading endpoints require Content-Type: application/json") {
     // Belt-and-braces login-CSRF / form-CSRF mitigation: a hostile cross-origin
     // site auto-submitting a <form action="/api/auth/login"> would deliver a
