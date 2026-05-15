@@ -724,8 +724,22 @@ object PlatformUserAuth:
 
     def consume(providerId: String, state: String): Option[OidcPendingState] =
       cleanupIfDue()
-      Option(states.remove(state))
-        .filter(record => record.providerId == providerId && nowMillis() - record.issuedAtEpochMs <= flowTtlMs)
+      // Atomically remove only when providerId and TTL both match. The earlier
+      // version called `states.remove(state)` unconditionally and then
+      // filtered, which meant a callback with a valid state but the wrong
+      // provider id would still evict the entry -- the legitimate user's
+      // subsequent correct callback would then 404 because their state had
+      // already been consumed (and discarded) by the wrong-provider request.
+      // Non-exploitable in practice because state is 32-byte random, but the
+      // atomic form removes the latent foot-gun.
+      val holder = new java.util.concurrent.atomic.AtomicReference[Option[OidcPendingState]](None)
+      states.computeIfPresent(state, (_, record) =>
+        if record.providerId == providerId && nowMillis() - record.issuedAtEpochMs <= flowTtlMs then
+          holder.set(Some(record))
+          null  // signal removal
+        else record
+      )
+      holder.get()
 
     private def cleanupIfDue(): Unit =
       val now = nowMillis()
