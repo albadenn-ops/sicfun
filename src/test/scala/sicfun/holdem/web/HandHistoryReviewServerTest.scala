@@ -1686,6 +1686,54 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("OIDC callback rejects oversize state or code params with oversize_callback_param") {
+    // Both state and code are bounded above by MaxOidcParamLength (256). Our
+    // own state is 32 chars, legitimate provider codes are <200, so anything
+    // larger is an attacker probing the callback to amplify CPU/memory cost
+    // in the OidcStateStore lookup or the upstream POST body. Reject upfront
+    // with a distinct reason before any cookie / state-store / network work.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              allowLocalRegistration = false,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val hugeState = "s" * 5000
+          val hugeCode = "c" * 5000
+
+          // Oversize state -> oversize_callback_param.
+          val resp1 = get(s"$baseUri${provider.callbackPath}?state=$hugeState&code=test-code")
+          assertEquals(resp1.statusCode(), 302)
+          val loc1 = headerValue(resp1, "Location").getOrElse(fail("missing Location"))
+          assert(loc1.contains("oversize_callback_param"),
+            s"oversize state must redirect with oversize_callback_param reason; got: $loc1")
+
+          // Oversize code -> oversize_callback_param.
+          val resp2 = get(s"$baseUri${provider.callbackPath}?state=test-state&code=$hugeCode")
+          assertEquals(resp2.statusCode(), 302)
+          val loc2 = headerValue(resp2, "Location").getOrElse(fail("missing Location"))
+          assert(loc2.contains("oversize_callback_param"),
+            s"oversize code must redirect with oversize_callback_param reason; got: $loc2")
+
+          // Redirect URLs must stay short -- the cap prevents the attacker
+          // from blowing up the redirect Location via state or code.
+          assert(loc1.length < 1024,
+            s"oversize-state redirect should be small (got ${loc1.length}); the cap prevents echoing the attacker payload")
+          assert(loc2.length < 1024,
+            s"oversize-code redirect should be small (got ${loc2.length}); the cap prevents echoing the attacker payload")
+        }
+      }
+    }
+  }
+
   test("OIDC callback caps the provider-supplied ?error= string before logging and redirecting") {
     // The /callback route is not rate-limited (it's a normal user flow that
     // fires once per sign-in) so without a cap an attacker who hits it

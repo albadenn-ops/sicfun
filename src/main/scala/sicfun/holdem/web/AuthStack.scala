@@ -248,23 +248,41 @@ private[web] object AuthStack:
           Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(error)))
         case None =>
           (query.get("state"), query.get("code")) match
-            case (Some(state), Some(code)) =>
-              // OAuth 2.0 BCP "covert-redirect" / login-CSRF mitigation: the
-              // browser that arrives at /callback must carry the SAME state
-              // value that we Set-Cookie'd at /start. Without this check, an
-              // attacker who finished their own authorization could forward
-              // their `?state=X&code=ATTACKER_CODE` to a victim, and our
-              // OidcStateStore (which only knows that X is a state WE issued)
-              // would happily exchange the code and bind the attacker's
-              // identity to the victim's browser session.
-              val expectedName = platformAuth.expectedOidcStateCookieName
-              val cookieState = extractCookieFromExchange(exchange, expectedName)
-              if cookieState.isEmpty || !cookieState.exists(value => secureEquals(value, state)) then
-                val reason = if cookieState.isEmpty then "missing_state_cookie" else "state_cookie_mismatch"
-                logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=$reason")
-                Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(reason)))
+            case (Some(rawState), Some(rawCode)) =>
+              // Reject obviously-oversized state or code upfront. We issued
+              // `state` ourselves as 24 random bytes base64url-encoded (~32
+              // chars); legitimate provider `code` values are typically
+              // under 200 chars. Anything orders of magnitude larger is an
+              // attacker probing the callback (potentially with a matching
+              // cookie planted via the sibling-subdomain vector in
+              // insecure-cookie mode) trying to amplify CPU/memory cost in
+              // the OidcStateStore lookup or the upstream POST body to the
+              // provider's token endpoint. 256 chars matches the cap on
+              // ?error= and is well above any legitimate value. Treat
+              // oversize as `missing_code_or_state` so the failure
+              // resembles a malformed request, not a state/cookie issue.
+              if rawState.length > MaxOidcParamLength || rawCode.length > MaxOidcParamLength then
+                logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=oversize_callback_param")
+                Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect("oversize_callback_param")))
               else
-                platformAuth.finishOidc(providerId, state, code) match
+                val state = rawState
+                val code = rawCode
+                // OAuth 2.0 BCP "covert-redirect" / login-CSRF mitigation: the
+                // browser that arrives at /callback must carry the SAME state
+                // value that we Set-Cookie'd at /start. Without this check, an
+                // attacker who finished their own authorization could forward
+                // their `?state=X&code=ATTACKER_CODE` to a victim, and our
+                // OidcStateStore (which only knows that X is a state WE issued)
+                // would happily exchange the code and bind the attacker's
+                // identity to the victim's browser session.
+                val expectedName = platformAuth.expectedOidcStateCookieName
+                val cookieState = extractCookieFromExchange(exchange, expectedName)
+                if cookieState.isEmpty || !cookieState.exists(value => secureEquals(value, state)) then
+                  val reason = if cookieState.isEmpty then "missing_state_cookie" else "state_cookie_mismatch"
+                  logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=$reason")
+                  Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(reason)))
+                else
+                  platformAuth.finishOidc(providerId, state, code) match
                   case Left(error) =>
                     logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=$error")
                     Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(error)))
@@ -401,6 +419,16 @@ private[web] object AuthStack:
   private def capOidcErrorString(raw: String): String =
     if raw.length <= MaxOidcErrorLength then raw
     else raw.substring(0, MaxOidcErrorLength) + "...(truncated)"
+
+  // Cap the OIDC `state` and `code` callback parameters. We issue `state` as
+  // 24 bytes of base64url (~32 chars); legitimate provider `code` values are
+  // typically under 200 chars. Anything orders of magnitude larger is an
+  // attacker probing the callback -- potentially with a matching cookie
+  // planted via the sibling-subdomain vector in insecure-cookie mode -- to
+  // amplify CPU/memory cost in the OidcStateStore lookup or the upstream
+  // POST body to the provider's token endpoint. 256 chars is well above any
+  // legitimate value and matches the ?error= cap above.
+  private val MaxOidcParamLength = 256
 
 
   final case class RedirectResponse(
