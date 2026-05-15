@@ -363,7 +363,20 @@ private[web] object HandHistoryReviewServerRuntime:
   def logError(message: String): Unit =
     log("ERROR", message, System.err)
 
+  /** Escapes the line-structural characters (`\`, `\n`, `\r`) inside a log message
+    * so that user-controlled values flowing into a log line cannot forge fake log
+    * entries. Several log call sites interpolate request paths, remote addresses,
+    * and error strings from HTTP requests; raw newlines would let an attacker
+    * submitting e.g. `GET /foo%0A%5BERROR%5D%20[hand-history-review]%20...` inject
+    * a fake `[ERROR]` line that fools log parsers / alerting rules. Kept simple:
+    * just the three characters; tabs and most printable control chars pass through. */
+  private[web] def sanitizeLogMessage(message: String): String =
+    message
+      .replace("\\", "\\\\")
+      .replace("\n", "\\n")
+      .replace("\r", "\\r")
+
   private def log(level: String, message: String, stream: java.io.PrintStream): Unit =
     stream.synchronized {
-      stream.println(s"[${Instant.now()}] [$level] [hand-history-review] $message")
+      stream.println(s"[${Instant.now()}] [$level] [hand-history-review] ${sanitizeLogMessage(message)}")
     }

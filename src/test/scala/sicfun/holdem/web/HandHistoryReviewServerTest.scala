@@ -236,6 +236,19 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("log message sanitization escapes line-structural characters") {
+    import HandHistoryReviewServerRuntime.sanitizeLogMessage
+
+    // Newline, carriage return, and backslash get escaped so user-controlled values
+    // flowing into log interpolation can't forge a fake log line.
+    assertEquals(sanitizeLogMessage("safe path"), "safe path")
+    assertEquals(sanitizeLogMessage("path with\nnewline"), "path with\\nnewline")
+    assertEquals(sanitizeLogMessage("CR\rLF\n"), "CR\\rLF\\n")
+    assertEquals(sanitizeLogMessage("escape \\ first so \\n stays literal"),
+      "escape \\\\ first so \\\\n stays literal",
+      clue = "backslashes must be escaped before \\n so a literal \\n in input doesn't decode as newline")
+  }
+
   test("shutdown grace milliseconds round up to whole HttpServer stop seconds") {
     assertEquals(HandHistoryReviewServer.shutdownDelaySeconds(0L), 0)
     assertEquals(HandHistoryReviewServer.shutdownDelaySeconds(1L), 1)
