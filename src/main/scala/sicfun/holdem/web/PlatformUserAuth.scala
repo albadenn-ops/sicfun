@@ -998,6 +998,15 @@ object PlatformUserAuth:
     raw.map(_.trim).filter(_.nonEmpty).map { value =>
       if value.length > maxLength then
         throw new IllegalArgumentException(s"$label must be at most $maxLength characters")
+      // Reject embedded C0 controls and DEL. validateEmail already rejects ALL
+      // whitespace + controls because email syntax forbids them; profile fields
+      // (displayName, heroName, preferredSite, timeZone) allow internal spaces
+      // for things like "John Smith", but a newline / NUL / ESC in a stored
+      // profile field has no legitimate use and would either confuse JSON
+      // consumers, corrupt audit log fields when the value eventually surfaces,
+      // or trip line-oriented dashboards downstream.
+      if value.exists(ch => ch.toInt < 0x20 || ch.toInt == 0x7F) then
+        throw new IllegalArgumentException(s"$label must not contain control characters")
       value
     }
 

@@ -294,6 +294,42 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("profile fields reject embedded C0 / DEL control characters") {
+    // displayName, heroName, preferredSite, timeZone all flow through
+    // sanitizeOptionalField. Email already rejects whitespace + controls
+    // (handled by a separate test); profile fields permit internal spaces
+    // for "John Smith" / "PokerStars NJ" / etc., but a NUL / newline / ESC /
+    // DEL in a stored profile field has no legitimate use and would either
+    // confuse downstream JSON consumers, corrupt audit log fields when the
+    // value eventually surfaces, or trip line-oriented log dashboards.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val cases = Vector(
+            // (json-escaped field value, label expected in the error)
+            ("Alice\\nSmith", "displayName"),
+            ("Alice\\u0000Smith", "displayName"),
+            ("Alice\\u001bSmith", "displayName"),
+            ("Alice\\u007fSmith", "displayName")
+          )
+          for (raw, label) <- cases do
+            val payload =
+              s"""{"email":"profile@example.com","password":"correct-horse-battery","displayName":"$raw"}"""
+            val response = postJson(s"$baseUri/api/auth/register", payload)
+            assertEquals(response.statusCode(), 400,
+              clue = s"raw=$raw must be rejected with 400")
+            val errorMessage = jsonBody(response)("error").str
+            assert(errorMessage.contains("control"),
+              s"raw=$raw expected `must not contain control characters`, got: $errorMessage")
+        }
+      }
+    }
+  }
+
   test("registration preserves password whitespace and login enforces the exact bytes") {
     // validatePassword no longer trims before checking length, so what the
     // user submits is what gets hashed. Pin both directions:
