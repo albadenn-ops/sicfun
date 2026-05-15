@@ -1287,6 +1287,82 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("OIDC upsert rejects oversize subject and drops oversize avatar URL") {
+    // upsertOidcIdentity now validates the email format/length, caps the
+    // subject at 256 chars (reject), caps the avatar URL at 2048 chars (drop
+    // the field but still upsert), and truncates displayName to 96 chars. The
+    // configured Google provider would never emit these values, but a future
+    // provider or a tampered response could. Use custom fake providers per
+    // case to drive the validation paths end-to-end via the callback HTTP
+    // flow.
+    def runCase(provider: PlatformUserAuth.OidcProvider)(check: HttpResponse[String] => Unit): Unit =
+      withStaticSite { staticDir =>
+        withUserStorePath { storePath =>
+          withServer(
+            staticDir,
+            platformAuth = Some(
+              PlatformUserAuth.Config(
+                storePath = storePath,
+                allowLocalRegistration = false,
+                oidcProviders = Vector(provider)
+              )
+            )
+          ) { server =>
+            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+            val start = get(s"$baseUri${provider.startPath}")
+            val state = queryParam(headerValue(start, "Location").getOrElse(""), "state")
+              .getOrElse(fail("missing OIDC state"))
+            val callback = get(s"$baseUri${provider.callbackPath}?state=$state&code=anything")
+            check(callback)
+          }
+        }
+      }
+
+    // 1. Oversize subject -> reject the upsert with a clear error in the redirect.
+    val bigSubject = "x" * 300
+    val oversizeSubjectProvider = new PlatformUserAuth.OidcProvider:
+      override val id = "google"
+      override val displayName = "Google"
+      override def authorizationUri(state: String, codeChallenge: String): String =
+        s"https://accounts.google.test/o/oauth2/v2/auth?state=$state&code_challenge=$codeChallenge"
+      override def exchangeCode(code: String, codeVerifier: String): Either[String, PlatformUserAuth.OidcIdentity] =
+        Right(PlatformUserAuth.OidcIdentity(
+          subject = bigSubject,
+          email = "oidc@example.com",
+          displayName = "Big Subject User",
+          avatarUrl = None
+        ))
+    runCase(oversizeSubjectProvider) { callback =>
+      assertEquals(callback.statusCode(), 302)
+      assertEquals(headerValue(callback, "Set-Cookie"), None,
+        "rejected OIDC upsert must not emit a session cookie")
+      val location = headerValue(callback, "Location").getOrElse(fail("missing redirect"))
+      assert(location.toLowerCase.contains("subject"),
+        s"failure redirect should mention 'subject', got: $location")
+    }
+
+    // 2. Oversize avatar URL -> drop the avatar but still upsert successfully.
+    val bigAvatarProvider = new PlatformUserAuth.OidcProvider:
+      override val id = "google"
+      override val displayName = "Google"
+      override def authorizationUri(state: String, codeChallenge: String): String =
+        s"https://accounts.google.test/o/oauth2/v2/auth?state=$state&code_challenge=$codeChallenge"
+      override def exchangeCode(code: String, codeVerifier: String): Either[String, PlatformUserAuth.OidcIdentity] =
+        Right(PlatformUserAuth.OidcIdentity(
+          subject = "fake-google-ok",
+          email = "oidc@example.com",
+          displayName = "Big Avatar User",
+          avatarUrl = Some("https://example.com/" + ("a" * 3000) + ".png")
+        ))
+    runCase(bigAvatarProvider) { callback =>
+      assertEquals(callback.statusCode(), 302)
+      assertEquals(headerValue(callback, "Location"), Some(PlatformUserAuth.oidcSuccessRedirect),
+        "oversize avatar should not block the upsert, just drop the field")
+      assert(headerValue(callback, "Set-Cookie").isDefined,
+        "successful OIDC upsert must emit a session cookie")
+    }
+  }
+
   test("OIDC callback refuses malformed queries (no params, partial params, unknown state)") {
     // Three callback-side failure modes besides the provider-error case:
     //   1. No query at all -- nothing to validate against.
