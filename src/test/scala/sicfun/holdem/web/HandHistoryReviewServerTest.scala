@@ -2299,6 +2299,28 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("villainPool with non-string entries reports the type name, not the offending value") {
+    // optionalStringArray used to fall through to `other.str` on non-string
+    // entries; for Obj/Arr/Bool that throws ujson.Value.InvalidData whose
+    // getMessage includes data.toString -- a multi-KB nested object inside
+    // the array would round-trip back as a "invalid JSON request: <huge>"
+    // 400 body. Now we map non-strings to their JSON type name instead, so
+    // the downstream allowlist check emits a clean
+    // "unsupported entries: object" with no attacker payload echoed.
+    withStaticSite { staticDir =>
+      withServer(staticDir, maxUploadBytes = 4096) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val payload =
+          """{"hands":10,"tableCount":1,"playerCount":2,"heroStyle":"gto","heroPosition":"Button","gtoMode":"fast","villainPool":[{"MARKER_PAYLOAD_AA":"MARKER_PAYLOAD_BB"}],"heroExplorationRate":0,"raiseSize":2.5,"bunchingTrials":1,"equityTrials":1,"learnEveryHands":0,"learningWindowSamples":0,"seed":1}"""
+        val response = postJson(s"$baseUri/api/playing-hall", payload)
+        assertEquals(response.statusCode(), 400)
+        val errorBody = jsonBody(response)("error").str
+        assert(!errorBody.contains("MARKER_PAYLOAD"),
+          clue = s"villainPool non-string entry must NOT be echoed in the response body; got: $errorBody")
+      }
+    }
+  }
+
   test("JSON-type-mismatch errors report only the offending type, not the offending value") {
     // The optional* parsers used to format type-mismatch errors as
     // `"hands must be an integer, got ${ujson.write(other)}"`. For an

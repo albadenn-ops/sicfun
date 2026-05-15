@@ -504,10 +504,19 @@ private[web] object HandHistoryReviewServerApi:
   ): Option[Vector[String]] =
     obj.get(key).flatMap {
       case Arr(values) =>
+        // For non-string entries, surface only the JSON type name rather
+        // than `other.str` (which works for Num and throws InvalidData --
+        // exception message includes data.toString -- for Bool/Obj/Arr/Null,
+        // and that exception was being caught by parsePlayingHallRequest's
+        // NonFatal handler and re-emitted as "invalid JSON request:
+        // <full attacker-controlled value>" in the 400 response body). The
+        // downstream allowlist check produces a clean
+        // "unsupported entries: object" instead of echoing the offending
+        // object verbatim back to the client.
         Some(
-          values.collect {
+          values.map {
             case Str(value) => value
-            case other => other.str
+            case other => jsonTypeName(other)
           }.toVector
         )
       case _ => None
