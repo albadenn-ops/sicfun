@@ -395,7 +395,10 @@ private[web] object HandHistoryReviewServerRuntime:
       label: String
   ): Unit =
     val method = Option(exchange.getRequestMethod).getOrElse("?")
-    val path = Option(exchange.getRequestURI).map(_.getPath).getOrElse("?")
+    // getRawPath -- not getPath -- so percent-encoded sequences stay encoded
+    // and a literal space in the URL does not split the `path=...` field at
+    // the wrong column. Matches the requestPath helper in AuthStack.
+    val path = Option(exchange.getRequestURI).map(_.getRawPath).getOrElse("?")
     val message = Option(e.getMessage).getOrElse("")
     logError(s"$label method=$method path=$path exception=${e.getClass.getName} message=$message")
     e.printStackTrace()
