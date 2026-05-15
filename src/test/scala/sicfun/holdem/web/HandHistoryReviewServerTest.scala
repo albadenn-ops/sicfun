@@ -1611,6 +1611,81 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("successful OIDC callback revokes a pre-existing session in the same browser") {
+    // If a user is already signed in (session A) and re-authenticates via
+    // OIDC -- e.g. they revisited /api/auth/oidc/google/start because they
+    // wanted to switch accounts, or just clicked the button while still
+    // signed in -- the callback creates a new session B. Before this fix
+    // the old session record stayed in the in-memory store until its TTL
+    // expired, so an attacker who had previously stolen session A's token
+    // (XSS, captured network, etc.) could keep using it for up to 12h
+    // after the user thought they had re-authenticated. The browser
+    // overwrites its cookie automatically; this fix gives the server-side
+    // store parity by revoking A as soon as B is issued.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              allowLocalRegistration = false,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // First OIDC sign-in -> session A.
+          val start1 = get(s"$baseUri${provider.startPath}")
+          val state1 = queryParam(headerValue(start1, "Location").getOrElse(""), "state")
+            .getOrElse(fail("missing OIDC state on first start"))
+          val stateCookie1 = headerValue(start1, "Set-Cookie")
+            .map(_.takeWhile(_ != ';'))
+            .getOrElse(fail("missing state cookie on first start"))
+          val callback1 = get(
+            s"$baseUri${provider.callbackPath}?state=$state1&code=test-code",
+            Map("Cookie" -> stateCookie1)
+          )
+          assertEquals(callback1.statusCode(), 302)
+          val sessionCookieA = sessionCookie(callback1)
+
+          // Confirm session A is alive.
+          val meA = getJsonWithHeaders(s"$baseUri/api/auth/me", Map("Cookie" -> sessionCookieA))
+          assertEquals(meA("authenticated").bool, true, clue = "session A should be alive after first OIDC sign-in")
+
+          // Second OIDC sign-in WHILE session A is in the browser -> session B.
+          val start2 = get(s"$baseUri${provider.startPath}", Map("Cookie" -> sessionCookieA))
+          val state2 = queryParam(headerValue(start2, "Location").getOrElse(""), "state")
+            .getOrElse(fail("missing OIDC state on second start"))
+          val stateCookie2 = headerValue(start2, "Set-Cookie")
+            .map(_.takeWhile(_ != ';'))
+            .getOrElse(fail("missing state cookie on second start"))
+          // Forward both session A AND the fresh state cookie to /callback.
+          val callback2 = get(
+            s"$baseUri${provider.callbackPath}?state=$state2&code=test-code",
+            Map("Cookie" -> s"$sessionCookieA; $stateCookie2")
+          )
+          assertEquals(callback2.statusCode(), 302)
+          val sessionCookieB = sessionCookie(callback2)
+          assertNotEquals(sessionCookieB, sessionCookieA,
+            clue = "second OIDC sign-in must issue a fresh session token")
+
+          // Session B works.
+          val meB = getJsonWithHeaders(s"$baseUri/api/auth/me", Map("Cookie" -> sessionCookieB))
+          assertEquals(meB("authenticated").bool, true, clue = "session B should be alive after second OIDC sign-in")
+
+          // Session A is REVOKED -- replaying its token alone (as a hypothetical
+          // stolen-cookie attacker would) must no longer resolve.
+          val meAReplay = getJsonWithHeaders(s"$baseUri/api/auth/me", Map("Cookie" -> sessionCookieA))
+          assertEquals(meAReplay("authenticated").bool, false,
+            clue = "session A must be revoked the moment session B is issued in the same browser; a previously stolen A token must stop working")
+        }
+      }
+    }
+  }
+
   test("OIDC callback rejects requests that lack the state cookie issued at /start") {
     // OAuth 2.0 BCP "covert-redirect" / login-CSRF mitigation: even if an
     // attacker holds a state value that WE issued (e.g. they kicked off a
