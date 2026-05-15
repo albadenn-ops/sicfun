@@ -290,14 +290,17 @@ async function maybeReauthOn401(response) {
 }
 
 // Build a user-facing error message that augments the server's `error` field
-// with the rate-limit retry-after hint when the response is a 429. Reads
-// retryAfterSeconds from the JSON body first (more precise) and falls back to
-// the Retry-After response header if the body did not include it. Returns the
-// original `error` field unchanged for non-429 responses.
+// with retry-after info for transient failures the user can re-try. Applies
+// to 429 (rate-limited) AND 503 (queue full / drain mode / timed-out worker
+// recovery). Both responses carry a Retry-After header (and 429 also includes
+// retryAfterSeconds in the JSON body, which is preferred because it's the
+// precise server-computed value rather than the JsonHandler's 5-second 503
+// fallback). For any other status code, returns the base error unchanged.
 function formatErrorMessage(response, body) {
   const fallback = `Request failed with status ${response.status}.`;
   const base = body && typeof body.error === "string" && body.error ? body.error : fallback;
-  if (response.status !== 429) return base;
+  const isRetryable = response.status === 429 || response.status === 503;
+  if (!isRetryable) return base;
   let retrySeconds = body && Number.isFinite(Number(body.retryAfterSeconds))
     ? Number(body.retryAfterSeconds)
     : null;
