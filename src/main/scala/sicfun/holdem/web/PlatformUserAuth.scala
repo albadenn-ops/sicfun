@@ -456,6 +456,13 @@ object PlatformUserAuth:
     def upsertOidcIdentity(providerId: String, identity: OidcIdentity): Either[String, StoredUser] =
       synchronized:
         val normalizedEmail = normalizeEmail(identity.email)
+        // Validate the email format and length the OIDC provider returned even
+        // though Google checks emailVerified upstream. Defense in depth: a
+        // future provider or a tampered userinfo response could deliver a
+        // malformed or oversize value, and the local-register path applies
+        // the same check -- keep both code paths consistent.
+        try validateEmail(normalizedEmail)
+        catch case e: IllegalArgumentException => return Left(e.getMessage)
         val now = System.currentTimeMillis()
         findByProviderIdentityInternal(providerId, identity.subject) match
           case Some(existing) =>
