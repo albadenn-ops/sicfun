@@ -62,6 +62,8 @@ Default behavior:
 
 `/api/health` and `/api/ready` are unauthenticated and accept `GET`, `HEAD`, and `OPTIONS`. HEAD returns the same status code and security headers as GET but with no body, so monitoring tools that probe with HEAD see `200 OK` while idle and `503` when readiness fails — same as a GET probe. The hand-history analysis and Playing Hall job routes always require auth (Basic auth or platform-user) and are rate-limited (Submit / JobStatus buckets — see "Rate limiting" below). Auth bootstrap routes under `/api/auth/*` are open by design (login/register cannot require an existing session). Submissions return `202 Accepted` with `Location` and `Retry-After` headers plus a JSON body containing `jobId`, `status`, `statusUrl`, `submittedAtEpochMs`, `pollAfterMs`.
 
+All body-reading endpoints (`POST /api/auth/*`, `POST /api/analyze-hand-history`, `POST /api/playing-hall`) require `Content-Type: application/json` and return `415 Unsupported Media Type` otherwise. The `application/json; charset=utf-8` form is also accepted. The check forecloses a cross-origin form-CSRF vector against the login endpoint (a hostile site auto-submitting an HTML `<form action="/api/auth/login">` would send `application/x-www-form-urlencoded` and now bounces at the Content-Type guard before any parsing).
+
 Hand-history analysis:
 
 - `POST /api/analyze-hand-history` — submit a hand history for analysis. Body: JSON `{handHistoryText, heroName?, site?}`. Rate-limited as Submit.
