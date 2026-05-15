@@ -1262,7 +1262,7 @@ function renderRecentRuns() {
         </div>
         <p class="recent-run-meta">
           ${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands &middot;
-          ${formatSigned(entry.summary.heroNetChips)} chips &middot; [${escapeHtml(pool)}] &middot; seed ${entry.request.seed}
+          ${formatSigned(entry.summary.heroNetChips)} chips &middot; [${escapeHtml(pool)}] &middot; seed ${escapeHtml(entry.request.seed)}
         </p>
       </article>
     `;
