@@ -301,6 +301,51 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("login does PBKDF2 work even when the email is unknown to prevent timing-based email enumeration") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Register a known user so we have a known-email path to compare against.
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"known@example.com","password":"correct-horse-battery","displayName":"Known"}""")
+          assertEquals(register.statusCode(), 201)
+
+          // Warm the JIT once so the first measured request is not penalized.
+          postJson(s"$baseUri/api/auth/login",
+            """{"email":"known@example.com","password":"wrong-but-normal-length"}""")
+
+          def avgLoginMs(email: String, runs: Int): Long =
+            val samples = (1 to runs).map { _ =>
+              val start = System.nanoTime()
+              val resp = postJson(s"$baseUri/api/auth/login",
+                s"""{"email":"$email","password":"wrong-but-normal-length"}""")
+              val elapsedMs = (System.nanoTime() - start) / 1000000L
+              assertEquals(resp.statusCode(), 401)
+              assertEquals(jsonBody(resp)("error").str, "invalid email or password")
+              elapsedMs
+            }
+            samples.sum / samples.length
+
+          val unknownEmailMs = avgLoginMs("nobody-was-ever-here@example.com", 3)
+          val knownEmailMs = avgLoginMs("known@example.com", 3)
+
+          // PBKDF2 at 210k iterations takes ~50-200ms on typical hardware. A no-hash
+          // path completes in <5ms. The 25ms floor catches a regression that skips
+          // hashing in either branch while staying robust to slow CI runners.
+          assert(unknownEmailMs >= 25,
+            s"unknown-email login must do PBKDF2 work, got $unknownEmailMs ms (known: $knownEmailMs ms)")
+          assert(knownEmailMs >= 25,
+            s"known-email login must do PBKDF2 work, got $knownEmailMs ms")
+        }
+      }
+    }
+  }
+
   test("PlatformUserAuth.Service.create returns a clear error for a corrupted user store file") {
     withUserStorePath { storePath =>
       // Write garbage that ujson will reject. Without the file-path-aware wrap,

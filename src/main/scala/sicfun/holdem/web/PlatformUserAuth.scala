@@ -409,21 +409,34 @@ object PlatformUserAuth:
           case NonFatal(e) => Left(e.getMessage)
 
     def authenticateLocal(email: String, password: String): Either[String, StoredUser] =
-      synchronized:
-        val normalizedEmail = normalizeEmail(email)
-        findByEmailInternal(normalizedEmail) match
-          case None => Left("invalid email or password")
-          case Some(user) =>
-            user.localPassword match
-              case None => Left("this account does not support password sign-in")
-              case Some(credential) =>
-                // Reject oversize password BEFORE PBKDF2 so an attacker with a known
-                // email cannot burn server CPU by submitting a multi-megabyte input;
-                // the response is intentionally indistinguishable from a bad password
-                // to avoid leaking that the email exists.
-                if password.length > MaxPasswordLength then Left("invalid email or password")
-                else if verifyPassword(password, credential) then Right(user)
-                else Left("invalid email or password")
+      // Reject oversize password BEFORE any lookup or hashing so all email values
+      // get the same fast response. Both the DoS guard (avoid PBKDF2 on multi-MB
+      // input) and the timing-leak guard (no per-email branching) fall out of
+      // this single short-circuit.
+      if password.length > MaxPasswordLength then Left("invalid email or password")
+      else
+        synchronized:
+          val normalizedEmail = normalizeEmail(email)
+          findByEmailInternal(normalizedEmail) match
+            case None =>
+              // Do equivalent PBKDF2 work in the "no such user" path so the
+              // response time matches the "known user, wrong password" path.
+              // Otherwise an attacker can enumerate registered email addresses
+              // by measuring login latency, even though the error string is
+              // identical across both branches.
+              dummyVerifyPassword(password)
+              Left("invalid email or password")
+            case Some(user) =>
+              user.localPassword match
+                case None =>
+                  // OIDC-only user: keep timing AND message indistinguishable
+                  // from the "no such user" and "wrong password" branches so
+                  // neither email existence nor account type leaks.
+                  dummyVerifyPassword(password)
+                  Left("invalid email or password")
+                case Some(credential) =>
+                  if verifyPassword(password, credential) then Right(user)
+                  else Left("invalid email or password")
 
     def upsertOidcIdentity(providerId: String, identity: OidcIdentity): Either[String, StoredUser] =
       synchronized:
@@ -880,6 +893,15 @@ object PlatformUserAuth:
     val expected = Base64.getDecoder.decode(credential.hashBase64)
     val actual = pbkdf2(password, salt, credential.iterations, credential.keyLengthBits)
     MessageDigest.isEqual(expected, actual)
+
+  // Fixed salt used only to make the "no such user" and "OIDC-only user" branches
+  // of authenticateLocal spend equivalent CPU time to the "real verify" branch.
+  // The output is discarded so no comparison occurs; the salt value cannot leak
+  // useful information.
+  private val PlaceholderSalt: Array[Byte] = Array.fill(PasswordSaltBytes)(0.toByte)
+
+  private def dummyVerifyPassword(password: String): Unit =
+    val _ = pbkdf2(password, PlaceholderSalt, PasswordIterations, PasswordKeyLengthBits)
 
   private def pbkdf2(
       password: String,
