@@ -260,6 +260,55 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("body-reading endpoints require Content-Type: application/json") {
+    // Belt-and-braces login-CSRF / form-CSRF mitigation: a hostile cross-origin
+    // site auto-submitting a <form action="/api/auth/login"> would deliver a
+    // browser-default application/x-www-form-urlencoded body. JSON parsing
+    // would already reject that with a 400, but returning a clean 415
+    // Unsupported Media Type before any body parsing makes the contract
+    // explicit and consistent with the documented same-origin model.
+    // application/json with a charset suffix must still be accepted because
+    // RFC 8259 allows it and standards-compliant clients emit it.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val body = """{"email":"alice@example.com","password":"correct-horse-battery"}"""
+
+          // Form-encoded -> 415.
+          val formPost = HttpRequest.newBuilder(URI.create(s"$baseUri/api/auth/login"))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+            .build()
+          val formResp = httpClient.send(formPost, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+          assertEquals(formResp.statusCode(), 415,
+            clue = "form-encoded Content-Type must be rejected with 415")
+
+          // text/plain -> 415.
+          val plainPost = HttpRequest.newBuilder(URI.create(s"$baseUri/api/auth/login"))
+            .header("Content-Type", "text/plain")
+            .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+            .build()
+          val plainResp = httpClient.send(plainPost, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+          assertEquals(plainResp.statusCode(), 415,
+            clue = "text/plain Content-Type must be rejected with 415")
+
+          // application/json with charset -> accepted (gets a normal 401 for bad creds).
+          val jsonWithCharset = HttpRequest.newBuilder(URI.create(s"$baseUri/api/auth/login"))
+            .header("Content-Type", "application/json; charset=utf-8")
+            .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+            .build()
+          val jsonResp = httpClient.send(jsonWithCharset, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+          assertEquals(jsonResp.statusCode(), 401,
+            clue = "application/json; charset=utf-8 must be accepted; 401 (bad creds) is the legitimate downstream outcome")
+        }
+      }
+    }
+  }
+
   test("registration rejects emails containing whitespace or control characters") {
     // RFC 5321 §4.1.2: unquoted local-part excludes whitespace. Beyond
     // compliance, a space in a stored email value also breaks the audit log

@@ -617,25 +617,41 @@ private[web] object HandHistoryReviewServerApi:
       exchange: HttpExchange,
       maxUploadBytes: Int
   ): Either[(Int, String), String] =
-    Option(exchange.getRequestHeaders.getFirst("Content-Length"))
-      .flatMap(_.toLongOption)
-      .filter(_ > maxUploadBytes.toLong) match
-        case Some(_) =>
-          Left(413 -> s"request body exceeds max upload size of $maxUploadBytes bytes")
-        case None =>
-          val input = exchange.getRequestBody
-          val buffer = Array.ofDim[Byte](8192)
-          val output = new ByteArrayOutputStream(math.min(maxUploadBytes, 8192))
-          var total = 0
-          var bytesRead = input.read(buffer)
-          while bytesRead != -1 && total <= maxUploadBytes do
-            total += bytesRead
-            if total <= maxUploadBytes then
-              output.write(buffer, 0, bytesRead)
-            bytesRead = input.read(buffer)
-          if total > maxUploadBytes then
+    // Require application/json on every body-reading endpoint. All real callers
+    // -- the frontend's fetch() calls, curl, integration tests -- already set
+    // Content-Type: application/json. Rejecting other Content-Type values
+    // closes the "login CSRF via cross-origin form POST" door belt-and-braces:
+    // a malicious site that auto-submits a <form action="/api/auth/login">
+    // gets browser-default application/x-www-form-urlencoded, which now 415s
+    // before any body parsing. Custom Content-Type would trigger a CORS
+    // preflight that our server doesn't allow (no Access-Control-Allow-Origin
+    // is configured), so the only path that delivers JSON is same-origin --
+    // exactly what we want for state-changing endpoints. Match a prefix so
+    // `application/json; charset=utf-8` and similar variants still work.
+    val contentType = Option(exchange.getRequestHeaders.getFirst("Content-Type"))
+      .map(_.trim.toLowerCase)
+    if !contentType.exists(value => value == "application/json" || value.startsWith("application/json;")) then
+      Left(415 -> "Content-Type must be application/json")
+    else
+      Option(exchange.getRequestHeaders.getFirst("Content-Length"))
+        .flatMap(_.toLongOption)
+        .filter(_ > maxUploadBytes.toLong) match
+          case Some(_) =>
             Left(413 -> s"request body exceeds max upload size of $maxUploadBytes bytes")
-          else Right(new String(output.toByteArray, StandardCharsets.UTF_8))
+          case None =>
+            val input = exchange.getRequestBody
+            val buffer = Array.ofDim[Byte](8192)
+            val output = new ByteArrayOutputStream(math.min(maxUploadBytes, 8192))
+            var total = 0
+            var bytesRead = input.read(buffer)
+            while bytesRead != -1 && total <= maxUploadBytes do
+              total += bytesRead
+              if total <= maxUploadBytes then
+                output.write(buffer, 0, bytesRead)
+              bytesRead = input.read(buffer)
+            if total > maxUploadBytes then
+              Left(413 -> s"request body exceeds max upload size of $maxUploadBytes bytes")
+            else Right(new String(output.toByteArray, StandardCharsets.UTF_8))
 
   final case class JsonResponse(
       status: Int,
