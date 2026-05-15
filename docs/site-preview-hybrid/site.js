@@ -109,7 +109,7 @@ if (form && fileInput && siteSelect && heroInput) {
 
       if (!response.ok) {
         await maybeReauthOn401(response);
-        renderStatus(body.error || `Request failed with status ${response.status}.`);
+        renderStatus(formatErrorMessage(response, body));
         return;
       }
 
@@ -187,7 +187,7 @@ if (hallForm) {
 
       if (!response.ok) {
         await maybeReauthOn401(response);
-        renderHallStatus(body.error || `Playing hall request failed with status ${response.status}.`);
+        renderHallStatus(formatErrorMessage(response, body));
         return;
       }
 
@@ -287,6 +287,28 @@ async function maybeReauthOn401(response) {
   if (response && response.status === 401 && authState.authenticated) {
     await refreshAuthState();
   }
+}
+
+// Build a user-facing error message that augments the server's `error` field
+// with the rate-limit retry-after hint when the response is a 429. Reads
+// retryAfterSeconds from the JSON body first (more precise) and falls back to
+// the Retry-After response header if the body did not include it. Returns the
+// original `error` field unchanged for non-429 responses.
+function formatErrorMessage(response, body) {
+  const fallback = `Request failed with status ${response.status}.`;
+  const base = body && typeof body.error === "string" && body.error ? body.error : fallback;
+  if (response.status !== 429) return base;
+  let retrySeconds = body && Number.isFinite(Number(body.retryAfterSeconds))
+    ? Number(body.retryAfterSeconds)
+    : null;
+  if (retrySeconds == null) {
+    const headerValue = response.headers.get("Retry-After");
+    const parsed = headerValue ? parseInt(headerValue, 10) : NaN;
+    retrySeconds = Number.isFinite(parsed) ? parsed : null;
+  }
+  if (retrySeconds == null || retrySeconds <= 0) return base;
+  const unit = retrySeconds === 1 ? "second" : "seconds";
+  return `${base} Try again in ${retrySeconds} ${unit}.`;
 }
 
 function applyAuthState(data, flashMessage = "") {
@@ -511,7 +533,7 @@ async function submitAuth(path, includeDisplayName) {
     });
     const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
     if (!response.ok) {
-      updateAccountUi(body.error || `Authentication request failed with status ${response.status}.`);
+      updateAccountUi(formatErrorMessage(response, body));
       return;
     }
 
@@ -547,7 +569,7 @@ async function saveProfile() {
     const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
     if (!response.ok) {
       await maybeReauthOn401(response);
-      updateAccountUi(body.error || `Profile save failed with status ${response.status}.`);
+      updateAccountUi(formatErrorMessage(response, body));
       return;
     }
 
@@ -707,7 +729,7 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
         throw new Error("Review job expired, was purged, or is not visible to this user session.");
       }
       await maybeReauthOn401(response);
-      throw new Error(body.error || `Status request failed with status ${response.status}.`);
+      throw new Error(formatErrorMessage(response, body));
     }
 
     renderStatus(jobStatusMessage(fileName, body.status));
@@ -752,7 +774,7 @@ async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
         throw new Error("Playing hall job expired, was purged, or is not visible to this user session.");
       }
       await maybeReauthOn401(response);
-      throw new Error(body.error || `Playing hall status failed with status ${response.status}.`);
+      throw new Error(formatErrorMessage(response, body));
     }
 
     renderHallStatus(playingHallJobStatusMessage(body.status));
