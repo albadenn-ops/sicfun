@@ -108,6 +108,7 @@ if (form && fileInput && siteSelect && heroInput) {
       const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
 
       if (!response.ok) {
+        await maybeReauthOn401(response);
         renderStatus(body.error || `Request failed with status ${response.status}.`);
         return;
       }
@@ -185,6 +186,7 @@ if (hallForm) {
       const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
 
       if (!response.ok) {
+        await maybeReauthOn401(response);
         renderHallStatus(body.error || `Playing hall request failed with status ${response.status}.`);
         return;
       }
@@ -274,6 +276,16 @@ async function refreshAuthState() {
   } catch (error) {
     authState = normalizeAuthState({});
     updateAccountUi(`Account bootstrap failed: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
+}
+
+// When a state-changing or polled request comes back 401, the user's session
+// has expired or been revoked. Refresh the auth state from /api/auth/me so the
+// login form reappears instead of leaving the user staring at an error string
+// inside an UI that still pretends they're signed in.
+async function maybeReauthOn401(response) {
+  if (response && response.status === 401 && authState.authenticated) {
+    await refreshAuthState();
   }
 }
 
@@ -534,6 +546,7 @@ async function saveProfile() {
     });
     const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
     if (!response.ok) {
+      await maybeReauthOn401(response);
       updateAccountUi(body.error || `Profile save failed with status ${response.status}.`);
       return;
     }
@@ -693,6 +706,7 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
       if (response.status === 404) {
         throw new Error("Review job expired, was purged, or is not visible to this user session.");
       }
+      await maybeReauthOn401(response);
       throw new Error(body.error || `Status request failed with status ${response.status}.`);
     }
 
@@ -737,6 +751,7 @@ async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
       if (response.status === 404) {
         throw new Error("Playing hall job expired, was purged, or is not visible to this user session.");
       }
+      await maybeReauthOn401(response);
       throw new Error(body.error || `Playing hall status failed with status ${response.status}.`);
     }
 
@@ -1334,6 +1349,7 @@ if (hallCancelButton) {
       } else if (response.status === 409) {
         // terminal - polling loop will resolve naturally
       } else if (!response.ok) {
+        await maybeReauthOn401(response);
         renderHallStatus(`Cancel failed with status ${response.status}.`);
       }
     } catch (error) {
