@@ -1109,10 +1109,21 @@ object PlatformUserAuth:
       .mkString
 
   private def extractCookie(cookieHeader: Option[String], cookieName: String): Option[String] =
-    cookieHeader
-      .flatMap(_.split(';').iterator.map(_.trim).find(_.startsWith(s"$cookieName=")))
-      .map(_.substring(cookieName.length + 1))
-      .filter(_.nonEmpty)
+    // Find the FIRST NON-EMPTY value among segments matching `<name>=`. RFC
+    // 6265 permits multiple cookies with the same name and leaves ordering
+    // up to the user agent, so picking strictly the first match (and then
+    // dropping it if empty) would let an attacker with a foothold on a
+    // sibling subdomain in plain-HTTP mode plant an empty
+    // `sicfun_session=` cookie that masks the real session and logs the
+    // victim out. Continuing the scan past empty matches defeats that
+    // narrow DoS without relying on which cookie the browser sorts first.
+    cookieHeader.flatMap { header =>
+      header.split(';').iterator
+        .map(_.trim)
+        .filter(_.startsWith(s"$cookieName="))
+        .map(_.substring(cookieName.length + 1))
+        .find(_.nonEmpty)
+    }
 
   // Resolve the wire-format cookie name for a given secure-mode setting. When
   // the deployment is HTTPS-backed (cookieSecure=true), use the `__Host-` prefix

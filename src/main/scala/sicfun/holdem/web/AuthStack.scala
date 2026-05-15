@@ -556,12 +556,24 @@ private[web] object AuthStack:
 
   // Parses the Cookie request header into Option[value] for the named cookie.
   // Mirrors the same shape used by PlatformUserAuth.extractCookie -- split on
-  // `;`, trim, find the first segment starting with `<name>=`, return the rest.
+  // `;`, trim, find the FIRST NON-EMPTY value among segments starting with
+  // `<name>=`. The "non-empty among many" detail matters because RFC 6265
+  // permits multiple cookies with the same name and leaves ordering
+  // implementation-defined, so an attacker who can plant a cookie on a
+  // sibling subdomain (which the `__Host-` prefix prevents in cookieSecure
+  // mode but NOT in plain-HTTP mode) could otherwise pin `sicfun_session=`
+  // with an empty value as the first segment and effectively log the victim
+  // out by hiding the real cookie that comes later. Skipping empty matches
+  // and continuing the scan defeats that specific DoS without relying on
+  // browser cookie-ordering quirks.
   private def extractCookieFromExchange(exchange: HttpExchange, cookieName: String): Option[String] =
-    cookieHeader(exchange)
-      .flatMap(_.split(';').iterator.map(_.trim).find(_.startsWith(s"$cookieName=")))
-      .map(_.substring(cookieName.length + 1))
-      .filter(_.nonEmpty)
+    cookieHeader(exchange).flatMap { header =>
+      header.split(';').iterator
+        .map(_.trim)
+        .filter(_.startsWith(s"$cookieName="))
+        .map(_.substring(cookieName.length + 1))
+        .find(_.nonEmpty)
+    }
 
   private def urlDecode(value: String): String =
     URLDecoder.decode(value, StandardCharsets.UTF_8)

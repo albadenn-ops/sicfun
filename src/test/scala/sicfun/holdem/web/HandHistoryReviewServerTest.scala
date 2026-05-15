@@ -260,6 +260,52 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("session resolution skips empty cookie matches so a planted empty cookie does not log the user out") {
+    // RFC 6265 permits multiple cookies with the same name and leaves
+    // ordering implementation-defined. In plain-HTTP mode the cookie name is
+    // `sicfun_session` (no __Host- prefix), so a sibling subdomain attacker
+    // could set `sicfun_session=` on the victim. The browser would then send
+    // BOTH the planted empty cookie AND the real session cookie in the
+    // Cookie header. A parser that takes strictly the first `sicfun_session=`
+    // segment and bails on the empty value would log the victim out;
+    // continuing past empty matches finds the real session and resolves it.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val register = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"victim@example.com","password":"correct-horse-battery","displayName":"Victim"}"""
+          )
+          assertEquals(register.statusCode(), 201)
+          val realSessionCookie = sessionCookie(register)
+
+          // Empty cookie planted FIRST, real cookie second.
+          val pollutedFirst = Map("Cookie" -> s"sicfun_session=; $realSessionCookie")
+          val meFirst = getJsonWithHeaders(s"$baseUri/api/auth/me", pollutedFirst)
+          assertEquals(meFirst("authenticated").bool, true,
+            clue = "real session must still resolve when an empty cookie is planted before it")
+
+          // Empty cookie planted LAST -- belt-and-braces.
+          val pollutedLast = Map("Cookie" -> s"$realSessionCookie; sicfun_session=")
+          val meLast = getJsonWithHeaders(s"$baseUri/api/auth/me", pollutedLast)
+          assertEquals(meLast("authenticated").bool, true,
+            clue = "real session must still resolve when an empty cookie is planted after it")
+
+          // No real cookie, only the empty plant -> not authenticated (regression test
+          // for the simple negative case so we don't accidentally accept '=' as a session).
+          val emptyOnly = Map("Cookie" -> "sicfun_session=")
+          val meEmpty = getJsonWithHeaders(s"$baseUri/api/auth/me", emptyOnly)
+          assertEquals(meEmpty("authenticated").bool, false,
+            clue = "empty-only sicfun_session= must not authenticate anyone")
+        }
+      }
+    }
+  }
+
   test("body-reading endpoints reject Content-Encoding other than identity") {
     // The server reads the request body as raw UTF-8 and parses as JSON; it
     // does NOT decompress. Before this guard, a client that sent
