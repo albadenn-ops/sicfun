@@ -875,7 +875,10 @@ class HandHistoryReviewServerTest extends FunSuite:
 
         val playingHallJobOptions = sendOptions("/api/playing-hall/jobs/some-id")
         assertEquals(playingHallJobOptions.statusCode(), 200)
-        assertEquals(headerValue(playingHallJobOptions, "Allow"), Some("GET, DELETE, OPTIONS"))
+        // GET, HEAD, and DELETE are all accepted on job-status routes:
+        // GET/HEAD for status reads (HEAD is body-less per writeBytes),
+        // DELETE for cooperative cancellation.
+        assertEquals(headerValue(playingHallJobOptions, "Allow"), Some("GET, HEAD, DELETE, OPTIONS"))
       }
     }
   }

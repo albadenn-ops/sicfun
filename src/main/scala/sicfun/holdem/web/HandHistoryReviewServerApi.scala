@@ -163,8 +163,15 @@ private[web] object HandHistoryReviewServerApi:
       jobStore: AnalysisJobStore,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET"))
-    else if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Right(methodNotAllowed("GET"))
+    // GET or HEAD: same response shape; writeBytes is HEAD-aware and
+    // suppresses the body so monitoring tools probing job existence with
+    // HEAD see the 200/404 status + security headers without paying for
+    // the JSON payload. Same convention used by /api/health, /api/ready,
+    // /api/auth/me, and the static handler.
+    val method = exchange.getRequestMethod
+    if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, HEAD"))
+    else if !method.equalsIgnoreCase("GET") && !method.equalsIgnoreCase("HEAD") then
+      Right(methodNotAllowed("GET, HEAD"))
     else
       extractJobId(exchange, AnalyzeJobPathPrefix, "analysis").flatMap { jobId =>
         jobStore
@@ -182,8 +189,9 @@ private[web] object HandHistoryReviewServerApi:
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
     val method = exchange.getRequestMethod
-    if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, DELETE"))
-    else if method.equalsIgnoreCase("GET") then
+    if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, HEAD, DELETE"))
+    // GET or HEAD: same response shape (writeBytes drops the body on HEAD).
+    else if method.equalsIgnoreCase("GET") || method.equalsIgnoreCase("HEAD") then
       extractJobId(exchange, PlayingHallJobPathPrefix, "playing hall").flatMap { jobId =>
         jobStore
           .status(
@@ -207,7 +215,7 @@ private[web] object HandHistoryReviewServerApi:
           case CancelOutcome.NotFound =>
             Left(404 -> s"playing hall job not found: $jobId")
       }
-    else Right(methodNotAllowed("GET, DELETE"))
+    else Right(methodNotAllowed("GET, HEAD, DELETE"))
 
   // Loose upper bound on job-id length. We generate UUID.randomUUID().toString
   // (36 chars), so anything dramatically longer is the URL being abused. Use a
