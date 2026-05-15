@@ -494,6 +494,27 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("json auth endpoints include Allow header on 405 responses per RFC 7231 sec 6.5.5") {
+    // /api/auth/me is GET-only; /api/auth/login is POST-only. RFC 7231 sec 6.5.5
+    // REQUIRES the server emit Allow on a 405 so the client (and any cache or
+    // OPTIONS-discovery tool) knows which methods the resource accepts.
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val getOnlyWith405 = postJson(s"$baseUri/api/auth/me", "{}")
+        assertEquals(getOnlyWith405.statusCode(), 405)
+        assertEquals(headerValue(getOnlyWith405, "Allow"), Some("GET"))
+        assertEquals(jsonBody(getOnlyWith405)("error").str, "GET required")
+
+        val postOnlyWith405 = get(s"$baseUri/api/auth/login")
+        assertEquals(postOnlyWith405.statusCode(), 405)
+        assertEquals(headerValue(postOnlyWith405, "Allow"), Some("POST"))
+        assertEquals(jsonBody(postOnlyWith405)("error").str, "POST required")
+      }
+    }
+  }
+
   test("static handler returns 405 with Allow header for unsupported methods") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>

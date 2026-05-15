@@ -25,6 +25,19 @@ import sicfun.holdem.web.Readiness.{ReadinessStatus, admissionRejectedMessage}
 
 /** API submit/status handlers and request parsing for [[HandHistoryReviewServer]]. */
 private[web] object HandHistoryReviewServerApi:
+
+  /** Build a 405 JsonResponse with the Allow header set per RFC 7231 sec 6.5.5,
+    * which requires the server "MUST generate an Allow header field in a 405
+    * response containing a list of the target resource's currently supported
+    * methods." `allowed` is a single token like "GET" or a comma-separated
+    * list like "GET, DELETE". */
+  private[web] def methodNotAllowed(allowed: String): JsonResponse =
+    JsonResponse(
+      status = 405,
+      value = Obj("error" -> Str(s"$allowed required")),
+      headers = Vector("Allow" -> allowed)
+    )
+
   private val DefaultPlayingHallRoot = Paths.get("data", "web-playing-hall")
   private val DefaultPlayingHallHands = 240
   private val DefaultPlayingHallTableCount = 2
@@ -43,7 +56,7 @@ private[web] object HandHistoryReviewServerApi:
       readiness: () => ReadinessStatus,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Left(405 -> "POST required")
+    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
     else if !ensurePlatformCsrf(exchange, platformAuth) then Left(403 -> SessionCsrfRequiredMessage)
     else if !readiness().acceptingAnalysisJobs then
       Left(503 -> admissionRejectedMessage(readiness()))
@@ -86,7 +99,7 @@ private[web] object HandHistoryReviewServerApi:
       readiness: () => ReadinessStatus,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Left(405 -> "POST required")
+    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
     else if !ensurePlatformCsrf(exchange, platformAuth) then Left(403 -> SessionCsrfRequiredMessage)
     else if !readiness().acceptingAnalysisJobs then
       Left(503 -> admissionRejectedMessage(readiness(), "playing hall"))
@@ -128,7 +141,7 @@ private[web] object HandHistoryReviewServerApi:
       jobStore: AnalysisJobStore,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Left(405 -> "GET required")
+    if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Right(methodNotAllowed("GET"))
     else
       extractJobId(exchange, AnalyzeJobPathPrefix, "analysis").flatMap { jobId =>
         jobStore
@@ -170,7 +183,7 @@ private[web] object HandHistoryReviewServerApi:
           case CancelOutcome.NotFound =>
             Left(404 -> s"playing hall job not found: $jobId")
       }
-    else Left(405 -> "GET or DELETE required")
+    else Right(methodNotAllowed("GET, DELETE"))
 
   private def extractJobId(
       exchange: HttpExchange,
