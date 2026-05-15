@@ -688,6 +688,46 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("static handler does not follow symlinks that escape the static directory") {
+    // A symlink under the static root that points outside it (or to anywhere
+    // else on the filesystem) used to be followed by Files.isRegularFile and
+    // Files.size, so a deploy that accidentally included such a symlink
+    // could serve arbitrary host files via the static handler. NOFOLLOW_LINKS
+    // now treats symlinks as non-regular files -- the request 404s rather
+    // than leaking the host file.
+    //
+    // Creating a symlink requires either Linux/Mac or Windows Developer Mode.
+    // The test gracefully skips when the JVM cannot create one (file system
+    // doesn't support symlinks, or platform refuses the operation).
+    withStaticSite { staticDir =>
+      val outsideTarget = Files.createTempFile("escape-target-", ".txt")
+      try
+        Files.writeString(outsideTarget, "SHOULD-NEVER-LEAK", StandardCharsets.UTF_8)
+        val symlinkPath = staticDir.resolve("escape.txt")
+        val canSymlink =
+          try
+            Files.createSymbolicLink(symlinkPath, outsideTarget.toAbsolutePath)
+            true
+          catch
+            case _: java.nio.file.FileSystemException => false
+            case _: UnsupportedOperationException => false
+            case _: SecurityException => false
+        if !canSymlink then
+          // Filesystem or platform does not allow symlinks here; the structural
+          // NOFOLLOW_LINKS guard is still in place, just not exercisable.
+          ()
+        else
+          withServer(staticDir) { server =>
+            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+            val response = get(s"$baseUri/escape.txt")
+            assertEquals(response.statusCode(), 404)
+            assert(!response.body().contains("SHOULD-NEVER-LEAK"),
+              s"symlink target must not leak via static handler: ${response.body()}")
+          }
+      finally Files.deleteIfExists(outsideTarget)
+    }
+  }
+
   test("static handler returns 404 for any path with a dot-prefixed segment, even when the file exists") {
     // Defense in depth: a misconfigured deployment that ships a `.git/`,
     // `.env`, `.htaccess`, or other dot-prefixed file under the static root

@@ -3,7 +3,7 @@ package sicfun.holdem.web
 import com.sun.net.httpserver.{HttpExchange, HttpHandler}
 
 import java.io.ByteArrayOutputStream
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, LinkOption, Path, Paths}
 import java.time.{Instant, ZoneOffset, ZonedDateTime}
 import java.time.format.DateTimeFormatter
 import java.util.zip.GZIPOutputStream
@@ -50,9 +50,17 @@ private[web] final class StaticAssetsHandler(
           writePlain(exchange, 403, "forbidden", "text/plain; charset=utf-8")
         else
           val target =
-            if Files.isDirectory(resolved) then resolved.resolve("index.html")
+            if Files.isDirectory(resolved, LinkOption.NOFOLLOW_LINKS) then resolved.resolve("index.html")
             else resolved
-          if Files.exists(target) && Files.isRegularFile(target) then
+          // NOFOLLOW_LINKS: a symlink under the static dir whose target lies
+          // outside it (or anywhere on the filesystem) would otherwise be
+          // followed by Files.isRegularFile/size/getLastModifiedTime, so a
+          // misconfigured deploy that includes such a symlink would serve
+          // arbitrary host files even though the normalized path check at
+          // line 49 says "resolved.startsWith(staticDir)". Treating symlinks
+          // as non-regular files makes the static dir self-contained: only
+          // genuine files inside it get served.
+          if Files.exists(target, LinkOption.NOFOLLOW_LINKS) && Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) then
             val size = Files.size(target)
             val lastModified = Files.getLastModifiedTime(target).toMillis
             // HTTP-date is second-resolution. Truncate file mtime so the value we emit
