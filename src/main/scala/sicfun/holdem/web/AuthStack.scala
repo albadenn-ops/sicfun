@@ -512,14 +512,25 @@ private[web] object AuthStack:
       exchange: HttpExchange,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Boolean =
-    platformAuth.isEmpty || authenticatedUser(exchange).forall { user =>
-      // CSRF tokens are session secrets; use constant-time comparison so a
-      // timing oracle cannot recover the token character-by-character. The
-      // basic-auth path already uses secureEquals for the same reason.
-      Option(exchange.getRequestHeaders.getFirst("X-CSRF-Token"))
-        .map(_.trim)
-        .exists(submitted => secureEquals(submitted, user.csrfToken))
-    }
+    if platformAuth.isEmpty then true
+    else
+      val passed = authenticatedUser(exchange).forall { user =>
+        // CSRF tokens are session secrets; use constant-time comparison so a
+        // timing oracle cannot recover the token character-by-character. The
+        // basic-auth path already uses secureEquals for the same reason.
+        Option(exchange.getRequestHeaders.getFirst("X-CSRF-Token"))
+          .map(_.trim)
+          .exists(submitted => secureEquals(submitted, user.csrfToken))
+      }
+      if !passed then
+        // CSRF failure on a state-changing request is security-relevant: the
+        // session resolved but the X-CSRF-Token header is missing or wrong.
+        // Likely either an attacker attempting a cross-site request without
+        // the JS frontend, or a session whose csrf cookie was cleared mid-
+        // flow. Either way, operators tailing the logs want to see it.
+        val email = authenticatedUser(exchange).map(_.email).getOrElse("-")
+        logWarn(s"request forbidden path=${requestPath(exchange)} remote=${remoteAddress(exchange)} email=$email reason=csrf-missing-or-invalid")
+      passed
 
 
   def authenticationMode(
