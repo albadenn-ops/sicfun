@@ -17,9 +17,17 @@ private[web] object WebResponses:
 
   // Defense-in-depth: explicitly deny browser features the app does not use, so any
   // future inline-script-induced exploit (or compromised vendored library) cannot
-  // promote itself into the user's hardware. `interest-cohort=()` opts out of FLoC.
+  // promote itself into the user's hardware or browser-level capabilities. `browsing-
+  // topics=()` is the current Chrome opt-out; `interest-cohort=()` is the legacy FLoC
+  // name kept for backwards compatibility with older browser builds.
   private val PermissionsPolicy =
-    "accelerometer=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), interest-cohort=(), magnetometer=(), microphone=(), payment=(), usb=()"
+    "accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), bluetooth=(), " +
+    "browsing-topics=(), camera=(), display-capture=(), document-domain=(), " +
+    "encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), " +
+    "idle-detection=(), interest-cohort=(), local-fonts=(), magnetometer=(), " +
+    "microphone=(), midi=(), otp-credentials=(), payment=(), picture-in-picture=(), " +
+    "publickey-credentials-get=(), screen-wake-lock=(), serial=(), storage-access=(), " +
+    "usb=(), web-share=(), xr-spatial-tracking=()"
 
   // Threshold below which gzip overhead can exceed the savings. A 256-byte JSON
   // typically compresses to 200-250 bytes once the gzip header (~20 bytes) is

@@ -305,6 +305,9 @@ class HandHistoryReviewServerTest extends FunSuite:
         assert(permissionsPolicy.contains("microphone=()"), s"missing microphone=() in: $permissionsPolicy")
         assert(permissionsPolicy.contains("geolocation=()"), s"missing geolocation=() in: $permissionsPolicy")
         assert(permissionsPolicy.contains("interest-cohort=()"), s"missing interest-cohort=() in: $permissionsPolicy")
+        assert(permissionsPolicy.contains("browsing-topics=()"),
+          s"missing browsing-topics=() (modern Topics-API opt-out, replacement for FLoC) in: $permissionsPolicy")
+        assert(permissionsPolicy.contains("usb=()"), s"missing usb=() in: $permissionsPolicy")
 
         val oversizedPayload = s"""{"handHistoryText":"${"A" * 256}"}"""
         val oversizedResponse = postJson(s"$baseUri/api/analyze-hand-history", oversizedPayload)
