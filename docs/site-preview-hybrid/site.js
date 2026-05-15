@@ -819,7 +819,12 @@ function renderResults(fileName, data) {
     summaryCard("Decisions", formatInteger(data.decisionsAnalyzed), `${formatInteger(data.mistakes)} mistakes flagged`),
     summaryCard("EV Lost", formatSigned(-Math.abs(Number(data.totalEvLost || 0))), "Aggregate avoidable EV gap"),
     summaryCard("Biggest Gap", formatNumber(data.biggestMistakeEv), "Worst single decision"),
-    summaryCard("Model", escapeHtml(data.modelSource || "-"), "Loaded for this review")
+    // summaryCard escapes both label and value internally; passing
+    // escapeHtml(...) here is a leftover that double-escapes (a literal `<` in
+    // modelSource would render as `&lt;` in the cell instead of `<`). Let the
+    // helper own the escaping for consistency with the other summaryCard call
+    // sites above.
+    summaryCard("Model", data.modelSource || "-", "Loaded for this review")
   ].join("");
 
   modelSource.textContent = `Model: ${data.modelSource || "-"}`;
