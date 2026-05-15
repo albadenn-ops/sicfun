@@ -2552,6 +2552,52 @@ class HandHistoryReviewServerTest extends FunSuite:
     assert(!RateLimit.trustsRateLimitClientIpHeader(None, Set("203.0.113.10")))
   }
 
+  test("auth.*.failure caps the submitted email before logging so an oversize submission cannot flood the audit log") {
+    // The auth-endpoint body cap is 16 KB. Before this guard, a request like
+    // {"email":"<15KB>","password":"x"} would land a 15 KB entry in the audit
+    // log per failed register/login attempt. Attacker mints disk pressure
+    // and noise per request. Cap the SUBMITTED email at 320 chars in the
+    // log line (the SUCCESS path uses the canonical email which is already
+    // bounded by validateEmail's 254-char cap, so this only affects the
+    // failure path).
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          try
+            // 10 KB email -> validateEmail rejects, but the submitted value
+            // is what the failure log line records. The log line itself must
+            // stay small.
+            val hugeEmail = ("a" * 10000) + "@example.com"
+            val payload = s"""{"email":"$hugeEmail","password":"correct-horse-battery","displayName":"Big"}"""
+            val response = postJson(s"$baseUri/api/auth/register", payload)
+            assertEquals(response.statusCode(), 400)
+          finally
+            System.setErr(originalErr)
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          assert(captured.contains("auth.register.failure"),
+            clue = s"expected auth.register.failure WARN in stderr; got: ${captured.take(200)}")
+          // The full log line, INCLUDING timestamp / level / prefix / email
+          // field / remote field / reason field, must stay well under 1 KB.
+          // If the email was logged untruncated, this line would be >10 KB.
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.register.failure"))
+            .getOrElse(fail(s"no auth.register.failure line in stderr capture"))
+          assert(failureLine.length < 1024,
+            clue = s"auth.register.failure log line is ${failureLine.length} bytes; cap should keep it well under 1 KB")
+          assert(failureLine.contains("...(truncated)"),
+            clue = s"capped email should include the truncation marker; got: ${failureLine.take(200)}")
+        }
+      }
+    }
+  }
+
   test("audit log remote= shows the trusted-header client IP behind a reverse proxy") {
     // Behind a trusted reverse proxy, audit logs that previously read
     // `remote=<loopback>:<port>` (the proxy's TCP peer) would be useless for

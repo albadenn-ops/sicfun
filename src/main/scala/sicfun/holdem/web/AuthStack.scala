@@ -96,7 +96,7 @@ private[web] object AuthStack:
                   // Replace ASCII spaces with %20 so a submitted email like
                   // "alice bob@example.com" (which validateEmail rejects) does
                   // not split the structured key=value log fields.
-                  logWarn(s"auth.register.failure email=${email.replace(" ", "%20")} remote=${remoteAddress(exchange)} reason=$error")
+                  logWarn(s"auth.register.failure email=${formatSubmittedEmailForLog(email)} remote=${remoteAddress(exchange)} reason=$error")
                   Left(400 -> error)
             }
             .map(result => loginJsonResponse(service, result, status = 201))
@@ -129,7 +129,7 @@ private[web] object AuthStack:
                   // from many IPs against one email). %20-escape ASCII spaces
                   // so a probe with embedded whitespace doesn't split the
                   // structured key=value log fields.
-                  logWarn(s"auth.login.failure email=${email.replace(" ", "%20")} remote=${remoteAddress(exchange)} reason=$error")
+                  logWarn(s"auth.login.failure email=${formatSubmittedEmailForLog(email)} remote=${remoteAddress(exchange)} reason=$error")
                   Left(401 -> error)
             }
             .map(result => loginJsonResponse(service, result, status = 200))
@@ -429,6 +429,28 @@ private[web] object AuthStack:
   // POST body to the provider's token endpoint. 256 chars is well above any
   // legitimate value and matches the ?error= cap above.
   private val MaxOidcParamLength = 256
+
+  // Cap the submitted-email value before it lands in the audit log. The body
+  // reader allows up to 16 KB on auth endpoints, so an attacker can craft
+  // {"email":"<15KB>","password":"x"} per request and -- without this cap --
+  // mint a 15 KB entry in the audit log per failed register/login attempt,
+  // exhausting disk over time and tripping line-oriented log tooling. The
+  // SUCCESS log line uses the canonical (validated, normalized) email which
+  // is already capped at MaxEmailLength = 254 by validateEmail; the FAILURE
+  // log line uses what the attacker submitted, which has had no validation
+  // yet by the time we log it. RFC 5321 caps legitimate email at 254 chars,
+  // so 320 leaves ample room for the %20-replacement of spaces plus the
+  // "...(truncated)" marker.
+  private val MaxLogEmailLength = 320
+
+  private def formatSubmittedEmailForLog(raw: String): String =
+    // Replace ASCII spaces with %20 so a submitted email like
+    // "alice bob@example.com" (which validateEmail rejects) does not split
+    // the structured key=value log fields, THEN cap so an attacker cannot
+    // flood the log via a 15 KB submitted email.
+    val replaced = raw.replace(" ", "%20")
+    if replaced.length <= MaxLogEmailLength then replaced
+    else replaced.substring(0, MaxLogEmailLength) + "...(truncated)"
 
 
   final case class RedirectResponse(
