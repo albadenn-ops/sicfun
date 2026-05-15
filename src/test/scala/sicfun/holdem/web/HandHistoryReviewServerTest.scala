@@ -260,6 +260,40 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("registration rejects emails containing whitespace or control characters") {
+    // RFC 5321 §4.1.2: unquoted local-part excludes whitespace. Beyond
+    // compliance, a space in a stored email value also breaks the audit log
+    // key=value parsing because the line would split at the wrong column.
+    // The structural @-and-dot check passes for all these inputs, so the
+    // rejection comes from the new whitespace/control-char guard.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val invalidEmails = Vector(
+            "alice bob@example.com" -> "embedded space",
+            "alice\\tbob@example.com" -> "embedded tab (JSON-escaped)",
+            "alice\\u0001bob@example.com" -> "embedded SOH control char",
+            "alice\\u007Fbob@example.com" -> "embedded DEL"
+          )
+          for (raw, description) <- invalidEmails do
+            val payload =
+              s"""{"email":"$raw","password":"correct-horse-battery","displayName":"Test"}"""
+            val response = postJson(s"$baseUri/api/auth/register", payload)
+            assertEquals(response.statusCode(), 400, clue = description)
+            val errorMessage = jsonBody(response)("error").str
+            assert(
+              errorMessage.contains("whitespace") || errorMessage.contains("control"),
+              s"$description: expected whitespace/control rejection, got: $errorMessage"
+            )
+        }
+      }
+    }
+  }
+
   test("registration and login reject passwords beyond the max-length cap") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
