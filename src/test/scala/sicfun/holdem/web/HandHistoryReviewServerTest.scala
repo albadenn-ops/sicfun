@@ -2042,6 +2042,81 @@ class HandHistoryReviewServerTest extends FunSuite:
     assert(!RateLimit.trustsRateLimitClientIpHeader(None, Set("203.0.113.10")))
   }
 
+  test("audit log remote= shows the trusted-header client IP behind a reverse proxy") {
+    // Behind a trusted reverse proxy, audit logs that previously read
+    // `remote=<loopback>:<port>` (the proxy's TCP peer) would be useless for
+    // forensics — every request looks the same. The same trusted-header policy
+    // the rate limiter applies (peer is loopback or in trustedProxyIps; header
+    // parses as a single IP) must also flow into the audit-log `remote=` field
+    // so operators can see who is actually behind the proxy.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath)),
+          rateLimitClientIpHeader = Some("X-Real-IP")
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          try
+            val response = postJson(
+              s"$baseUri/api/auth/login",
+              """{"email":"nobody@example.com","password":"wrong-password"}""",
+              Map("X-Real-IP" -> "203.0.113.5")
+            )
+            assertEquals(response.statusCode(), 401)
+          finally
+            System.setErr(originalErr)
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          assert(captured.contains("auth.login.failure"),
+            clue = s"expected auth.login.failure WARN in stderr; got: $captured")
+          assert(captured.contains("remote=203.0.113.5"),
+            clue = s"expected audit log to surface the resolved client IP; got: $captured")
+          assert(!captured.contains("remote=127.0.0.1") && !captured.contains("remote=[::1]"),
+            clue = s"audit log must not show the loopback peer when behind a trusted proxy; got: $captured")
+        }
+      }
+    }
+  }
+
+  test("audit log remote= shows the direct peer when no trusted header is configured") {
+    // Default deployment (no proxy): `remote=` is the TCP peer in `host:port`
+    // form with IPv6 brackets per RFC 3986. A spoofed X-Real-IP header from a
+    // non-trusted client must be IGNORED, not blindly echoed into the audit log.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+          // intentionally no rateLimitClientIpHeader -- audit must NOT trust client headers
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          try
+            val response = postJson(
+              s"$baseUri/api/auth/login",
+              """{"email":"nobody@example.com","password":"wrong-password"}""",
+              Map("X-Real-IP" -> "203.0.113.5")
+            )
+            assertEquals(response.statusCode(), 401)
+          finally
+            System.setErr(originalErr)
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          assert(captured.contains("auth.login.failure"),
+            clue = s"expected auth.login.failure WARN in stderr; got: $captured")
+          assert(!captured.contains("remote=203.0.113.5"),
+            clue = s"audit log must NOT trust a client-supplied X-Real-IP when no header is configured; got: $captured")
+          assert(captured.contains("remote=127.0.0.1:") || captured.contains("remote=[::1]:"),
+            clue = s"audit log must show the loopback TCP peer; got: $captured")
+        }
+      }
+    }
+  }
+
   test("invalid trusted proxy IP allowlist fails startup parsing") {
     withStaticSite { staticDir =>
       val startResult = HandHistoryReviewServer.start(Array(

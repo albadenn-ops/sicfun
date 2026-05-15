@@ -1,6 +1,6 @@
 package sicfun.holdem.web
 
-import com.sun.net.httpserver.{HttpExchange, HttpServer}
+import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 
 import java.net.{BindException, InetSocketAddress}
 import java.time.Instant
@@ -61,11 +61,20 @@ private[web] object HandHistoryReviewServerRuntime:
         analysisTimeoutMs = config.playingHallTimeoutMs
       )
       val activeHttpRequests = new AtomicInteger(0)
+      // Single wrapper applied to every registered handler. Tracks active-request
+      // counts AND stashes the audit-display client address so behind-a-proxy
+      // audit logs show the resolved client IP rather than the proxy peer.
+      def tracked(delegate: HttpHandler): HttpHandler =
+        trackActiveRequests(
+          activeHttpRequests,
+          config.rateLimitClientIpHeader,
+          config.rateLimitTrustedProxyIps,
+          delegate
+        )
       val server = HttpServer.create(new InetSocketAddress(config.host, config.port), 0)
       server.createContext(
         "/api/health",
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new JsonHandler(exchange =>
             // Accept GET and HEAD on the health endpoint. Monitoring tools
             // commonly probe with HEAD to skip the body; writeBytes is
@@ -93,8 +102,7 @@ private[web] object HandHistoryReviewServerRuntime:
       )
       server.createContext(
         "/api/ready",
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new JsonHandler(exchange =>
             val method = exchange.getRequestMethod
             if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, HEAD"))
@@ -116,8 +124,7 @@ private[web] object HandHistoryReviewServerRuntime:
       )
       server.createContext(
         AnalyzeJobPathPrefix,
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new JsonHandler(
             exchange => handleAnalyzeJobStatus(exchange, jobStore, platformAuthService),
             basicAuth = config.basicAuth,
@@ -130,8 +137,7 @@ private[web] object HandHistoryReviewServerRuntime:
       )
       server.createContext(
         "/api/analyze-hand-history",
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new JsonHandler(
             exchange =>
               handleAnalyzeSubmit(
@@ -151,8 +157,7 @@ private[web] object HandHistoryReviewServerRuntime:
       )
       server.createContext(
         PlayingHallPath,
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new JsonHandler(
             exchange =>
               handlePlayingHallSubmit(
@@ -172,8 +177,7 @@ private[web] object HandHistoryReviewServerRuntime:
       )
       server.createContext(
         PlayingHallJobPathPrefix,
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new JsonHandler(
             exchange => handlePlayingHallJobStatus(exchange, playingHallJobStore, platformAuthService),
             basicAuth = config.basicAuth,
@@ -186,15 +190,13 @@ private[web] object HandHistoryReviewServerRuntime:
       )
       server.createContext(
         "/",
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new StaticAssetsHandler(config.staticDir, basicAuth = config.basicAuth, platformAuth = platformAuthService)
         )
       )
       server.createContext(
         AuthMePath,
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new JsonHandler(
             exchange => handleAuthMe(exchange, config.basicAuth, platformAuthService),
             basicAuth = config.basicAuth,
@@ -205,8 +207,7 @@ private[web] object HandHistoryReviewServerRuntime:
       )
       server.createContext(
         AuthRegisterPath,
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new JsonHandler(
             exchange => handleAuthRegister(exchange, platformAuthService),
             basicAuth = config.basicAuth,
@@ -219,8 +220,7 @@ private[web] object HandHistoryReviewServerRuntime:
       )
       server.createContext(
         AuthLoginPath,
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new JsonHandler(
             exchange => handleAuthLogin(exchange, platformAuthService),
             basicAuth = config.basicAuth,
@@ -233,8 +233,7 @@ private[web] object HandHistoryReviewServerRuntime:
       )
       server.createContext(
         AuthLogoutPath,
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new JsonHandler(
             exchange => handleAuthLogout(exchange, platformAuthService),
             basicAuth = config.basicAuth,
@@ -245,8 +244,7 @@ private[web] object HandHistoryReviewServerRuntime:
       )
       server.createContext(
         AuthProfilePath,
-        trackActiveRequests(
-          activeHttpRequests,
+        tracked(
           new JsonHandler(
             exchange => handleAuthProfile(exchange, platformAuthService),
             basicAuth = config.basicAuth,
@@ -259,8 +257,7 @@ private[web] object HandHistoryReviewServerRuntime:
         service.providerSummaries.flatMap(_.startPath).foreach { startPath =>
           server.createContext(
             startPath,
-            trackActiveRequests(
-              activeHttpRequests,
+            tracked(
               new RedirectHandler(exchange => handleOidcStart(exchange, service))
             )
           )
@@ -268,8 +265,7 @@ private[web] object HandHistoryReviewServerRuntime:
         config.platformAuth.toVector.flatMap(_.oidcProviders).foreach { provider =>
           server.createContext(
             provider.callbackPath,
-            trackActiveRequests(
-              activeHttpRequests,
+            tracked(
               new RedirectHandler(exchange => handleOidcCallback(exchange, service, provider.id))
             )
           )

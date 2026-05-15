@@ -100,6 +100,38 @@ private[web] object RateLimit:
       case None =>
         ClientIpSourceRemoteAddress
 
+  /** Resolve the audit-display client address for the given request, applying the
+    * same trusted-proxy policy as rate limiting so audit `remote=` log fields and
+    * rate-limit `clientKey=` values agree on who the client is.
+    *
+    * Behind a trusted reverse proxy (peer is loopback or in `trustedProxyIps` and a
+    * single-valued `trustedClientIpHeader` parses as an IP), returns the resolved
+    * client IP without a port (X-Forwarded-For carries no port). Otherwise returns
+    * the formatted direct TCP peer `host:port` with IPv6 brackets per RFC 3986 §3.2.2.
+    *
+    * IPv6 hosts get bracketed in both cases so a log-line parser splitting on the
+    * trailing `:port` cannot mistake the address's internal `:` for a port delimiter. */
+  def resolveAuditClientAddress(
+      exchange: HttpExchange,
+      trustedClientIpHeader: Option[String],
+      trustedProxyIps: Set[String]
+  ): String =
+    trustedClientIpHeader
+      .filter(_ => trustsRateLimitClientIpHeader(remoteInetAddress(exchange), trustedProxyIps))
+      .flatMap(headerName => forwardedClientKey(exchange, headerName))
+      .map(formatAuditHostOnly)
+      .getOrElse(formatAuditPeer(exchange))
+
+  private def formatAuditHostOnly(host: String): String =
+    if host.contains(':') then s"[$host]" else host
+
+  private[web] def formatAuditPeer(exchange: HttpExchange): String =
+    Option(exchange.getRemoteAddress).map { address =>
+      val host = address.getHostString
+      val port = address.getPort
+      if host.contains(':') then s"[$host]:$port" else s"$host:$port"
+    }.getOrElse("-")
+
   def trustedProxyIpSummary(trustedProxyIps: Set[String]): String =
     trustedProxyIps.toVector.sorted match
       case Vector() => "-"

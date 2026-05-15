@@ -155,10 +155,22 @@ private[web] object Readiness:
 
   def trackActiveRequests(
       activeHttpRequests: AtomicInteger,
+      trustedClientIpHeader: Option[String],
+      trustedProxyIps: Set[String],
       delegate: HttpHandler
   ): HttpHandler =
     new HttpHandler:
       override def handle(exchange: HttpExchange): Unit =
+        // Stash the audit-display client address on the exchange before the
+        // handler runs so AuthStack.remoteAddress (and any other audit code
+        // path that wants to log "who connected") sees the same identity the
+        // rate limiter keys on. Behind a trusted proxy, that's the
+        // X-Forwarded-For IP (or whichever header is configured), not the
+        // proxy's loopback peer.
+        exchange.setAttribute(
+          AuthStack.AuditClientAddressAttribute,
+          RateLimit.resolveAuditClientAddress(exchange, trustedClientIpHeader, trustedProxyIps)
+        )
         activeHttpRequests.incrementAndGet()
         try delegate.handle(exchange)
         finally activeHttpRequests.decrementAndGet()

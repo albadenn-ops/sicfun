@@ -37,6 +37,13 @@ private[web] object AuthStack:
   private val SessionAuthenticationRequiredMessage = "sign in required"
   val SessionCsrfRequiredMessage = "missing or invalid csrf token"
   private val AuthenticatedUserAttribute = "sicfun.hand-history.authenticated-user"
+  // Stashed by the request wrapper (see `Readiness.trackActiveRequests`) before any
+  // handler runs, so audit log fields like `remote=` see the SAME client identity
+  // the rate limiter keys on -- a trusted X-Forwarded-For IP when the deployment is
+  // behind a proxy in the trustedProxyIps allowlist, the direct TCP peer otherwise.
+  // Without this, a reverse-proxied deployment would correctly rate-limit by client
+  // IP but its audit log would show every request coming from the proxy.
+  private[web] val AuditClientAddressAttribute = "sicfun.audit.client-address"
 
   def handleAuthMe(
       exchange: HttpExchange,
@@ -570,13 +577,17 @@ private[web] object AuthStack:
     Option(exchange.getRequestURI).map(_.getRawPath).filter(_.nonEmpty).getOrElse("/")
 
   private def remoteAddress(exchange: HttpExchange): String =
+    // Prefer the audit address stashed by the request wrapper -- it applies the
+    // trusted-proxy policy so behind a reverse proxy the log shows the real
+    // client IP from X-Forwarded-For (or whichever header is trusted) instead
+    // of the proxy's loopback peer. Falls back to the raw TCP peer for code
+    // paths that don't go through the wrapper (defense in depth).
+    //
     // Bracket IPv6 hosts per RFC 3986 §3.2.2 so the host:port format stays
     // unambiguous in log lines. Without brackets, an audit entry like
     // `remote=::1:54321` cannot be split into host + port because every `:`
     // looks the same -- a log-line parser sees `::1` then `54321` as
     // separate IPv6 segments. With brackets, `remote=[::1]:54321` is clear.
-    Option(exchange.getRemoteAddress).map { address =>
-      val host = address.getHostString
-      val port = address.getPort
-      if host.contains(':') then s"[$host]:$port" else s"$host:$port"
-    }.getOrElse("-")
+    Option(exchange.getAttribute(AuditClientAddressAttribute))
+      .collect { case s: String if s.nonEmpty => s }
+      .getOrElse(RateLimit.formatAuditPeer(exchange))
