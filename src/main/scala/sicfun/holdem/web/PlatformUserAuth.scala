@@ -898,6 +898,13 @@ object PlatformUserAuth:
   private def validateEmail(email: String): Unit =
     if email.length > MaxEmailLength then
       throw new IllegalArgumentException(s"email must be at most $MaxEmailLength characters")
+    // RFC 5321 §4.1.2 says local-part is built from `atext` which excludes
+    // whitespace (unless quoted, which we do not support). Rejecting any
+    // whitespace also keeps our `key=value` audit log lines parseable: a
+    // value with an embedded space would split as two tokens for any line-
+    // oriented parser. Same for any C0 control char.
+    if email.exists(ch => ch.isWhitespace || ch.toInt < 0x20 || ch.toInt == 0x7F) then
+      throw new IllegalArgumentException("email must not contain whitespace or control characters")
     val at = email.indexOf('@')
     val dot = email.lastIndexOf('.')
     if at <= 0 || dot <= at + 1 || dot == email.length - 1 then
