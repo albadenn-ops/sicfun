@@ -343,6 +343,12 @@ object PlatformUserAuth:
     def resolveSession(cookieHeader: Option[String]): Option[AuthenticatedUser] =
       sessionManager.resolve(cookieHeader, userStore)
 
+    /** Number of users currently in the in-memory store. Exposed for the
+      * `/api/health` dashboard so operators can see live usage against the
+      * `maxUsers` cap. O(1) read of a volatile snapshot -- no lock taken --
+      * because state is the @volatile var in JsonUserStore. */
+    def storedUserCount: Int = userStore.storedUserCount
+
     def registerLocal(
         email: String,
         password: String,
@@ -640,6 +646,12 @@ object PlatformUserAuth:
     def findByUserId(userId: String): Option[StoredUser] =
       synchronized:
         findByUserIdInternal(userId)
+
+    // Lock-free read of the live user count for the /api/health JSON. state
+    // is @volatile so the read sees a consistent snapshot without contending
+    // for the per-store synchronized block; registerLocal / upsertOidcIdentity
+    // / updateProfile all serialize on that lock so the value cannot tear.
+    def storedUserCount: Int = state.users.length
 
     private def load(): StoreState =
       if !Files.exists(path) then StoreState(Vector.empty)

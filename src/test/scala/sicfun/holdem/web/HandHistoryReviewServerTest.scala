@@ -401,6 +401,50 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("/api/health surfaces userAuthMaxUsers and userAuthStoredUsers so dashboards can show usage vs cap") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath, maxUsers = 50))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // No users yet: stored=0, max=50.
+          val healthBefore = getJson(s"$baseUri/api/health")
+          assertEquals(healthBefore("userAuthMaxUsers").num.toInt, 50)
+          assertEquals(healthBefore("userAuthStoredUsers").num.toInt, 0)
+
+          // Register one user.
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"alice@example.com","password":"correct-horse-battery","displayName":"Alice"}""")
+          assertEquals(register.statusCode(), 201)
+
+          val healthAfter = getJson(s"$baseUri/api/health")
+          assertEquals(healthAfter("userAuthMaxUsers").num.toInt, 50)
+          assertEquals(healthAfter("userAuthStoredUsers").num.toInt, 1,
+            clue = "stored count should reflect the newly registered user")
+        }
+      }
+    }
+  }
+
+  test("/api/health user-auth fields are null when platform-user auth is not configured") {
+    // basic-auth / no-auth deployments have no user store, so the cap and
+    // the live count are both null -- dashboards should treat null as
+    // "not applicable" rather than show a misleading 0.
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val health = getJson(s"$baseUri/api/health")
+        assert(health("userAuthMaxUsers").isNull,
+          clue = s"userAuthMaxUsers must be null when platform-user auth is disabled; got: ${health("userAuthMaxUsers")}")
+        assert(health("userAuthStoredUsers").isNull,
+          clue = s"userAuthStoredUsers must be null when platform-user auth is disabled; got: ${health("userAuthStoredUsers")}")
+      }
+    }
+  }
+
   test("registration rejects once the configured max-user count is reached") {
     // Defense against slow disk-fill via public registration abuse: the
     // user store has a hard cap (default 100k, configurable). Beyond the

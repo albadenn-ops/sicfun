@@ -94,7 +94,8 @@ private[web] object HandHistoryReviewServerRuntime:
                   jobStore,
                   playingHallJobStore,
                   activeHttpRequests.get(),
-                  draining
+                  draining,
+                  platformAuthService
                 )
               )
           )

@@ -61,7 +61,8 @@ private[web] object Readiness:
       jobStore: AnalysisJobStore,
       playingHallJobStore: PlayingHallJobStore,
       activeHttpRequests: Int,
-      draining: AtomicBoolean
+      draining: AtomicBoolean,
+      platformAuthService: Option[PlatformUserAuth.Service]
   ): JsonResponse =
     val metrics = jobStore.metrics
     val readiness = readinessStatus(config, jobStore, playingHallJobStore, draining)
@@ -81,6 +82,7 @@ private[web] object Readiness:
         // platform-user auth is enabled (basic auth and no-auth modes have
         // no user store).
         "userAuthMaxUsers" -> config.platformAuth.map(c => Num(c.maxUsers.toDouble)).getOrElse(ujson.Null),
+        "userAuthStoredUsers" -> platformAuthService.map(s => Num(s.storedUserCount.toDouble)).getOrElse(ujson.Null),
         "service" -> Str("hand-history-review"),
         "host" -> Str(config.host),
         "port" -> Num(boundPort.toDouble),
