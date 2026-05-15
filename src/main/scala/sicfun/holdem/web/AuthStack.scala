@@ -565,4 +565,13 @@ private[web] object AuthStack:
     Option(exchange.getRequestURI).map(_.getRawPath).filter(_.nonEmpty).getOrElse("/")
 
   private def remoteAddress(exchange: HttpExchange): String =
-    Option(exchange.getRemoteAddress).map(address => s"${address.getHostString}:${address.getPort}").getOrElse("-")
+    // Bracket IPv6 hosts per RFC 3986 §3.2.2 so the host:port format stays
+    // unambiguous in log lines. Without brackets, an audit entry like
+    // `remote=::1:54321` cannot be split into host + port because every `:`
+    // looks the same -- a log-line parser sees `::1` then `54321` as
+    // separate IPv6 segments. With brackets, `remote=[::1]:54321` is clear.
+    Option(exchange.getRemoteAddress).map { address =>
+      val host = address.getHostString
+      val port = address.getPort
+      if host.contains(':') then s"[$host]:$port" else s"$host:$port"
+    }.getOrElse("-")
