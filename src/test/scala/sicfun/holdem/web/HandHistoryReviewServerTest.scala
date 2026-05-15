@@ -428,7 +428,7 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
-  test("log message sanitization escapes line-structural characters") {
+  test("log message sanitization escapes line-structural and control characters") {
     import HandHistoryReviewServerRuntime.sanitizeLogMessage
 
     // Newline, carriage return, and backslash get escaped so user-controlled values
@@ -439,6 +439,25 @@ class HandHistoryReviewServerTest extends FunSuite:
     assertEquals(sanitizeLogMessage("escape \\ first so \\n stays literal"),
       "escape \\\\ first so \\\\n stays literal",
       clue = "backslashes must be escaped before \\n so a literal \\n in input doesn't decode as newline")
+
+    // NUL (0x00): would truncate log line display in less/grep/vim
+    assertEquals(sanitizeLogMessage("before\u0000after"), "before\\0after",
+      clue = "NUL must not pass through; would truncate the display in line-oriented tools")
+
+    // Tab (0x09): would split key=value pairs in column-oriented parsers
+    assertEquals(sanitizeLogMessage("before\tafter"), "before\\tafter",
+      clue = "tab must not pass through; would split fields in column-oriented log parsers")
+
+    // Other C0 control chars: rendered as \xHH lowercase hex so operators see
+    // SOMETHING readable rather than an invisible glyph or terminal-bell character.
+    assertEquals(sanitizeLogMessage("\u0001"), "\\x01")
+    assertEquals(sanitizeLogMessage("\u0007"), "\\x07", clue = "BEL")
+    assertEquals(sanitizeLogMessage("\u001b"), "\\x1b", clue = "ESC")
+    assertEquals(sanitizeLogMessage("\u007f"), "\\x7f", clue = "DEL")
+
+    // Printable ASCII (including space) and Unicode pass through unchanged.
+    assertEquals(sanitizeLogMessage("plain spaces and slashes /-_."), "plain spaces and slashes /-_.")
+    assertEquals(sanitizeLogMessage("unicode: éü"), "unicode: éü")
   }
 
   test("shutdown grace milliseconds round up to whole HttpServer stop seconds") {
