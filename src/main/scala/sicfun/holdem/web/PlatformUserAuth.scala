@@ -8,6 +8,7 @@ import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths, StandardCopyOption}
 import java.security.{MessageDigest, SecureRandom}
+import java.time.Duration
 import java.util.{Base64, UUID}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -174,9 +175,21 @@ object PlatformUserAuth:
     require(redirectUri.trim.nonEmpty, "redirectUri must be non-empty")
     require(scopes.nonEmpty, "scopes must be non-empty")
 
+  // Default OIDC HTTP timeouts. Without these the JDK HttpClient blocks
+  // indefinitely on a slow/hung token or userinfo endpoint, holding a server
+  // executor thread per callback. 5s to connect and 10s end-to-end is well
+  // above Google's typical latency (sub-second) and below anything that
+  // would feel responsive to a user waiting on the OIDC redirect.
+  private val DefaultOidcConnectTimeout = Duration.ofSeconds(5)
+  private val DefaultOidcRequestTimeout = Duration.ofSeconds(10)
+
+  private[web] def defaultOidcHttpClient(): HttpClient =
+    HttpClient.newBuilder.connectTimeout(DefaultOidcConnectTimeout).build()
+
   final class GoogleOidcProvider(
       config: GoogleOidcConfig,
-      httpClient: HttpClient = HttpClient.newHttpClient()
+      httpClient: HttpClient = defaultOidcHttpClient(),
+      requestTimeout: Duration = DefaultOidcRequestTimeout
   ) extends OidcProvider:
     override val id = "google"
     override val displayName = "Google"
@@ -202,6 +215,7 @@ object PlatformUserAuth:
       try
         val tokenRequest = HttpRequest.newBuilder(URI.create(GoogleTokenEndpoint))
           .header("Content-Type", "application/x-www-form-urlencoded")
+          .timeout(requestTimeout)
           .POST(
             HttpRequest.BodyPublishers.ofString(
               formEncode(
@@ -229,6 +243,7 @@ object PlatformUserAuth:
             case Some(token) =>
               val userInfoRequest = HttpRequest.newBuilder(URI.create(GoogleUserInfoEndpoint))
                 .header("Authorization", s"Bearer $token")
+                .timeout(requestTimeout)
                 .GET()
                 .build()
               val userInfoResponse = httpClient.send(
