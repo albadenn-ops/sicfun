@@ -98,7 +98,9 @@ private[web] object Readiness:
         "queuedJobs" -> Num(metrics.queuedJobs.toDouble),
         "runningJobs" -> Num(metrics.runningJobs.toDouble),
         "timedOutWorkersInFlight" -> Num(readiness.timedOutWorkersInFlight.toDouble),
-        "retainedTerminalJobs" -> Num(metrics.retainedTerminalJobs.toDouble)
+        // Sum both stores so the operator sees the true number of completed
+        // jobs being held for status polling, not just the analysis half.
+        "retainedTerminalJobs" -> Num((metrics.retainedTerminalJobs + playingHallJobStore.retainedTerminalJobsCount).toDouble)
       )
     )
 

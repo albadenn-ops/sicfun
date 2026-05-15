@@ -661,6 +661,14 @@ private[web] object JobQueue:
     def timedOutWorkersInFlightCount: Int =
       timedOutWorkersInFlight.get()
 
+    def retainedTerminalJobsCount: Int =
+      purgeExpiredJobs()
+      var count = 0
+      val iterator = jobs.values().iterator()
+      while iterator.hasNext do
+        if iterator.next().isTerminal then count += 1
+      count
+
     private def renderStatus(jobId: String, state: AnalysisJobState): JsonResponse =
       state match
         case Queued(submittedAt) =>
