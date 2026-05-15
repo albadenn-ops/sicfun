@@ -1741,6 +1741,61 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("OIDC routes answer OPTIONS with 204 + Allow: GET, OPTIONS and reject other verbs with 405 + the same Allow") {
+    // The OIDC /start and /callback paths are GET-only. Before this fix they
+    // returned 405 with Allow: GET on every non-GET method including OPTIONS,
+    // which was inconsistent with the rest of the API (JsonHandler routes
+    // accept OPTIONS preflight with 200 + Allow: <verbs>, OPTIONS). Now
+    // RedirectHandler handles OPTIONS uniformly with 204 + Allow: GET, OPTIONS,
+    // and the 405 response on POST/DELETE/etc also advertises the OPTIONS
+    // method per RFC 7231 sec 7.4.1.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              allowLocalRegistration = false,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // OPTIONS on /start.
+          val optionsStart = HttpRequest.newBuilder(URI.create(s"$baseUri${provider.startPath}"))
+            .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+            .build()
+          val optionsStartResp = httpClient.send(optionsStart, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+          assertEquals(optionsStartResp.statusCode(), 204, clue = "/start OPTIONS must return 204")
+          assertEquals(headerValue(optionsStartResp, "Allow"), Some("GET, OPTIONS"),
+            clue = "/start OPTIONS must list both GET and OPTIONS in Allow")
+          assertEquals(optionsStartResp.body(), "", clue = "/start OPTIONS must not include a body")
+
+          // OPTIONS on /callback.
+          val optionsCallback = HttpRequest.newBuilder(URI.create(s"$baseUri${provider.callbackPath}"))
+            .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+            .build()
+          val optionsCallbackResp = httpClient.send(optionsCallback, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+          assertEquals(optionsCallbackResp.statusCode(), 204, clue = "/callback OPTIONS must return 204")
+          assertEquals(headerValue(optionsCallbackResp, "Allow"), Some("GET, OPTIONS"),
+            clue = "/callback OPTIONS must list both GET and OPTIONS in Allow")
+
+          // POST on /start -> 405 with Allow: GET, OPTIONS (the 405 path now mirrors the OPTIONS advertisement).
+          val postStart = HttpRequest.newBuilder(URI.create(s"$baseUri${provider.startPath}"))
+            .POST(HttpRequest.BodyPublishers.noBody())
+            .build()
+          val postStartResp = httpClient.send(postStart, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+          assertEquals(postStartResp.statusCode(), 405, clue = "/start POST must return 405")
+          assertEquals(headerValue(postStartResp, "Allow"), Some("GET, OPTIONS"),
+            clue = "/start 405 Allow must include OPTIONS now that OPTIONS is supported")
+        }
+      }
+    }
+  }
+
   test("OIDC /start emits a HttpOnly SameSite=Lax state cookie bound to the redirect's state value") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>

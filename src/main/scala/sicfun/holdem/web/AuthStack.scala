@@ -185,7 +185,7 @@ private[web] object AuthStack:
       platformAuth: PlatformUserAuth.Service
   ): Either[(Int, String), RedirectResponse] =
     if !exchange.getRequestMethod.equalsIgnoreCase("GET") then
-      exchange.getResponseHeaders.set("Allow", "GET")
+      exchange.getResponseHeaders.set("Allow", "GET, OPTIONS")
       Left(405 -> "GET required")
     else
       extractOidcProviderId(exchange, "/start").flatMap { providerId =>
@@ -215,7 +215,7 @@ private[web] object AuthStack:
       providerId: String
   ): Either[(Int, String), RedirectResponse] =
     if !exchange.getRequestMethod.equalsIgnoreCase("GET") then
-      exchange.getResponseHeaders.set("Allow", "GET")
+      exchange.getResponseHeaders.set("Allow", "GET, OPTIONS")
       Left(405 -> "GET required")
     else
       val query = parseQuery(exchange)
@@ -433,14 +433,27 @@ private[web] object AuthStack:
     override def handle(exchange: HttpExchange): Unit =
       try
         applySecurityHeaders(exchange)
-        delegate(exchange) match
-          case Left((status, error)) =>
-            writePlain(exchange, status, error, "text/plain; charset=utf-8")
-          case Right(response) =>
-            response.headers.foreach { case (name, value) =>
-              exchange.getResponseHeaders.add(name, value)
-            }
-            writeRedirect(exchange, response.status, response.location)
+        // Handle OPTIONS uniformly for all RedirectHandler-backed routes (the
+        // OIDC /start + /callback paths). They are GET-only and previously
+        // returned 405 with Allow: GET on any non-GET method including OPTIONS,
+        // which was inconsistent with the rest of the API (JsonHandler routes
+        // return 200 with Allow: <verbs>, OPTIONS for OPTIONS preflight via
+        // optionsResponse). 204 No Content with Allow: GET, OPTIONS matches
+        // RFC 7231 sec 4.3.7 and avoids the writePlain Content-Type quirk
+        // (204 MUST NOT carry a body, so we go directly to sendResponseHeaders
+        // with -1 instead of through writeBytes).
+        if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then
+          exchange.getResponseHeaders.set("Allow", "GET, OPTIONS")
+          exchange.sendResponseHeaders(204, -1L)
+        else
+          delegate(exchange) match
+            case Left((status, error)) =>
+              writePlain(exchange, status, error, "text/plain; charset=utf-8")
+            case Right(response) =>
+              response.headers.foreach { case (name, value) =>
+                exchange.getResponseHeaders.add(name, value)
+              }
+              writeRedirect(exchange, response.status, response.location)
       catch
         case NonFatal(e) =>
           logHandlerException(exchange, e, "unhandled exception in RedirectHandler")
