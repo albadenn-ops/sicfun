@@ -157,6 +157,17 @@ private[web] final class StaticAssetsHandler(
           else
             writePlain(exchange, 404, "not found", "text/plain; charset=utf-8")
     catch
+      case _: java.nio.file.InvalidPathException =>
+        // Paths.get on Windows throws InvalidPathException when the request
+        // path contains NTFS-reserved characters (`<`, `>`, `:`, `*`, `?`,
+        // `|`, `"`). An attacker who sends `/path%3Cfoo` (decoded to
+        // `/path<foo`) would otherwise fall through to the NonFatal branch
+        // below and produce a 500 'internal server error' plus a logged
+        // exception per request -- both noise AND a log-inflation lever via
+        // the bundled stack trace. Treat path-parse failures the same as
+        // any missing file: a clean 404 with no body amplification.
+        try writePlain(exchange, 404, "not found", "text/plain; charset=utf-8")
+        catch case NonFatal(_) => ()
       case NonFatal(e) =>
         logHandlerException(exchange, e, "unhandled exception in StaticAssetsHandler")
         try writePlain(exchange, 500, "internal server error", "text/plain; charset=utf-8")

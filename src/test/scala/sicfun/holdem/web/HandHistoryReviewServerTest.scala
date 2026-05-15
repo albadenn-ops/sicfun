@@ -926,6 +926,33 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("static handler returns 404 not 500 when the URL path contains characters that Paths.get rejects") {
+    // On Windows, Paths.get throws InvalidPathException for path strings
+    // containing NTFS-reserved characters (`<`, `>`, `:`, `*`, `?`, `|`, `"`).
+    // An attacker sending `/file%3Cfoo` (decoded to `/file<foo`) would
+    // otherwise fall through to the outer NonFatal catch and get a 500 plus
+    // a logged exception per request -- both a 500-when-it-should-be-404 UX
+    // bug AND a log-inflation lever (stack trace per request). The static
+    // handler now catches InvalidPathException specifically and returns a
+    // clean 404. On Linux the test still passes because Linux file systems
+    // permit `<`/`>` in filenames, so Paths.get succeeds and the file simply
+    // does not exist, hitting the regular 404 branch -- same observable
+    // result on both platforms.
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        // %3C / %3E decode to `<` / `>`. URI.create accepts the encoded form.
+        val response = get(s"$baseUri/file%3Cfoo%3Ebar")
+        assertEquals(response.statusCode(), 404,
+          clue = s"NTFS-reserved characters in URL path must produce 404, not 500; got body: ${response.body()}")
+        // The 404 body must be the small generic "not found", NOT a stack
+        // trace or other 500-style payload.
+        assert(response.body().length < 256,
+          clue = s"404 body should stay small; got ${response.body().length} bytes")
+      }
+    }
+  }
+
   test("static handler answers HEAD with headers and no body") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>
