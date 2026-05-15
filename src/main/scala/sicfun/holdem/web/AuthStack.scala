@@ -448,9 +448,12 @@ private[web] object AuthStack:
       platformAuth: Option[PlatformUserAuth.Service]
   ): Boolean =
     platformAuth.isEmpty || authenticatedUser(exchange).forall { user =>
+      // CSRF tokens are session secrets; use constant-time comparison so a
+      // timing oracle cannot recover the token character-by-character. The
+      // basic-auth path already uses secureEquals for the same reason.
       Option(exchange.getRequestHeaders.getFirst("X-CSRF-Token"))
         .map(_.trim)
-        .contains(user.csrfToken)
+        .exists(submitted => secureEquals(submitted, user.csrfToken))
     }
 
 
