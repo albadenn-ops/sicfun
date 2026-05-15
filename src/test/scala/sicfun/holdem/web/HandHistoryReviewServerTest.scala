@@ -674,6 +674,21 @@ class HandHistoryReviewServerTest extends FunSuite:
     // Printable ASCII (including space) and Unicode pass through unchanged.
     assertEquals(sanitizeLogMessage("plain spaces and slashes /-_."), "plain spaces and slashes /-_.")
     assertEquals(sanitizeLogMessage("unicode: éü"), "unicode: éü")
+
+    // Hard length cap as a last-resort defense against log-line inflation.
+    // Per-field caps (submitted email, OIDC ?error= / ?state= / ?code=) are
+    // the primary discipline -- their truncation markers land in the right
+    // forensic spot -- but anything that slipped past those still gets
+    // clamped here so a single audit line can never exceed ~8 KB.
+    val huge = "x" * 20000
+    val sanitized = sanitizeLogMessage(huge)
+    assert(sanitized.length < 9 * 1024,
+      clue = s"sanitizeLogMessage must clamp huge inputs (got ${sanitized.length} bytes)")
+    assert(sanitized.endsWith("...(truncated)"),
+      clue = "clamped sanitization should signal the truncation with a visible marker")
+    // A short input must NOT have the marker (the cap fires only when needed).
+    assert(!sanitizeLogMessage("short").endsWith("...(truncated)"),
+      clue = "short inputs must pass through without the truncation marker")
   }
 
   test("shutdown grace milliseconds round up to whole HttpServer stop seconds") {

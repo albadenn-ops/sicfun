@@ -418,6 +418,8 @@ private[web] object HandHistoryReviewServerRuntime:
       logError(s"$label stack=$line")
     }
 
+  private val MaxSanitizedLogMessageLength = 8 * 1024
+
   /** Escapes control characters inside a log message so that user-controlled
     * values flowing into a log line cannot forge fake log entries or confuse
     * line-oriented tools. Log lines use spaces (0x20) as field separators and
@@ -429,7 +431,14 @@ private[web] object HandHistoryReviewServerRuntime:
     * control chars (0x01-0x08, 0x0B-0x0C, 0x0E-0x1F) and DEL (0x7F) are
     * rendered as `\xHH` (lowercase hex) so operators see something readable
     * rather than an invisible glyph. Backslash is handled first so the rest
-    * of the escapes are unambiguous. */
+    * of the escapes are unambiguous.
+    *
+    * After escaping, the rendered message is clamped at 8 KB with a
+    * "...(truncated)" marker. Per-field caps (submitted email in auth audit
+    * lines, OIDC ?error=/?state=/?code= in callback handling) remain the
+    * primary defense because their truncation markers land in the right
+    * spot for forensics; this is the last-resort cap for any input source
+    * that slipped past the per-field caps. */
   private[web] def sanitizeLogMessage(message: String): String =
     val intermediate = message
       .replace("\\", "\\\\")
@@ -443,7 +452,16 @@ private[web] object HandHistoryReviewServerRuntime:
         sb.append("\\x%02x".format(ch.toInt))
       else sb.append(ch)
     }
-    sb.toString
+    val rendered = sb.toString
+    // Hard cap as last-resort defense against log-line inflation. Per-field
+    // caps (submitted email, OIDC ?error=/?state=/?code=) are the primary
+    // discipline -- their truncation markers land in the right spot for
+    // forensics -- but this catches sources we did not anticipate. 8 KB is
+    // generous: legitimate sanitized messages never approach it, and stack
+    // traces are processed line-by-line in logHandlerException so individual
+    // frames stay well under.
+    if rendered.length <= MaxSanitizedLogMessageLength then rendered
+    else rendered.substring(0, MaxSanitizedLogMessageLength) + "...(truncated)"
 
   private def log(level: String, message: String, stream: java.io.PrintStream): Unit =
     stream.synchronized {
