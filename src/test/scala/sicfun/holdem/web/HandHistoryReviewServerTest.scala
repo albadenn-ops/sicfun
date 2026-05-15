@@ -1133,6 +1133,40 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("OIDC callback handles provider-side ?error= by redirecting to the failure landing page") {
+    // When the user denies consent on Google's screen, or the authorization
+    // code expires before redemption, the provider redirects back to our
+    // callback URL with ?error=... (and no code). The handler must not crash
+    // looking up state -- it should short-circuit to the failure redirect so
+    // the frontend can show the user a polite error and an option to retry.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              allowLocalRegistration = false,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val callback = get(s"$baseUri${provider.callbackPath}?error=access_denied")
+          assertEquals(callback.statusCode(), 302)
+          val location = headerValue(callback, "Location").getOrElse(fail("missing failure redirect"))
+          assert(location.contains("access_denied"),
+            s"failure redirect should include the provider error code, got: $location")
+          // No Set-Cookie on failure: the user must not end up with a half-baked session.
+          assertEquals(headerValue(callback, "Set-Cookie"), None,
+            "OIDC failure must not emit a session cookie")
+        }
+      }
+    }
+  }
+
   test("drain signal flips readiness to 503 and rejects new analysis submissions") {
     withStaticSite { staticDir =>
       val root = Files.createTempDirectory("hand-history-review-drain-")
