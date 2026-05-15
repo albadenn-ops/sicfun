@@ -732,12 +732,19 @@ object PlatformUserAuth:
     val encoded = ujson.write(json, indent = 2)
     val parent = Option(absolutePath.getParent).getOrElse(Paths.get(".").toAbsolutePath.normalize())
     val temp = Files.createTempFile(parent, "platform-users-", ".json.tmp")
-    Files.writeString(temp, encoded, StandardCharsets.UTF_8)
     try
-      Files.move(temp, absolutePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-    catch
-      case _: UnsupportedOperationException | _: java.nio.file.AtomicMoveNotSupportedException =>
-        Files.move(temp, absolutePath, StandardCopyOption.REPLACE_EXISTING)
+      Files.writeString(temp, encoded, StandardCharsets.UTF_8)
+      try
+        Files.move(temp, absolutePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+      catch
+        case _: UnsupportedOperationException | _: java.nio.file.AtomicMoveNotSupportedException =>
+          Files.move(temp, absolutePath, StandardCopyOption.REPLACE_EXISTING)
+    finally
+      // If the move succeeded, the temp path no longer exists and this is a no-op.
+      // If writeString or a non-fallback move exception threw mid-way, this prevents
+      // the orphaned tmp file from accumulating in the user-store directory across
+      // repeated failures (disk full, permission flap, etc.).
+      Files.deleteIfExists(temp)
 
   private def writeStoredUser(user: StoredUser): Value =
     Obj(
@@ -858,10 +865,10 @@ object PlatformUserAuth:
   // Cap the password length the server is willing to hash. PBKDF2's per-iteration
   // cost scales with input length, so without this cap an attacker submitting a 2 MB
   // password (just under MAX_UPLOAD_BYTES) and a high-iteration count could burn the
-  // server's CPU on each login attempt. Login is not rate-limited (auth bootstrap),
-  // so the cap is the only thing keeping work-per-request bounded. 256 chars is
-  // generous for any realistic passphrase and well above OWASP's 64-char minimum
-  // recommendation.
+  // server's CPU on each login attempt. The auth-bucket rate limiter (default 10/min
+  // /IP) caps requests, but the length cap is what bounds the work each individual
+  // request is allowed to cost. 256 chars is generous for any realistic passphrase
+  // and well above OWASP's 64-char minimum recommendation.
   private val MaxPasswordLength = 256
 
   private def validatePassword(password: String): Unit =
