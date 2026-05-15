@@ -163,6 +163,16 @@ If drain/stop times out, `bin/drain-stop-hand-history-web-service.ps1` now repor
   - `Cache-Control` — `no-store` on API responses (do not cache), `public, max-age=...` on static assets (safe to cache and revalidate)
   - `Content-Security-Policy`, `Permissions-Policy`, `X-Frame-Options`, `Referrer-Policy`, `X-Content-Type-Options`, `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy`, `X-Robots-Tag` — defense-in-depth headers the origin sets on every response. A proxy that drops them weakens the browser-side protections; in particular `X-Robots-Tag: noindex, nofollow` prevents search engines from indexing the app if the deployment is accidentally reachable from the public internet.
 
+## Logs And Observability
+
+- The service helper scripts route stdout/stderr to files under `logs/`. Tail those or pipe to a log aggregator.
+- `/api/health` reports configuration + queue state (auth mode, rate-limit caps, max concurrent/queued jobs, active HTTP requests, queued/running jobs, retained terminal jobs). Use it for dashboards.
+- `/api/ready` is 200 only when the instance is accepting traffic; 503 otherwise (drain mode, queue full, or stuck worker). Use it for load-balancer health checks.
+- Auth events emit structured log lines: `auth.login.success`, `auth.login.failure`, `auth.register.success`, `auth.register.failure`, `auth.logout`, `auth.oidc.start`, `auth.oidc.start.failure`, `auth.oidc.success`, `auth.oidc.failure`. INFO level for success/expected events, WARN for failures. Each line carries `email=` (where applicable) and `remote=` so a high WARN rate from a single `remote=` reveals brute-force or credential-stuffing attempts.
+- Job lifecycle events: submission/rejection/timeout/failure for both `/api/analyze-hand-history` and `/api/playing-hall` log to stderr at INFO/WARN.
+- Rate-limit rejections log as `request rate limited path=... client=... bucket=... limitPerMinute=... retryAfterMs=...` at WARN.
+- Unauthenticated requests against protected paths log as `request unauthorized path=... remote=... reason=...` at WARN.
+
 ## State And Backups
 
 - In-flight and completed review jobs are in-memory only
