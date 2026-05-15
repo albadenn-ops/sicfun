@@ -293,13 +293,19 @@ private[web] object HandHistoryReviewServerRuntime:
           )
           analysisExecutor.shutdown()
           analysisTimeoutExecutor.shutdown()
+          // Compute the deadline ONCE up front and let each step claim the
+          // wall time left until that deadline. Previously every step received
+          // the same `remainingGraceMs` value, so a 5s budget could become a
+          // 5+5+5+5 = 20s shutdown if every executor took the full window --
+          // not what operators expect from `shutdownGraceMs`.
+          val deadlineNanos = shutdownStartedAt + TimeUnit.MILLISECONDS.toNanos(config.shutdownGraceMs)
+          def remainingMs(): Long =
+            math.max(0L, TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()))
           try server.stop(httpDrainSeconds)
           finally
-            val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - shutdownStartedAt)
-            val remainingGraceMs = math.max(0L, config.shutdownGraceMs - elapsedMs)
-            shutdownExecutor("http", serverExecutor, remainingGraceMs)
-            awaitExecutorDrain("analysis-timeout", analysisTimeoutExecutor, remainingGraceMs)
-            awaitExecutorDrain("analysis", analysisExecutor, remainingGraceMs)
+            shutdownExecutor("http", serverExecutor, remainingMs())
+            awaitExecutorDrain("analysis-timeout", analysisTimeoutExecutor, remainingMs())
+            awaitExecutorDrain("analysis", analysisExecutor, remainingMs())
             logInfo(s"shutdown complete host=${binding.host} port=${binding.port}")
       sys.addShutdownHook(shutdown())
       logInfo(
