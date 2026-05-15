@@ -14,6 +14,7 @@ import sicfun.holdem.web.HandHistoryReviewServer.BasicAuthConfig
 import sicfun.holdem.web.HandHistoryReviewServerApi.{
   JsonResponse,
   methodNotAllowed,
+  optionsResponse,
   optionalString,
   readRequestBody,
   requiredString,
@@ -42,7 +43,8 @@ private[web] object AuthStack:
       basicAuth: Option[BasicAuthConfig],
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Right(methodNotAllowed("GET"))
+    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET"))
+    else if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Right(methodNotAllowed("GET"))
     else
       val value =
         platformAuth match
@@ -63,7 +65,8 @@ private[web] object AuthStack:
       exchange: HttpExchange,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
+    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("POST"))
+    else if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
     else if authenticatedUser(exchange).nonEmpty then Left(409 -> "already signed in")
     else
       platformAuth match
@@ -86,7 +89,8 @@ private[web] object AuthStack:
       exchange: HttpExchange,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
+    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("POST"))
+    else if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
     else if authenticatedUser(exchange).nonEmpty then Left(409 -> "already signed in")
     else
       platformAuth match
@@ -113,7 +117,8 @@ private[web] object AuthStack:
       exchange: HttpExchange,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
+    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("POST"))
+    else if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
     else if !ensurePlatformCsrf(exchange, platformAuth) then Left(403 -> SessionCsrfRequiredMessage)
     else
       platformAuth match
@@ -134,7 +139,8 @@ private[web] object AuthStack:
       exchange: HttpExchange,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
+    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("POST"))
+    else if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
     else if !ensurePlatformCsrf(exchange, platformAuth) then Left(403 -> SessionCsrfRequiredMessage)
     else
       (platformAuth, authenticatedUser(exchange)) match

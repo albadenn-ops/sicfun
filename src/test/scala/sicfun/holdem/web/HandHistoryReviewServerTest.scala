@@ -496,6 +496,39 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("json auth endpoints answer OPTIONS with 200 and Allow header per RFC 7231 sec 4.3.7") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        def sendOptions(path: String): HttpResponse[String] =
+          httpClient.send(
+            HttpRequest.newBuilder()
+              .uri(URI.create(s"$baseUri$path"))
+              .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+              .build(),
+            HttpResponse.BodyHandlers.ofString()
+          )
+
+        val meOptions = sendOptions("/api/auth/me")
+        assertEquals(meOptions.statusCode(), 200)
+        assertEquals(headerValue(meOptions, "Allow"), Some("GET"))
+
+        val loginOptions = sendOptions("/api/auth/login")
+        assertEquals(loginOptions.statusCode(), 200)
+        assertEquals(headerValue(loginOptions, "Allow"), Some("POST"))
+
+        val analyzeOptions = sendOptions("/api/analyze-hand-history")
+        assertEquals(analyzeOptions.statusCode(), 200)
+        assertEquals(headerValue(analyzeOptions, "Allow"), Some("POST"))
+
+        val playingHallJobOptions = sendOptions("/api/playing-hall/jobs/some-id")
+        assertEquals(playingHallJobOptions.statusCode(), 200)
+        assertEquals(headerValue(playingHallJobOptions, "Allow"), Some("GET, DELETE"))
+      }
+    }
+  }
+
   test("json auth endpoints include Allow header on 405 responses per RFC 7231 sec 6.5.5") {
     // /api/auth/me is GET-only; /api/auth/login is POST-only. RFC 7231 sec 6.5.5
     // REQUIRES the server emit Allow on a 405 so the client (and any cache or

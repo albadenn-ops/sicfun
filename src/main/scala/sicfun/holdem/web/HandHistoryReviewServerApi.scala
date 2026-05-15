@@ -38,6 +38,17 @@ private[web] object HandHistoryReviewServerApi:
       headers = Vector("Allow" -> allowed)
     )
 
+  /** Build an OPTIONS response advertising the supported methods. Per RFC 7231
+    * sec 4.3.7, OPTIONS responses SHOULD include an Allow header so clients
+    * (and capability-discovery tools) can learn what verbs the resource
+    * accepts without trying each one and parsing the 405 fallback. */
+  private[web] def optionsResponse(allowed: String): JsonResponse =
+    JsonResponse(
+      status = 200,
+      value = Obj("allow" -> Str(allowed)),
+      headers = Vector("Allow" -> allowed)
+    )
+
   private val DefaultPlayingHallRoot = Paths.get("data", "web-playing-hall")
   private val DefaultPlayingHallHands = 240
   private val DefaultPlayingHallTableCount = 2
@@ -56,7 +67,8 @@ private[web] object HandHistoryReviewServerApi:
       readiness: () => ReadinessStatus,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
+    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("POST"))
+    else if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
     else if !ensurePlatformCsrf(exchange, platformAuth) then Left(403 -> SessionCsrfRequiredMessage)
     else if !readiness().acceptingAnalysisJobs then
       Left(503 -> admissionRejectedMessage(readiness()))
@@ -99,7 +111,8 @@ private[web] object HandHistoryReviewServerApi:
       readiness: () => ReadinessStatus,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
+    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("POST"))
+    else if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
     else if !ensurePlatformCsrf(exchange, platformAuth) then Left(403 -> SessionCsrfRequiredMessage)
     else if !readiness().acceptingAnalysisJobs then
       Left(503 -> admissionRejectedMessage(readiness(), "playing hall"))
@@ -141,7 +154,8 @@ private[web] object HandHistoryReviewServerApi:
       jobStore: AnalysisJobStore,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Right(methodNotAllowed("GET"))
+    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET"))
+    else if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Right(methodNotAllowed("GET"))
     else
       extractJobId(exchange, AnalyzeJobPathPrefix, "analysis").flatMap { jobId =>
         jobStore
@@ -159,7 +173,8 @@ private[web] object HandHistoryReviewServerApi:
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
     val method = exchange.getRequestMethod
-    if method.equalsIgnoreCase("GET") then
+    if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, DELETE"))
+    else if method.equalsIgnoreCase("GET") then
       extractJobId(exchange, PlayingHallJobPathPrefix, "playing hall").flatMap { jobId =>
         jobStore
           .status(
