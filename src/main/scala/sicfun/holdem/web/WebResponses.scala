@@ -116,10 +116,13 @@ private[web] object WebResponses:
       // MUST NOT include a body. The static handler routes HEAD to a dedicated
       // branch for happy-path file serving; this guard catches all the error
       // paths (404 / 403 / 401 / 405 / 500) that flow through writePlain so
-      // those also stop emitting a body on HEAD requests. Content-Length is
-      // the uncompressed byte count -- error bodies are short enough that
-      // they're never gzipped (under MinGzipSize), so no variant mismatch.
-      exchange.sendResponseHeaders(status, bytes.length.toLong)
+      // those also stop emitting a body on HEAD requests.
+      //
+      // Per com.sun.net.httpserver docs, sendResponseHeaders for a HEAD
+      // request MUST pass a body length of 0 or -1; passing the actual byte
+      // count is out of contract. -1 means "no body, no Content-Length";
+      // the JDK then emits a Content-Length-less response.
+      exchange.sendResponseHeaders(status, -1L)
     else
       val shouldCompress = compressible && bytes.length >= MinGzipSize && clientAcceptsGzip(exchange)
       if shouldCompress then
