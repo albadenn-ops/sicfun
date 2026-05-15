@@ -660,26 +660,36 @@ object PlatformUserAuth:
       extractCookie(cookieHeader, sessionCookieName(cookieSecure))
         .flatMap { token =>
           val key = sha256Hex(token)
-          Option(sessions.get(key))
-            .filter(_.expiresAtEpochMs > nowMillis())
-            .flatMap { session =>
-              val now = nowMillis()
-              sessions.put(
-                key,
-                session.copy(
-                  expiresAtEpochMs = now + sessionTtlMs,
-                  lastSeenAtEpochMs = now
-                )
+          // computeIfPresent atomically reads + conditionally updates + writes,
+          // closing two concurrency races a plain get/filter/put loop has:
+          //   - resurrection: a logout that calls `revoke` (sessions.remove)
+          //     between our get and put would otherwise be undone by the put,
+          //     bringing a revoked session back to life.
+          //   - false expiry: a concurrent `purgeExpired` evicting an entry we
+          //     just refreshed; with compute, both writes serialize on the bin
+          //     so whichever runs second sees the other's update.
+          // Returning null from the remapping function removes the entry, which
+          // is what we want when the snapshot read fires for a session that
+          // expired between the purge sweep and this lookup.
+          val refreshed = sessions.computeIfPresent(
+            key,
+            (_, current) =>
+              if current.expiresAtEpochMs > nowMillis() then
+                val now = nowMillis()
+                current.copy(expiresAtEpochMs = now + sessionTtlMs, lastSeenAtEpochMs = now)
+              else
+                null
+          )
+          Option(refreshed).flatMap { session =>
+            userStore.findByUserId(session.userId).map { user =>
+              AuthenticatedUser(
+                userId = user.userId,
+                email = user.email,
+                profile = toUserView(user),
+                csrfToken = session.csrfToken
               )
-              userStore.findByUserId(session.userId).map { user =>
-                AuthenticatedUser(
-                  userId = user.userId,
-                  email = user.email,
-                  profile = toUserView(user),
-                  csrfToken = session.csrfToken
-                )
-              }
             }
+          }
         }
 
     def revoke(cookieHeader: Option[String]): String =
@@ -694,7 +704,16 @@ object PlatformUserAuth:
       while iterator.hasNext do
         val entry = iterator.next()
         if entry.getValue.expiresAtEpochMs <= now then
-          iterator.remove()
+          // Compare-and-remove: iterator.remove() would unconditionally drop the
+          // key, but a concurrent resolve() that refreshed the session between
+          // the entry.getValue snapshot and this line would have its work
+          // erased. computeIfPresent re-reads the current value under the bin
+          // lock and only removes if the entry is STILL expired.
+          sessions.computeIfPresent(
+            entry.getKey,
+            (_, current) =>
+              if current.expiresAtEpochMs <= nowMillis() then null else current
+          )
 
   private final case class OidcPendingState(
       providerId: String,
