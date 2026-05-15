@@ -463,6 +463,13 @@ object PlatformUserAuth:
         // the same check -- keep both code paths consistent.
         try validateEmail(normalizedEmail)
         catch case e: IllegalArgumentException => return Left(e.getMessage)
+        // Reject suspiciously long OIDC subject identifiers. Google's are
+        // ~21 chars; 256 is two orders of magnitude over that, plenty for any
+        // legitimate provider, but bounded so a hostile provider can't poison
+        // the user store with megabyte-sized subjects (which are also used as
+        // map keys for provider-identity lookup). Truncation here is unsafe --
+        // two distinct subjects could collide on a truncated prefix.
+        if identity.subject.length > 256 then return Left("OIDC subject is too long")
         // Truncate the provider-supplied display name to the same 96-char cap
         // the local-register path enforces. We truncate (rather than reject)
         // for the OIDC flow: a legitimate user with a long display name on
@@ -470,6 +477,12 @@ object PlatformUserAuth:
         // /api/auth/profile afterward. Without this, a malformed or huge
         // upstream `name` would bloat the user-store JSON unbounded.
         val truncatedDisplayName = identity.displayName.take(96)
+        // Drop an avatar URL that exceeds a generous URL-length bound. Stored
+        // verbatim but never rendered today; even so, an unbounded value would
+        // bloat the user store and a future renderer would have to defend
+        // against the bloat itself. 2048 is the de-facto URL length browsers
+        // and proxies accept.
+        val cappedAvatarUrl = identity.avatarUrl.filter(_.length <= 2048)
         val now = System.currentTimeMillis()
         findByProviderIdentityInternal(providerId, identity.subject) match
           case Some(existing) =>
@@ -477,7 +490,7 @@ object PlatformUserAuth:
               email = normalizedEmail,
               profile = existing.profile.copy(
                 displayName = preferNonBlank(existing.profile.displayName, truncatedDisplayName),
-                avatarUrl = identity.avatarUrl.orElse(existing.profile.avatarUrl)
+                avatarUrl = cappedAvatarUrl.orElse(existing.profile.avatarUrl)
               ),
               identities = existing.identities.map { current =>
                 if current.provider == providerId && current.subject == identity.subject then
@@ -498,7 +511,7 @@ object PlatformUserAuth:
                   email = normalizedEmail,
                   profile = UserProfile(
                     displayName = truncatedDisplayName,
-                    avatarUrl = identity.avatarUrl
+                    avatarUrl = cappedAvatarUrl
                   ),
                   identities = Vector(
                     ProviderIdentity(
