@@ -236,6 +236,23 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("PlatformUserAuth.Service.create returns a clear error for a corrupted user store file") {
+    withUserStorePath { storePath =>
+      // Write garbage that ujson will reject. Without the file-path-aware wrap,
+      // Service.create's outer catch would surface only the raw ujson message.
+      Files.writeString(storePath, "this is not valid JSON {[", StandardCharsets.UTF_8)
+      val result = PlatformUserAuth.Service.create(PlatformUserAuth.Config(storePath = storePath))
+      assert(result.isLeft, "expected create to fail on corrupted file")
+      val error = result.left.getOrElse(fail("expected Left"))
+      assert(error.contains("user store at"),
+        clue = s"error should name the file path; got: $error")
+      assert(error.contains(storePath.toAbsolutePath.toString),
+        clue = s"error should include the absolute path; got: $error")
+      assert(error.contains("Back up") || error.contains("restore") || error.contains("remove"),
+        clue = s"error should hint at recovery action; got: $error")
+    }
+  }
+
   test("log message sanitization escapes line-structural characters") {
     import HandHistoryReviewServerRuntime.sanitizeLogMessage
 

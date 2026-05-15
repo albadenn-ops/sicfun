@@ -516,9 +516,21 @@ object PlatformUserAuth:
     private def load(): StoreState =
       if !Files.exists(path) then StoreState(Vector.empty)
       else
-        val json = ujson.read(Files.readString(path, StandardCharsets.UTF_8))
-        val users = json.obj.get("users").map(_.arr.toVector.map(readStoredUser)).getOrElse(Vector.empty)
-        StoreState(users = users)
+        try
+          val raw = Files.readString(path, StandardCharsets.UTF_8)
+          val json = ujson.read(raw)
+          val users = json.obj.get("users").map(_.arr.toVector.map(readStoredUser)).getOrElse(Vector.empty)
+          StoreState(users = users)
+        catch
+          case NonFatal(e) =>
+            // Wrap with file path + recovery hint so the operator can act. A bare ujson
+            // parse error like "expected ']' got '}' at offset 1234" otherwise reaches
+            // Service.create's catch with no indication of which file is corrupted.
+            throw new RuntimeException(
+              s"user store at ${path.toAbsolutePath} is unreadable: ${e.getMessage}. " +
+                "Back up the file and restore from backup, or remove it to start fresh.",
+              e
+            )
 
     private def persist(next: StoreState): Unit =
       state = next
