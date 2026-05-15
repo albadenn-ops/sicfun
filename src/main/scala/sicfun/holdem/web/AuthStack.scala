@@ -18,7 +18,7 @@ import sicfun.holdem.web.HandHistoryReviewServerApi.{
   requiredString,
   retryAfterSeconds
 }
-import sicfun.holdem.web.HandHistoryReviewServerRuntime.{logHandlerException, logWarn}
+import sicfun.holdem.web.HandHistoryReviewServerRuntime.{logHandlerException, logInfo, logWarn}
 import sicfun.holdem.web.RateLimit.{RateLimitBucket, RequestRateLimiter}
 import sicfun.holdem.web.WebResponses.*
 
@@ -71,7 +71,13 @@ private[web] object AuthStack:
           readRequestBody(exchange, 16 * 1024)
             .flatMap(parseRegisterRequest)
             .flatMap { case (email, password, displayName) =>
-              service.registerLocal(email, password, displayName).left.map(error => 400 -> error)
+              service.registerLocal(email, password, displayName) match
+                case Right(result) =>
+                  logInfo(s"auth.register.success email=$email remote=${remoteAddress(exchange)}")
+                  Right(result)
+                case Left(error) =>
+                  logWarn(s"auth.register.failure email=$email remote=${remoteAddress(exchange)} reason=$error")
+                  Left(400 -> error)
             }
             .map(result => loginJsonResponse(service, result, status = 201))
 
@@ -88,7 +94,17 @@ private[web] object AuthStack:
           readRequestBody(exchange, 16 * 1024)
             .flatMap(parseLoginRequest)
             .flatMap { case (email, password) =>
-              service.loginLocal(email, password).left.map(error => 401 -> error)
+              service.loginLocal(email, password) match
+                case Right(result) =>
+                  logInfo(s"auth.login.success email=$email remote=${remoteAddress(exchange)}")
+                  Right(result)
+                case Left(error) =>
+                  // Email is what the attacker SUBMITTED, not a confirmed account;
+                  // log it so operators can spot brute-force patterns (e.g. many
+                  // failures from one IP across many emails, or many failures
+                  // from many IPs against one email).
+                  logWarn(s"auth.login.failure email=$email remote=${remoteAddress(exchange)} reason=$error")
+                  Left(401 -> error)
             }
             .map(result => loginJsonResponse(service, result, status = 200))
 
@@ -102,7 +118,9 @@ private[web] object AuthStack:
       platformAuth match
         case None => Left(404 -> "user auth is not enabled")
         case Some(service) =>
+          val email = authenticatedUser(exchange).map(_.email).getOrElse("-")
           val clearedCookie = service.revokeSession(cookieHeader(exchange))
+          logInfo(s"auth.logout email=$email remote=${remoteAddress(exchange)}")
           Right(
             JsonResponse(
               200,
@@ -163,8 +181,10 @@ private[web] object AuthStack:
             case (Some(state), Some(code)) =>
               platformAuth.finishOidc(providerId, state, code) match
                 case Left(error) =>
+                  logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=$error")
                   Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(error)))
                 case Right(result) =>
+                  logInfo(s"auth.oidc.success provider=$providerId email=${result.user.email} remote=${remoteAddress(exchange)}")
                   Right(
                     RedirectResponse(
                       location = PlatformUserAuth.oidcSuccessRedirect,
@@ -172,6 +192,7 @@ private[web] object AuthStack:
                     )
                   )
             case _ =>
+              logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=missing_code_or_state")
               Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect("missing_code_or_state")))
 
   private def loginJsonResponse(
