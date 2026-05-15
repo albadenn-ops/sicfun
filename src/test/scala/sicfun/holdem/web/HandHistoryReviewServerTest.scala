@@ -1686,6 +1686,50 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("OIDC callback caps the provider-supplied ?error= string before logging and redirecting") {
+    // The /callback route is not rate-limited (it's a normal user flow that
+    // fires once per sign-in) so without a cap an attacker who hits it
+    // directly with `?error=<huge string>` could bloat the audit log
+    // arbitrarily AND produce a redirect URL longer than what browsers
+    // accept (~2-8 KB), turning the polite auth_error landing into a
+    // failed redirect. Cap at 256 chars.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              allowLocalRegistration = false,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          // 10 KB attacker-controlled error string. Use only URL-safe chars so
+          // URI.create accepts it.
+          val huge = "x" * 10000
+          val response = get(s"$baseUri${provider.callbackPath}?error=$huge")
+          assertEquals(response.statusCode(), 302)
+          val location = headerValue(response, "Location").getOrElse(fail("missing Location"))
+          // The whole Location header (path + query) must stay well under
+          // typical browser URL caps. 1 KB is generous slack above the 256-char
+          // cap plus the `/?auth_error=` prefix and the "...(truncated)"
+          // marker. If this assertion fires it means the cap regressed.
+          assert(location.length < 1024,
+            s"failure redirect Location is too long (${location.length} bytes): ${location.take(120)}...")
+          // The truncation marker '...(truncated)' is URL-encoded in the
+          // Location header as '...%28truncated%29' because urlEncode escapes
+          // parentheses. The frontend's URLSearchParams will decode it back
+          // before display, so the user sees the human-readable marker.
+          assert(location.contains("%28truncated%29"),
+            s"capped error should include the URL-encoded truncation marker so the user knows the value was clamped; got: $location")
+        }
+      }
+    }
+  }
+
   test("OIDC callback rejects requests that lack the state cookie issued at /start") {
     // OAuth 2.0 BCP "covert-redirect" / login-CSRF mitigation: even if an
     // attacker holds a state value that WE issued (e.g. they kicked off a

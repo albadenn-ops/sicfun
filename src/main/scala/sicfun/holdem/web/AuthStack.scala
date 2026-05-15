@@ -220,7 +220,7 @@ private[web] object AuthStack:
     else
       val query = parseQuery(exchange)
       query.get("error") match
-        case Some(error) =>
+        case Some(rawError) =>
           // The OIDC provider rejected the authorization (user denied consent,
           // expired code, etc.). Log so an unusual burst of provider-side
           // failures is visible alongside our own auth.oidc.failure entries.
@@ -229,6 +229,21 @@ private[web] object AuthStack:
           // /start reissue cleanly without needing the failure path to write
           // multiple Set-Cookie headers (which complicates failure-mode tests
           // that grep `Set-Cookie` for the session cookie's presence).
+          //
+          // Cap the provider-supplied string before either logging it or
+          // embedding it in the failure-redirect URL. The /callback route is
+          // not rate-limited (it's a normal user flow that fires once per
+          // sign-in) so without a cap an attacker who hits it directly with
+          // `?error=<huge string>` could (a) bloat the audit log with
+          // arbitrary-size entries that exhaust disk or trip line-oriented
+          // log parsers, and (b) produce a redirect URL longer than what
+          // browsers accept (~2-8 KB) so legitimate users see a broken
+          // redirect instead of the polite "auth_error=..." landing.
+          // Standard OAuth/OIDC error codes (access_denied, invalid_request,
+          // unauthorized_client, server_error, temporarily_unavailable, etc.)
+          // are short -- 256 chars is generous for any legitimate value and
+          // far below any browser's URL cap.
+          val error = capOidcErrorString(rawError)
           logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=provider-error:$error")
           Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(error)))
         case None =>
@@ -373,6 +388,19 @@ private[web] object AuthStack:
   private def safeUrlDecode(value: String): Option[String] =
     try Some(urlDecode(value))
     catch case _: IllegalArgumentException => None
+
+  // Cap the OIDC provider-supplied `error` query value so an attacker who
+  // hits /callback directly with a multi-kilobyte string cannot bloat the
+  // audit log per request or produce a redirect URL longer than browsers
+  // accept. 256 chars is generous for any standards-compliant OIDC error
+  // code -- the longest is `temporarily_unavailable` (~24 chars), and
+  // RFC 6749 sec 5.2 error descriptions are similarly short. Truncation
+  // marker tells operators and end-users the value was clamped rather than
+  // silently shortened.
+  private val MaxOidcErrorLength = 256
+  private def capOidcErrorString(raw: String): String =
+    if raw.length <= MaxOidcErrorLength then raw
+    else raw.substring(0, MaxOidcErrorLength) + "...(truncated)"
 
 
   final case class RedirectResponse(
