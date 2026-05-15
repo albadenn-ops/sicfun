@@ -811,7 +811,17 @@ object PlatformUserAuth:
       "linkedProviders" -> Arr.from(user.linkedProviders.map(Str(_)))
     )
 
+  // RFC 5321 sec 4.5.3.1.3: an email address (local-part @ domain) cannot exceed
+  // 254 octets. Without this cap an attacker can register with a multi-megabyte
+  // "email" that passes structural validation, persists in the user store JSON,
+  // and slows future startups when load() reads it back. The cap is a fixed
+  // defensive bound; legitimate addresses are well under it (most real-world
+  // emails are under 50 chars).
+  private val MaxEmailLength = 254
+
   private def validateEmail(email: String): Unit =
+    if email.length > MaxEmailLength then
+      throw new IllegalArgumentException(s"email must be at most $MaxEmailLength characters")
     val at = email.indexOf('@')
     val dot = email.lastIndexOf('.')
     if at <= 0 || dot <= at + 1 || dot == email.length - 1 then

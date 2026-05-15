@@ -236,6 +236,30 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("registration rejects emails beyond RFC 5321's 254-character cap") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          // Local part 300 chars + "@example.com" = well over 254. Passes the
+          // structural @-and-dot check but must be rejected by the length cap so
+          // the user store doesn't get polluted with oversize records.
+          val oversizeEmail = ("a" * 300) + "@example.com"
+          val payload =
+            s"""{"email":"$oversizeEmail","password":"correct-horse-battery","displayName":"Test"}"""
+          val rejected = postJson(s"$baseUri/api/auth/register", payload)
+          assertEquals(rejected.statusCode(), 400,
+            clue = jsonBody(rejected).render(indent = 2))
+          assert(jsonBody(rejected)("error").str.contains("at most"),
+            clue = s"expected max-length rejection, got: ${jsonBody(rejected)("error").str}")
+        }
+      }
+    }
+  }
+
   test("registration and login reject passwords beyond the max-length cap") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
