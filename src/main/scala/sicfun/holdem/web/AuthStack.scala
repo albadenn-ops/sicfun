@@ -193,13 +193,20 @@ private[web] object AuthStack:
           case Left(error) =>
             logWarn(s"auth.oidc.start.failure provider=$providerId remote=${remoteAddress(exchange)} reason=$error")
             Left(400 -> error)
-          case Right(location) =>
+          case Right(start) =>
             // INFO not WARN -- this is normal user behavior, but the log entry
             // lets operators correlate a later auth.oidc.success/failure with
             // the start so a missing callback (user abandoned the flow,
             // provider error, etc.) is visible.
             logInfo(s"auth.oidc.start provider=$providerId remote=${remoteAddress(exchange)}")
-            Right(RedirectResponse(location = location))
+            // Bind the random state value to the user agent via a short-lived
+            // cookie so a stolen state cannot be replayed by a different
+            // browser (OAuth 2.0 BCP covert-redirect mitigation). The cookie
+            // is required at the callback step.
+            Right(RedirectResponse(
+              location = start.location,
+              headers = Vector("Set-Cookie" -> start.stateCookieHeader)
+            ))
       }
 
   def handleOidcCallback(
@@ -217,23 +224,50 @@ private[web] object AuthStack:
           // The OIDC provider rejected the authorization (user denied consent,
           // expired code, etc.). Log so an unusual burst of provider-side
           // failures is visible alongside our own auth.oidc.failure entries.
+          // No state cookie clear here: the cookie has a short Max-Age (~10
+          // min) and is HttpOnly + same-origin, so leaving it lets a follow-up
+          // /start reissue cleanly without needing the failure path to write
+          // multiple Set-Cookie headers (which complicates failure-mode tests
+          // that grep `Set-Cookie` for the session cookie's presence).
           logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=provider-error:$error")
           Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(error)))
         case None =>
           (query.get("state"), query.get("code")) match
             case (Some(state), Some(code)) =>
-              platformAuth.finishOidc(providerId, state, code) match
-                case Left(error) =>
-                  logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=$error")
-                  Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(error)))
-                case Right(result) =>
-                  logInfo(s"auth.oidc.success provider=$providerId email=${result.user.email} remote=${remoteAddress(exchange)}")
-                  Right(
-                    RedirectResponse(
-                      location = PlatformUserAuth.oidcSuccessRedirect,
-                      headers = Vector("Set-Cookie" -> result.cookieHeader)
+              // OAuth 2.0 BCP "covert-redirect" / login-CSRF mitigation: the
+              // browser that arrives at /callback must carry the SAME state
+              // value that we Set-Cookie'd at /start. Without this check, an
+              // attacker who finished their own authorization could forward
+              // their `?state=X&code=ATTACKER_CODE` to a victim, and our
+              // OidcStateStore (which only knows that X is a state WE issued)
+              // would happily exchange the code and bind the attacker's
+              // identity to the victim's browser session.
+              val expectedName = platformAuth.expectedOidcStateCookieName
+              val cookieState = extractCookieFromExchange(exchange, expectedName)
+              if cookieState.isEmpty || !cookieState.exists(value => secureEquals(value, state)) then
+                val reason = if cookieState.isEmpty then "missing_state_cookie" else "state_cookie_mismatch"
+                logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=$reason")
+                Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(reason)))
+              else
+                platformAuth.finishOidc(providerId, state, code) match
+                  case Left(error) =>
+                    logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=$error")
+                    Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(error)))
+                  case Right(result) =>
+                    logInfo(s"auth.oidc.success provider=$providerId email=${result.user.email} remote=${remoteAddress(exchange)}")
+                    Right(
+                      RedirectResponse(
+                        location = PlatformUserAuth.oidcSuccessRedirect,
+                        // Two Set-Cookie headers: install the session cookie
+                        // AND clear the now-consumed state cookie. JsonHandler/
+                        // RedirectHandler use `headers.add(...)` so both make
+                        // it onto the wire.
+                        headers = Vector(
+                          "Set-Cookie" -> result.cookieHeader,
+                          "Set-Cookie" -> platformAuth.oidcStateClearCookieHeader
+                        )
+                      )
                     )
-                  )
             case _ =>
               logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=missing_code_or_state")
               Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect("missing_code_or_state")))
@@ -519,6 +553,15 @@ private[web] object AuthStack:
 
   private def cookieHeader(exchange: HttpExchange): Option[String] =
     Option(exchange.getRequestHeaders.getFirst("Cookie")).map(_.trim).filter(_.nonEmpty)
+
+  // Parses the Cookie request header into Option[value] for the named cookie.
+  // Mirrors the same shape used by PlatformUserAuth.extractCookie -- split on
+  // `;`, trim, find the first segment starting with `<name>=`, return the rest.
+  private def extractCookieFromExchange(exchange: HttpExchange, cookieName: String): Option[String] =
+    cookieHeader(exchange)
+      .flatMap(_.split(';').iterator.map(_.trim).find(_.startsWith(s"$cookieName=")))
+      .map(_.substring(cookieName.length + 1))
+      .filter(_.nonEmpty)
 
   private def urlDecode(value: String): String =
     URLDecoder.decode(value, StandardCharsets.UTF_8)

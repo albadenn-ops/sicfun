@@ -1410,8 +1410,17 @@ class HandHistoryReviewServerTest extends FunSuite:
           assertEquals(start.statusCode(), 302)
           val redirect = headerValue(start, "Location").getOrElse(fail("missing OIDC redirect"))
           val state = queryParam(redirect, "state").getOrElse(fail("missing OIDC state"))
+          // /start now Set-Cookies a `sicfun_oidc_state=<state>` value the
+          // callback must echo back. Without it, /callback rejects with
+          // `missing_state_cookie` to block OAuth covert-redirect attacks.
+          val stateCookie = headerValue(start, "Set-Cookie")
+            .map(_.takeWhile(_ != ';'))
+            .getOrElse(fail("missing OIDC state Set-Cookie on /start"))
 
-          val callback = get(s"$baseUri${provider.callbackPath}?state=$state&code=test-code")
+          val callback = get(
+            s"$baseUri${provider.callbackPath}?state=$state&code=test-code",
+            Map("Cookie" -> stateCookie)
+          )
           assertEquals(callback.statusCode(), 302)
           assertEquals(headerValue(callback, "Location"), Some(PlatformUserAuth.oidcSuccessRedirect))
 
@@ -1420,6 +1429,96 @@ class HandHistoryReviewServerTest extends FunSuite:
           assertEquals(me("user")("email").str, "oidc@example.com")
           assertEquals(me("user")("displayName").str, "OIDC User")
           assert(me("user")("linkedProviders").arr.toVector.map(_.str).contains("google"))
+        }
+      }
+    }
+  }
+
+  test("OIDC callback rejects requests that lack the state cookie issued at /start") {
+    // OAuth 2.0 BCP "covert-redirect" / login-CSRF mitigation: even if an
+    // attacker holds a state value that WE issued (e.g. they kicked off a
+    // partial flow themselves), they cannot forward the resulting
+    // ?state=X&code=Y URL to a victim and have the victim's browser end up
+    // bound to the attacker's account -- because the victim's browser lacks
+    // the `sicfun_oidc_state=X` cookie that /start set on the attacker's
+    // browser. Without the cookie, /callback must abort before exchanging the
+    // code with the provider.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              allowLocalRegistration = false,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val start = get(s"$baseUri${provider.startPath}")
+          val state = queryParam(headerValue(start, "Location").getOrElse(""), "state")
+            .getOrElse(fail("missing OIDC state"))
+
+          // Callback without the state cookie -> must fail with
+          // missing_state_cookie, NOT proceed to finishOidc.
+          val noCookie = get(s"$baseUri${provider.callbackPath}?state=$state&code=test-code")
+          assertEquals(noCookie.statusCode(), 302)
+          val noCookieLocation = headerValue(noCookie, "Location").getOrElse(fail("missing Location"))
+          assert(noCookieLocation.contains("missing_state_cookie"),
+            s"callback without state cookie must surface missing_state_cookie; got: $noCookieLocation")
+          assertEquals(headerValue(noCookie, "Set-Cookie"), None,
+            "rejected callback must not install a session cookie")
+
+          // Callback with a MISMATCHED state cookie -> state_cookie_mismatch.
+          // Simulates an attacker forwarding their own state to the victim's
+          // browser, which carries a different state cookie from its own flow.
+          val mismatchedCookie = get(
+            s"$baseUri${provider.callbackPath}?state=$state&code=test-code",
+            Map("Cookie" -> "sicfun_oidc_state=different-state")
+          )
+          assertEquals(mismatchedCookie.statusCode(), 302)
+          val mismatchedLocation = headerValue(mismatchedCookie, "Location").getOrElse(fail("missing Location"))
+          assert(mismatchedLocation.contains("state_cookie_mismatch"),
+            s"callback with wrong state cookie must surface state_cookie_mismatch; got: $mismatchedLocation")
+          assertEquals(headerValue(mismatchedCookie, "Set-Cookie"), None,
+            "rejected callback must not install a session cookie")
+        }
+      }
+    }
+  }
+
+  test("OIDC /start emits a HttpOnly SameSite=Lax state cookie bound to the redirect's state value") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              allowLocalRegistration = false,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val start = get(s"$baseUri${provider.startPath}")
+          val urlState = queryParam(headerValue(start, "Location").getOrElse(""), "state")
+            .getOrElse(fail("missing OIDC state in redirect"))
+          val setCookie = headerValue(start, "Set-Cookie").getOrElse(fail("missing Set-Cookie on /start"))
+          assert(setCookie.startsWith("sicfun_oidc_state="),
+            s"state cookie name should be sicfun_oidc_state when cookieSecure=false; got: $setCookie")
+          val cookieValue = setCookie.takeWhile(_ != ';').drop("sicfun_oidc_state=".length)
+          assertEquals(cookieValue, urlState,
+            "state cookie value must match the URL state so the callback's compare succeeds")
+          assert(setCookie.toLowerCase.contains("httponly"),
+            s"state cookie must be HttpOnly so JS cannot read or set it; got: $setCookie")
+          assert(setCookie.toLowerCase.contains("samesite=lax"),
+            s"state cookie must be SameSite=Lax so the provider's top-level redirect can send it back; got: $setCookie")
+          assert(setCookie.toLowerCase.contains("max-age="),
+            s"state cookie must have a Max-Age (10 minutes); got: $setCookie")
         }
       }
     }
@@ -1484,7 +1583,13 @@ class HandHistoryReviewServerTest extends FunSuite:
             val start = get(s"$baseUri${provider.startPath}")
             val state = queryParam(headerValue(start, "Location").getOrElse(""), "state")
               .getOrElse(fail("missing OIDC state"))
-            val callback = get(s"$baseUri${provider.callbackPath}?state=$state&code=anything")
+            val stateCookie = headerValue(start, "Set-Cookie")
+              .map(_.takeWhile(_ != ';'))
+              .getOrElse(fail("missing OIDC state Set-Cookie on /start"))
+            val callback = get(
+              s"$baseUri${provider.callbackPath}?state=$state&code=anything",
+              Map("Cookie" -> stateCookie)
+            )
             check(callback)
           }
         }
@@ -1561,13 +1666,19 @@ class HandHistoryReviewServerTest extends FunSuite:
           val baseUri = s"http://${server.binding.host}:${server.binding.port}"
 
           val cases = Vector(
-            "" -> "missing_code_or_state",
-            "?state=abc" -> "missing_code_or_state",
-            "?code=xyz" -> "missing_code_or_state",
-            "?state=this-state-was-never-issued&code=xyz" -> "OIDC"
+            // (query, cookie-or-empty, expected-substring-in-failure-redirect)
+            ("", Map.empty[String, String], "missing_code_or_state"),
+            ("?state=abc", Map.empty[String, String], "missing_code_or_state"),
+            ("?code=xyz", Map.empty[String, String], "missing_code_or_state"),
+            // Unknown-state case now needs the state cookie to clear the
+            // covert-redirect check FIRST so the underlying "state expired or
+            // invalid" finishOidc error is what surfaces in the redirect.
+            ("?state=this-state-was-never-issued&code=xyz",
+              Map("Cookie" -> "sicfun_oidc_state=this-state-was-never-issued"),
+              "OIDC")
           )
-          for (query, expectedSubstring) <- cases do
-            val resp = get(s"$baseUri${provider.callbackPath}$query")
+          for (query, headers, expectedSubstring) <- cases do
+            val resp = get(s"$baseUri${provider.callbackPath}$query", headers)
             assertEquals(resp.statusCode(), 302, clue = s"query=$query")
             val location = headerValue(resp, "Location").getOrElse(fail(s"missing Location for query=$query"))
             assert(location.contains("/?auth_error="),

@@ -46,6 +46,7 @@ import scala.util.control.NonFatal
 object PlatformUserAuth:
   private val LocalProviderId = "local"
   private val DefaultSessionCookieName = "sicfun_session"
+  private val DefaultOidcStateCookieName = "sicfun_oidc_state"
   private val DefaultSessionTtlMs = 12L * 60L * 60L * 1000L
   private val DefaultOidcFlowTtlMs = 10L * 60L * 1000L
   private val PasswordAlgorithm = "PBKDF2WithHmacSHA256"
@@ -144,6 +145,22 @@ object PlatformUserAuth:
       user: UserView,
       csrfToken: String,
       cookieHeader: String
+  )
+
+  /** Result of starting an OIDC authorization flow.
+    *
+    * `state` is the random value embedded in the redirect URL; the same value
+    * is bound to a short-lived Set-Cookie (`stateCookieHeader`) the caller must
+    * emit alongside the redirect. The callback handler will then require both
+    * the URL state and the cookie state to match -- without the cookie, an
+    * attacker who hijacks a valid state value cannot redirect a victim to our
+    * callback URL and impersonate them (OAuth 2.0 BCP "mix-up" /
+    * "covert-redirect" mitigation: bind the state to the user agent that
+    * initiated the flow). */
+  final case class OidcStartResult(
+      location: String,
+      state: String,
+      stateCookieHeader: String
   )
 
   final case class OidcIdentity(
@@ -339,12 +356,20 @@ object PlatformUserAuth:
     def revokeSession(cookieHeader: Option[String]): String =
       sessionManager.revoke(cookieHeader)
 
-    def startOidc(providerId: String): Either[String, String] =
+    def startOidc(providerId: String): Either[String, OidcStartResult] =
       providersById.get(providerId).toRight(s"unknown OIDC provider '$providerId'").map { provider =>
         val codeVerifier = randomBase64Url(OidcCodeVerifierBytes)
         val state = oidcStateStore.issue(provider.id, codeVerifier)
-        provider.authorizationUri(state, codeChallenge(codeVerifier))
+        OidcStartResult(
+          location = provider.authorizationUri(state, codeChallenge(codeVerifier)),
+          state = state,
+          stateCookieHeader = oidcStateCookieHeader(state, DefaultOidcFlowTtlMs, config.cookieSecure)
+        )
       }
+
+    def expectedOidcStateCookieName: String = oidcStateCookieName(config.cookieSecure)
+
+    def oidcStateClearCookieHeader: String = clearOidcStateCookieHeader(config.cookieSecure)
 
     def finishOidc(providerId: String, state: String, code: String): Either[String, LoginResult] =
       for
@@ -1069,6 +1094,43 @@ object PlatformUserAuth:
     parts += s"${sessionCookieName(secure)}=$token"
     parts += "Path=/"
     parts += s"Max-Age=${math.max(1L, ttlMs / 1000L)}"
+    parts += "HttpOnly"
+    parts += "SameSite=Lax"
+    if secure then
+      parts += "Secure"
+    parts.result().mkString("; ")
+
+  // OIDC state cookie binds the random `state` value embedded in the
+  // authorization URL to the user-agent that initiated the flow. Without this
+  // binding, an attacker who completes their own authorization up to the
+  // redirect step can forward `?state=X&code=ATTACKER_CODE` to a victim; our
+  // callback would happily exchange the code and the victim's browser would
+  // end up holding a session for the attacker's account (OAuth 2.0 BCP
+  // "covert-redirect" / "login CSRF"). With the cookie, only the user agent
+  // that received the Set-Cookie at /start can supply the matching cookie at
+  // /callback.
+  private[web] def oidcStateCookieName(secure: Boolean): String =
+    if secure then s"__Host-$DefaultOidcStateCookieName" else DefaultOidcStateCookieName
+
+  private def oidcStateCookieHeader(state: String, ttlMs: Long, secure: Boolean): String =
+    val parts = Vector.newBuilder[String]
+    parts += s"${oidcStateCookieName(secure)}=$state"
+    parts += "Path=/"
+    parts += s"Max-Age=${math.max(1L, ttlMs / 1000L)}"
+    parts += "HttpOnly"
+    // SameSite=Lax: the OIDC callback is a top-level GET navigation back from
+    // the provider, which Lax permits. SameSite=Strict would block the cookie
+    // on the callback hop and break the flow.
+    parts += "SameSite=Lax"
+    if secure then
+      parts += "Secure"
+    parts.result().mkString("; ")
+
+  private def clearOidcStateCookieHeader(secure: Boolean): String =
+    val parts = Vector.newBuilder[String]
+    parts += s"${oidcStateCookieName(secure)}="
+    parts += "Path=/"
+    parts += "Max-Age=0"
     parts += "HttpOnly"
     parts += "SameSite=Lax"
     if secure then
