@@ -138,7 +138,8 @@ private[web] final class StaticAssetsHandler(
     catch
       case NonFatal(e) =>
         logHandlerException(exchange, e, "unhandled exception in StaticAssetsHandler")
-        writePlain(exchange, 500, "internal server error", "text/plain; charset=utf-8")
+        try writePlain(exchange, 500, "internal server error", "text/plain; charset=utf-8")
+        catch case NonFatal(_) => ()
     finally
       exchange.close()
 

@@ -348,7 +348,11 @@ private[web] object AuthStack:
           // generic message so we don't leak internal class names, file paths,
           // or other implementation detail back to clients via e.getMessage.
           logHandlerException(exchange, e, "unhandled exception in JsonHandler")
-          writeJson(exchange, 500, Obj("error" -> Str("internal server error")))
+          // If the original write already called sendResponseHeaders, the fallback
+          // write will throw "headers already sent" -- swallow it so the catch
+          // does not leak a second unhandled exception to the HTTP server frame.
+          try writeJson(exchange, 500, Obj("error" -> Str("internal server error")))
+          catch case NonFatal(_) => ()
       finally
         exchange.close()
 
@@ -369,7 +373,8 @@ private[web] object AuthStack:
       catch
         case NonFatal(e) =>
           logHandlerException(exchange, e, "unhandled exception in RedirectHandler")
-          writePlain(exchange, 500, "internal server error", "text/plain; charset=utf-8")
+          try writePlain(exchange, 500, "internal server error", "text/plain; charset=utf-8")
+          catch case NonFatal(_) => ()
       finally
         exchange.close()
 
