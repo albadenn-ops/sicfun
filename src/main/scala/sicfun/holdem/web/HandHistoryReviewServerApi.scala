@@ -438,6 +438,22 @@ private[web] object HandHistoryReviewServerApi:
         Left(400 -> s"villainPool contains unsupported entries: ${invalid.distinct.sorted.mkString(", ")}")
       else Right(normalized)
 
+  // Map a ujson.Value to its JSON-type label without serializing the value.
+  // `ujson.write(other)` for an Arr/Obj field can produce a multi-megabyte
+  // string that then lands verbatim in the 400 response body -- an attacker
+  // who sends {"hands": <1.9 MB nested object>} via /api/playing-hall (2 MB
+  // body cap) gets 1.9 MB of their own payload echoed back through the error
+  // response. The TYPE alone is enough information for legitimate clients to
+  // fix their request; the value adds nothing the client doesn't already
+  // know but inflates the response by the full attacker payload.
+  private def jsonTypeName(value: Value): String = value match
+    case _: ujson.Str => "string"
+    case _: ujson.Num => "number"
+    case _: ujson.Bool => "boolean"
+    case ujson.Null => "null"
+    case _: ujson.Arr => "array"
+    case _: ujson.Obj => "object"
+
   private def optionalInt(
       obj: collection.Map[String, Value],
       key: String
@@ -445,7 +461,7 @@ private[web] object HandHistoryReviewServerApi:
     obj.get(key).map {
       case ujson.Num(value) if value.isWhole => Right(value.toInt)
       case Str(value) => value.trim.toIntOption.toRight(400 -> s"$key must be an integer")
-      case other => Left(400 -> s"$key must be an integer, got ${ujson.write(other)}")
+      case other => Left(400 -> s"$key must be an integer, got ${jsonTypeName(other)}")
     }
 
   private def optionalLong(
@@ -455,7 +471,7 @@ private[web] object HandHistoryReviewServerApi:
     obj.get(key).map {
       case ujson.Num(value) if value.isWhole => Right(value.toLong)
       case Str(value) => value.trim.toLongOption.toRight(400 -> s"$key must be a long")
-      case other => Left(400 -> s"$key must be a long, got ${ujson.write(other)}")
+      case other => Left(400 -> s"$key must be a long, got ${jsonTypeName(other)}")
     }
 
   private def optionalDouble(
@@ -465,7 +481,7 @@ private[web] object HandHistoryReviewServerApi:
     obj.get(key).map {
       case ujson.Num(value) => Right(value)
       case Str(value) => value.trim.toDoubleOption.toRight(400 -> s"$key must be a number")
-      case other => Left(400 -> s"$key must be a number, got ${ujson.write(other)}")
+      case other => Left(400 -> s"$key must be a number, got ${jsonTypeName(other)}")
     }
 
   private def optionalBoolean(
@@ -479,7 +495,7 @@ private[web] object HandHistoryReviewServerApi:
           case "true" => Right(true)
           case "false" => Right(false)
           case _ => Left(400 -> s"$key must be true or false")
-      case other => Left(400 -> s"$key must be true or false, got ${ujson.write(other)}")
+      case other => Left(400 -> s"$key must be true or false, got ${jsonTypeName(other)}")
     }
 
   private def optionalStringArray(
