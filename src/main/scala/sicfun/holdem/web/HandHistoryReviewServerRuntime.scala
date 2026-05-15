@@ -403,7 +403,20 @@ private[web] object HandHistoryReviewServerRuntime:
     val path = Option(exchange.getRequestURI).map(_.getRawPath).getOrElse("?")
     val message = Option(e.getMessage).getOrElse("")
     logError(s"$label method=$method path=$path exception=${e.getClass.getName} message=$message")
-    e.printStackTrace()
+    // Render the stack trace as a string and route each frame through the
+    // same sanitized log path so a user-controlled value that ends up in
+    // an exception message (e.g. a JSON parse error that surfaces the
+    // offending byte at a position the parser quotes back) cannot inject
+    // forged log lines. The raw `e.printStackTrace()` we used before wrote
+    // straight to System.err bypassing sanitizeLogMessage and bypassing
+    // the per-write synchronized block, so a malicious payload combined
+    // with a concurrent legitimate log line could fabricate log entries
+    // and confuse line-oriented log tools.
+    val rendered = new java.io.StringWriter()
+    e.printStackTrace(new java.io.PrintWriter(rendered))
+    rendered.toString.split('\n').iterator.map(_.stripSuffix("\r")).filter(_.nonEmpty).foreach { line =>
+      logError(s"$label stack=$line")
+    }
 
   /** Escapes control characters inside a log message so that user-controlled
     * values flowing into a log line cannot forge fake log entries or confuse
