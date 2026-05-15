@@ -168,10 +168,17 @@ private[web] object AuthStack:
       Left(405 -> "GET required")
     else
       extractOidcProviderId(exchange, "/start").flatMap { providerId =>
-        platformAuth.startOidc(providerId)
-          .left
-          .map(error => 400 -> error)
-          .map(location => RedirectResponse(location = location))
+        platformAuth.startOidc(providerId) match
+          case Left(error) =>
+            logWarn(s"auth.oidc.start.failure provider=$providerId remote=${remoteAddress(exchange)} reason=$error")
+            Left(400 -> error)
+          case Right(location) =>
+            // INFO not WARN -- this is normal user behavior, but the log entry
+            // lets operators correlate a later auth.oidc.success/failure with
+            // the start so a missing callback (user abandoned the flow,
+            // provider error, etc.) is visible.
+            logInfo(s"auth.oidc.start provider=$providerId remote=${remoteAddress(exchange)}")
+            Right(RedirectResponse(location = location))
       }
 
   def handleOidcCallback(
