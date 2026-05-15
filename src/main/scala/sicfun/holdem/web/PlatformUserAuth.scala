@@ -593,8 +593,16 @@ object PlatformUserAuth:
             )
 
     private def persist(next: StoreState): Unit =
-      state = next
+      // Write to disk FIRST, publish to memory only on success. The previous
+      // order (state = next; writeState(...)) left the in-memory store ahead
+      // of disk if the write failed -- the caller saw an error and the user
+      // store quietly held a ghost record that disappeared on the next
+      // restart. With the journal-then-publish order, a failed write keeps
+      // memory and disk consistent; the IOException propagates to the
+      // synchronized caller (registerLocal / updateProfile / upsertOidcIdentity)
+      // which returns Left and the user can retry cleanly.
       writeState(path, next)
+      state = next
 
     private def replaceUser(userId: String, updated: StoredUser): StoreState =
       sortedState(state.users.map(current => if current.userId == userId then updated else current))
