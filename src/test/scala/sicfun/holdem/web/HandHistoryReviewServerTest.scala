@@ -638,6 +638,15 @@ class HandHistoryReviewServerTest extends FunSuite:
           )
           assertEquals(head.statusCode(), 200, clue = s"$path HEAD must succeed for monitoring probes")
           assertEquals(head.body(), "", clue = s"$path HEAD must not include a body")
+
+          // HEAD response carries the same security/cache headers as GET so a
+          // probe that asserts on them still works in HEAD mode.
+          val getResp = get(s"$baseUri$path")
+          assertEquals(getResp.statusCode(), 200, clue = path)
+          assertEquals(headerValue(head, "Content-Type"), headerValue(getResp, "Content-Type"),
+            clue = s"$path HEAD Content-Type must match GET")
+          assertEquals(headerValue(head, "Cache-Control"), headerValue(getResp, "Cache-Control"),
+            clue = s"$path HEAD Cache-Control must match GET")
       }
     }
   }
