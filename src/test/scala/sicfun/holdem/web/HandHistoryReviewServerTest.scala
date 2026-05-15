@@ -989,6 +989,13 @@ class HandHistoryReviewServerTest extends FunSuite:
             s"session cookie must declare Max-Age so browsers expire it on schedule; got: $setCookie")
           assert(!setCookie.contains("Secure"),
             s"loopback test deployment with cookieSecure=false must NOT set Secure (would prevent cookie over HTTP); got: $setCookie")
+          // Insecure mode: cookie name is `sicfun_session`. The `__Host-` prefix
+          // is only added when cookieSecure=true so the browser doesn't reject
+          // the cookie over plain HTTP.
+          assert(setCookie.startsWith("sicfun_session="),
+            s"insecure-mode cookie must use plain name, got: $setCookie")
+          assert(!setCookie.startsWith("__Host-"),
+            s"insecure-mode cookie must not use __Host- prefix (browsers reject __Host- over HTTP), got: $setCookie")
 
           val ownerHeaders = authSessionHeaders(register, registerJson("csrfToken").str)
 
@@ -1028,6 +1035,42 @@ class HandHistoryReviewServerTest extends FunSuite:
 
           val afterLogout = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
           assertEquals(afterLogout.statusCode(), 401)
+        }
+      }
+    }
+  }
+
+  test("session cookie uses __Host- prefix and Secure flag when cookieSecure=true") {
+    // RFC 6265 sec 4.1.3: a cookie with the `__Host-` prefix is rejected by
+    // browsers unless it was set over HTTPS, has Path=/, and has no Domain
+    // attribute. That blocks a sibling subdomain (compromised or rogue) from
+    // overwriting or planting a session cookie. We only emit the prefix when
+    // cookieSecure=true so the cookie remains usable over plain HTTP for
+    // localhost dev.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath, cookieSecure = true))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val register = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"secure@example.com","password":"correct-horse-battery","displayName":"Secure"}"""
+          )
+          assertEquals(register.statusCode(), 201)
+
+          val setCookie = headerValue(register, "Set-Cookie")
+            .getOrElse(fail("expected Set-Cookie on registration response"))
+          assert(setCookie.startsWith("__Host-sicfun_session="),
+            s"secure-mode cookie must use __Host- prefix, got: $setCookie")
+          assert(setCookie.contains("Secure"),
+            s"secure-mode cookie must set Secure, got: $setCookie")
+          assert(setCookie.contains("Path=/"),
+            s"__Host- prefix requires Path=/, got: $setCookie")
+          assert(!setCookie.contains("Domain="),
+            s"__Host- prefix forbids Domain attribute, got: $setCookie")
         }
       }
     }

@@ -630,7 +630,7 @@ object PlatformUserAuth:
         userStore: JsonUserStore
     ): Option[AuthenticatedUser] =
       purgeExpired()
-      extractCookie(cookieHeader, DefaultSessionCookieName)
+      extractCookie(cookieHeader, sessionCookieName(cookieSecure))
         .flatMap { token =>
           val key = sha256Hex(token)
           Option(sessions.get(key))
@@ -656,7 +656,7 @@ object PlatformUserAuth:
         }
 
     def revoke(cookieHeader: Option[String]): String =
-      extractCookie(cookieHeader, DefaultSessionCookieName).foreach { token =>
+      extractCookie(cookieHeader, sessionCookieName(cookieSecure)).foreach { token =>
         sessions.remove(sha256Hex(token))
       }
       clearSessionCookieHeader(cookieSecure)
@@ -953,9 +953,18 @@ object PlatformUserAuth:
       .map(_.substring(cookieName.length + 1))
       .filter(_.nonEmpty)
 
+  // Resolve the wire-format cookie name for a given secure-mode setting. When
+  // the deployment is HTTPS-backed (cookieSecure=true), use the `__Host-` prefix
+  // so the browser enforces three extra invariants: the cookie was set over
+  // HTTPS, Path=/, and no Domain attribute. That blocks a sibling subdomain
+  // (compromised or rogue) from overwriting our session cookie or planting a
+  // pre-set one. RFC 6265 sec 4.1.3.
+  private[web] def sessionCookieName(secure: Boolean): String =
+    if secure then s"__Host-$DefaultSessionCookieName" else DefaultSessionCookieName
+
   private def sessionCookieHeader(token: String, ttlMs: Long, secure: Boolean): String =
     val parts = Vector.newBuilder[String]
-    parts += s"$DefaultSessionCookieName=$token"
+    parts += s"${sessionCookieName(secure)}=$token"
     parts += "Path=/"
     parts += s"Max-Age=${math.max(1L, ttlMs / 1000L)}"
     parts += "HttpOnly"
@@ -966,7 +975,7 @@ object PlatformUserAuth:
 
   private def clearSessionCookieHeader(secure: Boolean): String =
     val parts = Vector.newBuilder[String]
-    parts += s"$DefaultSessionCookieName="
+    parts += s"${sessionCookieName(secure)}="
     parts += "Path=/"
     parts += "Max-Age=0"
     parts += "HttpOnly"
