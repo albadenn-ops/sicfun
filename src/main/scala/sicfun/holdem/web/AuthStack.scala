@@ -77,9 +77,15 @@ private[web] object AuthStack:
             .flatMap { case (email, password, displayName) =>
               service.registerLocal(email, password, displayName) match
                 case Right(result) =>
-                  logInfo(s"auth.register.success email=$email remote=${remoteAddress(exchange)}")
+                  // Log the canonical (normalized) email from the stored record so
+                  // operators grepping for a user see a single consistent value
+                  // across login/logout/profile events regardless of input casing.
+                  logInfo(s"auth.register.success email=${result.user.email} remote=${remoteAddress(exchange)}")
                   Right(result)
                 case Left(error) =>
+                  // Failure path logs the SUBMITTED email -- there may be no
+                  // canonical user, and operators want to see exactly what the
+                  // attacker typed (which may differ from the stored email).
                   logWarn(s"auth.register.failure email=$email remote=${remoteAddress(exchange)} reason=$error")
                   Left(400 -> error)
             }
@@ -101,7 +107,10 @@ private[web] object AuthStack:
             .flatMap { case (email, password) =>
               service.loginLocal(email, password) match
                 case Right(result) =>
-                  logInfo(s"auth.login.success email=$email remote=${remoteAddress(exchange)}")
+                  // Log the canonical (normalized) email so operators grepping
+                  // for a user see a single value across all of their events,
+                  // regardless of how they typed their email at the form.
+                  logInfo(s"auth.login.success email=${result.user.email} remote=${remoteAddress(exchange)}")
                   Right(result)
                 case Left(error) =>
                   // Email is what the attacker SUBMITTED, not a confirmed account;
