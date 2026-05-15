@@ -294,6 +294,45 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("registration preserves password whitespace and login enforces the exact bytes") {
+    // validatePassword no longer trims before checking length, so what the
+    // user submits is what gets hashed. Pin both directions:
+    //   1. A password with significant whitespace registers cleanly (the
+    //      whole 13-char string passes >=10).
+    //   2. Logging in with the same exact whitespace succeeds.
+    //   3. Logging in with the same characters MINUS the surrounding
+    //      whitespace fails -- because pre-trim validation used to silently
+    //      strip whitespace from the validate step but not the hash step,
+    //      regressing to that behaviour would falsely accept the trimmed
+    //      form on login.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val padded = "  hunter22ab  "
+          val trimmed = "hunter22ab"
+
+          val register = postJson(s"$baseUri/api/auth/register",
+            s"""{"email":"ws@example.com","password":"$padded","displayName":"WS"}""")
+          assertEquals(register.statusCode(), 201)
+
+          val loginExact = postJson(s"$baseUri/api/auth/login",
+            s"""{"email":"ws@example.com","password":"$padded"}""")
+          assertEquals(loginExact.statusCode(), 200,
+            clue = "login with the exact registered password (whitespace included) must succeed")
+
+          val loginTrimmed = postJson(s"$baseUri/api/auth/login",
+            s"""{"email":"ws@example.com","password":"$trimmed"}""")
+          assertEquals(loginTrimmed.statusCode(), 401,
+            clue = "login with the trimmed password must fail -- raw bytes were hashed at register")
+        }
+      }
+    }
+  }
+
   test("registration and login reject passwords beyond the max-length cap") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
