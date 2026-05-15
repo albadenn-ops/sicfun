@@ -732,6 +732,44 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("static handler returns the same ETag and Content-Encoding on HEAD as on GET for the same Accept-Encoding") {
+    // RFC 7231: HEAD describes the GET response. A client that does HEAD to
+    // validate a cached entry and then GET to refetch must see the same
+    // variant headers, or the cache will discard the entry on the GET
+    // response with different ETag/Content-Encoding.
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        def fetch(method: String, acceptEncoding: Option[String]): HttpResponse[String] =
+          val builder = HttpRequest.newBuilder(URI.create(s"$baseUri/")).method(method, HttpRequest.BodyPublishers.noBody())
+          acceptEncoding.foreach(builder.header("Accept-Encoding", _))
+          httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+
+        // Accept-Encoding: gzip -- the gzipped variant
+        val headGz = fetch("HEAD", Some("gzip"))
+        val getGz = fetch("GET", Some("gzip"))
+        assertEquals(headerValue(headGz, "ETag"), headerValue(getGz, "ETag"),
+          "HEAD and GET must report the same ETag for the gzipped variant")
+        assertEquals(headerValue(headGz, "Content-Encoding"), headerValue(getGz, "Content-Encoding"),
+          "HEAD and GET must report the same Content-Encoding for the gzipped variant")
+        assert(headerValue(headGz, "ETag").exists(_.endsWith("-gz\"")),
+          s"gzipped ETag must carry the -gz suffix, got: ${headerValue(headGz, "ETag")}")
+        assertEquals(headGz.body(), "", "HEAD response must have no body")
+
+        // No Accept-Encoding -- the plain variant
+        val headPlain = fetch("HEAD", None)
+        val getPlain = fetch("GET", None)
+        assertEquals(headerValue(headPlain, "ETag"), headerValue(getPlain, "ETag"),
+          "HEAD and GET must report the same ETag for the plain variant")
+        assert(headerValue(headPlain, "Content-Encoding").isEmpty,
+          s"plain variant must not carry Content-Encoding, got: ${headerValue(headPlain, "Content-Encoding")}")
+        assert(!headerValue(headPlain, "ETag").exists(_.endsWith("-gz\"")),
+          s"plain ETag must not carry the -gz suffix, got: ${headerValue(headPlain, "ETag")}")
+      }
+    }
+  }
+
   test("static handler honors If-None-Match on HEAD by returning 304") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>

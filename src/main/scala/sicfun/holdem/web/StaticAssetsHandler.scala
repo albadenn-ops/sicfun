@@ -71,12 +71,21 @@ private[web] final class StaticAssetsHandler(
             val contentType = contentTypeFor(target)
             val compressible = isCompressibleType(contentType)
             val acceptsGzip = clientAcceptsGzip(exchange)
-            val willCompress = compressible && acceptsGzip && isGet
+            // `wouldCompressIfGet` describes the VARIANT (gzipped or plain) the
+            // resource is going to be served as; HEAD must report the same
+            // variant headers and ETag as GET would for the same request shape
+            // so client caches that store HEAD-validated entries don't choke
+            // when the same client then issues GET.
+            val wouldCompressIfGet = compressible && acceptsGzip
+            // `willCompress` controls whether THIS response actually contains
+            // compressed bytes. HEAD has no body either way, so we skip the
+            // compression work for HEAD even when the variant is gzipped.
+            val willCompress = wouldCompressIfGet && isGet
             // Variant ETag: gzipped and uncompressed are different representations.
             // RFC 7232 sec 2.3.1: weak ETags MAY indicate equivalent representations,
             // but conservative caches that key only on ETag (ignoring Vary) need
             // distinct values to avoid serving the wrong encoding.
-            val etag = s"""W/"$size-$lastModified${if willCompress then "-gz" else ""}""""
+            val etag = s"""W/"$size-$lastModified${if wouldCompressIfGet then "-gz" else ""}""""
             val cacheControl =
               if requestPath.startsWith("/vendor/") then "public, max-age=31536000"
               else "public, max-age=0, must-revalidate"
@@ -112,7 +121,11 @@ private[web] final class StaticAssetsHandler(
               exchange.sendResponseHeaders(304, -1L)
             else if isHead then
               exchange.getResponseHeaders.set("Content-Type", contentType)
-              if willCompress then
+              // Advertise the same variant headers a GET would emit, so client
+              // caches that validate via HEAD then fetch via GET see consistent
+              // headers and don't invalidate. wouldCompressIfGet -- NOT
+              // willCompress -- because willCompress is gated on `isGet`.
+              if wouldCompressIfGet then
                 exchange.getResponseHeaders.set("Content-Encoding", "gzip")
               exchange.sendResponseHeaders(200, -1L)
             else if willCompress then
