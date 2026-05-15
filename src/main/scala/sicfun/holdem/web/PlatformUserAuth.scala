@@ -1016,9 +1016,16 @@ object PlatformUserAuth:
     try factory.generateSecret(spec).getEncoded
     finally spec.clearPassword()
 
+  // Shared SecureRandom: instantiation is non-trivial (the JDK's strong-DRBG
+  // setup samples OS entropy on first use), and SecureRandom.nextBytes is
+  // documented thread-safe. Reusing one instance avoids repeating that work
+  // for every session/CSRF/OIDC-state mint -- which on login fires four times
+  // (session token, csrf token, oidc state, code verifier).
+  private val secureRandom: SecureRandom = new SecureRandom()
+
   private def randomBytes(length: Int): Array[Byte] =
     val bytes = new Array[Byte](length)
-    new SecureRandom().nextBytes(bytes)
+    secureRandom.nextBytes(bytes)
     bytes
 
   private def randomBase64Url(length: Int): String =
