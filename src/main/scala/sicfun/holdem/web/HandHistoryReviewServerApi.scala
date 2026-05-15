@@ -209,6 +209,14 @@ private[web] object HandHistoryReviewServerApi:
       }
     else Right(methodNotAllowed("GET, DELETE"))
 
+  // Loose upper bound on job-id length. We generate UUID.randomUUID().toString
+  // (36 chars), so anything dramatically longer is the URL being abused. Use a
+  // generous cap (128 chars) so a future migration to a different id scheme
+  // does not box us in, but tight enough that an attacker cannot force the
+  // jobStore.get hash to chew on a 64 KB key per request or echo a big jobId
+  // back through the 404 response body.
+  private val MaxJobIdLength = 128
+
   private def extractJobId(
       exchange: HttpExchange,
       pathPrefix: String,
@@ -218,7 +226,14 @@ private[web] object HandHistoryReviewServerApi:
     if !path.startsWith(pathPrefix) then Left(404 -> "not found")
     else
       val jobId = path.substring(pathPrefix.length).trim
-      Either.cond(jobId.nonEmpty && !jobId.contains("/"), jobId, 400 -> s"$label job id is required")
+      if jobId.isEmpty || jobId.contains("/") then Left(400 -> s"$label job id is required")
+      // Oversize jobIds get 404, not 400. The downstream "job not found" is
+      // the same status code; treating oversize as "definitely not a job
+      // we know about" avoids both echoing the oversize value back through
+      // the error body AND giving the attacker a separate response shape
+      // they can use to fingerprint the length cutoff.
+      else if jobId.length > MaxJobIdLength then Left(404 -> s"$label job not found")
+      else Right(jobId)
 
   private def parseRequest(body: String): Either[(Int, String), HandHistoryReviewService.AnalysisRequest] =
     try

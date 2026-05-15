@@ -2271,6 +2271,34 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("oversize jobId path segments return a generic 404 without echoing the value back through the response body") {
+    // The job-id URL segment goes into Map.get keys (O(N) hash work) and
+    // into the "job not found: <id>" 404 response body. A long jobId in the
+    // URL was therefore both a CPU and bandwidth amplifier per request (an
+    // authenticated attacker rate-limited at 240/min via JobStatus bucket
+    // could echo ~15 MB/min of attacker-controlled payload back in 404
+    // bodies). Cap at 128 chars (UUIDs are 36) and return the same 404 the
+    // genuine-unknown-job path returns, with a generic "not found" message
+    // that does NOT include the requested id.
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val huge = "z" * 4096
+        val response = delete(s"$baseUri/api/playing-hall/jobs/$huge")
+        assertEquals(response.statusCode(), 404)
+        val errorBody = jsonBody(response)("error").str
+        assert(errorBody.contains("not found"),
+          clue = s"oversize jobId should still surface a 'not found' message; got: $errorBody")
+        assert(!errorBody.contains(huge.take(200)),
+          clue = "oversize jobId must NOT be echoed in the 404 response body (would burn upstream bandwidth and let the attacker amplify)")
+        // Total response size must stay tiny -- the attacker mailed in ~4 KB
+        // of jobId and they get back ~50 bytes of JSON, not 4 KB echoed.
+        assert(response.body().length < 256,
+          clue = s"404 response body should stay small; got ${response.body().length} bytes")
+      }
+    }
+  }
+
   test("playing hall cancellation returns 409 for terminal jobs") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>
