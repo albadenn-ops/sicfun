@@ -180,6 +180,10 @@ private[web] object AuthStack:
       val query = parseQuery(exchange)
       query.get("error") match
         case Some(error) =>
+          // The OIDC provider rejected the authorization (user denied consent,
+          // expired code, etc.). Log so an unusual burst of provider-side
+          // failures is visible alongside our own auth.oidc.failure entries.
+          logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=provider-error:$error")
           Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(error)))
         case None =>
           (query.get("state"), query.get("code")) match
