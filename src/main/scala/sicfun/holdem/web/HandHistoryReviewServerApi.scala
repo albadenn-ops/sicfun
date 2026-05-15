@@ -26,27 +26,36 @@ import sicfun.holdem.web.Readiness.{ReadinessStatus, admissionRejectedMessage}
 /** API submit/status handlers and request parsing for [[HandHistoryReviewServer]]. */
 private[web] object HandHistoryReviewServerApi:
 
+  /** Build the comma-separated Allow value the JSON handlers advertise. We
+    * always answer OPTIONS (see optionsResponse), so OPTIONS belongs in
+    * Allow per RFC 7231 sec 7.4.1: "The Allow header field lists the
+    * methods supported by the resource". */
+  private def allowValue(supported: String): String = s"$supported, OPTIONS"
+
   /** Build a 405 JsonResponse with the Allow header set per RFC 7231 sec 6.5.5,
     * which requires the server "MUST generate an Allow header field in a 405
     * response containing a list of the target resource's currently supported
-    * methods." `allowed` is a single token like "GET" or a comma-separated
-    * list like "GET, DELETE". */
-  private[web] def methodNotAllowed(allowed: String): JsonResponse =
+    * methods." `supported` is a single token like "GET" or a comma-separated
+    * list like "GET, DELETE"; OPTIONS is appended automatically because the
+    * handler answers it. */
+  private[web] def methodNotAllowed(supported: String): JsonResponse =
     JsonResponse(
       status = 405,
-      value = Obj("error" -> Str(s"$allowed required")),
-      headers = Vector("Allow" -> allowed)
+      value = Obj("error" -> Str(s"$supported required")),
+      headers = Vector("Allow" -> allowValue(supported))
     )
 
   /** Build an OPTIONS response advertising the supported methods. Per RFC 7231
     * sec 4.3.7, OPTIONS responses SHOULD include an Allow header so clients
     * (and capability-discovery tools) can learn what verbs the resource
-    * accepts without trying each one and parsing the 405 fallback. */
-  private[web] def optionsResponse(allowed: String): JsonResponse =
+    * accepts without trying each one and parsing the 405 fallback. OPTIONS
+    * is appended to Allow so the advertised set is complete. */
+  private[web] def optionsResponse(supported: String): JsonResponse =
+    val allow = allowValue(supported)
     JsonResponse(
       status = 200,
-      value = Obj("allow" -> Str(allowed)),
-      headers = Vector("Allow" -> allowed)
+      value = Obj("allow" -> Str(allow)),
+      headers = Vector("Allow" -> allow)
     )
 
   private val DefaultPlayingHallRoot = Paths.get("data", "web-playing-hall")

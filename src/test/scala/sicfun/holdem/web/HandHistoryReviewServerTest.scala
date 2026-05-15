@@ -617,7 +617,7 @@ class HandHistoryReviewServerTest extends FunSuite:
         for path <- Vector("/api/health", "/api/ready") do
           val rejected = postJson(s"$baseUri$path", "{}")
           assertEquals(rejected.statusCode(), 405, clue = path)
-          assertEquals(headerValue(rejected, "Allow"), Some("GET"), clue = path)
+          assertEquals(headerValue(rejected, "Allow"), Some("GET, OPTIONS"), clue = path)
 
           val options = httpClient.send(
             HttpRequest.newBuilder()
@@ -627,7 +627,7 @@ class HandHistoryReviewServerTest extends FunSuite:
             HttpResponse.BodyHandlers.ofString()
           )
           assertEquals(options.statusCode(), 200, clue = path)
-          assertEquals(headerValue(options, "Allow"), Some("GET"), clue = path)
+          assertEquals(headerValue(options, "Allow"), Some("GET, OPTIONS"), clue = path)
       }
     }
   }
@@ -648,19 +648,19 @@ class HandHistoryReviewServerTest extends FunSuite:
 
         val meOptions = sendOptions("/api/auth/me")
         assertEquals(meOptions.statusCode(), 200)
-        assertEquals(headerValue(meOptions, "Allow"), Some("GET"))
+        assertEquals(headerValue(meOptions, "Allow"), Some("GET, OPTIONS"))
 
         val loginOptions = sendOptions("/api/auth/login")
         assertEquals(loginOptions.statusCode(), 200)
-        assertEquals(headerValue(loginOptions, "Allow"), Some("POST"))
+        assertEquals(headerValue(loginOptions, "Allow"), Some("POST, OPTIONS"))
 
         val analyzeOptions = sendOptions("/api/analyze-hand-history")
         assertEquals(analyzeOptions.statusCode(), 200)
-        assertEquals(headerValue(analyzeOptions, "Allow"), Some("POST"))
+        assertEquals(headerValue(analyzeOptions, "Allow"), Some("POST, OPTIONS"))
 
         val playingHallJobOptions = sendOptions("/api/playing-hall/jobs/some-id")
         assertEquals(playingHallJobOptions.statusCode(), 200)
-        assertEquals(headerValue(playingHallJobOptions, "Allow"), Some("GET, DELETE"))
+        assertEquals(headerValue(playingHallJobOptions, "Allow"), Some("GET, DELETE, OPTIONS"))
       }
     }
   }
@@ -675,12 +675,12 @@ class HandHistoryReviewServerTest extends FunSuite:
 
         val getOnlyWith405 = postJson(s"$baseUri/api/auth/me", "{}")
         assertEquals(getOnlyWith405.statusCode(), 405)
-        assertEquals(headerValue(getOnlyWith405, "Allow"), Some("GET"))
+        assertEquals(headerValue(getOnlyWith405, "Allow"), Some("GET, OPTIONS"))
         assertEquals(jsonBody(getOnlyWith405)("error").str, "GET required")
 
         val postOnlyWith405 = get(s"$baseUri/api/auth/login")
         assertEquals(postOnlyWith405.statusCode(), 405)
-        assertEquals(headerValue(postOnlyWith405, "Allow"), Some("POST"))
+        assertEquals(headerValue(postOnlyWith405, "Allow"), Some("POST, OPTIONS"))
         assertEquals(jsonBody(postOnlyWith405)("error").str, "POST required")
       }
     }
