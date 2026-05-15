@@ -732,6 +732,37 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("HEAD requests on static error paths return headers without a body") {
+    // writeBytes now honors HEAD across the board, so the static handler's
+    // 404/403/etc paths advertise Content-Length matching what GET would
+    // send but emit no body. RFC 7231 sec 4.3.2.
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        def head(path: String): HttpResponse[String] =
+          httpClient.send(
+            HttpRequest.newBuilder(URI.create(s"$baseUri$path"))
+              .method("HEAD", HttpRequest.BodyPublishers.noBody())
+              .build(),
+            HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
+          )
+
+        val notFound = head("/does-not-exist")
+        assertEquals(notFound.statusCode(), 404)
+        assertEquals(notFound.body(), "", "HEAD 404 must have an empty body")
+
+        val forbidden = head("/../etc/passwd")
+        assertEquals(forbidden.statusCode(), 403)
+        assertEquals(forbidden.body(), "", "HEAD 403 must have an empty body")
+
+        val dotfile = head("/.git/HEAD")
+        assertEquals(dotfile.statusCode(), 404)
+        assertEquals(dotfile.body(), "", "HEAD on dot-prefixed path must have an empty body")
+      }
+    }
+  }
+
   test("static handler returns the same ETag and Content-Encoding on HEAD as on GET for the same Accept-Encoding") {
     // RFC 7231: HEAD describes the GET response. A client that does HEAD to
     // validate a cached entry and then GET to refetch must see the same

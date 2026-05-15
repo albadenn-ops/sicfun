@@ -110,22 +110,33 @@ private[web] object WebResponses:
     exchange.getResponseHeaders.set("Cache-Control", "no-store")
     if compressible then
       exchange.getResponseHeaders.set("Vary", "Accept-Encoding")
-    val shouldCompress = compressible && bytes.length >= MinGzipSize && clientAcceptsGzip(exchange)
-    if shouldCompress then
-      val buffer = new ByteArrayOutputStream(math.max(256, bytes.length / 4))
-      val gz = new GZIPOutputStream(buffer)
-      try gz.write(bytes) finally gz.close()
-      val compressed = buffer.toByteArray
-      exchange.getResponseHeaders.set("Content-Encoding", "gzip")
-      exchange.sendResponseHeaders(status, compressed.length.toLong)
-      val body = exchange.getResponseBody
-      body.write(compressed)
-      body.flush()
-    else
+    val isHead = exchange.getRequestMethod.equalsIgnoreCase("HEAD")
+    if isHead then
+      // RFC 7231 sec 4.3.2: HEAD response has the same headers as GET but
+      // MUST NOT include a body. The static handler routes HEAD to a dedicated
+      // branch for happy-path file serving; this guard catches all the error
+      // paths (404 / 403 / 401 / 405 / 500) that flow through writePlain so
+      // those also stop emitting a body on HEAD requests. Content-Length is
+      // the uncompressed byte count -- error bodies are short enough that
+      // they're never gzipped (under MinGzipSize), so no variant mismatch.
       exchange.sendResponseHeaders(status, bytes.length.toLong)
-      val body = exchange.getResponseBody
-      body.write(bytes)
-      body.flush()
+    else
+      val shouldCompress = compressible && bytes.length >= MinGzipSize && clientAcceptsGzip(exchange)
+      if shouldCompress then
+        val buffer = new ByteArrayOutputStream(math.max(256, bytes.length / 4))
+        val gz = new GZIPOutputStream(buffer)
+        try gz.write(bytes) finally gz.close()
+        val compressed = buffer.toByteArray
+        exchange.getResponseHeaders.set("Content-Encoding", "gzip")
+        exchange.sendResponseHeaders(status, compressed.length.toLong)
+        val body = exchange.getResponseBody
+        body.write(compressed)
+        body.flush()
+      else
+        exchange.sendResponseHeaders(status, bytes.length.toLong)
+        val body = exchange.getResponseBody
+        body.write(bytes)
+        body.flush()
 
   def contentTypeFor(path: Path): String =
     path.getFileName.toString.toLowerCase match
