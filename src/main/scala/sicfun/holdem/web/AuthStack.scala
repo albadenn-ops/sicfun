@@ -382,13 +382,15 @@ private[web] object AuthStack:
           case Some(_) =>
             validateBasicAuth(exchange, basicAuth) match
               case None => true
-              case Some(_) =>
+              case Some(reason) =>
                 exchange.getResponseHeaders.set("WWW-Authenticate", BasicAuthChallenge)
+                logWarn(s"request unauthorized path=${requestPath(exchange)} remote=${remoteAddress(exchange)} reason=$reason")
                 writeJson(exchange, 401, Obj("error" -> Str(AuthenticationRequiredMessage)))
                 false
           case None if platformAuth.nonEmpty =>
             if authenticatedUser(exchange).nonEmpty then true
             else
+              logWarn(s"request unauthorized path=${requestPath(exchange)} remote=${remoteAddress(exchange)} reason=session-missing-or-invalid")
               writeJson(exchange, 401, Obj("error" -> Str(SessionAuthenticationRequiredMessage)))
               false
           case None => true
