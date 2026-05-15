@@ -74,6 +74,13 @@ private[web] object WebResponses:
     headers.set("Referrer-Policy", "no-referrer")
     headers.set("X-Content-Type-Options", "nosniff")
     headers.set("X-Frame-Options", "DENY")
+    // CSP `frame-ancestors 'none'` + X-Frame-Options already block framing.
+    // COOP/CORP cover orthogonal threats: cross-origin window references
+    // (XS-Leaks, Spectre process isolation) and cross-origin resource
+    // embedding via <img>/<script>/fetch. Both are additive and harmless
+    // for a same-origin app.
+    headers.set("Cross-Origin-Opener-Policy", "same-origin")
+    headers.set("Cross-Origin-Resource-Policy", "same-origin")
 
   def writeJson(exchange: HttpExchange, status: Int, value: Value): Unit =
     val bytes = ujson.write(value, indent = 2).getBytes(StandardCharsets.UTF_8)
