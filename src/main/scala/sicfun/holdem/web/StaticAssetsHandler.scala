@@ -34,6 +34,14 @@ private[web] final class StaticAssetsHandler(
       else if !isGet && !isHead then
         exchange.getResponseHeaders.set("Allow", "GET, HEAD, OPTIONS")
         writePlain(exchange, 405, "GET, HEAD, or OPTIONS required", "text/plain; charset=utf-8")
+      else if hasDotPrefixedSegment(exchange) then
+        // Reject any path segment starting with `.` as defense in depth. The static
+        // dir should never contain dot-prefixed entries (.git/, .env, .htaccess,
+        // .DS_Store), but a misconfigured deployment that points staticDir at an
+        // unsanitized bundle or a repo checkout would otherwise expose them. 404
+        // (not 403) so the response is indistinguishable from a missing file and
+        // does not confirm the rule exists.
+        writePlain(exchange, 404, "not found", "text/plain; charset=utf-8")
       else
         val requestPath = Option(exchange.getRequestURI.getPath).getOrElse("/")
         val relative = if requestPath == "/" then Paths.get("index.html") else Paths.get(requestPath.dropWhile(_ == '/'))
@@ -131,3 +139,11 @@ private[web] final class StaticAssetsHandler(
         writePlain(exchange, 500, "internal server error", "text/plain; charset=utf-8")
     finally
       exchange.close()
+
+  private def hasDotPrefixedSegment(exchange: HttpExchange): Boolean =
+    val raw = Option(exchange.getRequestURI.getPath).getOrElse("/")
+    // Skip the path-navigation primitives `.` and `..` so the path-traversal
+    // check downstream still produces its more informative 403 response.
+    raw.split('/').exists(segment =>
+      segment.nonEmpty && segment.startsWith(".") && segment != "." && segment != ".."
+    )

@@ -588,6 +588,29 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("static handler returns 404 for any path with a dot-prefixed segment, even when the file exists") {
+    // Defense in depth: a misconfigured deployment that ships a `.git/`,
+    // `.env`, `.htaccess`, or other dot-prefixed file under the static root
+    // would otherwise expose its contents to anyone who guesses the path.
+    // The handler must refuse the request without confirming the file exists.
+    withStaticSite { staticDir =>
+      Files.createDirectories(staticDir.resolve(".git"))
+      Files.writeString(staticDir.resolve(".git/HEAD"), "ref: refs/heads/main\n", StandardCharsets.UTF_8)
+      Files.writeString(staticDir.resolve(".env"), "SECRET=should-not-leak\n", StandardCharsets.UTF_8)
+      Files.writeString(staticDir.resolve(".htaccess"), "Deny from all\n", StandardCharsets.UTF_8)
+      Files.createDirectories(staticDir.resolve("subdir"))
+      Files.writeString(staticDir.resolve("subdir/.env"), "ALSO_SECRET=nope\n", StandardCharsets.UTF_8)
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        for path <- Vector("/.git/HEAD", "/.env", "/.htaccess", "/subdir/.env") do
+          val response = get(s"$baseUri$path")
+          assertEquals(response.statusCode(), 404, clue = s"$path must be refused")
+          assert(!response.body().contains("SECRET"), s"$path body leaked file content: ${response.body()}")
+          assert(!response.body().contains("ref: refs"), s"$path body leaked .git contents: ${response.body()}")
+      }
+    }
+  }
+
   test("static handler resolves / to index.html with text/html content-type") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>
