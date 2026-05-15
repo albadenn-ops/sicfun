@@ -112,9 +112,11 @@ private[web] final class StaticAssetsHandler(
               // and the in-memory buffer is simpler than streaming gzip + chunked transfer.
               val buffer = new ByteArrayOutputStream(math.max(1024, (size / 4).toInt))
               val gz = new GZIPOutputStream(buffer)
-              val input = Files.newInputStream(target)
-              try input.transferTo(gz) finally input.close()
-              gz.close()
+              try
+                val input = Files.newInputStream(target)
+                try input.transferTo(gz)
+                finally input.close()
+              finally gz.close()
               val compressed = buffer.toByteArray
               exchange.getResponseHeaders.set("Content-Type", contentType)
               exchange.getResponseHeaders.set("Content-Encoding", "gzip")
