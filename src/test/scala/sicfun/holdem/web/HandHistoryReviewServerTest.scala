@@ -301,6 +301,37 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("JsonHandler 500 path returns a generic error and does not leak the exception message") {
+    // The handler-level catch must never echo e.getMessage back to clients;
+    // it should log server-side and return a fixed, generic body. This is the
+    // last line of defense against an unhandled exception that includes file
+    // paths, internal class names, or other implementation detail.
+    val sentinelMessage = "SENTINEL_INTERNAL_LEAK_xyzzy_abc123"
+    val throwingHandler = new AuthStack.JsonHandler(
+      handle = _ => throw new RuntimeException(sentinelMessage)
+    )
+    val httpServer = com.sun.net.httpserver.HttpServer.create(
+      new java.net.InetSocketAddress(InetAddress.getLoopbackAddress, 0),
+      0
+    )
+    httpServer.createContext("/throw", throwingHandler)
+    httpServer.start()
+    try
+      val baseUri = s"http://127.0.0.1:${httpServer.getAddress.getPort}"
+      val response = httpClient.send(
+        HttpRequest.newBuilder().uri(URI.create(s"$baseUri/throw")).GET().build(),
+        HttpResponse.BodyHandlers.ofString()
+      )
+      assertEquals(response.statusCode(), 500)
+      val body = response.body()
+      assertEquals(ujson.read(body)("error").str, "internal server error")
+      assert(!body.contains(sentinelMessage),
+        s"500 response must not echo exception message back to client: $body")
+      assert(!body.contains("RuntimeException"),
+        s"500 response must not leak exception class name: $body")
+    finally httpServer.stop(0)
+  }
+
   test("login does PBKDF2 work even when the email is unknown to prevent timing-based email enumeration") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>

@@ -18,7 +18,7 @@ import sicfun.holdem.web.HandHistoryReviewServerApi.{
   requiredString,
   retryAfterSeconds
 }
-import sicfun.holdem.web.HandHistoryReviewServerRuntime.logWarn
+import sicfun.holdem.web.HandHistoryReviewServerRuntime.{logHandlerException, logWarn}
 import sicfun.holdem.web.RateLimit.{RateLimitBucket, RequestRateLimiter}
 import sicfun.holdem.web.WebResponses.*
 
@@ -292,7 +292,11 @@ private[web] object AuthStack:
           writeJson(exchange, response.status, response.value)
       catch
         case NonFatal(e) =>
-          writeJson(exchange, 500, Obj("error" -> Str(s"internal server error: ${e.getMessage}")))
+          // Log the exception with full stack trace server-side; respond with a
+          // generic message so we don't leak internal class names, file paths,
+          // or other implementation detail back to clients via e.getMessage.
+          logHandlerException(exchange, e, "unhandled exception in JsonHandler")
+          writeJson(exchange, 500, Obj("error" -> Str("internal server error")))
       finally
         exchange.close()
 
@@ -312,7 +316,8 @@ private[web] object AuthStack:
             writeRedirect(exchange, response.status, response.location)
       catch
         case NonFatal(e) =>
-          writePlain(exchange, 500, s"internal server error: ${e.getMessage}", "text/plain; charset=utf-8")
+          logHandlerException(exchange, e, "unhandled exception in RedirectHandler")
+          writePlain(exchange, 500, "internal server error", "text/plain; charset=utf-8")
       finally
         exchange.close()
 

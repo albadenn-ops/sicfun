@@ -11,6 +11,7 @@ import scala.util.control.NonFatal
 
 import sicfun.holdem.web.AuthStack.ensureAuthenticatedStatic
 import sicfun.holdem.web.HandHistoryReviewServer.BasicAuthConfig
+import sicfun.holdem.web.HandHistoryReviewServerRuntime.logHandlerException
 import sicfun.holdem.web.WebResponses.{applySecurityHeaders, clientAcceptsGzip, contentTypeFor, isCompressibleType, writePlain}
 
 private[web] final class StaticAssetsHandler(
@@ -126,6 +127,7 @@ private[web] final class StaticAssetsHandler(
             writePlain(exchange, 404, "not found", "text/plain; charset=utf-8")
     catch
       case NonFatal(e) =>
-        writePlain(exchange, 500, s"internal server error: ${e.getMessage}", "text/plain; charset=utf-8")
+        logHandlerException(exchange, e, "unhandled exception in StaticAssetsHandler")
+        writePlain(exchange, 500, "internal server error", "text/plain; charset=utf-8")
     finally
       exchange.close()

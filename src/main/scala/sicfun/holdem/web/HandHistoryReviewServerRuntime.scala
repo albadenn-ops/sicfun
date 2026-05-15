@@ -1,6 +1,6 @@
 package sicfun.holdem.web
 
-import com.sun.net.httpserver.HttpServer
+import com.sun.net.httpserver.{HttpExchange, HttpServer}
 
 import java.net.{BindException, InetSocketAddress}
 import java.time.Instant
@@ -362,6 +362,23 @@ private[web] object HandHistoryReviewServerRuntime:
 
   def logError(message: String): Unit =
     log("ERROR", message, System.err)
+
+  /** Log an unhandled exception thrown from an HTTP handler. Logs request
+    * method, path, exception class, and message at ERROR level (sanitized
+    * via [[log]]) and then dumps the full stack trace to stderr so the same
+    * NSSM log stream captures it. Used by handler-level catch blocks that
+    * MUST avoid echoing the exception message back to the client (RFC-7807
+    * "internal server error" is the only public detail). */
+  private[web] def logHandlerException(
+      exchange: HttpExchange,
+      e: Throwable,
+      label: String
+  ): Unit =
+    val method = Option(exchange.getRequestMethod).getOrElse("?")
+    val path = Option(exchange.getRequestURI).map(_.getPath).getOrElse("?")
+    val message = Option(e.getMessage).getOrElse("")
+    logError(s"$label method=$method path=$path exception=${e.getClass.getName} message=$message")
+    e.printStackTrace()
 
   /** Escapes the line-structural characters (`\`, `\n`, `\r`) inside a log message
     * so that user-controlled values flowing into a log line cannot forge fake log
