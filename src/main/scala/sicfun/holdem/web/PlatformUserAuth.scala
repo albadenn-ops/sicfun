@@ -417,7 +417,12 @@ object PlatformUserAuth:
             user.localPassword match
               case None => Left("this account does not support password sign-in")
               case Some(credential) =>
-                if verifyPassword(password, credential) then Right(user)
+                // Reject oversize password BEFORE PBKDF2 so an attacker with a known
+                // email cannot burn server CPU by submitting a multi-megabyte input;
+                // the response is intentionally indistinguishable from a bad password
+                // to avoid leaking that the email exists.
+                if password.length > MaxPasswordLength then Left("invalid email or password")
+                else if verifyPassword(password, credential) then Right(user)
                 else Left("invalid email or password")
 
     def upsertOidcIdentity(providerId: String, identity: OidcIdentity): Either[String, StoredUser] =
@@ -812,9 +817,21 @@ object PlatformUserAuth:
     if at <= 0 || dot <= at + 1 || dot == email.length - 1 then
       throw new IllegalArgumentException("email must be a valid address")
 
+  // Cap the password length the server is willing to hash. PBKDF2's per-iteration
+  // cost scales with input length, so without this cap an attacker submitting a 2 MB
+  // password (just under MAX_UPLOAD_BYTES) and a high-iteration count could burn the
+  // server's CPU on each login attempt. Login is not rate-limited (auth bootstrap),
+  // so the cap is the only thing keeping work-per-request bounded. 256 chars is
+  // generous for any realistic passphrase and well above OWASP's 64-char minimum
+  // recommendation.
+  private val MaxPasswordLength = 256
+
   private def validatePassword(password: String): Unit =
-    if password.trim.length < 10 then
+    val trimmed = password.trim
+    if trimmed.length < 10 then
       throw new IllegalArgumentException("password must be at least 10 characters")
+    if trimmed.length > MaxPasswordLength then
+      throw new IllegalArgumentException(s"password must be at most $MaxPasswordLength characters")
 
   private def sanitizeDisplayName(displayName: Option[String]): Option[String] =
     sanitizeOptionalField(displayName, "displayName", 96)

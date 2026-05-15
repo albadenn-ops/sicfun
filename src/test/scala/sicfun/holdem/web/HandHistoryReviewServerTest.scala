@@ -236,6 +236,47 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("registration and login reject passwords beyond the max-length cap") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // 1 KB password is well above the 256-char cap. Registration must reject
+          // with the at-most message so PBKDF2 is never called on the oversize input.
+          val oversizePassword = "x" * 1024
+          val payload =
+            s"""{"email":"dos@example.com","password":"$oversizePassword","displayName":"DoS Tester"}"""
+          val rejected = postJson(s"$baseUri/api/auth/register", payload)
+          assertEquals(rejected.statusCode(), 400, clue = jsonBody(rejected).render(indent = 2))
+          assert(jsonBody(rejected)("error").str.contains("at most"),
+            clue = s"expected max-length rejection, got: ${jsonBody(rejected)("error").str}")
+
+          // Now register a real user, then attempt login with a 1 KB password against
+          // that known email -- the response must be "invalid email or password" (not
+          // a "too long" message that leaks email existence) and must NOT hang on
+          // PBKDF2 of the oversize input.
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"victim@example.com","password":"correct-horse-battery","displayName":"Victim"}""")
+          assertEquals(register.statusCode(), 201)
+
+          val loginStart = System.currentTimeMillis()
+          val dosLogin = postJson(s"$baseUri/api/auth/login",
+            s"""{"email":"victim@example.com","password":"$oversizePassword"}""")
+          val loginElapsed = System.currentTimeMillis() - loginStart
+          assertEquals(dosLogin.statusCode(), 401)
+          assert(jsonBody(dosLogin)("error").str == "invalid email or password",
+            clue = "must not leak email existence by returning a 'too long' message")
+          assert(loginElapsed < 1000,
+            clue = s"login with oversize password must short-circuit before PBKDF2 ($loginElapsed ms)")
+        }
+      }
+    }
+  }
+
   test("PlatformUserAuth.Service.create returns a clear error for a corrupted user store file") {
     withUserStorePath { storePath =>
       // Write garbage that ujson will reject. Without the file-path-aware wrap,
