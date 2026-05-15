@@ -51,8 +51,16 @@ private[web] object AuthStack:
       basicAuth: Option[BasicAuthConfig],
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET"))
-    else if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Right(methodNotAllowed("GET"))
+    // GET or HEAD: same response shape; writeBytes is HEAD-aware and
+    // suppresses the body so HEAD probes from monitoring tools get the
+    // status + security headers without the JSON payload. /api/health and
+    // /api/ready already accept HEAD for the same reason; /api/auth/me is
+    // a parallel read-only endpoint and HTTP semantics expect GET routes
+    // to also answer HEAD.
+    val method = exchange.getRequestMethod
+    if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, HEAD"))
+    else if !method.equalsIgnoreCase("GET") && !method.equalsIgnoreCase("HEAD") then
+      Right(methodNotAllowed("GET, HEAD"))
     else
       val value =
         platformAuth match

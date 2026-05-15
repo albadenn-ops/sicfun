@@ -859,7 +859,11 @@ class HandHistoryReviewServerTest extends FunSuite:
 
         val meOptions = sendOptions("/api/auth/me")
         assertEquals(meOptions.statusCode(), 200)
-        assertEquals(headerValue(meOptions, "Allow"), Some("GET, OPTIONS"))
+        // /api/auth/me accepts HEAD as well as GET so monitoring tools that
+        // probe with HEAD see the same status + security headers as a GET
+        // would emit, matching the convention used by /api/health and
+        // /api/ready.
+        assertEquals(headerValue(meOptions, "Allow"), Some("GET, HEAD, OPTIONS"))
 
         val loginOptions = sendOptions("/api/auth/login")
         assertEquals(loginOptions.statusCode(), 200)
@@ -876,6 +880,26 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("HEAD on /api/auth/me returns the same status and security headers as GET, with no body") {
+    // /api/auth/me is a read-only auth-state probe. HTTP semantics expect
+    // GET endpoints to also answer HEAD with the same status + headers and
+    // no body (RFC 7231 sec 4.3.2), and monitoring tools commonly probe
+    // with HEAD to skip the JSON payload.
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val request = HttpRequest.newBuilder(URI.create(s"$baseUri/api/auth/me"))
+          .method("HEAD", HttpRequest.BodyPublishers.noBody())
+          .build()
+        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+        assertEquals(response.statusCode(), 200, clue = "HEAD must succeed like GET")
+        assertEquals(response.body(), "", clue = "HEAD must not include a body")
+        // Security headers still applied on HEAD via applySecurityHeaders.
+        assertEquals(headerValue(response, "X-Content-Type-Options"), Some("nosniff"))
+      }
+    }
+  }
+
   test("json auth endpoints include Allow header on 405 responses per RFC 7231 sec 6.5.5") {
     // /api/auth/me is GET-only; /api/auth/login is POST-only. RFC 7231 sec 6.5.5
     // REQUIRES the server emit Allow on a 405 so the client (and any cache or
@@ -886,8 +910,8 @@ class HandHistoryReviewServerTest extends FunSuite:
 
         val getOnlyWith405 = postJson(s"$baseUri/api/auth/me", "{}")
         assertEquals(getOnlyWith405.statusCode(), 405)
-        assertEquals(headerValue(getOnlyWith405, "Allow"), Some("GET, OPTIONS"))
-        assertEquals(jsonBody(getOnlyWith405)("error").str, "GET required")
+        assertEquals(headerValue(getOnlyWith405, "Allow"), Some("GET, HEAD, OPTIONS"))
+        assertEquals(jsonBody(getOnlyWith405)("error").str, "GET, HEAD required")
 
         val postOnlyWith405 = get(s"$baseUri/api/auth/login")
         assertEquals(postOnlyWith405.statusCode(), 405)
