@@ -339,15 +339,29 @@ private[web] object AuthStack:
       case _ => Left(404 -> "not found")
 
   private def parseQuery(exchange: HttpExchange): Map[String, String] =
+    // URLDecoder.decode throws IllegalArgumentException on malformed
+    // percent-encoding (e.g. `?state=%ZZ`). Without local handling, that
+    // would propagate out of every caller -- including handleOidcCallback,
+    // where a single malformed param from the upstream provider's redirect
+    // would turn a clean "auth_error=<reason>" 302 into an opaque 500.
+    // Treat any pair that fails to decode as if it were absent: the
+    // downstream check that looks for `state`/`code`/`error` simply does
+    // not see the malformed entry and falls through to the same
+    // `missing_code_or_state` path a missing param would hit, which the
+    // frontend renders as a normal "OIDC sign-in failed" notice.
     Option(exchange.getRequestURI.getRawQuery).toVector
       .flatMap(_.split('&').toVector)
       .flatMap { pair =>
         pair.split("=", 2) match
-          case Array(name, value) => Some(urlDecode(name) -> urlDecode(value))
-          case Array(name) if name.nonEmpty => Some(urlDecode(name) -> "")
+          case Array(name, value) => safeUrlDecode(name).zip(safeUrlDecode(value))
+          case Array(name) if name.nonEmpty => safeUrlDecode(name).map(_ -> "")
           case _ => None
       }
       .toMap
+
+  private def safeUrlDecode(value: String): Option[String] =
+    try Some(urlDecode(value))
+    catch case _: IllegalArgumentException => None
 
 
   final case class RedirectResponse(
