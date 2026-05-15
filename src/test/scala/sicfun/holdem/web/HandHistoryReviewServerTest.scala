@@ -2299,6 +2299,35 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("playing hall rejects oversize villainPool entries without echoing them in the error body") {
+    // Supported archetype names are <= 16 chars; an entry over 32 chars is an
+    // attacker probing the validation error path to amplify the response body
+    // (the "unsupported entries: ..." branch would otherwise echo whatever
+    // the client sent). Reject upfront with a generic length error instead,
+    // keeping the response tiny.
+    withStaticSite { staticDir =>
+      // Bump maxUploadBytes for this test so the request body itself isn't
+      // rejected before we exercise the villainPool length-cap branch (the
+      // default-512-bytes withServer config 413s the wrapper JSON before we
+      // can get there).
+      withServer(staticDir, maxUploadBytes = 4096) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        // 64 chars: comfortably over the 32-char per-entry cap, comfortably
+        // under the 1 KB level where this test stops being defensive.
+        val tooLong = "x" * 64
+        val payload =
+          s"""{"hands":10,"tableCount":1,"playerCount":2,"heroStyle":"gto","heroPosition":"Button","gtoMode":"fast","villainPool":["$tooLong"],"heroExplorationRate":0,"raiseSize":2.5,"bunchingTrials":1,"equityTrials":1,"learnEveryHands":0,"learningWindowSamples":0,"seed":1}"""
+        val response = postJson(s"$baseUri/api/playing-hall", payload)
+        assertEquals(response.statusCode(), 400)
+        val errorBody = jsonBody(response)("error").str
+        assert(errorBody.contains("at most"),
+          clue = s"oversize entry should surface a 'must be at most ...' message; got: $errorBody")
+        assert(!errorBody.contains(tooLong),
+          clue = "oversize villainPool entry must NOT be echoed in the response body")
+      }
+    }
+  }
+
   test("playing hall cancellation returns 409 for terminal jobs") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>

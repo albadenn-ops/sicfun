@@ -401,6 +401,16 @@ private[web] object HandHistoryReviewServerApi:
       .get(normalized)
       .toRight(400 -> s"$key must be one of: ${allowed.toVector.sorted.mkString(", ")}")
 
+  // Cap individual villainPool entries upfront. All supported archetype names
+  // are <= 16 chars ("callingstation" is the longest). 32 is a generous
+  // ceiling that lets us reject oversize entries WITHOUT echoing the
+  // attacker-controlled value through the "unsupported entries: ..." error
+  // body. Without this cap, a request like {"villainPool":["<1KB string>"]}
+  // would land a 1 KB attacker value in the JSON error response per request
+  // -- the same bandwidth-amplification shape the OIDC ?error= and jobId
+  // caps closed elsewhere.
+  private val MaxVillainPoolEntryLength = 32
+
   private def requiredVillainPool(
       obj: collection.Map[String, Value]
   ): Either[(Int, String), Vector[String]] =
@@ -415,6 +425,11 @@ private[web] object HandHistoryReviewServerApi:
     if parsed.isEmpty then Left(400 -> "villainPool must include at least one entry")
     else if parsed.length > MaxPlayingHallVillainPoolEntries then
       Left(400 -> s"villainPool must include at most $MaxPlayingHallVillainPoolEntries entries")
+    else if parsed.exists(_.length > MaxVillainPoolEntryLength) then
+      // Reject oversize entries before the "unsupported entries: ..." error
+      // path would otherwise echo the long attacker-controlled string back
+      // through the response body. Generic message keeps the response tiny.
+      Left(400 -> s"villainPool entries must be at most $MaxVillainPoolEntryLength characters")
     else
       val normalized = parsed.map(_.toLowerCase(Locale.ROOT))
       val allowed = Set("nit", "tag", "lag", "callingstation", "station", "maniac", "gto")
