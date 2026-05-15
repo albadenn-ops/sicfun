@@ -785,7 +785,13 @@ object PlatformUserAuth:
       // If writeString or a non-fallback move exception threw mid-way, this prevents
       // the orphaned tmp file from accumulating in the user-store directory across
       // repeated failures (disk full, permission flap, etc.).
-      Files.deleteIfExists(temp)
+      //
+      // Swallow IOException here so a delete failure (e.g. the temp file was
+      // locked by another process on Windows) does not mask the original
+      // exception that triggered the cleanup. The original exception is the
+      // useful diagnostic; an orphaned tmp file is a much smaller problem.
+      try Files.deleteIfExists(temp)
+      catch case _: java.io.IOException => ()
 
   private def writeStoredUser(user: StoredUser): Value =
     Obj(
