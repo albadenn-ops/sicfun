@@ -152,6 +152,13 @@ private[web] object HandHistoryReviewServerConfig:
           12L * 60L * 60L * 1000L
         )
         _ <- Either.cond(userAuthSessionTtlMs > 0L, (), "--userAuthSessionTtlMs must be positive")
+        userAuthMaxUsers <- resolveIntOption(
+          options,
+          "userAuthMaxUsers",
+          env("USER_AUTH_MAX_USERS"),
+          100_000
+        )
+        _ <- Either.cond(userAuthMaxUsers > 0, (), "--userAuthMaxUsers must be positive")
         userAuthCookieSecure <- resolveBooleanOption(
           options,
           "userAuthCookieSecure",
@@ -171,7 +178,8 @@ private[web] object HandHistoryReviewServerConfig:
           allowLocalRegistration = userAuthAllowRegistration,
           sessionTtlMs = userAuthSessionTtlMs,
           cookieSecure = userAuthCookieSecure,
-          oidcProviders = googleOidc.toVector
+          oidcProviders = googleOidc.toVector,
+          maxUsers = userAuthMaxUsers
         )
         _ <- Either.cond(
           basicAuth.isEmpty || platformAuth.isEmpty,
@@ -365,7 +373,8 @@ private[web] object HandHistoryReviewServerConfig:
       allowLocalRegistration: Boolean,
       sessionTtlMs: Long,
       cookieSecure: Boolean,
-      oidcProviders: Vector[PlatformUserAuth.OidcProvider]
+      oidcProviders: Vector[PlatformUserAuth.OidcProvider],
+      maxUsers: Int
   ): Either[String, Option[PlatformUserAuth.Config]] =
     userStorePath match
       case None if oidcProviders.nonEmpty =>
@@ -379,7 +388,8 @@ private[web] object HandHistoryReviewServerConfig:
               sessionTtlMs = sessionTtlMs,
               allowLocalRegistration = allowLocalRegistration,
               cookieSecure = cookieSecure,
-              oidcProviders = oidcProviders
+              oidcProviders = oidcProviders,
+              maxUsers = maxUsers
             )
           )
         )
@@ -439,6 +449,7 @@ private[web] object HandHistoryReviewServerConfig:
       |  --basicAuthPassword=<pw> Optional HTTP Basic auth password (falls back to BASIC_AUTH_PASSWORD env)
       |  --allowUnauthenticatedPublicBind=<bool> Allow non-loopback binds without auth for trusted private networks only (falls back to ALLOW_UNAUTHENTICATED_PUBLIC_BIND env)
       |  --allowInsecureUserAuth=<bool> Allow non-loopback platform-user auth without secure cookies / HTTPS OIDC callback only for trusted private-network testing (falls back to ALLOW_INSECURE_USER_AUTH env)
+      |  --userAuthMaxUsers=100000 Hard cap on the total number of stored users; further registrations return 'temporarily unavailable' (falls back to USER_AUTH_MAX_USERS env)
       |  --model=<dir>            Optional model artifact directory (falls back to MODEL_DIR env)
       |  --seed=42                RNG seed (falls back to SEED env)
       |  --bunchingTrials=200     Monte Carlo bunching trials per analysis

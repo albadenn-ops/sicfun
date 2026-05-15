@@ -28,6 +28,7 @@ param(
   [string]$UserStorePath = "",
   [bool]$UserAuthAllowRegistration = $true,
   [long]$UserAuthSessionTtlMs = 43200000,
+  [int]$UserAuthMaxUsers = 100000,
   [bool]$UserAuthCookieSecure = $false,
   [string]$GoogleOidcClientId = "",
   [string]$GoogleOidcClientSecret = "",
@@ -126,6 +127,7 @@ $previousEnv = @{
   USER_STORE_PATH = $env:USER_STORE_PATH
   USER_AUTH_ALLOW_REGISTRATION = $env:USER_AUTH_ALLOW_REGISTRATION
   USER_AUTH_SESSION_TTL_MS = $env:USER_AUTH_SESSION_TTL_MS
+  USER_AUTH_MAX_USERS = $env:USER_AUTH_MAX_USERS
   USER_AUTH_COOKIE_SECURE = $env:USER_AUTH_COOKIE_SECURE
   GOOGLE_OIDC_CLIENT_ID = $env:GOOGLE_OIDC_CLIENT_ID
   GOOGLE_OIDC_CLIENT_SECRET = $env:GOOGLE_OIDC_CLIENT_SECRET
@@ -172,6 +174,7 @@ try {
   Set-Or-ClearEnv -Name "USER_STORE_PATH" -Value $resolvedUserStorePath
   Set-Or-ClearEnv -Name "USER_AUTH_ALLOW_REGISTRATION" -Value $UserAuthAllowRegistration
   Set-Or-ClearEnv -Name "USER_AUTH_SESSION_TTL_MS" -Value $UserAuthSessionTtlMs
+  Set-Or-ClearEnv -Name "USER_AUTH_MAX_USERS" -Value $UserAuthMaxUsers
   Set-Or-ClearEnv -Name "USER_AUTH_COOKIE_SECURE" -Value $UserAuthCookieSecure
   Set-Or-ClearEnv -Name "GOOGLE_OIDC_CLIENT_ID" -Value $GoogleOidcClientId
   Set-Or-ClearEnv -Name "GOOGLE_OIDC_CLIENT_SECRET" -Value $GoogleOidcClientSecret
