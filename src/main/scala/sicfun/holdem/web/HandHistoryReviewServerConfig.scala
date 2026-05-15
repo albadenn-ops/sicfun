@@ -309,16 +309,27 @@ private[web] object HandHistoryReviewServerConfig:
     (maybeClientId, maybeClientSecret, maybeRedirectUri) match
       case (None, None, None) => Right(None)
       case (Some(clientId), Some(clientSecret), Some(redirectUri)) =>
-        parseAbsoluteHttpUri(redirectUri, "--googleOidcRedirectUri/GOOGLE_OIDC_REDIRECT_URI").map { _ =>
-          Some(
-            new PlatformUserAuth.GoogleOidcProvider(
-              PlatformUserAuth.GoogleOidcConfig(
-                clientId = clientId,
-                clientSecret = clientSecret,
-                redirectUri = redirectUri
-              )
+        parseAbsoluteHttpUri(redirectUri, "--googleOidcRedirectUri/GOOGLE_OIDC_REDIRECT_URI").flatMap { uri =>
+          val provider = new PlatformUserAuth.GoogleOidcProvider(
+            PlatformUserAuth.GoogleOidcConfig(
+              clientId = clientId,
+              clientSecret = clientSecret,
+              redirectUri = redirectUri
             )
           )
+          // The server's runtime registers exactly one context per provider at
+          // `provider.callbackPath` (e.g. `/api/auth/oidc/google/callback`).
+          // A redirect URI whose path does not match that means Google would
+          // send the user to a path the server never registered -- the static
+          // handler's catch-all returns a generic 404 with no breadcrumb that
+          // OIDC was involved. Catch the mismatch at config time so the
+          // operator sees a precise error in startup logs.
+          val redirectPath = Option(uri.getPath).getOrElse("")
+          if redirectPath != provider.callbackPath then
+            Left(
+              s"--googleOidcRedirectUri/GOOGLE_OIDC_REDIRECT_URI path must be '${provider.callbackPath}' so the server's registered callback handler matches the redirect URI Google sees; got '$redirectPath'"
+            )
+          else Right(Some(provider))
         }
       case _ =>
         Left(

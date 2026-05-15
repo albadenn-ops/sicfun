@@ -2714,6 +2714,35 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("Google OIDC redirect URI must match the registered callback path") {
+    // The runtime registers exactly one context per OIDC provider at
+    // /api/auth/oidc/<id>/callback. If the operator configures
+    // GOOGLE_OIDC_REDIRECT_URI to a different path, Google would redirect the
+    // user back to that path -- the server has no handler for it, so the
+    // catch-all static handler returns a generic 404 with no breadcrumb that
+    // OIDC was the failing flow. Catch the mismatch at config parse time
+    // instead so the operator sees an actionable error.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val result = HandHistoryReviewServer.start(Array(
+          s"--staticDir=$staticDir",
+          "--host=127.0.0.1",
+          "--port=0",
+          s"--userStorePath=$storePath",
+          "--googleOidcClientId=test-client.apps.googleusercontent.com",
+          "--googleOidcClientSecret=test-secret",
+          "--googleOidcRedirectUri=http://127.0.0.1:8080/oauth/wrong-callback-path"
+        ))
+        assert(result.isLeft, s"expected config error, got: $result")
+        val error = result.left.toOption.getOrElse("")
+        assert(error.contains("/api/auth/oidc/google/callback"),
+          s"error should name the required callback path; got: $error")
+        assert(error.contains("/oauth/wrong-callback-path"),
+          s"error should echo the operator-supplied path so they can see what was wrong; got: $error")
+      }
+    }
+  }
+
   test("localhost user auth still allows insecure cookies and HTTP OIDC callback for local development") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
