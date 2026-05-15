@@ -172,6 +172,7 @@ If drain/stop times out, `bin/drain-stop-hand-history-web-service.ps1` now repor
 - Job lifecycle events: submission/rejection/timeout/failure for both `/api/analyze-hand-history` and `/api/playing-hall` log to stderr at INFO/WARN.
 - Rate-limit rejections log as `request rate limited path=... client=... bucket=... limitPerMinute=... retryAfterMs=...` at WARN.
 - Unauthenticated requests against protected paths log as `request unauthorized path=... remote=... reason=...` at WARN.
+- CSRF-failed state-changing requests (POST/DELETE on auth/logout, auth/profile, analyze-hand-history, playing-hall) log as `request forbidden path=... remote=... email=... reason=csrf-missing-or-invalid` at WARN. A burst from one `remote=` against many endpoints is a likely automated probe; the same from a known user usually means their JS frontend lost the cookie mid-session.
 - NSSM rotates the service stdout/stderr logs at 10 MB (`AppRotateBytes=10485760`, `AppRotateOnline=1`). Rotated files keep their timestamp suffix in `logs/`; nothing deletes them automatically, so prune or ship them off the host periodically if the audit history matters and the partition is small.
 
 ## State And Backups
