@@ -86,7 +86,17 @@ private[web] object RateLimit:
         while iterator.hasNext do
           val entry = iterator.next()
           if entry.getValue.windowStartedAtMs < cutoff then
-            iterator.remove()
+            // Compare-and-remove: iterator.remove() unconditionally drops the
+            // key, but a concurrent check() that just refreshed the entry into
+            // a NEW window between this snapshot read and the remove call
+            // would have its update erased. computeIfPresent re-checks the
+            // current value under the bin lock so a refreshed window stays in
+            // place. Same race shape SessionManager.purgeExpired had.
+            windows.computeIfPresent(
+              entry.getKey,
+              (_, current) =>
+                if current.windowStartedAtMs < cutoff then null else current
+            )
 
   def rateLimitClientIpSource(
       trustedClientIpHeader: Option[String],
