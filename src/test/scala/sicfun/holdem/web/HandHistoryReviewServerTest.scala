@@ -1167,6 +1167,52 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("OIDC callback refuses malformed queries (no params, partial params, unknown state)") {
+    // Three callback-side failure modes besides the provider-error case:
+    //   1. No query at all -- nothing to validate against.
+    //   2. Only `state` or only `code` -- attacker probing for partial-form
+    //      acceptance.
+    //   3. Both present but `state` does not match any issued flow -- expired
+    //      state, replay attempt, or attacker fishing for a working callback.
+    // All four must redirect to the failure landing page without emitting a
+    // session cookie. The first three share the same `missing_code_or_state`
+    // reason; the fourth surfaces the finishOidc Left as the redirect query.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              allowLocalRegistration = false,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val cases = Vector(
+            "" -> "missing_code_or_state",
+            "?state=abc" -> "missing_code_or_state",
+            "?code=xyz" -> "missing_code_or_state",
+            "?state=this-state-was-never-issued&code=xyz" -> "OIDC"
+          )
+          for (query, expectedSubstring) <- cases do
+            val resp = get(s"$baseUri${provider.callbackPath}$query")
+            assertEquals(resp.statusCode(), 302, clue = s"query=$query")
+            val location = headerValue(resp, "Location").getOrElse(fail(s"missing Location for query=$query"))
+            assert(location.contains("/?auth_error="),
+              s"query=$query must redirect to failure landing, got: $location")
+            assert(location.toLowerCase.contains(expectedSubstring.toLowerCase),
+              s"query=$query failure redirect should mention '$expectedSubstring', got: $location")
+            assertEquals(headerValue(resp, "Set-Cookie"), None,
+              s"query=$query must not emit a session cookie")
+        }
+      }
+    }
+  }
+
   test("drain signal flips readiness to 503 and rejects new analysis submissions") {
     withStaticSite { staticDir =>
       val root = Files.createTempDirectory("hand-history-review-drain-")
