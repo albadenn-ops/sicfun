@@ -438,6 +438,7 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(healthJson("analysisTimeoutMs").num.toLong, 120000L)
         assertEquals(healthJson("rateLimitSubmitsPerMinute").num.toInt, 6)
         assertEquals(healthJson("rateLimitStatusPerMinute").num.toInt, 240)
+        assertEquals(healthJson("rateLimitAuthPerMinute").num.toInt, 10)
         assertEquals(healthJson("rateLimitClientIpSource").str, "remote-address")
         assertEquals(healthJson("maxConcurrentJobs").num.toInt, 2)
         assertEquals(healthJson("maxQueuedJobs").num.toInt, 8)
@@ -463,6 +464,7 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(readyJson("analysisTimeoutMs").num.toLong, 120000L)
         assertEquals(readyJson("rateLimitSubmitsPerMinute").num.toInt, 6)
         assertEquals(readyJson("rateLimitStatusPerMinute").num.toInt, 240)
+        assertEquals(readyJson("rateLimitAuthPerMinute").num.toInt, 10)
         assertEquals(readyJson("rateLimitClientIpSource").str, "remote-address")
         assertEquals(readyJson("timedOutWorkersInFlight").num.toInt, 0)
 
@@ -1283,6 +1285,50 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("auth route rate limit returns 429 with retry-after to throttle credential stuffing") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath)),
+          rateLimitSubmitsPerMinute = 0,
+          rateLimitStatusPerMinute = 0,
+          rateLimitAuthPerMinute = 1
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val firstLogin = postJson(s"$baseUri/api/auth/login",
+            """{"email":"victim@example.com","password":"any-wrong-password"}""")
+          assertEquals(firstLogin.statusCode(), 401)
+
+          val limited = postJson(s"$baseUri/api/auth/login",
+            """{"email":"victim@example.com","password":"another-wrong-password"}""")
+          assertEquals(limited.statusCode(), 429)
+          val limitedJson = jsonBody(limited)
+          assert(limitedJson("error").str.contains("rate limit exceeded"),
+            s"expected rate-limit-exceeded error, got: ${limitedJson("error").str}")
+          assertEquals(limitedJson("rateLimitBucket").str, "auth")
+          assertEquals(limitedJson("limitPerMinute").num.toInt, 1)
+          assertEquals(
+            headerValue(limited, "Retry-After"),
+            Some(limitedJson("retryAfterSeconds").num.toInt.toString)
+          )
+
+          // Register is in the same auth bucket so attackers can't bypass the
+          // login throttle by hammering registration with PBKDF2-cost requests.
+          val limitedRegister = postJson(s"$baseUri/api/auth/register",
+            """{"email":"new@example.com","password":"correct-horse-battery","displayName":"New"}""")
+          assertEquals(limitedRegister.statusCode(), 429)
+
+          // Probes and static content stay reachable.
+          assertEquals(get(s"$baseUri/api/health").statusCode(), 200)
+          assertEquals(get(s"$baseUri/api/ready").statusCode(), 200)
+          assertEquals(get(s"$baseUri/").statusCode(), 200)
+        }
+      }
+    }
+  }
+
   test("zero rate limits disable submit throttling") {
     withStaticSite { staticDir =>
       val authConfig = HandHistoryReviewServer.BasicAuthConfig(username = "operator", password = "no-rate-limit")
@@ -1620,6 +1666,7 @@ class HandHistoryReviewServerTest extends FunSuite:
             shutdownGraceMs = 5000L,
             rateLimitSubmitsPerMinute = 6,
             rateLimitStatusPerMinute = 240,
+            rateLimitAuthPerMinute = 10,
             rateLimitClientIpHeader = None,
             rateLimitTrustedProxyIps = Set.empty,
             drainSignalFile = None,
@@ -1780,6 +1827,7 @@ class HandHistoryReviewServerTest extends FunSuite:
       shutdownGraceMs: Long = 5000L,
       rateLimitSubmitsPerMinute: Int = 6,
       rateLimitStatusPerMinute: Int = 240,
+      rateLimitAuthPerMinute: Int = 10,
       rateLimitClientIpHeader: Option[String] = None,
       rateLimitTrustedProxyIps: Set[String] = Set.empty,
       drainSignalFile: Option[Path] = None,
@@ -1799,6 +1847,7 @@ class HandHistoryReviewServerTest extends FunSuite:
         shutdownGraceMs = shutdownGraceMs,
         rateLimitSubmitsPerMinute = rateLimitSubmitsPerMinute,
         rateLimitStatusPerMinute = rateLimitStatusPerMinute,
+        rateLimitAuthPerMinute = rateLimitAuthPerMinute,
         rateLimitClientIpHeader = rateLimitClientIpHeader,
         rateLimitTrustedProxyIps = rateLimitTrustedProxyIps,
         drainSignalFile = drainSignalFile,

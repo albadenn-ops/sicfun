@@ -28,6 +28,7 @@ object HandHistoryReviewServer:
     * @param shutdownGraceMs           grace period for in-flight analysis on shutdown
     * @param rateLimitSubmitsPerMinute  max analysis submissions per client per minute
     * @param rateLimitStatusPerMinute   max status polls per client per minute
+    * @param rateLimitAuthPerMinute     max auth (register/login) attempts per client per minute
     * @param rateLimitClientIpHeader    optional header for client IP (e.g. X-Forwarded-For behind proxy)
     */
   final case class ServerConfig(
@@ -42,6 +43,7 @@ object HandHistoryReviewServer:
       shutdownGraceMs: Long,
       rateLimitSubmitsPerMinute: Int,
       rateLimitStatusPerMinute: Int,
+      rateLimitAuthPerMinute: Int,
       rateLimitClientIpHeader: Option[String],
       rateLimitTrustedProxyIps: Set[String],
       drainSignalFile: Option[Path],

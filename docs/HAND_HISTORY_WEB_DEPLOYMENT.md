@@ -110,12 +110,13 @@ Optional OIDC:
 
 Rate limiting:
 
-- `RATE_LIMIT_SUBMITS_PER_MINUTE`
-- `RATE_LIMIT_STATUS_PER_MINUTE`
+- `RATE_LIMIT_SUBMITS_PER_MINUTE` — cap on analysis/Playing Hall submissions per IP per minute
+- `RATE_LIMIT_STATUS_PER_MINUTE` — cap on job-status polls per IP per minute
+- `RATE_LIMIT_AUTH_PER_MINUTE` — cap on `/api/auth/register` + `/api/auth/login` attempts per IP per minute (defaults to `10`; throttles PBKDF2-cost credential stuffing)
 - `RATE_LIMIT_CLIENT_IP_HEADER`
 - `RATE_LIMIT_TRUSTED_PROXY_IPS`
 
-Only trust a client IP header when the app is behind a proxy you control.
+Set any of the three caps to `0` to disable that bucket. Only trust a client IP header when the app is behind a proxy you control.
 
 ## Service Install
 

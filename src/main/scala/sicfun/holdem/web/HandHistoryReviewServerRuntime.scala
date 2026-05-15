@@ -32,6 +32,7 @@ private[web] object HandHistoryReviewServerRuntime:
     val rateLimiter = new RequestRateLimiter(
       submitsPerMinute = config.rateLimitSubmitsPerMinute,
       statusPerMinute = config.rateLimitStatusPerMinute,
+      authPerMinute = config.rateLimitAuthPerMinute,
       trustedClientIpHeader = config.rateLimitClientIpHeader,
       trustedProxyIps = config.rateLimitTrustedProxyIps
     )
@@ -195,7 +196,9 @@ private[web] object HandHistoryReviewServerRuntime:
             exchange => handleAuthRegister(exchange, platformAuthService),
             basicAuth = config.basicAuth,
             platformAuth = platformAuthService,
-            authRequirement = AuthRequirement.Optional
+            authRequirement = AuthRequirement.Optional,
+            rateLimiter = Some(rateLimiter),
+            rateLimitBucket = Some(RateLimitBucket.Auth)
           )
         )
       )
@@ -207,7 +210,9 @@ private[web] object HandHistoryReviewServerRuntime:
             exchange => handleAuthLogin(exchange, platformAuthService),
             basicAuth = config.basicAuth,
             platformAuth = platformAuthService,
-            authRequirement = AuthRequirement.Optional
+            authRequirement = AuthRequirement.Optional,
+            rateLimiter = Some(rateLimiter),
+            rateLimitBucket = Some(RateLimitBucket.Auth)
           )
         )
       )

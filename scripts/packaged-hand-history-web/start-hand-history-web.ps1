@@ -11,11 +11,13 @@ param(
   [int]$MaxDecisions = 12,
   [int]$MaxUploadBytes = 2097152,
   [long]$AnalysisTimeoutMs = 120000,
+  [long]$PlayingHallTimeoutMs = 900000,
   [int]$MaxConcurrentJobs = 0,
   [int]$MaxQueuedJobs = 0,
   [long]$ShutdownGraceMs = 5000,
   [int]$RateLimitSubmitsPerMinute = 6,
   [int]$RateLimitStatusPerMinute = 240,
+  [int]$RateLimitAuthPerMinute = 10,
   [string]$RateLimitClientIpHeader = "",
   [string]$RateLimitTrustedProxyIps = "",
   [string]$DrainSignalFile = "",
@@ -107,11 +109,13 @@ $previousEnv = @{
   MAX_DECISIONS = $env:MAX_DECISIONS
   MAX_UPLOAD_BYTES = $env:MAX_UPLOAD_BYTES
   ANALYSIS_TIMEOUT_MS = $env:ANALYSIS_TIMEOUT_MS
+  PLAYING_HALL_TIMEOUT_MS = $env:PLAYING_HALL_TIMEOUT_MS
   MAX_CONCURRENT_JOBS = $env:MAX_CONCURRENT_JOBS
   MAX_QUEUED_JOBS = $env:MAX_QUEUED_JOBS
   SHUTDOWN_GRACE_MS = $env:SHUTDOWN_GRACE_MS
   RATE_LIMIT_SUBMITS_PER_MINUTE = $env:RATE_LIMIT_SUBMITS_PER_MINUTE
   RATE_LIMIT_STATUS_PER_MINUTE = $env:RATE_LIMIT_STATUS_PER_MINUTE
+  RATE_LIMIT_AUTH_PER_MINUTE = $env:RATE_LIMIT_AUTH_PER_MINUTE
   RATE_LIMIT_CLIENT_IP_HEADER = $env:RATE_LIMIT_CLIENT_IP_HEADER
   RATE_LIMIT_TRUSTED_PROXY_IPS = $env:RATE_LIMIT_TRUSTED_PROXY_IPS
   DRAIN_SIGNAL_FILE = $env:DRAIN_SIGNAL_FILE
@@ -141,6 +145,7 @@ try {
   Set-Or-ClearEnv -Name "MAX_DECISIONS" -Value $MaxDecisions
   Set-Or-ClearEnv -Name "MAX_UPLOAD_BYTES" -Value $MaxUploadBytes
   Set-Or-ClearEnv -Name "ANALYSIS_TIMEOUT_MS" -Value $AnalysisTimeoutMs
+  Set-Or-ClearEnv -Name "PLAYING_HALL_TIMEOUT_MS" -Value $PlayingHallTimeoutMs
   if ($MaxConcurrentJobs -gt 0) {
     Set-Or-ClearEnv -Name "MAX_CONCURRENT_JOBS" -Value $MaxConcurrentJobs
   }
@@ -156,6 +161,7 @@ try {
   Set-Or-ClearEnv -Name "SHUTDOWN_GRACE_MS" -Value $ShutdownGraceMs
   Set-Or-ClearEnv -Name "RATE_LIMIT_SUBMITS_PER_MINUTE" -Value $RateLimitSubmitsPerMinute
   Set-Or-ClearEnv -Name "RATE_LIMIT_STATUS_PER_MINUTE" -Value $RateLimitStatusPerMinute
+  Set-Or-ClearEnv -Name "RATE_LIMIT_AUTH_PER_MINUTE" -Value $RateLimitAuthPerMinute
   Set-Or-ClearEnv -Name "RATE_LIMIT_CLIENT_IP_HEADER" -Value $RateLimitClientIpHeader
   Set-Or-ClearEnv -Name "RATE_LIMIT_TRUSTED_PROXY_IPS" -Value $RateLimitTrustedProxyIps
   Set-Or-ClearEnv -Name "DRAIN_SIGNAL_FILE" -Value $resolvedDrainSignalFile

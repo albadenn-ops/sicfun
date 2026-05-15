@@ -17,6 +17,10 @@ private[web] object HandHistoryReviewServerConfig:
   private val DefaultShutdownGraceMs = 5000L
   private val DefaultRateLimitSubmitsPerMinute = 6
   private val DefaultRateLimitStatusPerMinute = 240
+  // 10 attempts/min/IP leaves room for a few legitimate fat-finger retries but
+  // throttles a credential-stuffing attacker to ~600 attempts/hour — well below
+  // what is useful for a dictionary attack against PBKDF2-hashed credentials.
+  private val DefaultRateLimitAuthPerMinute = 10
 
   def parseArgs(args: Array[String]): Either[String, ServerConfig] =
     if args.contains("--help") || args.contains("-h") then Left(usage)
@@ -87,6 +91,17 @@ private[web] object HandHistoryReviewServerConfig:
           rateLimitStatusPerMinute >= 0,
           (),
           "--rateLimitStatusPerMinute must be zero or positive"
+        )
+        rateLimitAuthPerMinute <- resolveIntOption(
+          options,
+          "rateLimitAuthPerMinute",
+          env("RATE_LIMIT_AUTH_PER_MINUTE"),
+          DefaultRateLimitAuthPerMinute
+        )
+        _ <- Either.cond(
+          rateLimitAuthPerMinute >= 0,
+          (),
+          "--rateLimitAuthPerMinute must be zero or positive"
         )
         rateLimitClientIpHeader = options
           .get("rateLimitClientIpHeader")
@@ -193,6 +208,7 @@ private[web] object HandHistoryReviewServerConfig:
         shutdownGraceMs = shutdownGraceMs,
         rateLimitSubmitsPerMinute = rateLimitSubmitsPerMinute,
         rateLimitStatusPerMinute = rateLimitStatusPerMinute,
+        rateLimitAuthPerMinute = rateLimitAuthPerMinute,
         rateLimitClientIpHeader = rateLimitClientIpHeader,
         rateLimitTrustedProxyIps = rateLimitTrustedProxyIps,
         drainSignalFile = drainSignalFile,
@@ -404,6 +420,7 @@ private[web] object HandHistoryReviewServerConfig:
       |  --shutdownGraceMs=5000   Grace window for draining requests/jobs on shutdown (falls back to SHUTDOWN_GRACE_MS env)
       |  --rateLimitSubmitsPerMinute=6 Submit request cap per rate-limit key per minute; 0 disables it (falls back to RATE_LIMIT_SUBMITS_PER_MINUTE env)
       |  --rateLimitStatusPerMinute=240 Job-status poll cap per rate-limit key per minute; 0 disables it (falls back to RATE_LIMIT_STATUS_PER_MINUTE env)
+      |  --rateLimitAuthPerMinute=10 Auth (register/login) cap per rate-limit key per minute; 0 disables it (falls back to RATE_LIMIT_AUTH_PER_MINUTE env)
       |  --rateLimitClientIpHeader=<header> Optional trusted single-value client-IP header for rate limiting behind a reverse proxy (falls back to RATE_LIMIT_CLIENT_IP_HEADER env)
       |  --rateLimitTrustedProxyIps=<csv> Optional comma-separated proxy peer IP allowlist for trusting --rateLimitClientIpHeader; loopback is always trusted (falls back to RATE_LIMIT_TRUSTED_PROXY_IPS env)
       |  --drainSignalFile=<path> Optional file that makes /api/ready fail and rejects new analysis submissions while present (falls back to DRAIN_SIGNAL_FILE env)

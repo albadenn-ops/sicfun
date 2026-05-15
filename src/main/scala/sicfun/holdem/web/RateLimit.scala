@@ -12,15 +12,17 @@ private[web] object RateLimit:
   val ClientIpSourceRemoteAddress = "remote-address"
 
   enum RateLimitBucket:
-    case Submit, JobStatus
+    case Submit, JobStatus, Auth
 
     def id: String = this match
       case Submit => "submit"
       case JobStatus => "job-status"
+      case Auth => "auth"
 
     def description: String = this match
       case Submit => "submit"
       case JobStatus => "job status"
+      case Auth => "auth"
 
   final case class RateLimitRejection(
       bucket: RateLimitBucket,
@@ -32,6 +34,7 @@ private[web] object RateLimit:
   final class RequestRateLimiter(
       submitsPerMinute: Int,
       statusPerMinute: Int,
+      authPerMinute: Int,
       trustedClientIpHeader: Option[String],
       trustedProxyIps: Set[String],
       nowMillis: () => Long = () => System.currentTimeMillis()
@@ -47,6 +50,7 @@ private[web] object RateLimit:
       val limitPerMinute = bucket match
         case RateLimitBucket.Submit => submitsPerMinute
         case RateLimitBucket.JobStatus => statusPerMinute
+        case RateLimitBucket.Auth => authPerMinute
       if limitPerMinute <= 0 then None
       else
         val now = nowMillis()
