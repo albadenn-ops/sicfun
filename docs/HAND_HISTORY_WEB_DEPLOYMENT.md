@@ -102,6 +102,7 @@ Auth modes:
 - Do not enable both at the same time
 - For safety, non-loopback binds now require one of those auth modes unless you explicitly set `ALLOW_UNAUTHENTICATED_PUBLIC_BIND=true` for a trusted private network
 - For safety, non-loopback platform-user auth also requires `USER_AUTH_COOKIE_SECURE=true` unless you explicitly set `ALLOW_INSECURE_USER_AUTH=true` for trusted private-network testing
+- When `USER_AUTH_COOKIE_SECURE=true` the session cookie is emitted with the RFC 6265 `__Host-` prefix (`__Host-sicfun_session`) so the browser also blocks a sibling subdomain from overwriting or planting the session cookie. Operator-side log greps and proxy ACLs should account for both `sicfun_session` (insecure mode) and `__Host-sicfun_session` (secure mode).
 
 Optional OIDC:
 
