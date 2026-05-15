@@ -872,10 +872,17 @@ object PlatformUserAuth:
   private val MaxPasswordLength = 256
 
   private def validatePassword(password: String): Unit =
-    val trimmed = password.trim
-    if trimmed.length < 10 then
+    // Validate the password as-is, NOT trimmed. NIST SP 800-63B says memorized
+    // secrets must accept any printable ASCII including spaces, and explicitly
+    // forbids truncation. The earlier version trimmed before validating length,
+    // which created a foot-gun: a register call with "  hunter22  " (12 chars
+    // raw, 8 trimmed) passed the length check on the trimmed form but stored
+    // the hash of the RAW (whitespace-included) value, and login then required
+    // the same whitespace -- silent UX failure when the user pasted with stray
+    // whitespace at register but typed cleanly at login.
+    if password.length < 10 then
       throw new IllegalArgumentException("password must be at least 10 characters")
-    if trimmed.length > MaxPasswordLength then
+    if password.length > MaxPasswordLength then
       throw new IllegalArgumentException(s"password must be at most $MaxPasswordLength characters")
 
   private def sanitizeDisplayName(displayName: Option[String]): Option[String] =
