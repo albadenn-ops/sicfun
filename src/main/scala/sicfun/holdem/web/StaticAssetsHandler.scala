@@ -166,8 +166,15 @@ private[web] final class StaticAssetsHandler(
 
   private def hasDotPrefixedSegment(exchange: HttpExchange): Boolean =
     val raw = Option(exchange.getRequestURI.getPath).getOrElse("/")
+    // Split on BOTH '/' and '\' so an attacker sending `/%5C.git/HEAD`
+    // (percent-encoded backslash, which Windows treats as a path separator)
+    // cannot smuggle a dot-prefixed segment past the check. The path-traversal
+    // guard at staticDir.resolve(...).startsWith(staticDir) catches escapes
+    // outside the static dir, but a backslash-prefixed dotfile inside the
+    // static dir would otherwise serve up `staticDir\.git\HEAD` content.
+    //
     // Skip the path-navigation primitives `.` and `..` so the path-traversal
     // check downstream still produces its more informative 403 response.
-    raw.split('/').exists(segment =>
+    raw.split('/').flatMap(_.split('\\')).exists(segment =>
       segment.nonEmpty && segment.startsWith(".") && segment != "." && segment != ".."
     )

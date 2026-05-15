@@ -868,6 +868,33 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("static handler dotfile blocking handles percent-encoded backslash on Windows-style paths") {
+    // On Windows, both `/` and `\` are filesystem path separators. The dotfile-
+    // block check only saw `/` initially, so an attacker sending a URL with a
+    // percent-encoded backslash (`%5C`) immediately before `.git` could slip
+    // past: getPath decoded `%5C` to a literal `\`, split('/') treated
+    // `\.git` as a single segment that did NOT start with `.`, and the
+    // dotfile check would pass. Path-traversal still kicks in if the file
+    // is outside the static dir, but a file inside the static dir at that
+    // backslashed path would be served. Split on both separators now.
+    withStaticSite { staticDir =>
+      Files.createDirectories(staticDir.resolve(".git"))
+      Files.writeString(staticDir.resolve(".git/HEAD"), "ref: refs/heads/main\n", StandardCharsets.UTF_8)
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        // %5C decodes to '\' -- with the fix, this is treated as a segment
+        // separator and `.git` is recognised as dot-prefixed.
+        val response = get(s"$baseUri/%5C.git/HEAD")
+        assert(
+          response.statusCode() == 404 || response.statusCode() == 403,
+          s"backslash-prefixed dotfile must be refused (404 dotfile-block or 403 path-traversal), got ${response.statusCode()}"
+        )
+        assert(!response.body().contains("ref: refs"),
+          s"backslash-prefixed dotfile must not leak file content: ${response.body()}")
+      }
+    }
+  }
+
   test("static handler does not follow symlinks that escape the static directory") {
     // A symlink under the static root that points outside it (or to anywhere
     // else on the filesystem) used to be followed by Files.isRegularFile and
