@@ -451,6 +451,7 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(headerValue(health, "X-Frame-Options"), Some("DENY"))
         assertEquals(headerValue(health, "Cross-Origin-Opener-Policy"), Some("same-origin"))
         assertEquals(headerValue(health, "Cross-Origin-Resource-Policy"), Some("same-origin"))
+        assertEquals(headerValue(health, "X-Robots-Tag"), Some("noindex, nofollow"))
 
         val ready = get(s"$baseUri/api/ready")
         assertEquals(ready.statusCode(), 200)
@@ -485,6 +486,7 @@ class HandHistoryReviewServerTest extends FunSuite:
         assert(permissionsPolicy.contains("usb=()"), s"missing usb=() in: $permissionsPolicy")
         assertEquals(headerValue(index, "Cross-Origin-Opener-Policy"), Some("same-origin"))
         assertEquals(headerValue(index, "Cross-Origin-Resource-Policy"), Some("same-origin"))
+        assertEquals(headerValue(index, "X-Robots-Tag"), Some("noindex, nofollow"))
 
         val oversizedPayload = s"""{"handHistoryText":"${"A" * 256}"}"""
         val oversizedResponse = postJson(s"$baseUri/api/analyze-hand-history", oversizedPayload)

@@ -160,7 +160,7 @@ If drain/stop times out, `bin/drain-stop-hand-history-web-service.ps1` now repor
   - `Content-Encoding: gzip` + `Vary: Accept-Encoding` — the origin negotiates gzip itself; stripping `Vary` would cause the proxy to serve gzipped bodies to clients that don't accept gzip
   - `ETag` + `Last-Modified` — preserve so the proxy and client can revalidate; the origin honors `If-None-Match` and `If-Modified-Since` and replies `304` to save bandwidth
   - `Cache-Control` — `no-store` on API responses (do not cache), `public, max-age=...` on static assets (safe to cache and revalidate)
-  - `Content-Security-Policy`, `Permissions-Policy`, `X-Frame-Options`, `Referrer-Policy`, `X-Content-Type-Options`, `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy` — defense-in-depth headers the origin sets on every response. A proxy that drops them weakens the browser-side protections.
+  - `Content-Security-Policy`, `Permissions-Policy`, `X-Frame-Options`, `Referrer-Policy`, `X-Content-Type-Options`, `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy`, `X-Robots-Tag` — defense-in-depth headers the origin sets on every response. A proxy that drops them weakens the browser-side protections; in particular `X-Robots-Tag: noindex, nofollow` prevents search engines from indexing the app if the deployment is accidentally reachable from the public internet.
 
 ## State And Backups
 

@@ -81,6 +81,12 @@ private[web] object WebResponses:
     // for a same-origin app.
     headers.set("Cross-Origin-Opener-Policy", "same-origin")
     headers.set("Cross-Origin-Resource-Policy", "same-origin")
+    // Private review tool: search engines must not index it even if it
+    // accidentally ends up reachable from the public internet (the operator
+    // forgets to firewall it, the reverse-proxy ACL is too permissive, etc.).
+    // `noindex` blocks indexing of the response; `nofollow` blocks crawling
+    // any URLs the response references.
+    headers.set("X-Robots-Tag", "noindex, nofollow")
 
   def writeJson(exchange: HttpExchange, status: Int, value: Value): Unit =
     val bytes = ujson.write(value, indent = 2).getBytes(StandardCharsets.UTF_8)
