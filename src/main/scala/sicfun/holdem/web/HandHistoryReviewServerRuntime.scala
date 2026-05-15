@@ -395,18 +395,23 @@ private[web] object HandHistoryReviewServerRuntime:
     logError(s"$label method=$method path=$path exception=${e.getClass.getName} message=$message")
     e.printStackTrace()
 
-  /** Escapes the line-structural characters (`\`, `\n`, `\r`) inside a log message
-    * so that user-controlled values flowing into a log line cannot forge fake log
-    * entries. Several log call sites interpolate request paths, remote addresses,
-    * and error strings from HTTP requests; raw newlines would let an attacker
-    * submitting e.g. `GET /foo%0A%5BERROR%5D%20[hand-history-review]%20...` inject
-    * a fake `[ERROR]` line that fools log parsers / alerting rules. Kept simple:
-    * just the three characters; tabs and most printable control chars pass through. */
+  /** Escapes the line-structural characters (`\`, `\n`, `\r`, `\0`) inside a log
+    * message so that user-controlled values flowing into a log line cannot forge
+    * fake log entries or confuse line-oriented tools. Several log call sites
+    * interpolate request paths, remote addresses, job ids, and error strings
+    * from HTTP requests; raw newlines would let an attacker submitting e.g.
+    * `GET /foo%0A%5BERROR%5D%20[hand-history-review]%20...` inject a fake
+    * `[ERROR]` line that fools log parsers / alerting rules, and a null byte
+    * from `%00` in a URL would silently truncate the line in many text
+    * tools (less, some grep variants, file viewers). Kept simple: just the
+    * four problem characters; tabs and most printable control chars pass
+    * through. */
   private[web] def sanitizeLogMessage(message: String): String =
     message
       .replace("\\", "\\\\")
       .replace("\n", "\\n")
       .replace("\r", "\\r")
+      .replace("\u0000", "\\0")
 
   private def log(level: String, message: String, stream: java.io.PrintStream): Unit =
     stream.synchronized {
