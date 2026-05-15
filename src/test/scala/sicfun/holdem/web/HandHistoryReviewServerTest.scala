@@ -513,6 +513,33 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("health and readiness probes reject non-GET methods with 405 + Allow") {
+    // Earlier the handlers accepted any method (POST, DELETE, PATCH …) and
+    // happily returned the JSON metrics. Probes must be GET-only -- a misrouted
+    // POST has no business getting cached or treated as a successful health
+    // check.
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        for path <- Vector("/api/health", "/api/ready") do
+          val rejected = postJson(s"$baseUri$path", "{}")
+          assertEquals(rejected.statusCode(), 405, clue = path)
+          assertEquals(headerValue(rejected, "Allow"), Some("GET"), clue = path)
+
+          val options = httpClient.send(
+            HttpRequest.newBuilder()
+              .uri(URI.create(s"$baseUri$path"))
+              .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+              .build(),
+            HttpResponse.BodyHandlers.ofString()
+          )
+          assertEquals(options.statusCode(), 200, clue = path)
+          assertEquals(headerValue(options, "Allow"), Some("GET"), clue = path)
+      }
+    }
+  }
+
   test("json auth endpoints answer OPTIONS with 200 and Allow header per RFC 7231 sec 4.3.7") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>

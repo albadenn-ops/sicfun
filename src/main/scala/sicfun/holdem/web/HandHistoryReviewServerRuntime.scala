@@ -66,18 +66,25 @@ private[web] object HandHistoryReviewServerRuntime:
         "/api/health",
         trackActiveRequests(
           activeHttpRequests,
-          new JsonHandler(_ =>
-            Right(
-              renderHealth(
-                config,
-                server.getAddress.getPort,
-                startedAtEpochMs,
-                jobStore,
-                playingHallJobStore,
-                activeHttpRequests.get(),
-                draining
+          new JsonHandler(exchange =>
+            // Without this guard, every method (POST, DELETE, PATCH, …) was
+            // returning the health JSON. /api/health is a metrics endpoint:
+            // accept GET only, advertise it via OPTIONS, 405 the rest with
+            // the Allow header.
+            if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET"))
+            else if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Right(methodNotAllowed("GET"))
+            else
+              Right(
+                renderHealth(
+                  config,
+                  server.getAddress.getPort,
+                  startedAtEpochMs,
+                  jobStore,
+                  playingHallJobStore,
+                  activeHttpRequests.get(),
+                  draining
+                )
               )
-            )
           )
         )
       )
@@ -85,17 +92,20 @@ private[web] object HandHistoryReviewServerRuntime:
         "/api/ready",
         trackActiveRequests(
           activeHttpRequests,
-          new JsonHandler(_ =>
-            Right(
-              renderReadiness(
-                config,
-                server.getAddress.getPort,
-                jobStore,
-                playingHallJobStore,
-                activeHttpRequests.get(),
-                draining
+          new JsonHandler(exchange =>
+            if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET"))
+            else if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Right(methodNotAllowed("GET"))
+            else
+              Right(
+                renderReadiness(
+                  config,
+                  server.getAddress.getPort,
+                  jobStore,
+                  playingHallJobStore,
+                  activeHttpRequests.get(),
+                  draining
+                )
               )
-            )
           )
         )
       )
