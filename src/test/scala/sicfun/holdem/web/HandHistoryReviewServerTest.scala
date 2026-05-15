@@ -401,6 +401,43 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("registration rejects once the configured max-user count is reached") {
+    // Defense against slow disk-fill via public registration abuse: the
+    // user store has a hard cap (default 100k, configurable). Beyond the
+    // cap, registrations return a generic 'temporarily unavailable'
+    // message that does not leak the cap to a probing attacker.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath, maxUsers = 2))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val first = postJson(s"$baseUri/api/auth/register",
+            """{"email":"a@example.com","password":"correct-horse-battery","displayName":"A"}""")
+          assertEquals(first.statusCode(), 201)
+
+          val second = postJson(s"$baseUri/api/auth/register",
+            """{"email":"b@example.com","password":"correct-horse-battery","displayName":"B"}""")
+          assertEquals(second.statusCode(), 201)
+
+          // Third registration -> cap hit, generic rejection.
+          val third = postJson(s"$baseUri/api/auth/register",
+            """{"email":"c@example.com","password":"correct-horse-battery","displayName":"C"}""")
+          assertEquals(third.statusCode(), 400)
+          val errorMessage = jsonBody(third)("error").str
+          assert(errorMessage.contains("temporarily unavailable"),
+            clue = s"hit-cap registration should surface 'temporarily unavailable'; got: $errorMessage")
+          // The message must NOT name the cap so an attacker cannot
+          // fingerprint the limit by probing.
+          assert(!errorMessage.contains("2") && !errorMessage.contains("max"),
+            clue = s"cap-hit error must not leak the configured limit; got: $errorMessage")
+        }
+      }
+    }
+  }
+
   test("registration rejects emails containing whitespace or control characters") {
     // RFC 5321 §4.1.2: unquoted local-part excludes whitespace. Beyond
     // compliance, a space in a stored email value also breaks the audit log

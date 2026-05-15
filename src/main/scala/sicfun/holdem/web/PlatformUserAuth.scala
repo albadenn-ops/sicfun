@@ -69,9 +69,19 @@ object PlatformUserAuth:
       sessionTtlMs: Long = DefaultSessionTtlMs,
       allowLocalRegistration: Boolean = true,
       cookieSecure: Boolean = false,
-      oidcProviders: Vector[OidcProvider] = Vector.empty
+      oidcProviders: Vector[OidcProvider] = Vector.empty,
+      // Defensive cap on the total number of stored users. Without a cap, a
+      // bot abusing public registration (10/min/IP via the auth rate limit)
+      // can grow the user store ~43 MB/day/IP indefinitely -- a slow disk-
+      // fill DoS over weeks. 100k is generous for any realistic private
+      // deployment and far below the point where the in-memory linear-scan
+      // by-email lookup becomes a perf concern. Operators expecting a much
+      // larger user base or running heavy load-test scenarios can raise it;
+      // tests use a much smaller value to exercise the rejection path.
+      maxUsers: Int = 100_000
   ):
     require(sessionTtlMs > 0L, "sessionTtlMs must be positive")
+    require(maxUsers > 0, "maxUsers must be positive")
 
   final case class UserProfile(
       displayName: String,
@@ -395,7 +405,7 @@ object PlatformUserAuth:
       else
         validateOidcProviderIds(config.oidcProviders).flatMap { _ =>
           try
-            val store = new JsonUserStore(config.storePath)
+            val store = new JsonUserStore(config.storePath, config.maxUsers)
             Right(
               new Service(
                 config = config,
@@ -433,7 +443,7 @@ object PlatformUserAuth:
 
   private final case class StoreState(users: Vector[StoredUser])
 
-  private final class JsonUserStore(path: Path):
+  private final class JsonUserStore(path: Path, maxUsers: Int):
     @volatile private var state = load()
 
     def registerLocal(
@@ -448,6 +458,14 @@ object PlatformUserAuth:
           validatePassword(password)
           if findByEmailInternal(normalizedEmail).nonEmpty then
             Left("an account with that email already exists")
+          else if state.users.length >= maxUsers then
+            // Hard cap on the user store to keep public-registration
+            // deployments from being slow-disk-filled by a bot that abuses
+            // the auth bucket (10/min/IP -> ~14400 registrations/day/IP ->
+            // ~43 MB/day/IP of stored user records). Generic error keeps
+            // the response small AND avoids letting the attacker
+            // fingerprint the limit by probing.
+            Left("registration is temporarily unavailable")
           else
             val now = System.currentTimeMillis()
             val resolvedDisplayName = sanitizeDisplayName(displayName).getOrElse(defaultDisplayNameFor(normalizedEmail))
