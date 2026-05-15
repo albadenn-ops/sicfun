@@ -2593,6 +2593,56 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("PlatformUserAuth.Service.create rejects OIDC providers that share an id with the local password sign-in") {
+    // The local-password sign-in path is registered under id "local" in the
+    // /api/auth/me providers list. An OIDC provider with id="local" would
+    // either shadow it in the UI or, worse, route /api/auth/oidc/local/start
+    // to a real OIDC flow disguised as the local-password tab. Reject at
+    // service-create time so the operator sees the misconfiguration during
+    // startup rather than at first user click.
+    withUserStorePath { storePath =>
+      val collidingProvider = new PlatformUserAuth.OidcProvider:
+        override val id = "local"
+        override val displayName = "Bad collision"
+        override def authorizationUri(state: String, codeChallenge: String): String = "https://nowhere.example/"
+        override def exchangeCode(code: String, codeVerifier: String): Either[String, PlatformUserAuth.OidcIdentity] =
+          Left("unreached")
+      val result = PlatformUserAuth.Service.create(PlatformUserAuth.Config(
+        storePath = storePath,
+        oidcProviders = Vector(collidingProvider)
+      ))
+      assert(result.isLeft, s"expected service creation to fail, got: $result")
+      val error = result.left.toOption.getOrElse(fail("missing error"))
+      assert(error.contains("local") && error.contains("reserved"),
+        s"error should mention the reserved 'local' id; got: $error")
+    }
+  }
+
+  test("PlatformUserAuth.Service.create rejects duplicate OIDC provider ids") {
+    // Two OIDC providers with the same id would silently collapse to one in
+    // providersById.toMap AND then crash HTTP server startup with an opaque
+    // "context already exists" exception when both tried to register the same
+    // /api/auth/oidc/<id>/start path. Reject at service-create with a clear
+    // message so the operator can fix the config without grepping stack traces.
+    withUserStorePath { storePath =>
+      def make(providerId: String, displayName: String) = new PlatformUserAuth.OidcProvider:
+        override val id = providerId
+        override val displayName = displayName
+        override def authorizationUri(state: String, codeChallenge: String): String =
+          s"https://nowhere.example/?state=$state"
+        override def exchangeCode(code: String, codeVerifier: String): Either[String, PlatformUserAuth.OidcIdentity] =
+          Left("unreached")
+      val result = PlatformUserAuth.Service.create(PlatformUserAuth.Config(
+        storePath = storePath,
+        oidcProviders = Vector(make("google", "Google A"), make("google", "Google B"))
+      ))
+      assert(result.isLeft, s"expected service creation to fail, got: $result")
+      val error = result.left.toOption.getOrElse(fail("missing error"))
+      assert(error.contains("google") && error.toLowerCase.contains("duplicate"),
+        s"error should mention the duplicate provider id 'google'; got: $error")
+    }
+  }
+
   test("non-loopback platform-user auth can be explicitly allowed for private-network testing") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>

@@ -393,18 +393,43 @@ object PlatformUserAuth:
       if !config.allowLocalRegistration && config.oidcProviders.isEmpty then
         Left("user auth requires at least one sign-in method")
       else
-        try
-          val store = new JsonUserStore(config.storePath)
-          Right(
-            new Service(
-              config = config,
-              userStore = store,
-              sessionManager = new SessionManager(config.sessionTtlMs, config.cookieSecure),
-              oidcStateStore = new OidcStateStore()
+        validateOidcProviderIds(config.oidcProviders).flatMap { _ =>
+          try
+            val store = new JsonUserStore(config.storePath)
+            Right(
+              new Service(
+                config = config,
+                userStore = store,
+                sessionManager = new SessionManager(config.sessionTtlMs, config.cookieSecure),
+                oidcStateStore = new OidcStateStore()
+              )
             )
-          )
-        catch
-          case NonFatal(e) => Left(s"user auth failed to initialize: ${e.getMessage}")
+          catch
+            case NonFatal(e) => Left(s"user auth failed to initialize: ${e.getMessage}")
+        }
+
+    /** Reject OIDC provider configurations that would either shadow the local
+      * password provider or collide with another OIDC entry. Without this
+      * check, two providers with the same id would silently collapse to one
+      * in `providersById.toMap` AND then crash HTTP server registration with
+      * an opaque "context already exists" IllegalArgumentException; an OIDC
+      * provider with id="local" would shadow the local-password provider in
+      * the /api/auth/me providers list. Both are deployment configuration
+      * bugs the operator wants to see surfaced at startup, not at first use. */
+    private def validateOidcProviderIds(providers: Vector[OidcProvider]): Either[String, Unit] =
+      val reserved = providers.map(_.id).filter(_ == LocalProviderId)
+      if reserved.nonEmpty then
+        Left(s"OIDC provider id '$LocalProviderId' is reserved for local password sign-in; choose a different id")
+      else
+        val duplicates = providers
+          .map(_.id)
+          .groupBy(identity)
+          .collect { case (id, occurrences) if occurrences.size > 1 => id }
+          .toVector
+          .sorted
+        if duplicates.nonEmpty then
+          Left(s"OIDC providers must have unique ids; duplicates: ${duplicates.mkString(", ")}")
+        else Right(())
 
   private final case class StoreState(users: Vector[StoredUser])
 
