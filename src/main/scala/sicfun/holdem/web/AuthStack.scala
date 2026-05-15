@@ -476,9 +476,17 @@ private[web] object AuthStack:
           case Some(header) =>
             decodeBasicCredentials(header.drop(6).trim) match
               case None => Some("malformed_authorization")
-              case Some((username, password)) if secureEquals(username, config.username) && secureEquals(password, config.password) =>
-                None
-              case Some(_) => Some("invalid_credentials")
+              case Some((username, password)) =>
+                // Use the non-short-circuit `&` so both secureEquals calls
+                // run regardless of the first result. With `&&` an attacker
+                // could distinguish "wrong username" (only username compared)
+                // from "username matches, password wrong" (both compared) by
+                // timing -- enough to recover the username over enough
+                // probes even when each individual compare is constant-time.
+                val usernameOk = secureEquals(username, config.username)
+                val passwordOk = secureEquals(password, config.password)
+                if usernameOk & passwordOk then None
+                else Some("invalid_credentials")
       failure.foreach(reason => logWarn(s"request unauthorized path=${requestPath(exchange)} remote=${remoteAddress(exchange)} reason=$reason"))
       failure
     }
