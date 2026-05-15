@@ -86,7 +86,10 @@ private[web] object AuthStack:
                   // Failure path logs the SUBMITTED email -- there may be no
                   // canonical user, and operators want to see exactly what the
                   // attacker typed (which may differ from the stored email).
-                  logWarn(s"auth.register.failure email=$email remote=${remoteAddress(exchange)} reason=$error")
+                  // Replace ASCII spaces with %20 so a submitted email like
+                  // "alice bob@example.com" (which validateEmail rejects) does
+                  // not split the structured key=value log fields.
+                  logWarn(s"auth.register.failure email=${email.replace(" ", "%20")} remote=${remoteAddress(exchange)} reason=$error")
                   Left(400 -> error)
             }
             .map(result => loginJsonResponse(service, result, status = 201))
@@ -116,8 +119,10 @@ private[web] object AuthStack:
                   // Email is what the attacker SUBMITTED, not a confirmed account;
                   // log it so operators can spot brute-force patterns (e.g. many
                   // failures from one IP across many emails, or many failures
-                  // from many IPs against one email).
-                  logWarn(s"auth.login.failure email=$email remote=${remoteAddress(exchange)} reason=$error")
+                  // from many IPs against one email). %20-escape ASCII spaces
+                  // so a probe with embedded whitespace doesn't split the
+                  // structured key=value log fields.
+                  logWarn(s"auth.login.failure email=${email.replace(" ", "%20")} remote=${remoteAddress(exchange)} reason=$error")
                   Left(401 -> error)
             }
             .map(result => loginJsonResponse(service, result, status = 200))
