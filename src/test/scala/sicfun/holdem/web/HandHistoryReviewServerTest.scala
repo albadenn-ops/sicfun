@@ -782,6 +782,24 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("server does not advertise its software identity in a Server response header") {
+    // Many HTTP servers default to emitting `Server: JDK/17.0.5` or similar,
+    // which gives an attacker a free version fingerprint for targeting
+    // known JVM/HttpServer CVEs. Our server should keep that surface dark.
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val response = get(s"$baseUri/api/health")
+        assertEquals(response.statusCode(), 200)
+        val serverHeader = headerValue(response, "Server")
+        assert(
+          serverHeader.isEmpty || !serverHeader.exists(value => value.contains("JDK") || value.contains("Java") || value.contains("/")),
+          s"Server header should not advertise JDK/Java version; got: $serverHeader"
+        )
+      }
+    }
+  }
+
   test("static handler returns the same ETag and Content-Encoding on HEAD as on GET for the same Accept-Encoding") {
     // RFC 7231: HEAD describes the GET response. A client that does HEAD to
     // validate a cached entry and then GET to refetch must see the same
