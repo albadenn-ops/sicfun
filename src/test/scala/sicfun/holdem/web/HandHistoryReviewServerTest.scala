@@ -858,6 +858,8 @@ class HandHistoryReviewServerTest extends FunSuite:
           val rejected = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
           assertEquals(rejected.statusCode(), 503)
           assert(rejected.body().contains("draining"))
+          assertEquals(headerValue(rejected, "Retry-After"), Some("5"),
+            clue = "RFC 7231 sec 6.6.4: 503 responses SHOULD include Retry-After so clients back off intelligently")
 
           Files.deleteIfExists(drainSignalFile)
 

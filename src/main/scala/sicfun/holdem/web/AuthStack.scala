@@ -282,6 +282,13 @@ private[web] object AuthStack:
           response.headers.foreach { case (name, value) =>
             exchange.getResponseHeaders.add(name, value)
           }
+          // RFC 7231 sec 6.6.4: 503 responses SHOULD include Retry-After so clients
+          // back off intelligently rather than guessing. Handlers that have a more
+          // specific value (e.g. job-store admission rejections compute one from the
+          // poll-after hint) set it explicitly via the headers list; this fallback
+          // covers the rest.
+          if response.status == 503 && exchange.getResponseHeaders.getFirst("Retry-After") == null then
+            exchange.getResponseHeaders.add("Retry-After", "5")
           writeJson(exchange, response.status, response.value)
       catch
         case NonFatal(e) =>
