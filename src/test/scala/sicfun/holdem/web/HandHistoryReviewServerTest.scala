@@ -617,7 +617,7 @@ class HandHistoryReviewServerTest extends FunSuite:
         for path <- Vector("/api/health", "/api/ready") do
           val rejected = postJson(s"$baseUri$path", "{}")
           assertEquals(rejected.statusCode(), 405, clue = path)
-          assertEquals(headerValue(rejected, "Allow"), Some("GET, OPTIONS"), clue = path)
+          assertEquals(headerValue(rejected, "Allow"), Some("GET, HEAD, OPTIONS"), clue = path)
 
           val options = httpClient.send(
             HttpRequest.newBuilder()
@@ -627,7 +627,17 @@ class HandHistoryReviewServerTest extends FunSuite:
             HttpResponse.BodyHandlers.ofString()
           )
           assertEquals(options.statusCode(), 200, clue = path)
-          assertEquals(headerValue(options, "Allow"), Some("GET, OPTIONS"), clue = path)
+          assertEquals(headerValue(options, "Allow"), Some("GET, HEAD, OPTIONS"), clue = path)
+
+          val head = httpClient.send(
+            HttpRequest.newBuilder()
+              .uri(URI.create(s"$baseUri$path"))
+              .method("HEAD", HttpRequest.BodyPublishers.noBody())
+              .build(),
+            HttpResponse.BodyHandlers.ofString()
+          )
+          assertEquals(head.statusCode(), 200, clue = s"$path HEAD must succeed for monitoring probes")
+          assertEquals(head.body(), "", clue = s"$path HEAD must not include a body")
       }
     }
   }

@@ -67,12 +67,15 @@ private[web] object HandHistoryReviewServerRuntime:
         trackActiveRequests(
           activeHttpRequests,
           new JsonHandler(exchange =>
-            // Without this guard, every method (POST, DELETE, PATCH, …) was
-            // returning the health JSON. /api/health is a metrics endpoint:
-            // accept GET only, advertise it via OPTIONS, 405 the rest with
-            // the Allow header.
-            if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET"))
-            else if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Right(methodNotAllowed("GET"))
+            // Accept GET and HEAD on the health endpoint. Monitoring tools
+            // commonly probe with HEAD to skip the body; writeBytes is
+            // HEAD-aware now and suppresses the body while still emitting
+            // the headers, so HEAD returns 200 + Content-Length matching
+            // what GET would send.
+            val method = exchange.getRequestMethod
+            if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, HEAD"))
+            else if !method.equalsIgnoreCase("GET") && !method.equalsIgnoreCase("HEAD") then
+              Right(methodNotAllowed("GET, HEAD"))
             else
               Right(
                 renderHealth(
@@ -93,8 +96,10 @@ private[web] object HandHistoryReviewServerRuntime:
         trackActiveRequests(
           activeHttpRequests,
           new JsonHandler(exchange =>
-            if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET"))
-            else if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Right(methodNotAllowed("GET"))
+            val method = exchange.getRequestMethod
+            if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, HEAD"))
+            else if !method.equalsIgnoreCase("GET") && !method.equalsIgnoreCase("HEAD") then
+              Right(methodNotAllowed("GET, HEAD"))
             else
               Right(
                 renderReadiness(
