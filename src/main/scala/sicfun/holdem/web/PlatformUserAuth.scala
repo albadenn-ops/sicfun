@@ -463,13 +463,20 @@ object PlatformUserAuth:
         // the same check -- keep both code paths consistent.
         try validateEmail(normalizedEmail)
         catch case e: IllegalArgumentException => return Left(e.getMessage)
+        // Truncate the provider-supplied display name to the same 96-char cap
+        // the local-register path enforces. We truncate (rather than reject)
+        // for the OIDC flow: a legitimate user with a long display name on
+        // Google should still be able to sign in -- they can shorten it via
+        // /api/auth/profile afterward. Without this, a malformed or huge
+        // upstream `name` would bloat the user-store JSON unbounded.
+        val truncatedDisplayName = identity.displayName.take(96)
         val now = System.currentTimeMillis()
         findByProviderIdentityInternal(providerId, identity.subject) match
           case Some(existing) =>
             val updated = existing.copy(
               email = normalizedEmail,
               profile = existing.profile.copy(
-                displayName = preferNonBlank(existing.profile.displayName, identity.displayName),
+                displayName = preferNonBlank(existing.profile.displayName, truncatedDisplayName),
                 avatarUrl = identity.avatarUrl.orElse(existing.profile.avatarUrl)
               ),
               identities = existing.identities.map { current =>
@@ -490,7 +497,7 @@ object PlatformUserAuth:
                   userId = UUID.randomUUID().toString,
                   email = normalizedEmail,
                   profile = UserProfile(
-                    displayName = identity.displayName,
+                    displayName = truncatedDisplayName,
                     avatarUrl = identity.avatarUrl
                   ),
                   identities = Vector(
