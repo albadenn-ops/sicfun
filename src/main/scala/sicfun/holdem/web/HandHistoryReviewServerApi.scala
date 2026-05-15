@@ -677,9 +677,22 @@ private[web] object HandHistoryReviewServerApi:
       case other => Some(other.str)
     }
 
+  // Loose upper bound on the operator-facing "site" field. Recognised aliases
+  // (pokerstars/stars/winamax/wina/ggpoker/gg/ggnetwork) are all under 12
+  // chars; 64 is plenty of slack for any future alias and tight enough that
+  // an attacker cannot stuff a multi-KB attacker payload into the
+  // "unsupported hand-history site: <value>" error message that
+  // HandHistorySite.parse echoes for unknown inputs.
+  private val MaxSiteFieldLength = 64
+
   private def parseOptionalSite(raw: Option[String]): Either[(Int, String), Option[HandHistorySite]] =
     raw.map(_.trim).filter(_.nonEmpty).filterNot(_.equalsIgnoreCase("auto")) match
       case None => Right(None)
+      case Some(value) if value.length > MaxSiteFieldLength =>
+        // Reject oversize values BEFORE HandHistorySite.parse echoes them
+        // back through the "unsupported hand-history site: <value>" error.
+        // Generic length message keeps the response tiny.
+        Left(400 -> s"site must be at most $MaxSiteFieldLength characters")
       case Some(value) => HandHistorySite.parse(value).left.map(err => 400 -> err).map(Some(_))
 
   def readRequestBody(

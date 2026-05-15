@@ -2299,6 +2299,31 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("analyze-hand-history rejects oversize 'site' field without echoing the value back") {
+    // HandHistorySite.parse returns "unsupported hand-history site: <value>"
+    // for unknown inputs. parseOptionalSite used to forward that verbatim,
+    // so a request with a 2 KB attacker-controlled site value would land
+    // 2 KB of attacker payload in the 400 response. Cap at 64 chars upfront
+    // -- recognised site aliases are all under 12 chars -- so the echo path
+    // is fenced off before it can amplify.
+    withStaticSite { staticDir =>
+      withServer(staticDir, maxUploadBytes = 4096) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val marker = "MARKER_PAYLOAD_SITE_AA"
+        val hugeSite = marker + ("x" * 2000)
+        val payload =
+          s"""{"handHistoryText":"x","site":"$hugeSite","heroName":"Hero"}"""
+        val response = postJson(s"$baseUri/api/analyze-hand-history", payload)
+        assertEquals(response.statusCode(), 400)
+        val errorBody = jsonBody(response)("error").str
+        assert(errorBody.contains("at most"),
+          clue = s"oversize site should surface a 'must be at most ...' message; got: $errorBody")
+        assert(!errorBody.contains(marker),
+          clue = s"oversize site value must NOT be echoed in the 400 response body; got: $errorBody")
+      }
+    }
+  }
+
   test("JSON parse-error responses cap the underlying exception message so a non-object body cannot echo back at full size") {
     // ujson.read(body).obj throws ujson.Value.InvalidData when body is a JSON
     // value but not an object (e.g. a giant string or array). The exception's
