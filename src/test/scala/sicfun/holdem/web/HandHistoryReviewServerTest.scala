@@ -474,7 +474,24 @@ class HandHistoryReviewServerTest extends FunSuite:
         assert(index.body().contains("Runtime smoke page"))
         assertEquals(headerValue(index, "X-Content-Type-Options"), Some("nosniff"))
         assertEquals(headerValue(index, "X-Frame-Options"), Some("DENY"))
-        assert(headerValue(index, "Content-Security-Policy").exists(_.contains("default-src 'self'")))
+        // Pin each defensive CSP directive so a regression that drops one (e.g.
+        // removing object-src 'none' which kills legacy Flash injection, or
+        // base-uri 'none' which prevents <base href> hijacking of relative
+        // URLs) fails the test rather than passing on the still-present
+        // default-src.
+        val csp = headerValue(index, "Content-Security-Policy")
+          .getOrElse(fail("expected Content-Security-Policy header"))
+        for directive <- Vector(
+          "default-src 'self'",
+          "base-uri 'none'",
+          "connect-src 'self'",
+          "form-action 'self'",
+          "frame-ancestors 'none'",
+          "object-src 'none'",
+          "script-src 'self'",
+          "style-src 'self'"
+        ) do
+          assert(csp.contains(directive), s"CSP missing `$directive`: $csp")
         val permissionsPolicy = headerValue(index, "Permissions-Policy").getOrElse(
           fail("expected Permissions-Policy header on index response"))
         assert(permissionsPolicy.contains("camera=()"), s"missing camera=() in: $permissionsPolicy")
