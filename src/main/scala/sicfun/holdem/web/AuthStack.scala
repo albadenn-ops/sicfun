@@ -557,7 +557,12 @@ private[web] object AuthStack:
 
 
   private def requestPath(exchange: HttpExchange): String =
-    Option(exchange.getRequestURI).map(_.getPath).filter(_.nonEmpty).getOrElse("/")
+    // getRawPath keeps percent-encoded sequences as-is; getPath would decode
+    // them, and a `%20` in the URL would become a literal space in the
+    // structured `path=...` log field -- which then splits at the wrong
+    // column for any line-oriented parser. The raw form is uglier but
+    // unambiguous and stable across log parsers.
+    Option(exchange.getRequestURI).map(_.getRawPath).filter(_.nonEmpty).getOrElse("/")
 
   private def remoteAddress(exchange: HttpExchange): String =
     Option(exchange.getRemoteAddress).map(address => s"${address.getHostString}:${address.getPort}").getOrElse("-")
