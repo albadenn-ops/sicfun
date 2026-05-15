@@ -380,11 +380,12 @@ private[web] object AuthStack:
       case AuthRequirement.Required =>
         basicAuth match
           case Some(_) =>
+            // validateBasicAuth logs the failure reason itself, so the JSON
+            // path does not also emit a `request unauthorized` line.
             validateBasicAuth(exchange, basicAuth) match
               case None => true
-              case Some(reason) =>
+              case Some(_) =>
                 exchange.getResponseHeaders.set("WWW-Authenticate", BasicAuthChallenge)
-                logWarn(s"request unauthorized path=${requestPath(exchange)} remote=${remoteAddress(exchange)} reason=$reason")
                 writeJson(exchange, 401, Obj("error" -> Str(AuthenticationRequiredMessage)))
                 false
           case None if platformAuth.nonEmpty =>
