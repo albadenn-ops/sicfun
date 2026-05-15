@@ -251,7 +251,7 @@ private[web] object HandHistoryReviewServerApi:
         heroName = heroName
       )
     catch
-      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${e.getMessage}")
+      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${capParseErrorMessage(e.getMessage)}")
 
   private def parsePlayingHallRequest(body: String): Either[(Int, String), PlayingHallRequest] =
     try
@@ -361,7 +361,7 @@ private[web] object HandHistoryReviewServerApi:
         seed = seed
       )
     catch
-      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${e.getMessage}")
+      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${capParseErrorMessage(e.getMessage)}")
 
   private def requiredIntInRange(
       obj: collection.Map[String, Value],
@@ -453,6 +453,20 @@ private[web] object HandHistoryReviewServerApi:
     case ujson.Null => "null"
     case _: ujson.Arr => "array"
     case _: ujson.Obj => "object"
+
+  // Cap the exception message we surface in JSON parse-error responses. The
+  // main exposure is ujson.Value.InvalidData (thrown by .obj on a non-object
+  // body), whose getMessage is "Expected Obj: <data.toString>" -- and for a
+  // 16 KB request body shaped as a giant string or array, data.toString is
+  // ~16 KB of attacker-controlled payload that would otherwise round-trip
+  // through the 400 response body. 256 chars matches the per-field caps
+  // applied elsewhere and is plenty for any genuine parser error message
+  // (positions, expected tokens, etc.).
+  private val MaxParseErrorMessageLength = 256
+  private[web] def capParseErrorMessage(raw: String): String =
+    if raw == null then ""
+    else if raw.length <= MaxParseErrorMessageLength then raw
+    else raw.substring(0, MaxParseErrorMessageLength) + "...(truncated)"
 
   private def optionalInt(
       obj: collection.Map[String, Value],

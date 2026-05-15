@@ -2299,6 +2299,34 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("JSON parse-error responses cap the underlying exception message so a non-object body cannot echo back at full size") {
+    // ujson.read(body).obj throws ujson.Value.InvalidData when body is a JSON
+    // value but not an object (e.g. a giant string or array). The exception's
+    // getMessage is 'Expected Obj: <data.toString>' -- for a 4 KB raw string
+    // body, ~4 KB of attacker payload would otherwise round-trip into the
+    // 'invalid JSON request: ...' 400 response body. capParseErrorMessage
+    // bounds that round-trip at 256 chars + truncation marker. The first
+    // 256 chars of the message can still include attacker-controlled prefix
+    // (we don't fully redact), but the total response body size is bounded.
+    withStaticSite { staticDir =>
+      withServer(staticDir, maxUploadBytes = 4096) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        // 3 KB raw string body (valid JSON, but a JSON string, not an object).
+        val hugeString = "\"" + ("y" * 3000) + "\""
+        val request = HttpRequest.newBuilder(URI.create(s"$baseUri/api/playing-hall"))
+          .header("Content-Type", "application/json")
+          .POST(HttpRequest.BodyPublishers.ofString(hugeString, StandardCharsets.UTF_8))
+          .build()
+        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+        // The response body must be bounded -- without the cap, the
+        // 'invalid JSON request: Expected Obj: yyyy...3000y...' message
+        // would be ~3 KB; with the cap it's ~256 chars + framing.
+        assert(response.body().length < 600,
+          clue = s"3 KB request body should produce <600-byte error response with cap; got ${response.body().length} bytes")
+      }
+    }
+  }
+
   test("villainPool with non-string entries reports the type name, not the offending value") {
     // optionalStringArray used to fall through to `other.str` on non-string
     // entries; for Obj/Arr/Bool that throws ujson.Value.InvalidData whose

@@ -13,6 +13,7 @@ import ujson.{Arr, Obj, Str}
 import sicfun.holdem.web.HandHistoryReviewServer.BasicAuthConfig
 import sicfun.holdem.web.HandHistoryReviewServerApi.{
   JsonResponse,
+  capParseErrorMessage,
   methodNotAllowed,
   optionsResponse,
   optionalString,
@@ -343,7 +344,7 @@ private[web] object AuthStack:
         password <- requiredString(obj, "password")
       yield (email.trim, password, optionalString(obj, "displayName").map(_.trim).filter(_.nonEmpty))
     catch
-      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${e.getMessage}")
+      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${capParseErrorMessage(e.getMessage)}")
 
   private def parseLoginRequest(body: String): Either[(Int, String), (String, String)] =
     try
@@ -353,7 +354,7 @@ private[web] object AuthStack:
         password <- requiredString(obj, "password")
       yield (email.trim, password)
     catch
-      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${e.getMessage}")
+      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${capParseErrorMessage(e.getMessage)}")
 
   private def parseProfileUpdateRequest(
       body: String
@@ -369,7 +370,7 @@ private[web] object AuthStack:
         )
       )
     catch
-      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${e.getMessage}")
+      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${capParseErrorMessage(e.getMessage)}")
 
   private def extractOidcProviderId(
       exchange: HttpExchange,
