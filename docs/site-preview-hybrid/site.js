@@ -200,6 +200,7 @@ if (form && fileInput && siteSelect && heroInput) {
     // still runs if the file read or payload build throws.
     setSubmitting(true);
     renderStatus(`Submitting ${file.name} for local review...`);
+    setTitleStatus(`Submitting ${file.name}`);
     reviewResults.classList.add("hidden");
 
     try {
@@ -241,6 +242,7 @@ if (form && fileInput && siteSelect && heroInput) {
       renderStatus(`Request failed: ${describeFetchError(error)}`);
     } finally {
       setSubmitting(false);
+      setTitleStatus(null);
     }
   });
 }
@@ -284,6 +286,7 @@ if (hallForm) {
 
     setHallSubmitting(true);
     renderHallStatus("Queueing a local playing hall run...");
+    setTitleStatus("Hall run queued");
     hallResults.classList.add("hidden");
 
     try {
@@ -323,6 +326,7 @@ if (hallForm) {
     } finally {
       setHallSubmitting(false);
       finishHallProgress();
+      setTitleStatus(null);
     }
   });
 }
@@ -1056,6 +1060,17 @@ function renderStatus(message) {
       counts, EV gaps, warnings, and opponent notes when the review is ready.
     </p>
   `;
+}
+
+// Mirror status into the document title so users with many tabs can see
+// at a glance which one has work in flight. Pass null/empty to reset to
+// the default title (kept here as the source of truth so the meta and
+// the page title agree). Called from the analyze + hall submit flows
+// and finally blocks; idempotent so a final reset doesn't overwrite a
+// later flow's in-progress title.
+const DEFAULT_TITLE = "SICFUN | Hand-History Review & Playing Hall";
+function setTitleStatus(message) {
+  document.title = message ? `${message} · SICFUN` : DEFAULT_TITLE;
 }
 
 function renderHallStatus(message) {
