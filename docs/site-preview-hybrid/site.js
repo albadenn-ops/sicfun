@@ -1833,13 +1833,19 @@ function renderRecentRuns() {
   hallRecentList.innerHTML = headerBar + entries.map((entry, idx) => {
     const ts = new Date(entry.timestamp).toLocaleString();
     const pool = Array.isArray(entry.request.villainPool) ? entry.request.villainPool.join(", ") : "-";
+    // Per-button aria-labels include the timestamp so screen-reader users
+    // navigating by button list (Tab key, rotor, etc.) don't hear "Load
+    // button, Remove button" repeated N times with no way to tell which
+    // run is which. The visible "Load" / "x" stays terse for sighted
+    // users; the label only kicks in for assistive tech.
+    const tsForLabel = escapeHtml(ts);
     return `
       <article class="recent-run">
         <div class="recent-run-head">
           <span class="recent-run-ts">${escapeHtml(ts)}</span>
           <span class="recent-run-actions">
-            <button type="button" class="button button-secondary" data-recent-index="${idx}">Load</button>
-            <button type="button" class="button button-secondary recent-run-remove" data-recent-remove="${idx}" aria-label="Remove this run from history" title="Remove">×</button>
+            <button type="button" class="button button-secondary" data-recent-index="${idx}" aria-label="Load run from ${tsForLabel}">Load</button>
+            <button type="button" class="button button-secondary recent-run-remove" data-recent-remove="${idx}" aria-label="Remove run from ${tsForLabel}" title="Remove">×</button>
           </span>
         </div>
         <p class="recent-run-meta">
