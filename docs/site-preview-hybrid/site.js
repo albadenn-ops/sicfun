@@ -622,7 +622,14 @@ const OIDC_ERROR_MESSAGES = {
   "state_cookie_mismatch": "Sign-in security check failed. Please try signing in again.",
   "missing_code_or_state": "Sign-in did not complete. Please try signing in again.",
   "oversize_callback_param": "The sign-in response was malformed. Please try again.",
-  "access_denied": "Sign-in was declined. Please try a different account or method."
+  "access_denied": "Sign-in was declined. Please try a different account or method.",
+  // The user-store cap (USER_AUTH_MAX_USERS) can trip during BOTH local
+  // registration AND OIDC sign-up when the new identity does not match
+  // an existing user. The server emits the same human-readable string in
+  // both cases ("registration is temporarily unavailable"); the friendly
+  // version below tells the OIDC user this is a deployment-side capacity
+  // issue, not something they did wrong.
+  "registration is temporarily unavailable": "This deployment is at capacity and not accepting new sign-ins. Please try again later or contact the operator."
 };
 
 function renderAuthFlash() {
