@@ -249,7 +249,14 @@
           <form class="upload-form" id="hand-upload-form">
             <label class="field">
               <span>Hand history file</span>
-              <input id="hand-history-file" type="file" accept=".txt,text/plain">
+              <!-- aria-describedby links the file input to the size hint
+                   so screen readers announce the dynamic upload cap and
+                   the supported export sources when the input gains
+                   focus. Without it the hint is visible-only - the
+                   <small> sits inside the <label> but assistive tech
+                   reads only the <span> label name, not the trailing
+                   small text. -->
+              <input id="hand-history-file" type="file" accept=".txt,text/plain" aria-describedby="hand-history-file-hint">
               <!-- The size hint is populated from MAX_UPLOAD_BYTES via the
                    /api/health probe at boot so it stays in sync when an
                    operator raises the server cap. Placeholder text gives
