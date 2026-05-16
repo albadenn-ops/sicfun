@@ -349,6 +349,16 @@ object PlatformUserAuth:
       * because state is the @volatile var in JsonUserStore. */
     def storedUserCount: Int = userStore.storedUserCount
 
+    /** Number of session records currently held in memory. Approximate -- may
+      * include expired sessions that have not yet been purged by the next
+      * resolve() or cleanup pass -- but accurate enough for the
+      * `/api/health` dashboard. Useful as a capacity proxy: a steady-state
+      * count higher than expected (e.g. an unusual spike during off-hours)
+      * is a heads-up about credential stuffing succeeded or a leaked
+      * automation script. Includes anonymous-OIDC-flow start cookies? No;
+      * the state-cookie store is separate. */
+    def activeSessionCount: Int = sessionManager.activeSessionCount
+
     def registerLocal(
         email: String,
         password: String,
@@ -718,6 +728,13 @@ object PlatformUserAuth:
       nowMillis: () => Long = () => System.currentTimeMillis()
   ):
     private val sessions = new ConcurrentHashMap[String, SessionRecord]()
+
+    // Approximate count of in-memory session records. ConcurrentHashMap.size
+    // is documented as "not a constant-time operation" but for our scale
+    // (typically dozens to thousands of sessions) it's microseconds.
+    // Includes records that have expired but not yet been purged by the
+    // next resolve() / cleanup pass; close enough for dashboarding.
+    def activeSessionCount: Int = sessions.size()
 
     def create(user: StoredUser): SessionMaterial =
       purgeExpired()

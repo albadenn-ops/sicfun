@@ -83,6 +83,7 @@ private[web] object Readiness:
         // no user store).
         "userAuthMaxUsers" -> config.platformAuth.map(c => Num(c.maxUsers.toDouble)).getOrElse(ujson.Null),
         "userAuthStoredUsers" -> platformAuthService.map(s => Num(s.storedUserCount.toDouble)).getOrElse(ujson.Null),
+        "userAuthActiveSessions" -> platformAuthService.map(s => Num(s.activeSessionCount.toDouble)).getOrElse(ujson.Null),
         "service" -> Str("hand-history-review"),
         "host" -> Str(config.host),
         "port" -> Num(boundPort.toDouble),

@@ -410,10 +410,12 @@ class HandHistoryReviewServerTest extends FunSuite:
         ) { server =>
           val baseUri = s"http://${server.binding.host}:${server.binding.port}"
 
-          // No users yet: stored=0, max=50.
+          // No users yet: stored=0, max=50, sessions=0.
           val healthBefore = getJson(s"$baseUri/api/health")
           assertEquals(healthBefore("userAuthMaxUsers").num.toInt, 50)
           assertEquals(healthBefore("userAuthStoredUsers").num.toInt, 0)
+          assertEquals(healthBefore("userAuthActiveSessions").num.toInt, 0,
+            clue = "no users registered, no sessions issued, so active-session count starts at 0")
 
           // Register one user.
           val register = postJson(s"$baseUri/api/auth/register",
@@ -424,6 +426,8 @@ class HandHistoryReviewServerTest extends FunSuite:
           assertEquals(healthAfter("userAuthMaxUsers").num.toInt, 50)
           assertEquals(healthAfter("userAuthStoredUsers").num.toInt, 1,
             clue = "stored count should reflect the newly registered user")
+          assertEquals(healthAfter("userAuthActiveSessions").num.toInt, 1,
+            clue = "successful registration creates an initial session, so active-session count is 1")
         }
       }
     }
@@ -441,6 +445,8 @@ class HandHistoryReviewServerTest extends FunSuite:
           clue = s"userAuthMaxUsers must be null when platform-user auth is disabled; got: ${health("userAuthMaxUsers")}")
         assert(health("userAuthStoredUsers").isNull,
           clue = s"userAuthStoredUsers must be null when platform-user auth is disabled; got: ${health("userAuthStoredUsers")}")
+        assert(health("userAuthActiveSessions").isNull,
+          clue = s"userAuthActiveSessions must be null when platform-user auth is disabled; got: ${health("userAuthActiveSessions")}")
       }
     }
   }
