@@ -188,7 +188,10 @@
 
             <label class="field">
               <span>Default hero screen name</span>
-              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form" maxlength="64">
+              <!-- spellcheck=false: poker screen names are identifiers
+                   (e.g. 'Mig_Pro22'), not prose. iOS/Android autocorrect
+                   would otherwise capitalize them or swap chars. -->
+              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form" spellcheck="false" maxlength="64">
             </label>
 
             <label class="field">
@@ -203,7 +206,10 @@
 
             <label class="field">
               <span>Time zone</span>
-              <input id="profile-time-zone" type="text" placeholder="e.g. Europe/Madrid" maxlength="64">
+              <!-- spellcheck=false: IANA time-zone names ("Europe/Madrid",
+                   "America/Argentina/Buenos_Aires") aren't dictionary
+                   words. -->
+              <input id="profile-time-zone" type="text" placeholder="e.g. Europe/Madrid" spellcheck="false" maxlength="64">
             </label>
 
             <div class="auth-actions">
@@ -248,8 +254,10 @@
               <span>Hero screen name</span>
               <!-- 64 chars matches the profile heroName cap so a value
                    pasted here behaves the same as one saved on the
-                   profile (which prefills this field). -->
-              <input id="hero-name" type="text" placeholder="Optional override" maxlength="64">
+                   profile (which prefills this field). spellcheck=false
+                   matches the profile heroName field: identifier, not
+                   prose. -->
+              <input id="hero-name" type="text" placeholder="Optional override" spellcheck="false" maxlength="64">
             </label>
 
             <div class="upload-actions">
