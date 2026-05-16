@@ -626,7 +626,21 @@ function updateAccountUi(message = "") {
     toggleHidden(authForm, false);
     toggleHidden(profileCard, true);
     if (authRegisterButton) {
-      authRegisterButton.disabled = !authState.allowLocalRegistration;
+      const registrationOff = !authState.allowLocalRegistration;
+      authRegisterButton.disabled = registrationOff;
+      // Tell the user WHY the button is grayed out. Without this they
+      // see a dimmed Register and have no signal whether it's a
+      // transient lock (slow network mid-fetch) or a deployment-level
+      // policy (USER_AUTH_ALLOW_REGISTRATION=false). aria-disabled
+      // mirrors disabled so screen readers announce the state too;
+      // title gives the hover tooltip on desktop.
+      if (registrationOff) {
+        authRegisterButton.title = "Registration is disabled on this deployment";
+        authRegisterButton.setAttribute("aria-disabled", "true");
+      } else {
+        authRegisterButton.removeAttribute("title");
+        authRegisterButton.removeAttribute("aria-disabled");
+      }
     }
     return;
   }
