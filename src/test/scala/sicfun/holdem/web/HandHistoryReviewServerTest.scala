@@ -3533,6 +3533,32 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("PlatformUserAuth.Service.create rejects OIDC provider ids with invalid shape") {
+    // Provider id ends up in URL paths and as a JDK HttpServer context key.
+    // Empty, slash-bearing, or non-URL-safe ids would either fail context
+    // registration with an opaque JDK error or register routes that
+    // extractOidcProviderId's 5-segment match couldn't reach. Reject at
+    // service-create with a clear shape-rule message so the operator
+    // fixes the config at startup, not at first user click.
+    withUserStorePath { storePath =>
+      def make(providerId: String) = new PlatformUserAuth.OidcProvider:
+        override val id = providerId
+        override val displayName = "Bad shape"
+        override def authorizationUri(state: String, codeChallenge: String): String = "https://nowhere.example/"
+        override def exchangeCode(code: String, codeVerifier: String): Either[String, PlatformUserAuth.OidcIdentity] =
+          Left("unreached")
+      for badId <- Vector("", "has/slash", "has\\backslash", "has space", "has?question", "has#hash", "ñoñascii", "a" * 65) do
+        val result = PlatformUserAuth.Service.create(PlatformUserAuth.Config(
+          storePath = storePath,
+          oidcProviders = Vector(make(badId))
+        ))
+        assert(result.isLeft, s"expected service creation to fail for id='$badId', got: $result")
+        val error = result.left.toOption.getOrElse(fail(s"missing error for id='$badId'"))
+        assert(error.toLowerCase.contains("invalid") || error.toLowerCase.contains("contain only") || error.toLowerCase.contains("non-empty"),
+          s"error should mention the shape rule for id='$badId'; got: $error")
+    }
+  }
+
   test("PlatformUserAuth.Service.create rejects duplicate OIDC provider ids") {
     // Two OIDC providers with the same id would silently collapse to one in
     // providersById.toMap AND then crash HTTP server startup with an opaque

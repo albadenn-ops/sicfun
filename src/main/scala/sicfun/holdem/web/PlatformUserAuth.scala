@@ -451,8 +451,31 @@ object PlatformUserAuth:
       * the /api/auth/me providers list. Both are deployment configuration
       * bugs the operator wants to see surfaced at startup, not at first use. */
     private def validateOidcProviderIds(providers: Vector[OidcProvider]): Either[String, Unit] =
+      // Provider id ends up directly in URL paths (/api/auth/oidc/<id>/start
+      // and /callback) AND as a JDK HttpServer context key. Empty / slash-
+      // bearing / non-URL-safe ids would either fail context registration
+      // at startup with an opaque JDK error, or register routes the
+      // extractOidcProviderId 5-segment match couldn't reach. Restrict to
+      // a conservative slug shape so misconfigured deployments fail fast
+      // at startup with a clear message instead of silently shipping an
+      // unreachable provider.
+      val invalidShape = providers
+        .map(_.id)
+        // ASCII alphanumerics only -- ch.isLetterOrDigit accepts Unicode
+        // letters (e.g. ñ, ü, ø) which would round-trip safely in URL
+        // paths but break the operator-grep contract: a provider id of
+        // "ñoñ" surfaces as `provider=%C3%B1o%C3%B1` in some audit-log
+        // contexts (URL-encoded) and `provider=ñoñ` in others (raw),
+        // making grep brittle. Stick to ASCII for predictability.
+        .filterNot(id => id.nonEmpty && id.length <= 64 && id.forall(ch =>
+          (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_'
+        ))
+        .distinct
+        .sorted
       val reserved = providers.map(_.id).filter(_ == LocalProviderId)
-      if reserved.nonEmpty then
+      if invalidShape.nonEmpty then
+        Left(s"OIDC provider ids must be non-empty and contain only letters, digits, '-', or '_' (at most 64 chars); invalid: ${invalidShape.mkString(", ")}")
+      else if reserved.nonEmpty then
         Left(s"OIDC provider id '$LocalProviderId' is reserved for local password sign-in; choose a different id")
       else
         val duplicates = providers
