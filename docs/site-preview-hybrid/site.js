@@ -108,6 +108,17 @@ const SINGLE_SHOT_FETCH_TIMEOUT_MS = 15_000;
 const POLL_FETCH_TIMEOUT_MS = 30_000;
 
 function fetchWithTimeout(url, options, timeoutMs = SINGLE_SHOT_FETCH_TIMEOUT_MS) {
+  // Feature-detect AbortSignal.timeout (Chrome 103+, Firefox 100+, Safari
+  // 16+). Older browsers throw TypeError ('AbortSignal.timeout is not a
+  // function') the moment we call it -- before fetch even starts -- and
+  // describeFetchError wouldn't recognize the message, so every single
+  // request would surface a confusing developer-facing error to the user.
+  // Fall back to a fetch without timeout (matches the pre-timeout
+  // behavior) so the page still works on legacy browsers; modern users
+  // keep the timeout they had.
+  if (typeof AbortSignal === "undefined" || typeof AbortSignal.timeout !== "function") {
+    return fetch(url, options);
+  }
   return fetch(url, {
     ...options,
     signal: AbortSignal.timeout(timeoutMs)
