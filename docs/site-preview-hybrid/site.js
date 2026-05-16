@@ -410,12 +410,18 @@ async function refreshAuthState() {
   }
 }
 
-// When a state-changing or polled request comes back 401, the user's session
-// has expired or been revoked. Refresh the auth state from /api/auth/me so the
-// login form reappears instead of leaving the user staring at an error string
-// inside an UI that still pretends they're signed in.
+// When a state-changing or polled request comes back 401 or 403, the
+// frontend's auth state is out of sync with the server's:
+//   - 401: session expired / revoked (logged out in another tab) -- the
+//     login form needs to reappear so the user knows.
+//   - 403: stale CSRF token (re-auth happened in another tab and minted a
+//     new csrfToken that this tab hasn't seen yet). Refreshing /api/auth/me
+//     pulls the fresh token so a retry succeeds without a full page reload.
+// Either way, refresh from /api/auth/me so the UI matches reality.
 async function maybeReauthOn401(response) {
-  if (response && response.status === 401 && authState.authenticated) {
+  if (!response) return;
+  const status = response.status;
+  if ((status === 401 || status === 403) && authState.authenticated) {
     await refreshAuthState();
   }
 }
