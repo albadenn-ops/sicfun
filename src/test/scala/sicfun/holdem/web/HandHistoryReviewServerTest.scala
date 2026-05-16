@@ -2555,6 +2555,31 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("analyze-hand-history rejects oversize heroName with 400 before queueing a job") {
+    // Frontend caps heroName at 64 via <input maxlength="64">, matching the
+    // PlatformUserAuth profile heroName cap. A scripted client that bypasses
+    // the HTML would otherwise stuff a multi-kilobyte heroName into the
+    // request body, hit the worker's comparison loop, and -- worse -- could
+    // be quoted back through any future audit log line that includes
+    // heroName. Cap upfront with a generic length message that does not
+    // echo the value.
+    withStaticSite { staticDir =>
+      withServer(staticDir, maxUploadBytes = 4096) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val marker = "MARKER_HERO_PAYLOAD_AA"
+        val hugeHero = marker + ("x" * 200)
+        val payload = s"""{"handHistoryText":"x","heroName":"$hugeHero"}"""
+        val response = postJson(s"$baseUri/api/analyze-hand-history", payload)
+        assertEquals(response.statusCode(), 400)
+        val errorBody = jsonBody(response)("error").str
+        assert(errorBody.contains("at most"),
+          clue = s"oversize heroName should surface a 'must be at most ...' message; got: $errorBody")
+        assert(!errorBody.contains(marker),
+          clue = s"oversize heroName value must NOT be echoed in the 400 response body; got: $errorBody")
+      }
+    }
+  }
+
   test("analyze-hand-history rejects oversize 'site' field without echoing the value back") {
     // HandHistorySite.parse returns "unsupported hand-history site: <value>"
     // for unknown inputs. parseOptionalSite used to forward that verbatim,

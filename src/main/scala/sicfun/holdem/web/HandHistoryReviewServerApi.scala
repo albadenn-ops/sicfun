@@ -261,15 +261,23 @@ private[web] object HandHistoryReviewServerApi:
       val handHistoryText = requiredString(obj, "handHistoryText")
         .map(_.stripPrefix("\uFEFF").trim)
         .filterOrElse(_.nonEmpty, 400 -> "handHistoryText is required")
-      val heroName = optionalString(obj, "heroName").map(_.trim).filter(_.nonEmpty)
+      // Cap heroName at 64 chars to match the frontend maxlength and the
+      // PlatformUserAuth profile heroName cap. The HTML <input maxlength=64>
+      // prevents legitimate UI input from exceeding the limit; this server
+      // check is defense in depth against a hand-crafted curl/scripted
+      // client and also keeps the value out of the audit log if any future
+      // code path logs the heroName. Reject upfront so the worker never
+      // sees a multi-kilobyte heroName in the comparison loop.
+      val heroName = parseOptionalHeroName(optionalString(obj, "heroName"))
       val site = parseOptionalSite(optionalString(obj, "site"))
       for
         text <- handHistoryText
+        parsedHeroName <- heroName
         parsedSite <- site
       yield HandHistoryReviewService.AnalysisRequest(
         handHistoryText = text,
         site = parsedSite,
-        heroName = heroName
+        heroName = parsedHeroName
       )
     catch
       case NonFatal(e) => Left(400 -> s"invalid JSON request: ${capParseErrorMessage(e.getMessage)}")
@@ -705,6 +713,19 @@ private[web] object HandHistoryReviewServerApi:
   // "unsupported hand-history site: <value>" error message that
   // HandHistorySite.parse echoes for unknown inputs.
   private val MaxSiteFieldLength = 64
+
+  // Cap for the analyze-hand-history heroName field. Matches the frontend
+  // <input maxlength="64"> and the PlatformUserAuth profile heroName cap,
+  // so a value behaves consistently whether it came from the saved profile,
+  // a manual upload-form entry, or a scripted curl request.
+  private val MaxAnalyzeHeroNameLength = 64
+
+  private def parseOptionalHeroName(raw: Option[String]): Either[(Int, String), Option[String]] =
+    raw.map(_.trim).filter(_.nonEmpty) match
+      case None => Right(None)
+      case Some(value) if value.length > MaxAnalyzeHeroNameLength =>
+        Left(400 -> s"heroName must be at most $MaxAnalyzeHeroNameLength characters")
+      case Some(value) => Right(Some(value))
 
   private def parseOptionalSite(raw: Option[String]): Either[(Int, String), Option[HandHistorySite]] =
     raw.map(_.trim).filter(_.nonEmpty).filterNot(_.equalsIgnoreCase("auto")) match
