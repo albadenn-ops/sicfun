@@ -73,7 +73,18 @@ Hand-history analysis:
 
 Playing Hall simulation:
 
-- `POST /api/playing-hall` — submit a hall simulation. JSON body fields: `hands`, `tableCount`, `playerCount`, `heroStyle` (`adaptive`/`gto`/`strategic`), `heroPosition` (`SmallBlind`/`BigBlind`/`UTG`/`UTG1`/`UTG2`/`Middle`/`Hijack`/`Cutoff`/`Button`), `gtoMode` (`fast`/`exact`), `villainPool`, `heroExplorationRate`, `raiseSize`, `bunchingTrials`, `equityTrials`. Rate-limited as Submit; admission shares the same `MAX_CONCURRENT_JOBS` / `MAX_QUEUED_JOBS` budget as hand-history analysis.
+- `POST /api/playing-hall` — submit a hall simulation. All JSON body fields are optional; omitted values fall back to documented defaults. Numeric ranges are enforced server-side with `400` on out-of-range values:
+  - `hands` (1..5000, default 240), `tableCount` (1..24, default 2), `playerCount` (2..9, default 6)
+  - `heroStyle` (`adaptive`/`gto`/`strategic`, default `adaptive`)
+  - `heroPosition` (`SmallBlind`/`BigBlind`/`UTG`/`UTG1`/`UTG2`/`Middle`/`Hijack`/`Cutoff`/`Button`, default `Button`)
+  - `gtoMode` (`fast`/`exact`, default `exact`)
+  - `villainPool` (array of 1..8 entries from `nit`/`tag`/`lag`/`station`/`callingstation`/`maniac`/`gto`, each entry capped at 32 chars; default `[tag, gto]`)
+  - `heroExplorationRate` (0.0..1.0, default 0.0), `raiseSize` (0.25..20.0, default 2.5)
+  - `bunchingTrials` (1..600, default 40), `equityTrials` (1..6000, default 240)
+  - `learnEveryHands` (0..5000, default 0), `learningWindowSamples` (0..500000, default 200)
+  - `seed` (any Long, default 42), `saveReviewHandHistory` (bool, default false), `fullRing` (bool, default false)
+
+  Rate-limited as Submit; admission shares the same `MAX_CONCURRENT_JOBS` / `MAX_QUEUED_JOBS` budget as hand-history analysis.
 - `GET /api/playing-hall/jobs/{jobId}` — poll job status. Rate-limited as JobStatus.
 - `DELETE /api/playing-hall/jobs/{jobId}` — request cooperative cancellation of an in-flight Playing Hall job. Returns `200` with `status=cancelled` once accepted, `409` if the job already finished, `404` if unknown. Rate-limited as JobStatus.
 
