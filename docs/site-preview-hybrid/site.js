@@ -625,6 +625,14 @@ async function submitAuth(path, includeDisplayName) {
     });
     const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
     if (!response.ok) {
+      // 409 'already signed in' from register/login means the server sees a
+      // valid session cookie that the frontend's authState doesn't reflect
+      // -- typically because this tab booted before sign-in happened in a
+      // sibling tab. Refreshing /api/auth/me pulls the real state so the
+      // UI switches from sign-in to signed-in without a manual reload.
+      if (response.status === 409) {
+        await refreshAuthState();
+      }
       updateAccountUi(formatErrorMessage(response, body));
       return;
     }
