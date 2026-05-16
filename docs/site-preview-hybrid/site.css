@@ -632,6 +632,13 @@ h3 {
   font-family: "Consolas", "Courier New", monospace;
   font-size: 0.84rem;
   line-height: 1.7;
+  /* Hall output cards drop full file paths into .opponent-meta. A path
+     like 'C:\Users\Alex\code\math\untitled\data\web-playing-hall\<jobId>\
+     run-output.txt' has no break points, so default overflow-wrap would
+     let it bust the card width. `anywhere` lets the browser break inside
+     the path as needed; opponent player names + hints are short enough
+     that the rule doesn't affect them. */
+  overflow-wrap: anywhere;
 }
 
 .decision-grid {
