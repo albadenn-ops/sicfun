@@ -612,6 +612,19 @@ async function logout() {
   }
 }
 
+// Map well-known server-side OIDC error codes to readable messages. Unknown
+// codes fall through to the raw value (e.g. provider-side codes Google
+// passes through). The server caps the value at 256 chars + truncation
+// marker, so this mapping does not need to handle adversarial input -- just
+// translate the small set of identifiers our own callback handler emits.
+const OIDC_ERROR_MESSAGES = {
+  "missing_state_cookie": "Sign-in session expired. Please try signing in again.",
+  "state_cookie_mismatch": "Sign-in security check failed. Please try signing in again.",
+  "missing_code_or_state": "Sign-in did not complete. Please try signing in again.",
+  "oversize_callback_param": "The sign-in response was malformed. Please try again.",
+  "access_denied": "Sign-in was declined. Please try a different account or method."
+};
+
 function renderAuthFlash() {
   const params = new URLSearchParams(window.location.search);
   const authResult = params.get("auth");
@@ -620,7 +633,9 @@ function renderAuthFlash() {
   if (authResult === "success") {
     updateAccountUi("OIDC sign-in completed.");
   } else if (authError) {
-    updateAccountUi(`OIDC sign-in failed: ${authError.replaceAll("+", " ")}`);
+    const friendly = OIDC_ERROR_MESSAGES[authError];
+    const displayed = friendly || `OIDC sign-in failed: ${authError.replaceAll("+", " ")}`;
+    updateAccountUi(displayed);
   } else {
     return;
   }
