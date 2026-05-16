@@ -410,13 +410,15 @@ function requiresPlatformSignIn() {
 }
 
 function resolvedUploadSite() {
-  if (siteSelect.value && siteSelect.value !== "auto") {
-    return siteSelect.value;
-  }
-  if (authState.user && authState.user.preferredSite) {
-    return authState.user.preferredSite;
-  }
-  return "auto";
+  // hydrateUploadDefaults already prefills siteSelect from
+  // authState.user.preferredSite when the user signs in, so whatever the
+  // select shows is the user's effective choice. Returning preferredSite
+  // here too used to OVERRIDE an explicit 'Auto-detect' pick: if the
+  // signed-in user with preferredSite='pokerstars' changed the select to
+  // 'Auto-detect', this code path silently sent 'pokerstars' anyway,
+  // because siteSelect.value === 'auto' fell through to the preferredSite
+  // branch. Trust the select; it already reflects the prefill.
+  return siteSelect.value || "auto";
 }
 
 function resolvedHeroName() {
