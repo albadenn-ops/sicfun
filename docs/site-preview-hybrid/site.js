@@ -1434,13 +1434,30 @@ if (hallCancelButton) {
         renderHallStatus("Job no longer available.");
         finishHallProgress();
       } else if (response.status === 409) {
-        // terminal - polling loop will resolve naturally
-      } else if (!response.ok) {
+        // Already terminal -- the polling loop is about to (or already did)
+        // resolve with whatever the server's final status was, so let it own
+        // the user-facing message. Don't reset the button here: it stays
+        // disabled until finishHallProgress hides the whole progress card.
+      } else if (response.ok) {
+        // 200/202: server accepted the cancel. The job is now winding down
+        // server-side; the polling loop will see status="cancelled" within
+        // ~pollAfterMs (capped at 5s) and trigger finishHallProgress. Give
+        // the user IMMEDIATE feedback so they know their click landed and
+        // the UI didn't freeze on "Cancelling..." for the poll window.
+        renderHallStatus("Cancel accepted. Finishing in-flight hands...");
+      } else {
         await maybeReauthOn401(response);
         renderHallStatus(`Cancel failed with status ${response.status}.`);
+        // Restore the button so the user can retry. Without this the user
+        // is stuck staring at a disabled "Cancelling..." button after a
+        // transient 500 / 503 / network-layer failure.
+        hallCancelButton.disabled = false;
+        hallCancelButton.textContent = "Cancel Run";
       }
     } catch (error) {
       renderHallStatus(`Cancel failed: ${error instanceof Error ? error.message : "unknown error"}`);
+      hallCancelButton.disabled = false;
+      hallCancelButton.textContent = "Cancel Run";
     }
   });
 }
