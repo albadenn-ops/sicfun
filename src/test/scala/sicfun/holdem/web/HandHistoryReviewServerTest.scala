@@ -2536,7 +2536,13 @@ class HandHistoryReviewServerTest extends FunSuite:
         for whitespacePayload <- Vector(
             """{"handHistoryText":"   "}""",
             """{"handHistoryText":"\n\n\n"}""",
-            """{"handHistoryText":"\t\r\n "}"""
+            """{"handHistoryText":"\t\r\n "}""",
+            // BOM-only file: a leading U+FEFF survives String.trim
+            // (which only drops chars <= U+0020) but stripPrefix("\uFEFF")
+            // peels it off before the non-empty re-check. Without that
+            // peel a "BOM + newlines" file would queue a job whose
+            // payload is empty after the downstream BOM-stripping pass.
+            "{\"handHistoryText\":\"\\uFEFF\\n\\n\\n\"}"
           )
         do
           val response = postJson(s"$baseUri/api/analyze-hand-history", whitespacePayload)

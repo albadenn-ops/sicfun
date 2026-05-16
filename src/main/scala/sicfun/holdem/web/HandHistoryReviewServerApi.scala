@@ -247,14 +247,19 @@ private[web] object HandHistoryReviewServerApi:
     try
       val json = ujson.read(body)
       val obj = json.obj
-      // Trim FIRST, then re-check non-empty: requiredString filters empty
-      // pre-trim, so an all-whitespace handHistoryText ("   ", "\n\n\n", a
-      // file containing only BOM + newlines) would otherwise survive
-      // validation and queue a job whose payload is "" -- the parser then
-      // produces a confusing "no playable hands" failure deep in the
-      // pipeline instead of a clean 400 at the API boundary.
+      // Trim FIRST (and strip BOM), then re-check non-empty: requiredString
+      // filters empty pre-trim, so an all-whitespace handHistoryText
+      // ("   ", "\n\n\n") would otherwise survive validation and queue a
+      // job whose payload is "" -- the parser then produces a confusing
+      // "no playable hands" failure deep in the pipeline instead of a
+      // clean 400 at the API boundary. Strip a leading BOM (U+FEFF) too
+      // because String.trim only drops chars <= U+0020, so a file
+      // containing just a BOM + newlines would survive trim and reach the
+      // worker. HandHistoryImport already strips BOM per-line downstream,
+      // so doing it once here keeps the empty-content check in sync with
+      // what the parser actually sees.
       val handHistoryText = requiredString(obj, "handHistoryText")
-        .map(_.trim)
+        .map(_.stripPrefix("\uFEFF").trim)
         .filterOrElse(_.nonEmpty, 400 -> "handHistoryText is required")
       val heroName = optionalString(obj, "heroName").map(_.trim).filter(_.nonEmpty)
       val site = parseOptionalSite(optionalString(obj, "site"))
