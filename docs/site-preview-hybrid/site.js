@@ -79,15 +79,14 @@ const profileSaveButton = document.getElementById("profile-save");
 // affected.
 const MAX_POLL_WAIT_MS = 16 * 60 * 1000;
 
-// Matches the server's default --maxUploadBytes (2 MiB). The server already
-// rejects oversize bodies with 413, but the frontend has no way to discover
-// the configured cap at runtime, so we bound it client-side to spare the user
-// from a multi-second file-read + upload + 413-rejection round trip when they
-// pick the wrong file (a DB export, a video, etc.). Operators who raise the
-// server cap should keep this in mind; the frontend will still allow under-
-// cap files, so the worst case is "frontend stops early at 2 MiB even though
-// server would accept 8 MiB" — a strictly safer floor.
-const MAX_UPLOAD_FILE_BYTES = 2 * 1024 * 1024;
+// Initial cap matches the server's default --maxUploadBytes (2 MiB). The
+// server already rejects oversize bodies with 413, but the frontend has no
+// way to discover the configured cap until boot, so we bound it client-side
+// to spare the user from a multi-second file-read + upload + 413-rejection
+// round trip when they pick the wrong file. boot() probes /api/health and
+// reassigns this to the server's actual maxUploadBytes so an operator who
+// raised the server cap also gets the larger client-side allowance.
+let maxUploadFileBytes = 2 * 1024 * 1024;
 
 // Single-shot fetch timeout. Without this, a hung server (or a network
 // drop after the TCP handshake) leaves the user staring at a stuck
@@ -158,14 +157,14 @@ if (form && fileInput && siteSelect && heroInput) {
       return;
     }
 
-    if (file.size > MAX_UPLOAD_FILE_BYTES) {
+    if (file.size > maxUploadFileBytes) {
       // Skip the file.text() + JSON.stringify + upload round trip entirely.
       // For a 50 MB mis-picked file (DB dump, archive, video) this saves the
       // user several seconds of "Submitting..." status before the inevitable
       // 413, AND avoids holding the whole file in the JS heap. Show the
       // received and allowed sizes so the user can decide whether to trim or
       // split rather than guess the cap.
-      renderStatus(`File is ${formatFileSize(file.size)}, exceeds the ${formatFileSize(MAX_UPLOAD_FILE_BYTES)} upload limit. Trim or split the hand history and try again.`);
+      renderStatus(`File is ${formatFileSize(file.size)}, exceeds the ${formatFileSize(maxUploadFileBytes)} upload limit. Trim or split the hand history and try again.`);
       reviewResults.classList.add("hidden");
       return;
     }
@@ -368,13 +367,42 @@ if (authLogoutButton) {
 }
 
 async function boot() {
-  await refreshAuthState();
+  // /api/health is unauthenticated and cheap; do it in parallel with the
+  // auth probe so a slow auth-state response doesn't delay the upload cap
+  // sync. Both Promises are fire-and-forget on error.
+  await Promise.all([refreshAuthState(), probeServerLimits()]);
   renderAuthFlash();
   renderPresetBar();
   renderRecentRuns();
   wireHallValidation();
   syncRandomSeedState();
   mirrorHelpDataToAriaLabel();
+}
+
+// Read the server's actual maxUploadBytes from /api/health and adopt it
+// as the client-side upload cap. Without this, an operator who raises
+// MAX_UPLOAD_BYTES beyond the 2 MiB default would have the frontend still
+// refusing files larger than 2 MiB because the cap was hard-coded.
+// Falls back silently to the initial 2 MiB if the probe fails -- worst
+// case is the frontend stops at 2 MiB even though the server would accept
+// more, which is strictly safer than the opposite. Uses the same
+// AbortSignal timeout as other single-shot fetches.
+async function probeServerLimits() {
+  try {
+    const response = await fetchWithTimeout("/api/health", {
+      credentials: "same-origin",
+      headers: { "Accept": "application/json" }
+    });
+    if (!response.ok) return;
+    const body = await response.json();
+    const serverMax = Number(body && body.maxUploadBytes);
+    if (Number.isFinite(serverMax) && serverMax > 0) {
+      maxUploadFileBytes = serverMax;
+    }
+  } catch (_) {
+    // Probe is best-effort. A network blip leaves the 2 MiB default in
+    // place, which still allows legitimate hand-history uploads.
+  }
 }
 
 // The ⓘ help icons use a CSS ::after pseudo-element to render their
