@@ -29,8 +29,13 @@ private[web] final class StaticAssetsHandler(
       val isOptions = method.equalsIgnoreCase("OPTIONS")
       if !ensureAuthenticatedStatic(exchange, basicAuth, platformAuth) then ()
       else if isOptions then
+        // 204 No Content (not 200) for OPTIONS body-less responses, matching
+        // RedirectHandler's OIDC OPTIONS path. RFC 7231 sec 6.3.5: 204
+        // explicitly signals "no body, intentionally". 200 + -1L body length
+        // works too but 204 is the idiomatic status code for this case and
+        // keeps the API uniform across handler types.
         exchange.getResponseHeaders.set("Allow", "GET, HEAD, OPTIONS")
-        exchange.sendResponseHeaders(200, -1L)
+        exchange.sendResponseHeaders(204, -1L)
       else if !isGet && !isHead then
         exchange.getResponseHeaders.set("Allow", "GET, HEAD, OPTIONS")
         writePlain(exchange, 405, "GET, HEAD, or OPTIONS required", "text/plain; charset=utf-8")

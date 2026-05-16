@@ -1083,7 +1083,10 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
-  test("static handler answers OPTIONS with 200 and Allow header") {
+  test("static handler answers OPTIONS with 204 and Allow header") {
+    // Static handler's OPTIONS path now returns 204 No Content (was 200)
+    // to match RedirectHandler's OIDC OPTIONS shape; RFC 7231 sec 6.3.5
+    // makes 204 the idiomatic status for body-less responses.
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>
         val baseUri = s"http://${server.binding.host}:${server.binding.port}"
@@ -1091,7 +1094,7 @@ class HandHistoryReviewServerTest extends FunSuite:
           .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
           .build()
         val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-        assertEquals(response.statusCode(), 200)
+        assertEquals(response.statusCode(), 204)
         assertEquals(response.body(), "")
         assertEquals(headerValue(response, "Allow"), Some("GET, HEAD, OPTIONS"))
       }
