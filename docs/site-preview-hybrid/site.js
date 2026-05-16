@@ -680,6 +680,17 @@ async function logout() {
     if (authDisplayName) {
       authDisplayName.value = "";
     }
+    // Clear upload-form state too so the previous user's prefilled
+    // preferences (hero name, preferred site) and any selected file
+    // don't carry over to the next person signing in on the same
+    // browser. The password field is already cleared in submitAuth on
+    // a successful login; on logout it's typically empty already, but
+    // wipe it defensively in case the user typed and then signed out
+    // without submitting.
+    if (authPassword) authPassword.value = "";
+    if (heroInput) heroInput.value = "";
+    if (siteSelect) siteSelect.value = "auto";
+    if (fileInput) fileInput.value = "";
     applyAuthState(body, "Signed out.");
   } catch (error) {
     updateAccountUi(`Sign out failed: ${error instanceof Error ? error.message : "unknown error"}`);
