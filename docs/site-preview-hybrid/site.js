@@ -1658,6 +1658,7 @@ function renderRecentRuns() {
         <div class="recent-run-head">
           <span class="recent-run-ts">${escapeHtml(ts)}</span>
           <button type="button" class="button button-secondary" data-recent-index="${idx}">Load</button>
+          <button type="button" class="button button-secondary" data-recent-remove="${idx}" aria-label="Remove this run from history" title="Remove">×</button>
         </div>
         <p class="recent-run-meta">
           ${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands &middot;
@@ -1670,6 +1671,19 @@ function renderRecentRuns() {
     btn.addEventListener("click", () => {
       const entry = entries[Number(btn.dataset.recentIndex)];
       if (entry) applyHallConfig(entry.request);
+    });
+  });
+  // Per-entry remove: localStorage is bounded at RECENT_RUNS_MAX so old
+  // entries age out automatically, but a user who ran a one-off
+  // exploratory config they don't want to remember had no way to drop
+  // it before it cycled off. Remove + re-render rather than just hide
+  // so the entry doesn't reappear on the next renderRecentRuns.
+  hallRecentList.querySelectorAll("button[data-recent-remove]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.recentRemove);
+      const next = entries.filter((_, i) => i !== idx);
+      writeRecentRuns(next);
+      renderRecentRuns();
     });
   });
 }
