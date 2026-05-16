@@ -324,8 +324,14 @@ private[web] object HandHistoryReviewServerRuntime:
       val loggedDrainSignalFile = config.drainSignalFile
         .map(_.toAbsolutePath.normalize().toString.replace(" ", "%20"))
         .getOrElse("-")
+      // rateLimitClientIpSource can return values like "header:X-Real-IP via
+      // loopback-only" with internal spaces -- same key=value split hazard.
+      // The JSON form in /api/health doesn't need this escape (JSON
+      // quoting handles spaces); only the log line does.
+      val loggedRateLimitClientIpSource =
+        rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps).replace(" ", "%20")
       logInfo(
-        s"startup complete host=${binding.host} port=${binding.port} modelSource=$loggedModelSource maxUploadBytes=${config.maxUploadBytes} analysisTimeoutMs=${config.analysisTimeoutMs} playingHallTimeoutMs=${config.playingHallTimeoutMs} maxConcurrentJobs=${config.maxConcurrentJobs} maxQueuedJobs=${config.maxQueuedJobs} rateLimitSubmitsPerMinute=${config.rateLimitSubmitsPerMinute} rateLimitStatusPerMinute=${config.rateLimitStatusPerMinute} rateLimitAuthPerMinute=${config.rateLimitAuthPerMinute} rateLimitClientIpSource=${rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)} rateLimitTrustedProxyIps=${trustedProxyIpSummary(config.rateLimitTrustedProxyIps)} drainSignalFile=$loggedDrainSignalFile authenticationMode=${authenticationMode(config.basicAuth, config.platformAuth)} userAuthMaxUsers=$userAuthMaxUsersField userAuthStoredUsers=$userAuthStoredUsersField"
+        s"startup complete host=${binding.host} port=${binding.port} modelSource=$loggedModelSource maxUploadBytes=${config.maxUploadBytes} analysisTimeoutMs=${config.analysisTimeoutMs} playingHallTimeoutMs=${config.playingHallTimeoutMs} maxConcurrentJobs=${config.maxConcurrentJobs} maxQueuedJobs=${config.maxQueuedJobs} rateLimitSubmitsPerMinute=${config.rateLimitSubmitsPerMinute} rateLimitStatusPerMinute=${config.rateLimitStatusPerMinute} rateLimitAuthPerMinute=${config.rateLimitAuthPerMinute} rateLimitClientIpSource=$loggedRateLimitClientIpSource rateLimitTrustedProxyIps=${trustedProxyIpSummary(config.rateLimitTrustedProxyIps)} drainSignalFile=$loggedDrainSignalFile authenticationMode=${authenticationMode(config.basicAuth, config.platformAuth)} userAuthMaxUsers=$userAuthMaxUsersField userAuthStoredUsers=$userAuthStoredUsersField"
       )
       Right(new RunningServer(binding, () => shutdown()))
     catch
