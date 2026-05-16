@@ -1006,6 +1006,11 @@ h3 {
 .recent-run-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .recent-run-ts { color: var(--muted); font-family: "Consolas", "Courier New", monospace; font-size: 0.82rem; }
 .recent-run-meta { margin: 6px 0 0; color: var(--muted); font-family: "Consolas", "Courier New", monospace; font-size: 0.8rem; }
+/* Group the Load + remove buttons so flex space-between keeps them
+   together on the right instead of distributing across the row. The
+   remove button is narrow (single ×) so a tighter gap reads as a unit. */
+.recent-run-actions { display: inline-flex; align-items: center; gap: 6px; }
+.recent-run-remove { padding: 4px 10px; min-width: 0; }
 
 .hall-progress { display: grid; gap: 8px; margin-top: 12px; }
 .hall-progress-bar {

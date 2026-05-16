@@ -1657,8 +1657,10 @@ function renderRecentRuns() {
       <article class="recent-run">
         <div class="recent-run-head">
           <span class="recent-run-ts">${escapeHtml(ts)}</span>
-          <button type="button" class="button button-secondary" data-recent-index="${idx}">Load</button>
-          <button type="button" class="button button-secondary" data-recent-remove="${idx}" aria-label="Remove this run from history" title="Remove">×</button>
+          <span class="recent-run-actions">
+            <button type="button" class="button button-secondary" data-recent-index="${idx}">Load</button>
+            <button type="button" class="button button-secondary recent-run-remove" data-recent-remove="${idx}" aria-label="Remove this run from history" title="Remove">×</button>
+          </span>
         </div>
         <p class="recent-run-meta">
           ${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands &middot;
