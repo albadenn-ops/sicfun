@@ -491,10 +491,15 @@ function updateAccountUi(message = "") {
     return;
   }
 
+  // accountPanel applies escapeHtml to each field on its own, so we pass raw
+  // values here. Pre-escaping inside the template (e.g. escapeHtml(displayName))
+  // would double-encode -- `Alice & Bob` becomes `Alice &amp;amp; Bob` after
+  // the second pass and renders to the user as `Alice &amp; Bob` instead of
+  // `Alice & Bob`. Same fix shape as the modelSource cleanup earlier.
   authStatePanel.innerHTML = accountPanel(
     "Signed in",
-    `${escapeHtml(authState.user.displayName)} is active for this browser.`,
-    message || `Email: ${escapeHtml(authState.user.email)}`
+    `${authState.user.displayName} is active for this browser.`,
+    message || `Email: ${authState.user.email}`
   );
   toggleHidden(authForm, true);
   toggleHidden(profileCard, false);
