@@ -957,6 +957,14 @@ const OIDC_ERROR_MESSAGES = {
   "unauthorized_client": "This deployment is not authorized with the sign-in provider. Please contact the operator.",
   "unsupported_response_type": "The sign-in provider returned an unsupported response. Please contact the operator.",
   "invalid_scope": "The sign-in scope is misconfigured. Please contact the operator.",
+  // OpenID Connect Core 1.0 sec 3.1.2.6 codes. These mostly fire when
+  // the relying party requested prompt=none and the provider couldn't
+  // satisfy it silently; our flow doesn't set prompt=none, so they're
+  // edge cases, but the provider can still emit them.
+  "login_required": "Sign-in requires a fresh login. Please try again and log in when prompted.",
+  "consent_required": "The sign-in provider needs you to grant consent. Please try again and accept the requested permissions.",
+  "interaction_required": "Sign-in requires extra interaction with the provider. Please try again.",
+  "account_selection_required": "Pick which account you want to use, then try signing in again.",
   // PlatformUserAuth.finishOidc emits this when the state token cannot be
   // resolved -- typically because the user took longer than the
   // OidcStateStore TTL (~10 minutes) between /start and /callback, or
