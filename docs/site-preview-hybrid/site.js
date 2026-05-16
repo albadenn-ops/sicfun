@@ -66,7 +66,18 @@ const profileTimeZone = document.getElementById("profile-time-zone");
 const authLogoutButton = document.getElementById("auth-logout");
 const profileSaveButton = document.getElementById("profile-save");
 
-const MAX_POLL_WAIT_MS = 15 * 60 * 1000;
+// 16 minutes: 1 minute of slack over the default PLAYING_HALL_TIMEOUT_MS
+// (15 min) so the frontend deadline check at the top of the poll loop
+// doesn't throw "timed out" the moment the server's own timeout fires.
+// Without slack the two deadlines line up exactly, and the queue wait
+// between submit and the worker start (which the server measures from)
+// means the server can return a terminal status (completed OR timeout-
+// failed) microseconds after the frontend's pre-poll deadline check
+// has already given up. The user then sees a misleading client-side
+// "timed out" instead of the server's actual outcome. ANALYZE jobs use
+// a 2-min server timeout so they have 14 min of slack and aren't
+// affected.
+const MAX_POLL_WAIT_MS = 16 * 60 * 1000;
 
 // Matches the server's default --maxUploadBytes (2 MiB). The server already
 // rejects oversize bodies with 413, but the frontend has no way to discover
