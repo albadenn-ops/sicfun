@@ -315,8 +315,17 @@ private[web] object HandHistoryReviewServerRuntime:
       // capacity headroom vs maxUsers without having to hit /api/health
       // first. `-` for basic-auth / no-auth deployments (no store to count).
       val userAuthStoredUsersField = platformAuthService.map(_.storedUserCount.toString).getOrElse("-")
+      // %20-escape spaces in path-like fields so a Windows path such as
+      // "C:\Program Files\model" or a drain-signal file in a user home
+      // dir like "C:\Users\Alex Smith\drain.flag" does not split the
+      // structured key=value pairs of the startup banner. Same shape as
+      // formatSubmittedEmailForLog and the analyze heroName log field.
+      val loggedModelSource = binding.modelSource.replace(" ", "%20")
+      val loggedDrainSignalFile = config.drainSignalFile
+        .map(_.toAbsolutePath.normalize().toString.replace(" ", "%20"))
+        .getOrElse("-")
       logInfo(
-        s"startup complete host=${binding.host} port=${binding.port} modelSource=${binding.modelSource} maxUploadBytes=${config.maxUploadBytes} analysisTimeoutMs=${config.analysisTimeoutMs} playingHallTimeoutMs=${config.playingHallTimeoutMs} maxConcurrentJobs=${config.maxConcurrentJobs} maxQueuedJobs=${config.maxQueuedJobs} rateLimitSubmitsPerMinute=${config.rateLimitSubmitsPerMinute} rateLimitStatusPerMinute=${config.rateLimitStatusPerMinute} rateLimitAuthPerMinute=${config.rateLimitAuthPerMinute} rateLimitClientIpSource=${rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)} rateLimitTrustedProxyIps=${trustedProxyIpSummary(config.rateLimitTrustedProxyIps)} drainSignalFile=${config.drainSignalFile.map(_.toAbsolutePath.normalize().toString).getOrElse("-")} authenticationMode=${authenticationMode(config.basicAuth, config.platformAuth)} userAuthMaxUsers=$userAuthMaxUsersField userAuthStoredUsers=$userAuthStoredUsersField"
+        s"startup complete host=${binding.host} port=${binding.port} modelSource=$loggedModelSource maxUploadBytes=${config.maxUploadBytes} analysisTimeoutMs=${config.analysisTimeoutMs} playingHallTimeoutMs=${config.playingHallTimeoutMs} maxConcurrentJobs=${config.maxConcurrentJobs} maxQueuedJobs=${config.maxQueuedJobs} rateLimitSubmitsPerMinute=${config.rateLimitSubmitsPerMinute} rateLimitStatusPerMinute=${config.rateLimitStatusPerMinute} rateLimitAuthPerMinute=${config.rateLimitAuthPerMinute} rateLimitClientIpSource=${rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)} rateLimitTrustedProxyIps=${trustedProxyIpSummary(config.rateLimitTrustedProxyIps)} drainSignalFile=$loggedDrainSignalFile authenticationMode=${authenticationMode(config.basicAuth, config.platformAuth)} userAuthMaxUsers=$userAuthMaxUsersField userAuthStoredUsers=$userAuthStoredUsersField"
       )
       Right(new RunningServer(binding, () => shutdown()))
     catch
