@@ -1650,7 +1650,18 @@ function renderRecentRuns() {
     hallRecentList.innerHTML = `<p class="section-note">No runs yet. Launch one from the form.</p>`;
     return;
   }
-  hallRecentList.innerHTML = entries.map((entry, idx) => {
+  // Header bar above the list: "N entries" + Clear all. The per-entry ×
+  // button handles one-off removal; this gives a bulk path for the no-
+  // auth deployments that don't have a logout-clear, and lets a user
+  // wipe the list without 20 individual clicks. requestConfirm prompt
+  // is a native dialog to keep the codebase free of a modal dependency.
+  const headerBar = `
+    <div class="recent-runs-header">
+      <span class="section-note">${entries.length} ${entries.length === 1 ? "run" : "runs"} stored locally</span>
+      <button type="button" class="button button-secondary" id="hall-recent-clear">Clear all</button>
+    </div>
+  `;
+  hallRecentList.innerHTML = headerBar + entries.map((entry, idx) => {
     const ts = new Date(entry.timestamp).toLocaleString();
     const pool = Array.isArray(entry.request.villainPool) ? entry.request.villainPool.join(", ") : "-";
     return `
@@ -1688,6 +1699,22 @@ function renderRecentRuns() {
       renderRecentRuns();
     });
   });
+  // Clear all: complement to per-entry remove for users who want to
+  // wipe the whole history (e.g., no-auth deployments where logout-
+  // clear isn't an option). Use the native window.confirm rather than
+  // building a modal so the codebase stays dependency-free; the prompt
+  // text names the count + that the data is local so the user knows
+  // what they're discarding.
+  const clearBtn = document.getElementById("hall-recent-clear");
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      const proceed = window.confirm(`Discard all ${entries.length} stored hall runs from this browser?`);
+      if (proceed) {
+        clearRecentRuns();
+        renderRecentRuns();
+      }
+    });
+  }
 }
 
 // ----- Progress / elapsed timer / cancel -----

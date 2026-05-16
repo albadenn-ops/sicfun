@@ -1002,6 +1002,7 @@ h3 {
 .recent-runs[open] > summary::before { content: "▾ "; }
 .recent-runs-count { color: var(--muted); margin-left: 6px; font-family: "Consolas", "Courier New", monospace; font-size: 0.82rem; }
 .recent-runs-body { padding: 10px 14px 14px; display: grid; gap: 8px; }
+.recent-runs-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding-bottom: 4px; }
 .recent-run { padding: 8px 10px; border: 1px solid var(--line); background: rgba(74, 246, 38, 0.04); }
 .recent-run-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .recent-run-ts { color: var(--muted); font-family: "Consolas", "Courier New", monospace; font-size: 0.82rem; }
