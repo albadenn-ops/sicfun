@@ -707,6 +707,11 @@ h3 {
   color: var(--ink);
   font-family: "Consolas", "Courier New", monospace;
   font-size: 0.8rem;
+  /* #model-source ('Model: <abs path>') is the long-path consumer of this
+     class; other usages are short static labels or formatted counts. The
+     wrap is harmless for the short cases and prevents the model-source
+     line from busting its container on narrow viewports. */
+  overflow-wrap: anywhere;
 }
 
 .output-grid {
