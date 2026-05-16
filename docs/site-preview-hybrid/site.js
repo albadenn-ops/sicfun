@@ -110,6 +110,16 @@ if (form && fileInput && siteSelect && heroInput) {
       return;
     }
 
+    if (file.size === 0) {
+      // The server also rejects empty handHistoryText (post-trim), but a
+      // synchronous local check beats round-tripping a 400. Common cause:
+      // the user picked the wrong file from a "Save As" template that
+      // left only an empty placeholder.
+      renderStatus(`${file.name} is empty. Pick a hand-history export with at least one hand.`);
+      reviewResults.classList.add("hidden");
+      return;
+    }
+
     const payload = {
       handHistoryText: await file.text(),
       site: resolvedUploadSite(),

@@ -2524,6 +2524,31 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("analyze-hand-history rejects whitespace-only handHistoryText with 400 before queueing a job") {
+    // requiredString filters empty BEFORE trim, so "   " or "\n\n\n" used
+    // to survive validation and queue a job whose payload was "" -- the
+    // parser then produced a confusing 'no playable hands' failure deep
+    // in the pipeline instead of a clean 400 at the API boundary. The
+    // post-trim re-check now bounces it at parse time.
+    withStaticSite { staticDir =>
+      withServer(staticDir, maxUploadBytes = 4096) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        for whitespacePayload <- Vector(
+            """{"handHistoryText":"   "}""",
+            """{"handHistoryText":"\n\n\n"}""",
+            """{"handHistoryText":"\t\r\n "}"""
+          )
+        do
+          val response = postJson(s"$baseUri/api/analyze-hand-history", whitespacePayload)
+          assertEquals(response.statusCode(), 400,
+            clue = s"whitespace-only handHistoryText must be rejected at the API boundary; payload=$whitespacePayload")
+          val errorBody = jsonBody(response)("error").str
+          assertEquals(errorBody, "handHistoryText is required",
+            clue = s"error message should be the standard required-field message; payload=$whitespacePayload")
+      }
+    }
+  }
+
   test("analyze-hand-history rejects oversize 'site' field without echoing the value back") {
     // HandHistorySite.parse returns "unsupported hand-history site: <value>"
     // for unknown inputs. parseOptionalSite used to forward that verbatim,

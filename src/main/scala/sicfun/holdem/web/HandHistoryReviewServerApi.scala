@@ -247,7 +247,15 @@ private[web] object HandHistoryReviewServerApi:
     try
       val json = ujson.read(body)
       val obj = json.obj
-      val handHistoryText = requiredString(obj, "handHistoryText").map(_.trim)
+      // Trim FIRST, then re-check non-empty: requiredString filters empty
+      // pre-trim, so an all-whitespace handHistoryText ("   ", "\n\n\n", a
+      // file containing only BOM + newlines) would otherwise survive
+      // validation and queue a job whose payload is "" -- the parser then
+      // produces a confusing "no playable hands" failure deep in the
+      // pipeline instead of a clean 400 at the API boundary.
+      val handHistoryText = requiredString(obj, "handHistoryText")
+        .map(_.trim)
+        .filterOrElse(_.nonEmpty, 400 -> "handHistoryText is required")
       val heroName = optionalString(obj, "heroName").map(_.trim).filter(_.nonEmpty)
       val site = parseOptionalSite(optionalString(obj, "site"))
       for
