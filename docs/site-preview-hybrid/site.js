@@ -1129,10 +1129,16 @@ function renderHint(hint) {
 }
 
 function decisionRow(label, value) {
+  // Both fields escape uniformly. Callers today pass numeric strings from
+  // formatSigned/formatPercent (no HTML chars to escape), so this is a
+  // no-op on current data -- but it closes the same footgun as summaryCard:
+  // a future decisionRow("Note", decision.someTextField) won't silently
+  // become an XSS sink just because the helper escaped one field and not
+  // the other.
   return `
     <div class="decision-row">
       <strong>${escapeHtml(label)}</strong>
-      <span>${value}</span>
+      <span>${escapeHtml(value)}</span>
     </div>
   `;
 }
