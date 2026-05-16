@@ -1894,6 +1894,29 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("PlatformUserAuth.oidcFailureRedirect caps the error string so internal wrapped messages cannot blow up the redirect URL") {
+    // Defense-in-depth complement to the AuthStack-level cap on the
+    // provider's ?error= callback param. finishOidc's wrapped failure
+    // messages (e.g. "Google OIDC exchange failed: <ujson InvalidData with
+    // the full response body>") flow through oidcFailureRedirect unchecked
+    // -- a 2 MB upstream parse failure would otherwise produce a 2 MB
+    // Location header browsers refuse to follow. Bound the input to 256
+    // chars + truncation marker, same shape as the other caps.
+    val huge = "z" * 2000
+    val location = PlatformUserAuth.oidcFailureRedirect(huge)
+    assert(location.startsWith("/?auth_error="),
+      clue = s"location should be the failure landing prefix; got: ${location.take(60)}")
+    assert(location.length < 600,
+      clue = s"location must stay small even for huge input; got ${location.length} bytes")
+    assert(location.contains("%28truncated%29"),
+      clue = s"location should include the URL-encoded truncation marker; got: ${location.take(120)}")
+
+    // Short inputs pass through untruncated.
+    val short = PlatformUserAuth.oidcFailureRedirect("invalid_request")
+    assertEquals(short, "/?auth_error=invalid_request",
+      clue = s"short inputs should pass through with simple URL encoding")
+  }
+
   test("OIDC callback caps the provider-supplied ?error= string before logging and redirecting") {
     // The /callback route is not rate-limited (it's a normal user flow that
     // fires once per sign-in) so without a cap an attacker who hits it

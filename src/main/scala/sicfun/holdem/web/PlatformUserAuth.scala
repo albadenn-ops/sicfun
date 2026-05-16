@@ -1287,5 +1287,21 @@ object PlatformUserAuth:
 
   def oidcSuccessRedirect: String = OidcSuccessRedirect
 
+  // Cap the error string that flows into the auth-failure redirect URL.
+  // Callers in AuthStack already cap the provider's ?error= callback param
+  // upfront, but finishOidc returns wrapped error messages from internal
+  // failures (e.g. "Google OIDC exchange failed: <ujson InvalidData with the
+  // full response body>" if Google returned a non-JSON or unexpectedly-large
+  // payload) and those flow through oidcFailureRedirect unchecked. Without a
+  // cap here, a 2 MB upstream parse-error message becomes a 2 MB Location
+  // header -- which browsers refuse to follow (~2-8 KB practical limit) AND
+  // round-trips attacker-controllable bytes back through the failure
+  // landing redirect. 256 chars matches the OAuth-error-code cap in
+  // AuthStack and is plenty for any operator-facing failure string.
+  private val MaxOidcFailureRedirectErrorLength = 256
   def oidcFailureRedirect(error: String): String =
-    s"$OidcFailureRedirectPrefix${urlEncode(error)}"
+    val capped =
+      if error == null then ""
+      else if error.length <= MaxOidcFailureRedirectErrorLength then error
+      else error.substring(0, MaxOidcFailureRedirectErrorLength) + "...(truncated)"
+    s"$OidcFailureRedirectPrefix${urlEncode(capped)}"
