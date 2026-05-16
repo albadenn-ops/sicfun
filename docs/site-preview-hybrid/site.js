@@ -803,6 +803,12 @@ async function logout() {
     });
     const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
     if (!response.ok) {
+      // Same auth-state-divergence handling as the other state-changing
+      // routes: a 401 means the session was already gone (e.g. revoked
+      // in a sibling tab) and the UI should re-render as signed-out;
+      // a 403 means a stale CSRF token (post-reauth in a sibling tab)
+      // and refreshing /api/auth/me pulls a fresh one so a retry works.
+      await maybeReauthOn401(response);
       updateAccountUi(body.error || `Sign out failed with status ${response.status}.`);
       return;
     }
