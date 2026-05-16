@@ -1708,7 +1708,8 @@ function renderRecentRuns() {
   const clearBtn = document.getElementById("hall-recent-clear");
   if (clearBtn) {
     clearBtn.addEventListener("click", () => {
-      const proceed = window.confirm(`Discard all ${entries.length} stored hall runs from this browser?`);
+      const noun = entries.length === 1 ? "1 stored hall run" : `all ${entries.length} stored hall runs`;
+      const proceed = window.confirm(`Discard ${noun} from this browser?`);
       if (proceed) {
         clearRecentRuns();
         renderRecentRuns();
