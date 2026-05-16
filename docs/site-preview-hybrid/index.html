@@ -190,8 +190,13 @@
               <span>Default hero screen name</span>
               <!-- spellcheck=false: poker screen names are identifiers
                    (e.g. 'Mig_Pro22'), not prose. iOS/Android autocorrect
-                   would otherwise capitalize them or swap chars. -->
-              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form" spellcheck="false" maxlength="64">
+                   would otherwise capitalize them or swap chars.
+                   autocapitalize=off prevents the mobile soft keyboard
+                   from auto-uppercasing the first letter; the server's
+                   normalizePlayerName comparison is case-sensitive so
+                   'alice' typed on mobile must NOT silently become
+                   'Alice'. -->
+              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form" spellcheck="false" autocapitalize="off" maxlength="64">
             </label>
 
             <label class="field">
@@ -255,9 +260,10 @@
               <!-- 64 chars matches the profile heroName cap so a value
                    pasted here behaves the same as one saved on the
                    profile (which prefills this field). spellcheck=false
-                   matches the profile heroName field: identifier, not
-                   prose. -->
-              <input id="hero-name" type="text" placeholder="Optional override" spellcheck="false" maxlength="64">
+                   + autocapitalize=off match the profile heroName field
+                   (identifier, not prose; case-sensitive compare against
+                   the hand-history file's player name). -->
+              <input id="hero-name" type="text" placeholder="Optional override" spellcheck="false" autocapitalize="off" maxlength="64">
             </label>
 
             <div class="upload-actions">
