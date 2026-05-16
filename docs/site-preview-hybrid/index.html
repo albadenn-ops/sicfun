@@ -116,12 +116,19 @@
             -->
             <label class="field">
               <span>Email</span>
-              <input id="auth-email" type="email" autocomplete="username email" placeholder="player@example.com">
+              <input id="auth-email" type="email" autocomplete="username email" placeholder="player@example.com" required maxlength="254">
             </label>
 
             <label class="field">
               <span>Password</span>
-              <input id="auth-password" type="password" autocomplete="current-password" placeholder="At least 10 characters">
+              <!-- minlength/maxlength match PlatformUserAuth.validatePassword
+                   (10..256). Native HTML validation runs BEFORE the form's
+                   submit event so an Enter key in a too-short password gets
+                   a native tooltip instead of a round-trip to the server's
+                   "password must be at least 10 characters" 400. The JS
+                   button-click path still goes through submitAuth without
+                   relying on these attributes. -->
+              <input id="auth-password" type="password" autocomplete="current-password" placeholder="At least 10 characters" required minlength="10" maxlength="256">
             </label>
 
             <label class="field">
