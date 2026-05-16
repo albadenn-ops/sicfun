@@ -19,15 +19,22 @@ private[web] object WebResponses:
   // future inline-script-induced exploit (or compromised vendored library) cannot
   // promote itself into the user's hardware or browser-level capabilities. `browsing-
   // topics=()` is the current Chrome opt-out; `interest-cohort=()` is the legacy FLoC
-  // name kept for backwards compatibility with older browser builds.
+  // name kept for backwards compatibility with older browser builds. The
+  // `attribution-reporting` / `private-state-token-*` / `run-ad-auction` /
+  // `shared-storage` / `shared-storage-select-url` group is Chrome's Privacy
+  // Sandbox surface -- a private poker review tool has no business participating
+  // in cross-site ad measurement, attribution tracking, or auction APIs, so deny
+  // them too even though their default is already "deny" in most browsers.
   private val PermissionsPolicy =
-    "accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), bluetooth=(), " +
-    "browsing-topics=(), camera=(), display-capture=(), document-domain=(), " +
-    "encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), " +
-    "idle-detection=(), interest-cohort=(), local-fonts=(), magnetometer=(), " +
+    "accelerometer=(), ambient-light-sensor=(), attribution-reporting=(), autoplay=(), " +
+    "battery=(), bluetooth=(), browsing-topics=(), camera=(), display-capture=(), " +
+    "document-domain=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), " +
+    "hid=(), idle-detection=(), interest-cohort=(), local-fonts=(), magnetometer=(), " +
     "microphone=(), midi=(), otp-credentials=(), payment=(), picture-in-picture=(), " +
-    "publickey-credentials-get=(), screen-wake-lock=(), serial=(), storage-access=(), " +
-    "usb=(), web-share=(), xr-spatial-tracking=()"
+    "private-state-token-issuance=(), private-state-token-redemption=(), " +
+    "publickey-credentials-get=(), run-ad-auction=(), screen-wake-lock=(), serial=(), " +
+    "shared-storage=(), shared-storage-select-url=(), storage-access=(), usb=(), " +
+    "web-share=(), xr-spatial-tracking=()"
 
   // Threshold below which gzip overhead can exceed the savings. A 256-byte JSON
   // typically compresses to 200-250 bytes once the gzip header (~20 bytes) is
