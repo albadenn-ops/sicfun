@@ -89,7 +89,12 @@
 
       <div class="account-grid">
         <article class="surface account-card">
-          <div class="auth-state" id="auth-state">
+          <!-- aria-live="polite" matches the review-panel / hall-panel
+               announcement contract: a screen reader hears the new
+               account state ("Signed in", "Sign in required", error
+               flashes from formatErrorMessage) without the user having
+               to re-navigate to the panel. -->
+          <div class="auth-state" id="auth-state" aria-live="polite">
             <p class="card-kicker">Checking auth</p>
             <h3>Loading account controls...</h3>
             <p class="section-note">
