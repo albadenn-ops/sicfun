@@ -64,6 +64,7 @@ const profileHeroName = document.getElementById("profile-hero-name");
 const profilePreferredSite = document.getElementById("profile-preferred-site");
 const profileTimeZone = document.getElementById("profile-time-zone");
 const authLogoutButton = document.getElementById("auth-logout");
+const profileSaveButton = document.getElementById("profile-save");
 
 const MAX_POLL_WAIT_MS = 15 * 60 * 1000;
 
@@ -601,6 +602,12 @@ async function submitAuth(path, includeDisplayName) {
     payload.displayName = displayName;
   }
 
+  // Disable BOTH auth buttons (login + register) for the duration of the
+  // request so a slow network doesn't tempt the user into a double-click
+  // that fires the request twice -- a duplicate register racing on the
+  // same email surfaces as a confusing "already exists" error, and a
+  // duplicate login wastes a PBKDF2 verify per click.
+  setAuthButtonsBusy(true);
   try {
     const response = await fetch(path, {
       method: "POST",
@@ -620,6 +627,18 @@ async function submitAuth(path, includeDisplayName) {
     applyAuthState(body, includeDisplayName ? "Registration complete." : "Signed in.");
   } catch (error) {
     updateAccountUi(`Authentication request failed: ${error instanceof Error ? error.message : "unknown error"}`);
+  } finally {
+    setAuthButtonsBusy(false);
+  }
+}
+
+function setAuthButtonsBusy(busy) {
+  // Keep updateAccountUi's allow-local-registration gate intact when
+  // re-enabling: it stays disabled if registration is off for the
+  // deployment, even after the fetch completes.
+  if (authLoginButton) authLoginButton.disabled = busy;
+  if (authRegisterButton) {
+    authRegisterButton.disabled = busy || !authState.allowLocalRegistration;
   }
 }
 
@@ -636,6 +655,15 @@ async function saveProfile() {
     timeZone: profileTimeZone ? profileTimeZone.value.trim() || null : null
   };
 
+  // Disable the Save button for the duration of the request -- the
+  // profile form's <button type="submit"> means hitting Enter in any
+  // field also fires saveProfile, so a slow network + impatient retry
+  // (click, then Enter, then click again) would otherwise race
+  // multiple POSTs against the same CSRF token.
+  if (profileSaveButton) {
+    profileSaveButton.disabled = true;
+    profileSaveButton.textContent = "Saving...";
+  }
   try {
     const response = await fetch("/api/auth/profile", {
       method: "POST",
@@ -653,6 +681,11 @@ async function saveProfile() {
     applyAuthState(body, "Profile saved.");
   } catch (error) {
     updateAccountUi(`Profile save failed: ${error instanceof Error ? error.message : "unknown error"}`);
+  } finally {
+    if (profileSaveButton) {
+      profileSaveButton.disabled = false;
+      profileSaveButton.textContent = "Save Profile";
+    }
   }
 }
 
