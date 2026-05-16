@@ -72,6 +72,39 @@ body::before {
   top: 12px;
 }
 
+/* No-script fallback banner: hand-history upload, Playing Hall self-play,
+   and account auth panels are all JS-driven (fetch + polling against the
+   local server). Users with JS disabled would otherwise see static prose
+   plus apparently-broken submit buttons. The banner is the first thing
+   inside <main> so it appears above the page header. Visual treatment
+   borrows the site's existing alert palette (--warning #ff4d00 on
+   rgba(255, 77, 0, 0.14) tint with a thicker left border, matching
+   .warning-block) so it reads as "important notice" rather than a
+   decorative element. */
+.noscript-notice {
+  margin: 0 0 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--warning);
+  border-left-width: 3px;
+  background: var(--warning-soft);
+  color: var(--ink);
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.noscript-notice strong {
+  color: var(--warning);
+  letter-spacing: 0.02em;
+}
+
+.noscript-notice p {
+  margin: 0;
+}
+
+.noscript-notice p + p {
+  margin-top: 8px;
+}
+
 .page {
   position: relative;
   width: min(1180px, calc(100% - 32px));
