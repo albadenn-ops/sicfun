@@ -1501,7 +1501,15 @@ function validateField(input) {
   const value = Number(input.value);
   const min = input.min !== "" ? Number(input.min) : -Infinity;
   const max = input.max !== "" ? Number(input.max) : Infinity;
-  const ok = Number.isFinite(value) && value >= min && value <= max;
+  // Also reject step mismatches (e.g. 1.5 in a step=1 input). The
+  // browser surfaces these via validity.stepMismatch, but only when
+  // checkValidity() is called; reading the value directly doesn't
+  // gate them. Without this guard a user pasting '1.5' into 'hands'
+  // (step=1) would pass the frontend but get a 400 'must be an integer'
+  // from optionalInt -- worse, the field would render as valid until
+  // the server bounced it.
+  const stepOk = !input.validity || !input.validity.stepMismatch;
+  const ok = Number.isFinite(value) && value >= min && value <= max && stepOk;
   input.classList.toggle("invalid", !ok);
   let err = input.parentElement.querySelector(".field-error");
   if (!ok) {
@@ -1510,8 +1518,11 @@ function validateField(input) {
       err.className = "field-error";
       input.parentElement.appendChild(err);
     }
-    err.textContent = !Number.isFinite(value) ? "Number required" :
-      value < min ? `Min ${min}` : `Max ${max}`;
+    err.textContent =
+      !Number.isFinite(value) ? "Number required" :
+      value < min ? `Min ${min}` :
+      value > max ? `Max ${max}` :
+      "Step mismatch";
     // Force the parent <details> open if the user collapsed the section
     // that contains an invalid field. Otherwise the submit button is
     // disabled (because validateHallForm returns false) but the red
