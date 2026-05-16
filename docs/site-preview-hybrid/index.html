@@ -3,6 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Inline defense-in-depth for the X-Robots-Tag header WebResponses
+       already emits. The header is authoritative for compliant crawlers,
+       but some indexers honor the meta tag more reliably (or read it
+       when proxies strip response headers). Cheap to include and
+       harmless if the page is already private. -->
+  <meta name="robots" content="noindex, nofollow">
   <title>SICFUN | Hand-History Review &amp; Playing Hall</title>
   <link rel="icon" href="data:,">
   <meta
