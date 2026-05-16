@@ -96,14 +96,22 @@ const MAX_UPLOAD_FILE_BYTES = 2 * 1024 * 1024;
 // many minutes for an idle ESTABLISHED socket. 15 seconds is comfortably
 // above the worst-case happy-path latency (auth PBKDF2 + DB write,
 // submit + JSON parse, etc.) and far below "user assumes the page is
-// broken". Poll loops keep their own structure -- a transient blip on
-// one poll shouldn't blow the whole loop, so they don't use this.
+// broken". Poll loops use a longer timeout via the timeoutMs override
+// (see POLL_FETCH_TIMEOUT_MS).
 const SINGLE_SHOT_FETCH_TIMEOUT_MS = 15_000;
 
-function fetchWithTimeout(url, options) {
+// Poll-status timeout: more generous than single-shot so a brief server
+// stall doesn't kill the loop, but tight enough that a genuinely hung
+// fetch fails well before MAX_POLL_WAIT_MS (16 min) is exhausted.
+// Without this, an OS-level TCP idle timeout (minutes) could leave one
+// poll waiting while the deadline check at the top of the loop never
+// gets a chance to re-evaluate.
+const POLL_FETCH_TIMEOUT_MS = 30_000;
+
+function fetchWithTimeout(url, options, timeoutMs = SINGLE_SHOT_FETCH_TIMEOUT_MS) {
   return fetch(url, {
     ...options,
-    signal: AbortSignal.timeout(SINGLE_SHOT_FETCH_TIMEOUT_MS)
+    signal: AbortSignal.timeout(timeoutMs)
   });
 }
 
@@ -966,12 +974,12 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
 
     await sleep(pollAfterMs);
 
-    const response = await fetch(statusUrl, {
+    const response = await fetchWithTimeout(statusUrl, {
       credentials: "same-origin",
       headers: {
         "Accept": "application/json"
       }
-    });
+    }, POLL_FETCH_TIMEOUT_MS);
     const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
 
     if (!response.ok) {
@@ -1020,12 +1028,12 @@ async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
 
     await sleep(pollAfterMs);
 
-    const response = await fetch(statusUrl, {
+    const response = await fetchWithTimeout(statusUrl, {
       credentials: "same-origin",
       headers: {
         "Accept": "application/json"
       }
-    });
+    }, POLL_FETCH_TIMEOUT_MS);
     const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
 
     if (!response.ok) {
