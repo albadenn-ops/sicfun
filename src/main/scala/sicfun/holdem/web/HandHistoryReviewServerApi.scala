@@ -202,7 +202,16 @@ private[web] object HandHistoryReviewServerApi:
           .toRight(404 -> s"playing hall job not found: $jobId")
       }
     else if method.equalsIgnoreCase("DELETE") then
-      extractJobId(exchange, PlayingHallJobPathPrefix, "playing hall").flatMap { jobId =>
+      // DELETE is state-changing -- enforce CSRF the same way the POST
+      // submit and the auth state-changing endpoints do. Browsers
+      // preflight non-simple methods (DELETE included) and our origin
+      // emits no CORS headers, so the cross-origin browser path is
+      // already blocked, but a scripted local proxy or a future CORS
+      // relaxation shouldn't be able to fire cooperative cancel without
+      // the explicit X-CSRF-Token. ensurePlatformCsrf is a no-op when
+      // platform auth is disabled.
+      if !ensurePlatformCsrf(exchange, platformAuth) then Left(403 -> SessionCsrfRequiredMessage)
+      else extractJobId(exchange, PlayingHallJobPathPrefix, "playing hall").flatMap { jobId =>
         jobStore.cancel(
           jobId = jobId,
           requesterUserId = authenticatedUser(exchange).map(_.userId),
