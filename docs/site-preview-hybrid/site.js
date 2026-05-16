@@ -712,10 +712,17 @@ async function submitAuth(path, includeDisplayName) {
 function setAuthButtonsBusy(busy) {
   // Keep updateAccountUi's allow-local-registration gate intact when
   // re-enabling: it stays disabled if registration is off for the
-  // deployment, even after the fetch completes.
-  if (authLoginButton) authLoginButton.disabled = busy;
+  // deployment, even after the fetch completes. Swap the labels to
+  // 'Signing in...' / 'Registering...' for the same in-flight feedback
+  // shape the profile-save and logout buttons use; the disabled state
+  // alone is too subtle (Tab-key users may not notice).
+  if (authLoginButton) {
+    authLoginButton.disabled = busy;
+    authLoginButton.textContent = busy ? "Signing in..." : "Sign In";
+  }
   if (authRegisterButton) {
     authRegisterButton.disabled = busy || !authState.allowLocalRegistration;
+    authRegisterButton.textContent = busy ? "Registering..." : "Register";
   }
 }
 
