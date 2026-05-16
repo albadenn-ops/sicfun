@@ -1061,6 +1061,20 @@ h3 {
   from { left: -40%; }
   to   { left: 100%; }
 }
+/* Respect prefers-reduced-motion: users who opted into less animation
+   (e.g., vestibular disorders, motion-triggered migraines) shouldn't see
+   the gradient sliding left-to-right forever. Pin the indicator at the
+   left edge so the bar still SHOWS the work-in-progress region (the
+   user knows polling is alive) without the perpetual horizontal slide.
+   aria-busy=true on the wrapper keeps the assistive-tech signal. */
+@media (prefers-reduced-motion: reduce) {
+  .hall-progress-bar-inner {
+    animation: none;
+    left: 0;
+    width: 100%;
+    opacity: 0.45;
+  }
+}
 .hall-progress-meta {
   display: flex;
   justify-content: space-between;
