@@ -92,6 +92,7 @@ Platform-user auth (when `USER_STORE_PATH` is set):
 
 - `GET /api/auth/me`, `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/logout`, `POST /api/auth/profile`
 - Optional OIDC start/callback at `/api/auth/oidc/{provider}/start` and `/api/auth/oidc/{provider}/callback` (e.g. `/api/auth/oidc/google/callback`) when the matching `*_OIDC_*` settings are configured.
+- The `register` / `login` JSON responses include a `csrfToken` field. State-changing routes under platform-user auth (`POST /api/auth/logout`, `POST /api/auth/profile`, `POST /api/analyze-hand-history`, `POST /api/playing-hall`, `DELETE /api/playing-hall/jobs/{id}`) require this token in the `X-CSRF-Token` request header in addition to the session cookie; missing or mismatched values produce `403` `"missing or invalid csrf token"`. Scripted clients can either re-call `GET /api/auth/me` to refresh the token or stash it from the original login response. The OIDC callback also issues a fresh token via the same response shape.
 
 ## Core Configuration
 
