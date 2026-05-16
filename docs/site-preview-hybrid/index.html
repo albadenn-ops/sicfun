@@ -243,6 +243,11 @@
             <label class="field">
               <span>Hand history file</span>
               <input id="hand-history-file" type="file" accept=".txt,text/plain">
+              <!-- The size hint is populated from MAX_UPLOAD_BYTES via the
+                   /api/health probe at boot so it stays in sync when an
+                   operator raises the server cap. Placeholder text gives
+                   the default before the probe lands. -->
+              <small class="field-hint" id="hand-history-file-hint">Max 2 MB · .txt export from PokerStars, Winamax, or GGPoker</small>
             </label>
 
             <label class="field">

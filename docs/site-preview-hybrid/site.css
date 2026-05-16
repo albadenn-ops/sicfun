@@ -1002,6 +1002,14 @@ h3 {
   font-size: 0.72rem;
   letter-spacing: 0.08em;
 }
+.field-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+}
 .chip-check span.invalid {
   border-color: var(--warning) !important;
   color: var(--warning) !important;

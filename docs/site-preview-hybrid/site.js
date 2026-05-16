@@ -413,6 +413,15 @@ async function probeServerLimits() {
   } catch (_) {
     // Probe is best-effort. A network blip leaves the 2 MiB default in
     // place, which still allows legitimate hand-history uploads.
+  } finally {
+    // Always refresh the visible size hint -- on probe failure it'll
+    // show 'Max 2 MB' (the default), on success it reflects the actual
+    // server cap. Either way the user sees the cap that the validation
+    // will enforce.
+    const hint = document.getElementById("hand-history-file-hint");
+    if (hint) {
+      hint.textContent = `Max ${formatFileSize(maxUploadFileBytes)} · .txt export from PokerStars, Winamax, or GGPoker`;
+    }
   }
 }
 
