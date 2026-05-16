@@ -98,7 +98,22 @@
             </p>
           </div>
 
-          <form class="auth-form" id="auth-form">
+          <form class="auth-form" id="auth-form" method="post" action="/api/auth/login">
+            <!--
+              method="post" + action="/api/auth/login" together close a
+              defense-in-depth gap: if the JS submit handler ever fails
+              to load (404, network blip mid-deploy, CSP block) and the
+              user presses Enter in the password field, the browser's
+              default submit would otherwise serialize every field into
+              the URL as a GET against the current page, putting the
+              PASSWORD in the URL bar, browser history, and Referer
+              header. With POST + a real endpoint, the same fallback
+              submission carries the password in the request body and
+              hits an actual handler (which then 415s because the body
+              is form-urlencoded not JSON, but the password is no
+              longer in the URL). The JS handler still preventDefaults,
+              so the normal flow is unchanged.
+            -->
             <label class="field">
               <span>Email</span>
               <input id="auth-email" type="email" autocomplete="username email" placeholder="player@example.com">
