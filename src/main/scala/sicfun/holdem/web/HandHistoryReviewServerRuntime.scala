@@ -309,8 +309,14 @@ private[web] object HandHistoryReviewServerRuntime:
             awaitExecutorDrain("analysis", analysisExecutor, remainingMs())
             logInfo(s"shutdown complete host=${binding.host} port=${binding.port}")
       sys.addShutdownHook(shutdown())
+      val userAuthMaxUsersField = config.platformAuth.map(_.maxUsers.toString).getOrElse("-")
+      // At boot we have JUST loaded the user store; emit the current count so
+      // operators can verify the persistent store survived restart and see
+      // capacity headroom vs maxUsers without having to hit /api/health
+      // first. `-` for basic-auth / no-auth deployments (no store to count).
+      val userAuthStoredUsersField = platformAuthService.map(_.storedUserCount.toString).getOrElse("-")
       logInfo(
-        s"startup complete host=${binding.host} port=${binding.port} modelSource=${binding.modelSource} maxUploadBytes=${config.maxUploadBytes} analysisTimeoutMs=${config.analysisTimeoutMs} playingHallTimeoutMs=${config.playingHallTimeoutMs} maxConcurrentJobs=${config.maxConcurrentJobs} maxQueuedJobs=${config.maxQueuedJobs} rateLimitSubmitsPerMinute=${config.rateLimitSubmitsPerMinute} rateLimitStatusPerMinute=${config.rateLimitStatusPerMinute} rateLimitAuthPerMinute=${config.rateLimitAuthPerMinute} rateLimitClientIpSource=${rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)} rateLimitTrustedProxyIps=${trustedProxyIpSummary(config.rateLimitTrustedProxyIps)} drainSignalFile=${config.drainSignalFile.map(_.toAbsolutePath.normalize().toString).getOrElse("-")} authenticationMode=${authenticationMode(config.basicAuth, config.platformAuth)}"
+        s"startup complete host=${binding.host} port=${binding.port} modelSource=${binding.modelSource} maxUploadBytes=${config.maxUploadBytes} analysisTimeoutMs=${config.analysisTimeoutMs} playingHallTimeoutMs=${config.playingHallTimeoutMs} maxConcurrentJobs=${config.maxConcurrentJobs} maxQueuedJobs=${config.maxQueuedJobs} rateLimitSubmitsPerMinute=${config.rateLimitSubmitsPerMinute} rateLimitStatusPerMinute=${config.rateLimitStatusPerMinute} rateLimitAuthPerMinute=${config.rateLimitAuthPerMinute} rateLimitClientIpSource=${rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)} rateLimitTrustedProxyIps=${trustedProxyIpSummary(config.rateLimitTrustedProxyIps)} drainSignalFile=${config.drainSignalFile.map(_.toAbsolutePath.normalize().toString).getOrElse("-")} authenticationMode=${authenticationMode(config.basicAuth, config.platformAuth)} userAuthMaxUsers=$userAuthMaxUsersField userAuthStoredUsers=$userAuthStoredUsersField"
       )
       Right(new RunningServer(binding, () => shutdown()))
     catch
