@@ -524,7 +524,13 @@
               files written for that run.
             </p>
             <div class="hall-progress hidden" id="hall-progress">
-              <div class="hall-progress-bar"><div class="hall-progress-bar-inner"></div></div>
+              <!-- role="progressbar" + aria-label tells screen readers what
+                   the animated bar represents. Omit aria-valuenow because
+                   this is indeterminate (CSS animation slides a gradient
+                   left-to-right indefinitely; the server doesn't report a
+                   completion percentage). Per WAI-ARIA, a progressbar
+                   without aria-valuenow is interpreted as indeterminate. -->
+              <div class="hall-progress-bar" role="progressbar" aria-label="Playing hall run in progress" aria-busy="true"><div class="hall-progress-bar-inner"></div></div>
               <div class="hall-progress-meta">
                 <span id="hall-elapsed">Elapsed 00:00</span>
                 <button type="button" class="button button-secondary" id="hall-cancel">Cancel Run</button>
