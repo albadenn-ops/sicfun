@@ -845,7 +845,16 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
       if (response.status === 404) {
         throw new Error("Review job expired, was purged, or is not visible to this user session.");
       }
-      await maybeReauthOn401(response);
+      if (response.status === 401) {
+        // Session expired mid-poll. maybeReauthOn401 will refresh the auth
+        // state and re-render the sign-in form; throw a message that tells
+        // the user the JOB itself is still running server-side and that
+        // they can sign back in to retry the status check, instead of the
+        // generic 'session authentication required' which reads as a
+        // total failure.
+        await maybeReauthOn401(response);
+        throw new Error("Session expired during the review. The job is still running on the server -- sign in again to keep polling, or check back later.");
+      }
       throw new Error(formatErrorMessage(response, body));
     }
 
@@ -890,7 +899,13 @@ async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
       if (response.status === 404) {
         throw new Error("Playing hall job expired, was purged, or is not visible to this user session.");
       }
-      await maybeReauthOn401(response);
+      if (response.status === 401) {
+        // Session expired mid-poll. Same shape as the analysis poller --
+        // the run is still going server-side; the user can sign back in
+        // and the job remains queryable until it finishes or is purged.
+        await maybeReauthOn401(response);
+        throw new Error("Session expired during the hall run. The job is still running on the server -- sign in again to keep polling, or check back later.");
+      }
       throw new Error(formatErrorMessage(response, body));
     }
 
