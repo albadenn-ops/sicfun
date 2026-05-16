@@ -1831,7 +1831,13 @@ if (hallCancelButton) {
         renderHallStatus("Cancel accepted. Finishing in-flight hands...");
       } else {
         await maybeReauthOn401(response);
-        renderHallStatus(`Cancel failed with status ${response.status}.`);
+        // Run the response body through formatErrorMessage so 429 / 503
+        // responses surface their Retry-After info ('... Try again in N
+        // seconds.') the same way the analyze + hall submit error paths
+        // do. Cancel goes through the same job-status rate-limit bucket
+        // as polling so a 429 is plausible if a script is hammering.
+        const body = await response.json().catch(() => ({ error: `Server returned ${response.status}` }));
+        renderHallStatus(`Cancel failed: ${formatErrorMessage(response, body)}`);
         // Restore the button so the user can retry. Without this the user
         // is stuck staring at a disabled "Cancelling..." button after a
         // transient 500 / 503 / network-layer failure.
