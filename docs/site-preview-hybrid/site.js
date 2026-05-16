@@ -1377,6 +1377,16 @@ function validateField(input) {
 function validateVillainPool() {
   const ok = selectedVillainPool().length > 0;
   document.querySelectorAll(".hall-pool .chip-check span").forEach(el => el.classList.toggle("invalid", !ok));
+  // Same auto-open as validateField: if the villain section is collapsed
+  // and the pool has no entries, the user sees a stuck Run button with
+  // no visible 'why'. Force the villain <details> open so the red chips
+  // are visible. Look up via the first chip's nearest ancestor so the
+  // selector stays cheap and survives DOM restructuring.
+  if (!ok) {
+    const firstChip = document.querySelector(".hall-pool");
+    const parentDetails = firstChip && firstChip.closest("details");
+    if (parentDetails) parentDetails.open = true;
+  }
   return ok;
 }
 
