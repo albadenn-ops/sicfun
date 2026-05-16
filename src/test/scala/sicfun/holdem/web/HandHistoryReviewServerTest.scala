@@ -455,6 +455,60 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("OIDC sign-up also honors the max-user cap so it cannot be a back door past the local-registration defense") {
+    // The disk-fill defense applies to ALL new-user paths, not just local
+    // registration. Before this fix, upsertOidcIdentity skipped the cap
+    // check, so a deployment with OIDC enabled would let any new Google
+    // account create a user record after the local path was already
+    // saturated. Use a fake provider whose exchangeCode returns a never-
+    // seen subject so the OIDC flow always tries to CREATE a new user.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        // Cap at 1, then register one local user. The next OIDC sign-in
+        // (which would otherwise create a 2nd user) must hit the same
+        // 'temporarily unavailable' rejection.
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(
+            storePath = storePath,
+            maxUsers = 1,
+            oidcProviders = Vector(provider)
+          ))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"first@example.com","password":"correct-horse-battery","displayName":"First"}""")
+          assertEquals(register.statusCode(), 201)
+
+          // OIDC flow: start to get state cookie, then callback.
+          val start = get(s"$baseUri${provider.startPath}")
+          val state = queryParam(headerValue(start, "Location").getOrElse(""), "state")
+            .getOrElse(fail("missing OIDC state"))
+          val stateCookie = headerValue(start, "Set-Cookie")
+            .map(_.takeWhile(_ != ';'))
+            .getOrElse(fail("missing state cookie"))
+
+          val callback = get(
+            s"$baseUri${provider.callbackPath}?state=$state&code=test-code",
+            Map("Cookie" -> stateCookie)
+          )
+          // The OIDC sign-in succeeded as far as cookie + state validation,
+          // but the upsert step hit the maxUsers cap, so the failure
+          // redirect surfaces the same generic 'temporarily unavailable'
+          // message the local path emits.
+          assertEquals(callback.statusCode(), 302)
+          val location = headerValue(callback, "Location").getOrElse(fail("missing Location"))
+          assert(location.contains("/?auth_error="),
+            s"OIDC callback rejected at cap should redirect to the failure landing; got: $location")
+          assert(location.contains("temporarily%20unavailable") || location.contains("temporarily+unavailable"),
+            clue = s"failure redirect should carry the 'temporarily unavailable' reason (URL-encoded); got: $location")
+        }
+      }
+    }
+  }
+
   test("registration rejects once the configured max-user count is reached") {
     // Defense against slow disk-fill via public registration abuse: the
     // user store has a hard cap (default 100k, configurable). Beyond the

@@ -597,6 +597,15 @@ object PlatformUserAuth:
             findByEmailInternal(normalizedEmail) match
               case Some(_) =>
                 Left("an account with that email already exists; sign in with its existing method")
+              case None if state.users.length >= maxUsers =>
+                // Apply the same cap registerLocal does. Without this, OIDC
+                // sign-up was a back door past the disk-fill defense: a
+                // deployment with OIDC enabled would let any new Google
+                // account create a user record even after the local-
+                // registration path was already saturated. Generic
+                // message matches the local path so a probing attacker
+                // cannot distinguish the two cases by response shape.
+                Left("registration is temporarily unavailable")
               case None =>
                 val created = StoredUser(
                   userId = UUID.randomUUID().toString,
