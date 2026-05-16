@@ -1360,6 +1360,14 @@ function validateField(input) {
     }
     err.textContent = !Number.isFinite(value) ? "Number required" :
       value < min ? `Min ${min}` : `Max ${max}`;
+    // Force the parent <details> open if the user collapsed the section
+    // that contains an invalid field. Otherwise the submit button is
+    // disabled (because validateHallForm returns false) but the red
+    // highlight is hidden, so the user sees a stuck Run button with no
+    // visible cause -- pure mystery. .closest finds the nearest
+    // ancestor <details> regardless of nesting depth.
+    const parentDetails = input.closest("details");
+    if (parentDetails) parentDetails.open = true;
   } else if (err) {
     err.remove();
   }
