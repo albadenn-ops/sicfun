@@ -579,6 +579,14 @@ h3 {
   font-family: "Bahnschrift SemiCondensed", "Arial Narrow", "Franklin Gothic Medium", "Segoe UI", sans-serif;
   font-size: 1.6rem;
   line-height: 1;
+  /* The Model card sometimes holds a full Windows path
+     ('C:\Program Files\sicfun\artifacts\model-v3'). Default overflow-wrap
+     would let it bust the grid column (.summary-grid uses minmax(0,1fr)
+     which is permissive about overflow). `anywhere` lets the browser
+     break inside the path so the card just gets taller rather than
+     wider. Site/Hands/Decisions/EV-Lost cards hold short values and
+     are unaffected. */
+  overflow-wrap: anywhere;
 }
 
 .summary-note {
