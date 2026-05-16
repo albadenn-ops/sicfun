@@ -67,6 +67,16 @@ const authLogoutButton = document.getElementById("auth-logout");
 
 const MAX_POLL_WAIT_MS = 15 * 60 * 1000;
 
+// Matches the server's default --maxUploadBytes (2 MiB). The server already
+// rejects oversize bodies with 413, but the frontend has no way to discover
+// the configured cap at runtime, so we bound it client-side to spare the user
+// from a multi-second file-read + upload + 413-rejection round trip when they
+// pick the wrong file (a DB export, a video, etc.). Operators who raise the
+// server cap should keep this in mind; the frontend will still allow under-
+// cap files, so the worst case is "frontend stops early at 2 MiB even though
+// server would accept 8 MiB" — a strictly safer floor.
+const MAX_UPLOAD_FILE_BYTES = 2 * 1024 * 1024;
+
 let authState = normalizeAuthState({});
 
 void boot();
@@ -84,6 +94,18 @@ if (form && fileInput && siteSelect && heroInput) {
     const file = fileInput.files && fileInput.files[0];
     if (!file) {
       renderStatus("Choose a `.txt` hand-history export to start the review.");
+      reviewResults.classList.add("hidden");
+      return;
+    }
+
+    if (file.size > MAX_UPLOAD_FILE_BYTES) {
+      // Skip the file.text() + JSON.stringify + upload round trip entirely.
+      // For a 50 MB mis-picked file (DB dump, archive, video) this saves the
+      // user several seconds of "Submitting..." status before the inevitable
+      // 413, AND avoids holding the whole file in the JS heap. Show the
+      // received and allowed sizes so the user can decide whether to trim or
+      // split rather than guess the cap.
+      renderStatus(`File is ${formatFileSize(file.size)}, exceeds the ${formatFileSize(MAX_UPLOAD_FILE_BYTES)} upload limit. Trim or split the hand history and try again.`);
       reviewResults.classList.add("hidden");
       return;
     }
@@ -1154,6 +1176,13 @@ function formatMetric(value) {
 
 function formatPercent(value) {
   return `${(Number(value || 0) * 100).toFixed(1)}%`;
+}
+
+function formatFileSize(bytes) {
+  const size = Number(bytes) || 0;
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${size} B`;
 }
 
 function escapeHtml(value) {
