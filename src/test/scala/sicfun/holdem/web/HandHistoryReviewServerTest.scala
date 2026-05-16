@@ -2484,6 +2484,56 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("playing hall DELETE enforces CSRF under platform-user auth") {
+    // DELETE is state-changing -- it MUST require the same X-CSRF-Token
+    // header that POST /api/playing-hall and the other state-changing
+    // routes require. The cross-origin browser path is already closed by
+    // the missing CORS headers + the fact that DELETE triggers a
+    // preflight, but defense-in-depth says to gate it the same way as
+    // the rest. Without this check a scripted local proxy could fire
+    // cooperative cancel using just the session cookie.
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val backend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+        withServer(
+          staticDir,
+          playingHallBackend = backend,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val register = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"hall-cancel-csrf@example.com","password":"correct-horse-battery","displayName":"Tester"}"""
+          )
+          assertEquals(register.statusCode(), 201)
+          val registerJson = jsonBody(register)
+          val ownerHeaders = authSessionHeaders(register, registerJson("csrfToken").str)
+
+          val submission = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload, ownerHeaders)
+          assertEquals(submission.statusCode(), 202)
+          val statusUri = s"$baseUri${jsonBody(submission)("statusUrl").str}"
+          assert(backend.started.await(3, TimeUnit.SECONDS), "playing hall backend never started")
+
+          try
+            // DELETE with the SESSION cookie but NO X-CSRF-Token: 403.
+            val cookieOnly = Map("Cookie" -> sessionCookie(register))
+            val withoutCsrf = delete(statusUri, cookieOnly)
+            assertEquals(withoutCsrf.statusCode(), 403,
+              clue = s"DELETE without X-CSRF-Token must return 403; got ${withoutCsrf.statusCode()}")
+            assert(jsonBody(withoutCsrf)("error").str.toLowerCase.contains("csrf"),
+              clue = "error message should mention csrf")
+
+            // DELETE with the proper CSRF header succeeds.
+            val withCsrf = delete(statusUri, ownerHeaders)
+            assertEquals(withCsrf.statusCode(), 200,
+              clue = "DELETE with X-CSRF-Token must succeed")
+          finally
+            backend.release.countDown()
+        }
+      }
+    }
+  }
+
   test("playing hall cancellation returns 404 for unknown jobs") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>
