@@ -199,8 +199,8 @@ If drain/stop times out, `bin/drain-stop-hand-history-web-service.ps1` now repor
 
 - In-flight and completed review jobs are in-memory only
 - A restart drops queued/running jobs
-- Platform-user auth persists account/profile data under `USER_STORE_PATH`
-- Back up `conf/hand-history-web.env` and `USER_STORE_PATH` if they matter operationally
+- Platform-user auth persists account/profile data under `USER_STORE_PATH`. The file contains email addresses, PBKDF2-HMAC-SHA256 password hashes (salted, 210k iterations -- not plaintext), profile fields (displayName, heroName, preferredSite, timeZone), and OIDC subject identifiers. Treat it as PII: restrict filesystem permissions to the service account (e.g. `icacls` on Windows or `chmod 600` + correct owner on Linux), encrypt backups, and keep it off any tier where unprivileged readers could grep it. A leaked store is not a credential leak (the hashes resist offline cracking), but the linked emails + OIDC subjects + profile fields are still PII a compliance audit would flag.
+- Back up `conf/hand-history-web.env` and `USER_STORE_PATH` if they matter operationally. `hand-history-web.env` contains the Basic-auth credentials and/or `GOOGLE_OIDC_CLIENT_SECRET` in plaintext if either is configured; back up with the same protections you give other secrets.
 
 ## Bundle Integrity
 
