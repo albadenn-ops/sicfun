@@ -1498,6 +1498,19 @@ const hallNumericInputs = [
 
 function validateField(input) {
   if (!input) return true;
+  // Skip validation of disabled inputs: their value isn't submitted in
+  // the same form-data shape (form submits skip disabled fields), and
+  // for the hall-seed case specifically the value is explicitly
+  // bypassed when hallRandomSeedInput is checked (a random Long is
+  // generated at submit time). A stale step-mismatching seed value
+  // sitting in the disabled input would otherwise block the Run
+  // button even though the value gets discarded.
+  if (input.disabled) {
+    input.classList.remove("invalid");
+    const err = input.parentElement && input.parentElement.querySelector(".field-error");
+    if (err) err.remove();
+    return true;
+  }
   const value = Number(input.value);
   const min = input.min !== "" ? Number(input.min) : -Infinity;
   const max = input.max !== "" ? Number(input.max) : Infinity;
