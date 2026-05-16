@@ -1132,6 +1132,12 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
     }
 
     renderStatus(jobStatusMessage(fileName, body.status));
+    // Mirror the polling state into the tab title too -- otherwise the
+    // 'Submitting <file>' title set at submit time would persist through
+    // the entire reviewing phase, undercutting the multi-tab visibility
+    // win the dynamic title was meant to provide.
+    if (body.status === "running") setTitleStatus(`Reviewing ${fileName}`);
+    else if (body.status === "queued") setTitleStatus(`Queued ${fileName}`);
 
     if (body.status === "completed") {
       return body.result || {};
@@ -1192,6 +1198,11 @@ async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
     }
 
     renderHallStatus(playingHallJobStatusMessage(body.status));
+    // Same title-mirroring as the analyze poller -- the 'Hall run queued'
+    // title set at submit time should advance to 'Hall running' once the
+    // worker picks it up.
+    if (body.status === "running") setTitleStatus("Hall running");
+    else if (body.status === "queued") setTitleStatus("Hall queued");
 
     if (body.status === "completed") {
       return body.result || {};
