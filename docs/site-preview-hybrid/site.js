@@ -259,6 +259,23 @@ if (authRegisterButton) {
   });
 }
 
+if (authForm) {
+  // Without this handler, hitting Enter in the password (or email) field
+  // implicitly submits the <form>, which has no `action` or `method` -- so
+  // the browser defaults to method=GET against the current URL and appends
+  // every form field as a query parameter. The PASSWORD ends up in the URL
+  // bar, in browser history, and in any subsequent Referer header. Catch
+  // the submit event, prevent the default GET-with-credentials navigation,
+  // and route to the login flow (the most common action). The user can
+  // still click Register explicitly if that was their intent.
+  authForm.addEventListener("submit", event => {
+    event.preventDefault();
+    if (authState.authenticationMode !== "users") return;
+    if (authState.authenticated) return;
+    void submitAuth("/api/auth/login", false);
+  });
+}
+
 if (profileForm) {
   profileForm.addEventListener("submit", event => {
     event.preventDefault();
