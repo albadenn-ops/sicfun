@@ -723,6 +723,16 @@ async function logout() {
     return;
   }
 
+  // Disable the Sign Out button for the duration of the request so a
+  // slow network doesn't tempt a double-click into firing the POST
+  // twice. The server's logout is idempotent (revoking an already-
+  // revoked session returns the same cleared-cookie response), so the
+  // duplicate is harmless server-side -- this is purely a UX nicety
+  // matching the auth + profile-save buttons.
+  if (authLogoutButton) {
+    authLogoutButton.disabled = true;
+    authLogoutButton.textContent = "Signing out...";
+  }
   try {
     const response = await fetch("/api/auth/logout", {
       method: "POST",
@@ -763,6 +773,15 @@ async function logout() {
     applyAuthState(body, "Signed out.");
   } catch (error) {
     updateAccountUi(`Sign out failed: ${error instanceof Error ? error.message : "unknown error"}`);
+  } finally {
+    // Re-enable only on failure: a successful logout hides profileCard
+    // (which contains this button) via updateAccountUi switching to the
+    // sign-in panel, so its disabled state doesn't matter. On failure
+    // the user stays on the profile panel and needs the button back.
+    if (authLogoutButton) {
+      authLogoutButton.disabled = false;
+      authLogoutButton.textContent = "Sign Out";
+    }
   }
 }
 
