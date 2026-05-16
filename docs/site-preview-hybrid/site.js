@@ -339,14 +339,36 @@ if (hallRandomSeedInput) {
   });
 }
 
+// Browsers use the password input's autocomplete attribute as a strong
+// signal to decide whether to OFFER to save the entered password:
+//   - "current-password" -> sign-in form, do NOT prompt to save (user is
+//     entering an existing credential the browser already knows or will
+//     learn from this submit)
+//   - "new-password"     -> registration form, DO prompt to save (this is
+//     a freshly chosen credential)
+// The HTML defaults the field to "current-password" because login is the
+// more common action and Enter-to-submit routes to login. But when the
+// user clicks Register, the password is a fresh credential and the save
+// prompt is the whole point -- flip the attribute just before the fetch
+// so Chrome/Edge/Firefox surface their save UI. We flip it back on the
+// login path so a register-then-cancel-then-login sequence doesn't leave
+// the wrong hint sticky on the input.
+function setAuthPasswordIntent(intent) {
+  if (authPassword) {
+    authPassword.autocomplete = intent === "register" ? "new-password" : "current-password";
+  }
+}
+
 if (authLoginButton) {
   authLoginButton.addEventListener("click", () => {
+    setAuthPasswordIntent("login");
     void submitAuth("/api/auth/login", false);
   });
 }
 
 if (authRegisterButton) {
   authRegisterButton.addEventListener("click", () => {
+    setAuthPasswordIntent("register");
     void submitAuth("/api/auth/register", true);
   });
 }
@@ -364,6 +386,7 @@ if (authForm) {
     event.preventDefault();
     if (authState.authenticationMode !== "users") return;
     if (authState.authenticated) return;
+    setAuthPasswordIntent("login");
     void submitAuth("/api/auth/login", false);
   });
 }
