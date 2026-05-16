@@ -359,6 +359,14 @@ object PlatformUserAuth:
       * the state-cookie store is separate. */
     def activeSessionCount: Int = sessionManager.activeSessionCount
 
+    /** Number of OIDC flows that have called /start without yet completing
+      * /callback. Each entry has a 10-minute Max-Age so a healthy
+      * deployment's steady state is "very small". Used for the
+      * /api/health dashboard so operators can spot a /start storm without
+      * matching callbacks (typical cause: misconfigured redirect URI on
+      * the provider side, or an automation script exercising /start). */
+    def pendingOidcFlows: Int = oidcStateStore.pendingFlowCount
+
     def registerLocal(
         email: String,
         password: String,
@@ -853,6 +861,14 @@ object PlatformUserAuth:
   ):
     private val states = new ConcurrentHashMap[String, OidcPendingState]()
     private val lastCleanupAtMs = new AtomicLong(0L)
+
+    // Approximate count of in-flight OIDC flows. Useful for the /api/health
+    // dashboard: a steady-state count well above the normal "few" is a hint
+    // that /start is being hit without /callback ever completing (provider
+    // redirect URI misconfigured, automation exercising the start path, or
+    // user-agent rejecting Google's cookies). Includes records that have
+    // expired but not yet been removed by the next cleanup pass.
+    def pendingFlowCount: Int = states.size()
 
     def issue(providerId: String, codeVerifier: String): String =
       cleanupIfDue()

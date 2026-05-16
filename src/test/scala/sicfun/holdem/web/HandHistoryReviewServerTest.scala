@@ -416,6 +416,8 @@ class HandHistoryReviewServerTest extends FunSuite:
           assertEquals(healthBefore("userAuthStoredUsers").num.toInt, 0)
           assertEquals(healthBefore("userAuthActiveSessions").num.toInt, 0,
             clue = "no users registered, no sessions issued, so active-session count starts at 0")
+          assertEquals(healthBefore("userAuthPendingOidcFlows").num.toInt, 0,
+            clue = "no OIDC /start calls yet, so pending-flow count starts at 0")
 
           // Register one user.
           val register = postJson(s"$baseUri/api/auth/register",
@@ -447,6 +449,8 @@ class HandHistoryReviewServerTest extends FunSuite:
           clue = s"userAuthStoredUsers must be null when platform-user auth is disabled; got: ${health("userAuthStoredUsers")}")
         assert(health("userAuthActiveSessions").isNull,
           clue = s"userAuthActiveSessions must be null when platform-user auth is disabled; got: ${health("userAuthActiveSessions")}")
+        assert(health("userAuthPendingOidcFlows").isNull,
+          clue = s"userAuthPendingOidcFlows must be null when platform-user auth is disabled; got: ${health("userAuthPendingOidcFlows")}")
       }
     }
   }
