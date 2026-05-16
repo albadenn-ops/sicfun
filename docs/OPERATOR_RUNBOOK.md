@@ -264,6 +264,8 @@ sbt "runMain sicfun.holdem.bench.tuner.HoldemPostflopGpuAutoTuner --villains=102
 
 ## 5A. Hand-History Web Review
 
+For a packaged-release-oriented overview (reverse proxy guidance, HTTP endpoint reference, configuration knob descriptions), see [`docs/HAND_HISTORY_WEB_DEPLOYMENT.md`](HAND_HISTORY_WEB_DEPLOYMENT.md). The packaged release ships that document as the bundle root's `README.md` so customers reach it without needing the source tree. This section focuses on the source-mode operator-on-the-host workflow: launchers, service install, log triage, and the deeper observability + security notes the deployment guide summarizes but the runbook owns.
+
 Source-mode launcher:
 
 ```powershell
