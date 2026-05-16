@@ -725,6 +725,15 @@ private[web] object HandHistoryReviewServerApi:
       case None => Right(None)
       case Some(value) if value.length > MaxAnalyzeHeroNameLength =>
         Left(400 -> s"heroName must be at most $MaxAnalyzeHeroNameLength characters")
+      // Reject C0 control chars and DEL, same shape as
+      // PlatformUserAuth.sanitizeOptionalField. heroName is compared
+      // against player names parsed from the hand-history file (which
+      // never contain controls) so a control-bearing value would never
+      // match anyway -- but a newline-bearing value WOULD splice fake
+      // structured key=value entries into any future log line that
+      // included heroName. Defense in depth.
+      case Some(value) if value.exists(ch => ch.toInt < 0x20 || ch.toInt == 0x7F) =>
+        Left(400 -> "heroName must not contain control characters")
       case Some(value) => Right(Some(value))
 
   private def parseOptionalSite(raw: Option[String]): Either[(Int, String), Option[HandHistorySite]] =

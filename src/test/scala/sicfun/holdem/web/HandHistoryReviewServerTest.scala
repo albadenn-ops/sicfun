@@ -2555,6 +2555,28 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  test("analyze-hand-history rejects heroName containing control characters") {
+    // Defense in depth for log-injection: heroName with embedded \n / \r /
+    // NUL / ESC has no legitimate use (the hand-history matcher compares
+    // against player names parsed from the file, which never contain
+    // controls) and would splice fake structured key=value pairs into
+    // any future audit log line that includes heroName. Same control-char
+    // rule PlatformUserAuth.sanitizeOptionalField uses for profile fields.
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        for control <- Vector("\\n", "\\r", "\\u0000", "\\u001b", "\\u007f") do
+          val payload = s"""{"handHistoryText":"x","heroName":"Hero${control}Injected"}"""
+          val response = postJson(s"$baseUri/api/analyze-hand-history", payload)
+          assertEquals(response.statusCode(), 400,
+            clue = s"heroName with control-char escape $control must be rejected at the API boundary; payload=$payload")
+          val errorBody = jsonBody(response)("error").str
+          assertEquals(errorBody, "heroName must not contain control characters",
+            clue = s"error should be the generic control-char message; got: $errorBody")
+      }
+    }
+  }
+
   test("analyze-hand-history rejects oversize heroName with 400 before queueing a job") {
     // Frontend caps heroName at 64 via <input maxlength="64">, matching the
     // PlatformUserAuth profile heroName cap. A scripted client that bypasses
