@@ -136,7 +136,11 @@
             -->
             <label class="field">
               <span>Email</span>
-              <input id="auth-email" type="email" autocomplete="username email" placeholder="player@example.com" required maxlength="254">
+              <!-- inputmode="email" hints the mobile soft-keyboard layout
+                   (shows @ and . prominently). spellcheck="false" keeps
+                   email addresses out of the autocorrect dictionary so
+                   "user.name" doesn't become "user.Name" on mobile. -->
+              <input id="auth-email" type="email" autocomplete="username email" inputmode="email" spellcheck="false" placeholder="player@example.com" required maxlength="254">
             </label>
 
             <label class="field">
