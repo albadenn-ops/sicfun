@@ -102,6 +102,7 @@ Common settings:
 
 - `HOST` / `PORT`: bind address and port
 - `ALLOW_UNAUTHENTICATED_PUBLIC_BIND`: explicit override for non-loopback binds without auth on a trusted private network
+- `STATIC_DIR`: directory served as the upload UI (default `docs/site-preview-hybrid` in source mode; `static/` relative to the bundle root after `release-hand-history-web.ps1` packages it). Override only when you've copied or modified the static assets to a non-standard location.
 - `MODEL_DIR`: optional model artifact directory
 - `MAX_UPLOAD_BYTES`: upload cap (applies to both `/api/analyze-hand-history` and `/api/playing-hall` request bodies)
 - `ANALYSIS_TIMEOUT_MS`: per-job timeout for `/api/analyze-hand-history` jobs
