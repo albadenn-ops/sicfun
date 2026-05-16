@@ -933,6 +933,17 @@ const OIDC_ERROR_MESSAGES = {
   "missing_code_or_state": "Sign-in did not complete. Please try signing in again.",
   "oversize_callback_param": "The sign-in response was malformed. Please try again.",
   "access_denied": "Sign-in was declined. Please try a different account or method.",
+  // RFC 6749 sec 5.2 standard error codes the provider might pass through
+  // verbatim. They're rare in practice but worth translating so the user
+  // doesn't see 'OIDC sign-in failed: temporarily_unavailable' (which
+  // reads like a technical fault); the friendly versions tell them
+  // whether to retry vs. contact someone.
+  "temporarily_unavailable": "The sign-in provider is temporarily unavailable. Please try again in a few minutes.",
+  "server_error": "The sign-in provider reported an error. Please try again.",
+  "invalid_request": "The sign-in request was malformed. Please try again.",
+  "unauthorized_client": "This deployment is not authorized with the sign-in provider. Please contact the operator.",
+  "unsupported_response_type": "The sign-in provider returned an unsupported response. Please contact the operator.",
+  "invalid_scope": "The sign-in scope is misconfigured. Please contact the operator.",
   // PlatformUserAuth.finishOidc emits this when the state token cannot be
   // resolved -- typically because the user took longer than the
   // OidcStateStore TTL (~10 minutes) between /start and /callback, or
