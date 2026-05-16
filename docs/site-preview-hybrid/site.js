@@ -278,6 +278,20 @@ async function boot() {
   renderPresetBar();
   renderRecentRuns();
   wireHallValidation();
+  syncRandomSeedState();
+}
+
+// Browsers preserve checkbox state across reload, so a user who left the
+// random-seed checkbox ticked sees it ticked on reload -- but the change
+// listener that disables the seed-number input only runs on user toggle,
+// not on initial state. Without this sync the seed input renders as
+// editable on reload even though its value is ignored on submit, which
+// is misleading. Run once on boot to bring the disabled state in line
+// with the checkbox.
+function syncRandomSeedState() {
+  if (hallRandomSeedInput && hallSeedInput) {
+    hallSeedInput.disabled = hallRandomSeedInput.checked;
+  }
 }
 
 async function refreshAuthState() {
@@ -438,6 +452,12 @@ function updateUploadAvailability() {
   if (locked && hallStatus) {
     renderHallStatus("Sign in to launch a playing hall run on this deployment.");
   }
+  // The blanket `element.disabled = locked` above re-enables hallSeedInput
+  // on sign-in even when the random-seed checkbox is ticked, which is
+  // misleading -- the seed value is ignored on submit but the input
+  // appears editable. Re-apply the random-seed → seed-input dependency
+  // after the blanket pass so it survives auth-state changes.
+  if (!locked) syncRandomSeedState();
 }
 
 function updateAccountUi(message = "") {
