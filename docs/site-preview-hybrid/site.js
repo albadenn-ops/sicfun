@@ -796,6 +796,18 @@ const OIDC_ERROR_MESSAGES = {
   "missing_code_or_state": "Sign-in did not complete. Please try signing in again.",
   "oversize_callback_param": "The sign-in response was malformed. Please try again.",
   "access_denied": "Sign-in was declined. Please try a different account or method.",
+  // PlatformUserAuth.finishOidc emits this when the state token cannot be
+  // resolved -- typically because the user took longer than the
+  // OidcStateStore TTL (~10 minutes) between /start and /callback, or
+  // because they reloaded /callback and the state was already consumed
+  // by a previous attempt. Tell them what to do without leaking the
+  // internal token-store mechanics.
+  "OIDC login state expired or is invalid": "Your sign-in took too long or was already completed in another tab. Please try again.",
+  // upsertOidcIdentity rejects when the email is already linked to a
+  // different identity (e.g. local password) so two flows don't collide
+  // on the same email. The user needs to use their original method.
+  "an account with that email already exists; sign in with its existing method":
+    "An account with that email already exists. Sign in with your original method (e.g. password) instead.",
   // The user-store cap (USER_AUTH_MAX_USERS) can trip during BOTH local
   // registration AND OIDC sign-up when the new identity does not match
   // an existing user. The server emits the same human-readable string in
