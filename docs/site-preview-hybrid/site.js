@@ -121,17 +121,25 @@ if (form && fileInput && siteSelect && heroInput) {
       return;
     }
 
-    const payload = {
-      handHistoryText: await file.text(),
-      site: resolvedUploadSite(),
-      heroName: resolvedHeroName()
-    };
-
+    // Disable the submit button BEFORE the first await -- file.text() is
+    // async, so leaving setSubmitting(true) after it would let an
+    // impatient double-click fire a second submit handler that races
+    // through its own file read, JSON build, and POST. The hall form
+    // gets away without this ordering because its payload build is
+    // entirely sync (numeric inputs only); the analyze form has to read
+    // the file. Use try/finally from this point so setSubmitting(false)
+    // still runs if the file read or payload build throws.
     setSubmitting(true);
     renderStatus(`Submitting ${file.name} for local review...`);
     reviewResults.classList.add("hidden");
 
     try {
+      const payload = {
+        handHistoryText: await file.text(),
+        site: resolvedUploadSite(),
+        heroName: resolvedHeroName()
+      };
+
       const response = await fetch("/api/analyze-hand-history", {
         method: "POST",
         credentials: "same-origin",
