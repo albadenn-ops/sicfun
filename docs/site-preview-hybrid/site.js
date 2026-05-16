@@ -691,6 +691,13 @@ async function logout() {
     if (heroInput) heroInput.value = "";
     if (siteSelect) siteSelect.value = "auto";
     if (fileInput) fileInput.value = "";
+    // localStorage 'sicfun.hall.recentRuns' is browser-scoped, not
+    // user-scoped: without this wipe, user B signing into the same
+    // browser would see (and could Load) user A's hall configurations
+    // alongside their own. Clear on explicit logout only -- a page
+    // refresh leaves the data intact for the same signed-in user.
+    clearRecentRuns();
+    renderRecentRuns();
     applyAuthState(body, "Signed out.");
   } catch (error) {
     updateAccountUi(`Sign out failed: ${error instanceof Error ? error.message : "unknown error"}`);
@@ -1388,6 +1395,11 @@ function readRecentRuns() {
 function writeRecentRuns(entries) {
   try { localStorage.setItem(RECENT_RUNS_KEY, JSON.stringify(entries.slice(0, RECENT_RUNS_MAX))); }
   catch (_) { /* quota or private mode - ignore */ }
+}
+
+function clearRecentRuns() {
+  try { localStorage.removeItem(RECENT_RUNS_KEY); }
+  catch (_) { /* private mode - ignore */ }
 }
 
 function pushRecentRun(request, summary) {
