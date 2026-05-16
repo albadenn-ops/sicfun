@@ -40,6 +40,7 @@ Installer-variant additions:
 - PowerShell 5.1+
 - Java 17+ on `PATH` before startup (not required for the installer variant — `runtime/` is embedded)
 - NSSM if you want the Windows service workflow (drop `nssm.exe` into `bin/` before zipping or pass `-NssmPath` at install time; auto-download is disabled because corporate AV often blocks `nssm.cc`)
+- Client browser: a modern build (Chrome 103+, Firefox 100+, Safari 16+, or equivalent Chromium-based Edge). Older browsers still load the page but lose the fetch-timeout safety net (`AbortSignal.timeout` shipped in those versions); `String.prototype.replaceAll` (used by HTML escaping) requires Chrome 85+ / Firefox 77+ / Safari 13.1+ which is a lower floor.
 
 ## Quick Start
 
