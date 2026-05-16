@@ -903,16 +903,11 @@ function renderResults(fileName, data) {
   );
 
   summaryGrid.innerHTML = [
-    summaryCard("Site", data.site, data.heroName ? `Hero: ${escapeHtml(data.heroName)}` : "Hero shown only when one clear name is resolved"),
+    summaryCard("Site", data.site, data.heroName ? `Hero: ${data.heroName}` : "Hero shown only when one clear name is resolved"),
     summaryCard("Hands", formatInteger(data.handsAnalyzed), `${formatInteger(data.handsSkipped)} skipped`),
     summaryCard("Decisions", formatInteger(data.decisionsAnalyzed), `${formatInteger(data.mistakes)} mistakes flagged`),
     summaryCard("EV Lost", formatSigned(-Math.abs(Number(data.totalEvLost || 0))), "Aggregate avoidable EV gap"),
     summaryCard("Biggest Gap", formatNumber(data.biggestMistakeEv), "Worst single decision"),
-    // summaryCard escapes both label and value internally; passing
-    // escapeHtml(...) here is a leftover that double-escapes (a literal `<` in
-    // modelSource would render as `&lt;` in the cell instead of `<`). Let the
-    // helper own the escaping for consistency with the other summaryCard call
-    // sites above.
     summaryCard("Model", data.modelSource || "-", "Loaded for this review")
   ].join("");
 
@@ -1066,11 +1061,16 @@ function renderHallResults(data) {
 }
 
 function summaryCard(label, value, note) {
+  // All three fields escape uniformly. Previously `note` was interpolated
+  // raw, forcing every caller to pre-escape if it embedded user data --
+  // easy to forget when adding a new card, which would silently turn a
+  // future `summaryCard("Site", data.site, data.note)` into an XSS sink.
+  // Uniform escaping closes the footgun.
   return `
     <article class="summary-card">
       <p class="summary-label">${escapeHtml(label)}</p>
       <p class="summary-value">${escapeHtml(value)}</p>
-      <p class="summary-note">${note}</p>
+      <p class="summary-note">${escapeHtml(note)}</p>
     </article>
   `;
 }
