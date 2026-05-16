@@ -89,6 +89,24 @@ const MAX_POLL_WAIT_MS = 16 * 60 * 1000;
 // server would accept 8 MiB" — a strictly safer floor.
 const MAX_UPLOAD_FILE_BYTES = 2 * 1024 * 1024;
 
+// Single-shot fetch timeout. Without this, a hung server (or a network
+// drop after the TCP handshake) leaves the user staring at a stuck
+// "Submitting..." / "Signing in..." indicator until the OS-level TCP
+// timeout fires -- which on Windows is ~21s for SYN retries but can be
+// many minutes for an idle ESTABLISHED socket. 15 seconds is comfortably
+// above the worst-case happy-path latency (auth PBKDF2 + DB write,
+// submit + JSON parse, etc.) and far below "user assumes the page is
+// broken". Poll loops keep their own structure -- a transient blip on
+// one poll shouldn't blow the whole loop, so they don't use this.
+const SINGLE_SHOT_FETCH_TIMEOUT_MS = 15_000;
+
+function fetchWithTimeout(url, options) {
+  return fetch(url, {
+    ...options,
+    signal: AbortSignal.timeout(SINGLE_SHOT_FETCH_TIMEOUT_MS)
+  });
+}
+
 let authState = normalizeAuthState({});
 
 void boot();
@@ -151,7 +169,7 @@ if (form && fileInput && siteSelect && heroInput) {
         heroName: resolvedHeroName()
       };
 
-      const response = await fetch("/api/analyze-hand-history", {
+      const response = await fetchWithTimeout("/api/analyze-hand-history", {
         method: "POST",
         credentials: "same-origin",
         headers: jsonHeaders(true),
@@ -229,7 +247,7 @@ if (hallForm) {
     hallResults.classList.add("hidden");
 
     try {
-      const response = await fetch("/api/playing-hall", {
+      const response = await fetchWithTimeout("/api/playing-hall", {
         method: "POST",
         credentials: "same-origin",
         headers: jsonHeaders(true),
@@ -343,7 +361,7 @@ function syncRandomSeedState() {
 
 async function refreshAuthState() {
   try {
-    const response = await fetch("/api/auth/me", {
+    const response = await fetchWithTimeout("/api/auth/me", {
       credentials: "same-origin",
       headers: {
         "Accept": "application/json"
@@ -630,7 +648,7 @@ async function submitAuth(path, includeDisplayName) {
   // duplicate login wastes a PBKDF2 verify per click.
   setAuthButtonsBusy(true);
   try {
-    const response = await fetch(path, {
+    const response = await fetchWithTimeout(path, {
       method: "POST",
       credentials: "same-origin",
       headers: jsonHeaders(false),
@@ -694,7 +712,7 @@ async function saveProfile() {
     profileSaveButton.textContent = "Saving...";
   }
   try {
-    const response = await fetch("/api/auth/profile", {
+    const response = await fetchWithTimeout("/api/auth/profile", {
       method: "POST",
       credentials: "same-origin",
       headers: jsonHeaders(true),
@@ -734,7 +752,7 @@ async function logout() {
     authLogoutButton.textContent = "Signing out...";
   }
   try {
-    const response = await fetch("/api/auth/logout", {
+    const response = await fetchWithTimeout("/api/auth/logout", {
       method: "POST",
       credentials: "same-origin",
       headers: jsonHeaders(true),
@@ -1621,7 +1639,7 @@ if (hallCancelButton) {
     hallCancelButton.disabled = true;
     hallCancelButton.textContent = "Cancelling...";
     try {
-      const response = await fetch(`/api/playing-hall/jobs/${encodeURIComponent(hallActiveJobId)}`, {
+      const response = await fetchWithTimeout(`/api/playing-hall/jobs/${encodeURIComponent(hallActiveJobId)}`, {
         method: "DELETE",
         credentials: "same-origin",
         headers: jsonHeaders(true)
