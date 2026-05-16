@@ -976,7 +976,12 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
 
   for (;;) {
     if (Date.now() >= deadline) {
-      throw new Error("Analysis timed out while waiting for the review job to finish.");
+      // Frontend-side polling deadline, NOT a server-side job failure --
+      // the job may still be running. Tell the user accurately so they
+      // don't assume the analysis crashed; the 16-minute frontend
+      // budget should rarely fire because the server's analyze timeout
+      // is 2 minutes (the job would have terminated long before this).
+      throw new Error("Stopped polling after 16 minutes. The job may still be running on the server -- check back later by reloading the page.");
     }
 
     await sleep(pollAfterMs);
@@ -1030,7 +1035,14 @@ async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
 
   for (;;) {
     if (Date.now() >= deadline) {
-      throw new Error("Playing hall timed out while waiting for the run to finish.");
+      // Same shape as the analysis poller: this is a client-side
+      // polling budget exhaustion, not a server-side job failure. The
+      // hall server timeout is 15 minutes (default PLAYING_HALL_TIMEOUT_MS),
+      // so reaching the 16-minute frontend budget means either the
+      // server is silently slow OR the queue wait was long enough to
+      // push the worker's own deadline past ours. The job may still
+      // run to completion.
+      throw new Error("Stopped polling after 16 minutes. The hall run may still be finishing on the server -- check back later by reloading the page.");
     }
 
     await sleep(pollAfterMs);
