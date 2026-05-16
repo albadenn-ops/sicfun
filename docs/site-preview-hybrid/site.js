@@ -107,6 +107,28 @@ function fetchWithTimeout(url, options) {
   });
 }
 
+// Translate a thrown fetch error into a user-facing message. The two cases
+// the user benefits from naming explicitly:
+//   - AbortSignal.timeout throws DOMException with name='TimeoutError' and
+//     a terse "signal timed out" message that reads like a bug to a non-
+//     developer. Translate to actionable language.
+//   - A network-layer failure (server unreachable, DNS down, offline)
+//     throws TypeError "Failed to fetch" in Chrome / "NetworkError when
+//     attempting to fetch resource" in Firefox -- match either substring.
+// Anything else passes through the original error.message so a server-
+// thrown reason (e.g., from pollAnalysisJob's manual throws) still
+// surfaces verbatim.
+function describeFetchError(error) {
+  if (!error) return "unknown error";
+  if (error.name === "TimeoutError" || error.name === "AbortError") {
+    return "the server did not respond in time -- please try again";
+  }
+  if (error instanceof TypeError && /fetch|network/i.test(error.message)) {
+    return "could not reach the server -- check your connection";
+  }
+  return error instanceof Error ? error.message : "unknown error";
+}
+
 let authState = normalizeAuthState({});
 
 void boot();
@@ -198,7 +220,7 @@ if (form && fileInput && siteSelect && heroInput) {
 
       renderResults(file.name, body);
     } catch (error) {
-      renderStatus(`Request failed: ${error instanceof Error ? error.message : "unknown error"}`);
+      renderStatus(`Request failed: ${describeFetchError(error)}`);
     } finally {
       setSubmitting(false);
     }
@@ -279,7 +301,7 @@ if (hallForm) {
       renderHallResults(body);
       pushRecentRun(payload, (body && body.summary) || {});
     } catch (error) {
-      renderHallStatus(`Playing hall request failed: ${error instanceof Error ? error.message : "unknown error"}`);
+      renderHallStatus(`Playing hall request failed: ${describeFetchError(error)}`);
     } finally {
       setHallSubmitting(false);
       finishHallProgress();
@@ -376,7 +398,7 @@ async function refreshAuthState() {
     applyAuthState(body);
   } catch (error) {
     authState = normalizeAuthState({});
-    updateAccountUi(`Account bootstrap failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    updateAccountUi(`Account bootstrap failed: ${describeFetchError(error)}`);
   }
 }
 
@@ -673,7 +695,7 @@ async function submitAuth(path, includeDisplayName) {
     }
     applyAuthState(body, includeDisplayName ? "Registration complete." : "Signed in.");
   } catch (error) {
-    updateAccountUi(`Authentication request failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    updateAccountUi(`Authentication request failed: ${describeFetchError(error)}`);
   } finally {
     setAuthButtonsBusy(false);
   }
@@ -727,7 +749,7 @@ async function saveProfile() {
 
     applyAuthState(body, "Profile saved.");
   } catch (error) {
-    updateAccountUi(`Profile save failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    updateAccountUi(`Profile save failed: ${describeFetchError(error)}`);
   } finally {
     if (profileSaveButton) {
       profileSaveButton.disabled = false;
@@ -790,7 +812,7 @@ async function logout() {
     renderRecentRuns();
     applyAuthState(body, "Signed out.");
   } catch (error) {
-    updateAccountUi(`Sign out failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    updateAccountUi(`Sign out failed: ${describeFetchError(error)}`);
   } finally {
     // Re-enable only on failure: a successful logout hides profileCard
     // (which contains this button) via updateAccountUi switching to the
@@ -1669,7 +1691,7 @@ if (hallCancelButton) {
         hallCancelButton.textContent = "Cancel Run";
       }
     } catch (error) {
-      renderHallStatus(`Cancel failed: ${error instanceof Error ? error.message : "unknown error"}`);
+      renderHallStatus(`Cancel failed: ${describeFetchError(error)}`);
       hallCancelButton.disabled = false;
       hallCancelButton.textContent = "Cancel Run";
     }
