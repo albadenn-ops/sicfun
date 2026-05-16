@@ -728,6 +728,19 @@ object PlatformUserAuth:
       nowMillis: () => Long = () => System.currentTimeMillis()
   ):
     private val sessions = new ConcurrentHashMap[String, SessionRecord]()
+    // Throttle purgeExpired runs to at most once per PurgeIntervalMs.
+    // resolve() (called on every authenticated request) and create() (called
+    // on every login) used to run purgeExpired unconditionally, scanning all
+    // sessions on every auth check. For a deployment near maxUsers=100k that
+    // is 100k iterations per request; at hundreds of req/s the wasted CPU
+    // adds up. With per-entry compare-and-remove the GC-side cost is already
+    // bounded, but the iteration itself is still O(N). Throttling drops the
+    // amortized cost to O(N) per minute rather than O(N) per request, with
+    // no correctness impact -- expired sessions stop resolving anyway via
+    // the in-line TTL check in resolve(), and the purge sweep only matters
+    // for memory hygiene (which can wait a minute).
+    private val PurgeIntervalMs = 60_000L
+    private val lastPurgeAtMs = new AtomicLong(0L)
 
     // Approximate count of in-memory session records. ConcurrentHashMap.size
     // is documented as "not a constant-time operation" but for our scale
@@ -805,6 +818,14 @@ object PlatformUserAuth:
 
     private def purgeExpired(): Unit =
       val now = nowMillis()
+      val lastPurge = lastPurgeAtMs.get()
+      // Run at most once per PurgeIntervalMs. CAS guards against multiple
+      // concurrent callers racing to start a sweep -- whichever wins claims
+      // the work, the rest fall through immediately. Same pattern used by
+      // RateLimit.cleanupIfDue and OidcStateStore.cleanupIfDue elsewhere
+      // in this file.
+      if now - lastPurge < PurgeIntervalMs then return
+      if !lastPurgeAtMs.compareAndSet(lastPurge, now) then return
       val iterator = sessions.entrySet().iterator()
       while iterator.hasNext do
         val entry = iterator.next()
