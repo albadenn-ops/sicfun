@@ -261,8 +261,14 @@ private[web] object JobQueue:
       jobs.put(jobId, Running(submittedAt, startedAt))
       val timedOut = new AtomicBoolean(false)
       val timeoutTask = scheduleTimeout(jobId, submittedAt, startedAt, timedOut)
+      // %20-escape spaces in heroName so a value like "Alice Smith" does
+      // not split the structured key=value log fields. parseRequest's
+      // 64-char cap + control-char rejection already bound the value;
+      // this is the same shape AuthStack.formatSubmittedEmailForLog uses
+      // for submitted emails.
+      val loggedHeroName = request.heroName.getOrElse("-").replace(" ", "%20")
       logInfo(
-        s"job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} heroName=${request.heroName.getOrElse("-")} site=${request.site.map(_.toString).getOrElse("auto")} analysisTimeoutMs=$analysisTimeoutMs"
+        s"job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} heroName=$loggedHeroName site=${request.site.map(_.toString).getOrElse("auto")} analysisTimeoutMs=$analysisTimeoutMs"
       )
       val completedState =
         try
