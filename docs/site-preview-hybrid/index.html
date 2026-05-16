@@ -133,7 +133,8 @@
 
             <label class="field">
               <span>Display name</span>
-              <input id="auth-display-name" type="text" autocomplete="nickname" placeholder="Optional for local registration">
+              <!-- maxlength matches sanitizeDisplayName cap (96). -->
+              <input id="auth-display-name" type="text" autocomplete="nickname" placeholder="Optional for local registration" maxlength="96">
             </label>
 
             <div class="auth-actions">
@@ -151,14 +152,19 @@
           </div>
 
           <form class="auth-form" id="profile-form">
+            <!-- maxlength caps match the server-side sanitizeOptionalField
+                 limits in PlatformUserAuth.updateProfile (displayName=96,
+                 heroName=64, preferredSite=32, timeZone=64). Native
+                 enforcement gives a cleaner UI than a server 400 after
+                 the user pastes a too-long value. -->
             <label class="field">
               <span>Display name</span>
-              <input id="profile-display-name" type="text" autocomplete="nickname" placeholder="Display name">
+              <input id="profile-display-name" type="text" autocomplete="nickname" placeholder="Display name" maxlength="96">
             </label>
 
             <label class="field">
               <span>Default hero screen name</span>
-              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form">
+              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form" maxlength="64">
             </label>
 
             <label class="field">
@@ -173,7 +179,7 @@
 
             <label class="field">
               <span>Time zone</span>
-              <input id="profile-time-zone" type="text" placeholder="e.g. Europe/Madrid">
+              <input id="profile-time-zone" type="text" placeholder="e.g. Europe/Madrid" maxlength="64">
             </label>
 
             <div class="auth-actions">
@@ -216,7 +222,10 @@
 
             <label class="field">
               <span>Hero screen name</span>
-              <input id="hero-name" type="text" placeholder="Optional override">
+              <!-- 64 chars matches the profile heroName cap so a value
+                   pasted here behaves the same as one saved on the
+                   profile (which prefills this field). -->
+              <input id="hero-name" type="text" placeholder="Optional override" maxlength="64">
             </label>
 
             <div class="upload-actions">
