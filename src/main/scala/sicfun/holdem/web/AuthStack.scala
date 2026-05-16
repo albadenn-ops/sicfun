@@ -748,13 +748,26 @@ private[web] object AuthStack:
     basicAuth.nonEmpty || platformAuth.nonEmpty
 
 
+  // Cap the request path that lands in audit log `path=` fields. JDK
+  // HttpServer's request-line length is not strictly bounded, so an attacker
+  // can plausibly send a multi-KB URL. sanitizeLogMessage's 8 KB final cap
+  // catches the total line length anyway, but a per-field cap keeps the
+  // truncation marker in the right spot for forensics (the path is one of
+  // several fields; without per-field capping, sanitizeLogMessage would
+  // truncate the WHOLE message and the trailing fields would disappear from
+  // the audit log). 512 chars is well above any legitimate URL we serve
+  // (the longest registered context is ~32 chars).
+  private val MaxLogRequestPathLength = 512
+
   private def requestPath(exchange: HttpExchange): String =
     // getRawPath keeps percent-encoded sequences as-is; getPath would decode
     // them, and a `%20` in the URL would become a literal space in the
     // structured `path=...` log field -- which then splits at the wrong
     // column for any line-oriented parser. The raw form is uglier but
     // unambiguous and stable across log parsers.
-    Option(exchange.getRequestURI).map(_.getRawPath).filter(_.nonEmpty).getOrElse("/")
+    val raw = Option(exchange.getRequestURI).map(_.getRawPath).filter(_.nonEmpty).getOrElse("/")
+    if raw.length <= MaxLogRequestPathLength then raw
+    else raw.substring(0, MaxLogRequestPathLength) + "...(truncated)"
 
   private def remoteAddress(exchange: HttpExchange): String =
     // Prefer the audit address stashed by the request wrapper -- it applies the

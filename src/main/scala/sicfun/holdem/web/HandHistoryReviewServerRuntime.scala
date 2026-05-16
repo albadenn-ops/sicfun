@@ -406,8 +406,14 @@ private[web] object HandHistoryReviewServerRuntime:
     val method = Option(exchange.getRequestMethod).getOrElse("?")
     // getRawPath -- not getPath -- so percent-encoded sequences stay encoded
     // and a literal space in the URL does not split the `path=...` field at
-    // the wrong column. Matches the requestPath helper in AuthStack.
-    val path = Option(exchange.getRequestURI).map(_.getRawPath).getOrElse("?")
+    // the wrong column. Matches the requestPath helper in AuthStack, and
+    // applies the same 512-char cap so an attacker with a multi-KB URL
+    // cannot blow up the exception-log path= field. sanitizeLogMessage's
+    // 8 KB final cap would catch the whole line otherwise, but per-field
+    // capping keeps the truncation marker in the right spot for forensics
+    // and preserves the trailing `exception=` and `message=` fields.
+    val rawPath = Option(exchange.getRequestURI).map(_.getRawPath).getOrElse("?")
+    val path = if rawPath.length <= 512 then rawPath else rawPath.substring(0, 512) + "...(truncated)"
     val message = Option(e.getMessage).getOrElse("")
     logError(s"$label method=$method path=$path exception=${e.getClass.getName} message=$message")
     // Render the stack trace as a string and route each frame through the
