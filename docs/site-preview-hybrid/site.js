@@ -1518,11 +1518,21 @@ function validateField(input) {
       err.className = "field-error";
       input.parentElement.appendChild(err);
     }
+    // Use the input's step to surface a specific message: step=1 reads as
+    // 'Whole number required'; everything else surfaces the actual step so
+    // the user sees what precision is expected (e.g. step=0.05 -> 'Use
+    // multiples of 0.05'). Default fallback names the constraint without
+    // a value when input.step is empty.
+    const stepValue = input.step;
+    const stepHint =
+      stepValue === "1" ? "Whole number required" :
+      stepValue ? `Use multiples of ${stepValue}` :
+      "Value does not match the step";
     err.textContent =
       !Number.isFinite(value) ? "Number required" :
       value < min ? `Min ${min}` :
       value > max ? `Max ${max}` :
-      "Step mismatch";
+      stepHint;
     // Force the parent <details> open if the user collapsed the section
     // that contains an invalid field. Otherwise the submit button is
     // disabled (because validateHallForm returns false) but the red
