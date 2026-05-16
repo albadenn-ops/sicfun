@@ -374,6 +374,23 @@ async function boot() {
   renderRecentRuns();
   wireHallValidation();
   syncRandomSeedState();
+  mirrorHelpDataToAriaLabel();
+}
+
+// The ⓘ help icons use a CSS ::after pseudo-element to render their
+// data-help attribute as a hover tooltip. Screen readers don't announce
+// pseudo-element generated content, so the data-help text is invisible
+// to assistive tech -- a focused help icon is just announced as the
+// ℹ symbol with no context. Mirror data-help into aria-label so screen
+// readers read the same hint the sighted tooltip shows. tabindex=0 in
+// the markup already makes them focusable; this just labels them.
+function mirrorHelpDataToAriaLabel() {
+  document.querySelectorAll(".help[data-help]").forEach(el => {
+    const help = el.getAttribute("data-help");
+    if (help && !el.hasAttribute("aria-label")) {
+      el.setAttribute("aria-label", help);
+    }
+  });
 }
 
 // Browsers preserve checkbox state across reload, so a user who left the
