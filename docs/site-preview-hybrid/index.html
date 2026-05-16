@@ -9,6 +9,15 @@
        when proxies strip response headers). Cheap to include and
        harmless if the page is already private. -->
   <meta name="robots" content="noindex, nofollow">
+  <!-- The page is exclusively dark-themed (site.css :root vars use #0a0f0d
+       background, #edf6f0 ink). color-scheme=dark tells the user agent
+       to render its built-in form controls + scrollbars in the dark
+       palette so they don't flash white against the page; theme-color
+       paints the mobile browser chrome (Chrome's address bar on Android,
+       Safari's overscroll area on iOS) to match the page background
+       rather than leaving a jarring white strip above the dark UI. -->
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0f0d">
   <title>SICFUN | Hand-History Review &amp; Playing Hall</title>
   <link rel="icon" href="data:,">
   <meta
