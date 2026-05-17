@@ -129,7 +129,7 @@ Auth modes:
 
 Optional OIDC:
 
-- Set `GOOGLE_OIDC_CLIENT_ID`, `GOOGLE_OIDC_CLIENT_SECRET`, and `GOOGLE_OIDC_REDIRECT_URI`. OIDC layers on top of platform-user auth so `USER_STORE_PATH` must also be set; otherwise startup fails with `user auth with OIDC requires --userStorePath/USER_STORE_PATH`. All three Google knobs are required together (configuring just one or two also fails at startup).
+- Set `GOOGLE_OIDC_CLIENT_ID`, `GOOGLE_OIDC_CLIENT_SECRET`, and `GOOGLE_OIDC_REDIRECT_URI`. OIDC layers on top of platform-user auth so `USER_STORE_PATH` must also be set; otherwise startup fails with `user auth with OIDC requires --userStorePath/USER_STORE_PATH`. All three Google knobs are required together (configuring just one or two also fails at startup). The redirect URI's PATH component must be exactly `/api/auth/oidc/google/callback` (the path the server registers its callback handler on); any other path -- e.g. `https://example.com/oidc-return` -- fails startup with `--googleOidcRedirectUri/GOOGLE_OIDC_REDIRECT_URI path must be '/api/auth/oidc/google/callback'`. Configure the same path in the Google Cloud Console's Authorized Redirect URIs.
 - On non-loopback binds, set `USER_AUTH_COOKIE_SECURE=true` and use an `https://...` redirect URI unless you explicitly set `ALLOW_INSECURE_USER_AUTH=true` for trusted private-network testing
 
 Rate limiting:
