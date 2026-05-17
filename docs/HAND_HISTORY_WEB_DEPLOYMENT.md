@@ -107,7 +107,7 @@ Common settings:
 - `STATIC_DIR`: directory served as the upload UI (default `docs/site-preview-hybrid` in source mode; `static/` relative to the bundle root after `release-hand-history-web.ps1` packages it). Override only when you've copied or modified the static assets to a non-standard location.
 - `MODEL_DIR`: optional model artifact directory
 - `MAX_UPLOAD_BYTES`: upload cap (applies to both `/api/analyze-hand-history` and `/api/playing-hall` request bodies). The frontend probes `/api/health` at page load and adopts this value as its client-side file-size check, so raising the server cap automatically raises what the upload form accepts without a frontend rebuild.
-- `ANALYSIS_TIMEOUT_MS`: per-job timeout for `/api/analyze-hand-history` jobs
+- `ANALYSIS_TIMEOUT_MS`: per-job timeout for `/api/analyze-hand-history` jobs (default `120000`, i.e. 2 min); `0` disables it
 - `PLAYING_HALL_TIMEOUT_MS`: per-job timeout for `/api/playing-hall` jobs (default `900000`, i.e. 15 min); `0` disables it
 - `MAX_CONCURRENT_JOBS` / `MAX_QUEUED_JOBS`: admission limits shared across both job stores
 - `SHUTDOWN_GRACE_MS`: graceful shutdown budget
