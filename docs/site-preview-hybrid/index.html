@@ -406,7 +406,17 @@
       <div class="hall-grid">
         <article class="surface hall-card">
           <form class="hall-form" id="playing-hall-form">
-            <div class="preset-bar" id="hall-preset-bar"></div>
+            <!-- role="group" + aria-label gives the preset buttons a single
+                 semantic container so screen readers announce "Hall
+                 configuration presets, group" before reading each
+                 preset button. Without it the buttons are read in
+                 isolation ("Smoke 50 button, Standard 240 button, ...")
+                 with no context for what tapping one does, and a user
+                 hearing the page top-to-bottom would have to reach the
+                 fields below before realizing those buttons populate
+                 them. Mirrors the villain-pool role=group treatment
+                 added in a recent commit. -->
+            <div class="preset-bar" id="hall-preset-bar" role="group" aria-label="Hall configuration presets"></div>
 
             <details class="form-section" open>
               <summary>Run sizing</summary>
