@@ -203,7 +203,7 @@
                    normalizePlayerName comparison is case-sensitive so
                    'alice' typed on mobile must NOT silently become
                    'Alice'. -->
-              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form" spellcheck="false" autocapitalize="off" maxlength="64">
+              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form" spellcheck="false" autocapitalize="off" autocomplete="off" maxlength="64">
             </label>
 
             <label class="field">
@@ -282,7 +282,15 @@
                    + autocapitalize=off match the profile heroName field
                    (identifier, not prose; case-sensitive compare against
                    the hand-history file's player name). -->
-              <input id="hero-name" type="text" placeholder="Optional override" spellcheck="false" autocapitalize="off" maxlength="64">
+              <!-- autocomplete="off" stops the browser from offering to
+                   autofill this with stored personal-name data ("Alice
+                   Smith") or with values typed into past forms with
+                   similar field names. The hero name is a poker handle
+                   (e.g. "Mig_Pro22") matched literally against player
+                   strings in the hand-history file; auto-suggested
+                   personal names would silently produce a non-match
+                   and the review would fall back to auto-detect. -->
+              <input id="hero-name" type="text" placeholder="Optional override" spellcheck="false" autocapitalize="off" autocomplete="off" maxlength="64">
             </label>
 
             <div class="upload-actions">
