@@ -1901,6 +1901,19 @@ function applyHallConfig(config) {
   if (hallBunchingTrialsInput && config.bunchingTrials != null) hallBunchingTrialsInput.value = config.bunchingTrials;
   if (hallEquityTrialsInput && config.equityTrials != null) hallEquityTrialsInput.value = config.equityTrials;
   if (hallSeedInput && config.seed != null) hallSeedInput.value = config.seed;
+  // If the loaded config carries an explicit numeric seed, also turn
+  // OFF the random-seed checkbox and re-enable the seed input. Without
+  // this step a user with random-seed currently checked who clicks
+  // "Load" on a saved recent run would get the seed value populated
+  // but ignored at submit time (random-seed=true overrides the seed
+  // input and rolls a fresh Math.random() per Run click). The saved
+  // recent run captured the SEED THAT ACTUALLY RAN (even if the
+  // original toggle was random), so reproducing it must use that
+  // captured seed verbatim.
+  if (hallRandomSeedInput && hallSeedInput && config.seed != null) {
+    hallRandomSeedInput.checked = false;
+    hallSeedInput.disabled = false;
+  }
   if (hallSaveReviewInput) hallSaveReviewInput.checked = Boolean(config.saveReviewHandHistory);
   if (hallFullRingInput) hallFullRingInput.checked = Boolean(config.fullRing);
   if (Array.isArray(config.villainPool)) {
