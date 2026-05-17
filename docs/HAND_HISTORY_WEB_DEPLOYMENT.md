@@ -133,8 +133,8 @@ Optional OIDC:
 
 Rate limiting:
 
-- `RATE_LIMIT_SUBMITS_PER_MINUTE` — cap on analysis/Playing Hall submissions per IP per minute
-- `RATE_LIMIT_STATUS_PER_MINUTE` — cap on job-status polls per IP per minute
+- `RATE_LIMIT_SUBMITS_PER_MINUTE` — cap on analysis/Playing Hall submissions per IP per minute (defaults to `6`; bounds the worker pool against burst-submit abuse without throttling a human operator queuing a handful of files)
+- `RATE_LIMIT_STATUS_PER_MINUTE` — cap on job-status polls per IP per minute (defaults to `240`; the frontend's poll loop wakes every 1.5–5 s so the cap leaves headroom for a single browser tab + a sidecar monitor)
 - `RATE_LIMIT_AUTH_PER_MINUTE` — cap on `/api/auth/register` + `/api/auth/login` attempts per IP per minute (defaults to `10`; throttles PBKDF2-cost credential stuffing)
 - `RATE_LIMIT_CLIENT_IP_HEADER` — name of a single-value header the reverse proxy injects with the real client IP (e.g. `X-Real-IP`). When set and the request's TCP peer is loopback or in `RATE_LIMIT_TRUSTED_PROXY_IPS`, the rate limiter and audit-log `remote=` field both key on the trusted-header value instead of the proxy's peer address, so a single grep for one client IP correlates rate-limit rejections AND the auth events that triggered them. Do NOT set this if the app is directly internet-facing -- clients can spoof the header.
 - `RATE_LIMIT_TRUSTED_PROXY_IPS` — comma-separated allowlist of proxy peer IP literals authorized to inject `RATE_LIMIT_CLIENT_IP_HEADER`. Same-host loopback proxies are trusted automatically; this knob is for proxies on a different host. The IP comparison is exact (no CIDR support); list each proxy explicitly.
