@@ -58,7 +58,7 @@ private[web] object HandHistoryReviewServerRuntime:
         executor = analysisExecutor,
         timeoutExecutor = analysisTimeoutExecutor,
         backend = playingHallBackend,
-        analysisTimeoutMs = config.playingHallTimeoutMs
+        playingHallTimeoutMs = config.playingHallTimeoutMs
       )
       val activeHttpRequests = new AtomicInteger(0)
       // Single wrapper applied to every registered handler. Tracks active-request

@@ -440,7 +440,7 @@ private[web] object JobQueue:
       executor: ThreadPoolExecutor,
       timeoutExecutor: ScheduledExecutorService,
       backend: PlayingHallBackend,
-      analysisTimeoutMs: Long,
+      playingHallTimeoutMs: Long,
       nowMillis: () => Long = () => System.currentTimeMillis()
   ):
     import AnalysisJobState.*
@@ -552,7 +552,7 @@ private[web] object JobQueue:
       val cancelFlag = Option(cancelFlags.get(jobId)).getOrElse(new AtomicBoolean(false))
       val timeoutTask = scheduleTimeout(jobId, submittedAt, startedAt, timedOut)
       logInfo(
-        s"playing hall job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} timeoutMs=$analysisTimeoutMs ${request.logSummary}"
+        s"playing hall job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} timeoutMs=$playingHallTimeoutMs ${request.logSummary}"
       )
       val completedState =
         try
@@ -607,7 +607,7 @@ private[web] object JobQueue:
         startedAt: Long,
         timedOut: AtomicBoolean
     ): Option[ScheduledFuture[?]] =
-      if analysisTimeoutMs <= 0 then None
+      if playingHallTimeoutMs <= 0 then None
       else
         val workerThread = Thread.currentThread()
         Some(
@@ -619,11 +619,11 @@ private[web] object JobQueue:
                   cancelFlags.remove(jobId)
                   timedOutWorkersInFlight.incrementAndGet()
                   logWarn(
-                    s"playing hall job timed out jobId=$jobId timeoutMs=$analysisTimeoutMs queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
+                    s"playing hall job timed out jobId=$jobId timeoutMs=$playingHallTimeoutMs queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
                   )
                   workerThread.interrupt()
             ,
-            analysisTimeoutMs,
+            playingHallTimeoutMs,
             TimeUnit.MILLISECONDS
           )
         )
@@ -651,7 +651,7 @@ private[web] object JobQueue:
         startedAt = startedAt,
         completedAt = nowMillis(),
         errorStatus = 504,
-        error = s"playing hall timed out after ${analysisTimeoutMs}ms"
+        error = s"playing hall timed out after ${playingHallTimeoutMs}ms"
       )
 
     private def terminalFailureFor(
