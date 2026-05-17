@@ -40,7 +40,7 @@ Installer-variant additions:
 - PowerShell 5.1+
 - Java 17+ on `PATH` before startup (not required for the installer variant — `runtime/` is embedded)
 - NSSM if you want the Windows service workflow (drop `nssm.exe` into `bin/` before zipping or pass `-NssmPath` at install time; auto-download is disabled because corporate AV often blocks `nssm.cc`)
-- Client browser: a modern build (Chrome 103+, Edge 103+, Firefox 100+, Safari 16+). Modern Edge is Chromium-based so it tracks the Chrome version. Older browsers still load the page but lose the fetch-timeout safety net (`AbortSignal.timeout` shipped in those versions); `String.prototype.replaceAll` (used by HTML escaping) requires Chrome 85+ / Edge 85+ / Firefox 77+ / Safari 13.1+ which is a lower floor below which the page won't render at all.
+- Client browser: a modern build (Chrome 103+, Edge 103+, Firefox 100+, Safari 16+) gets the one-line `AbortSignal.timeout` fetch-timeout path. Older browsers fall back to an `AbortController + setTimeout` shim that delivers the same fetch-timeout safety net; that primitive shipped in Chrome 66 / Firefox 57 / Safari 11.1 (2018+) which is below the page's actual rendering floor, so every browser that can run the page also gets the timeout. `String.prototype.replaceAll` (used by HTML escaping) requires Chrome 85+ / Edge 85+ / Firefox 77+ / Safari 13.1+ — that's the real floor below which the page won't render at all. Modern Edge is Chromium-based so it tracks the Chrome version.
 
 ## Quick Start
 
