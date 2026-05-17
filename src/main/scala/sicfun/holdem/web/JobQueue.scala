@@ -167,8 +167,15 @@ private[web] object JobQueue:
       purgeExpiredJobs()
       rejectIfUnavailable() match
         case Some(error) =>
+          // admissionRejectedMessage produces human-readable strings with
+          // SPACES ("analysis service is draining; try another instance
+          // or retry later"). Interpolated raw, those spaces split the
+          // structured `key=value key=value` log shape so a log
+          // aggregator tokenizing on whitespace orphans every subsequent
+          // word. Same %20-escape pattern the startup banner and
+          // heroName logging already use for the same reason.
           logWarn(
-            s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+            s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
           )
           Left(error)
         case None =>
@@ -182,7 +189,7 @@ private[web] object JobQueue:
                 jobs.remove(jobId)
                 jobOwners.remove(jobId)
                 logWarn(
-                  s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+                  s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
                 )
                 Left(error)
               case None =>
@@ -458,8 +465,9 @@ private[web] object JobQueue:
       purgeExpiredJobs()
       rejectIfUnavailable() match
         case Some(error) =>
+          // Same %20-escape as the analysis path -- see AnalysisJobStore.submit.
           logWarn(
-            s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+            s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
           )
           Left(error)
         case None =>
@@ -475,7 +483,7 @@ private[web] object JobQueue:
                 jobOwners.remove(jobId)
                 cancelFlags.remove(jobId)
                 logWarn(
-                  s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+                  s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
                 )
                 Left(error)
               case None =>
