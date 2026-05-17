@@ -115,7 +115,7 @@ Common settings:
 
 Auth modes:
 
-- Basic auth: set `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD`
+- Basic auth: set `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD` (both required together — setting one without the other fails startup with a clear error). The username may not contain `:` (HTTP Basic uses it as the user:password separator per RFC 7617), and both values are trimmed; empty / whitespace-only values are treated as unset.
 - Platform-user auth: set `USER_STORE_PATH`
 - `ALLOW_INSECURE_USER_AUTH` (default `false`): explicit override for non-loopback platform-user auth without secure cookies or an HTTPS OIDC callback on a trusted private-network test deployment. The server otherwise refuses to start when `USER_STORE_PATH` is set on a non-loopback host without `USER_AUTH_COOKIE_SECURE=true`.
 - Do not enable both at the same time
