@@ -214,8 +214,10 @@ private[web] object JobQueue:
               jobOwners.remove(jobId)
               rejectIfUnavailable() match
                 case Some(error) =>
+                  // Same %20-escape as the two pre-submit reject sites above --
+                  // admissionRejectedMessage strings contain spaces.
                   logWarn(
-                    s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+                    s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
                   )
                   Left(error)
                 case None =>
@@ -309,8 +311,15 @@ private[web] object JobQueue:
             s"job completed jobId=$jobId durationMs=${completedAt - startedAt} queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
           )
         case Failed(_, _, completedAt, errorStatus, error) =>
+          // %20-escape spaces in the Failed.error value before it lands in
+          // the structured log line. The value can be a backend-returned
+          // message ('no hands found in upload'), a wrapped exception
+          // ('analysis failed: <e.getMessage>'), or the timeoutFailure
+          // string ('analysis timed out after 120000ms') -- all of which
+          // contain spaces that would split the surrounding key=value
+          // pairs when a log aggregator tokenizes on whitespace.
           logWarn(
-            s"job failed jobId=$jobId durationMs=${completedAt - startedAt} errorStatus=$errorStatus queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} error=$error"
+            s"job failed jobId=$jobId durationMs=${completedAt - startedAt} errorStatus=$errorStatus queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} error=${error.replace(" ", "%20")}"
           )
         case _ => ()
 
@@ -509,8 +518,9 @@ private[web] object JobQueue:
               cancelFlags.remove(jobId)
               rejectIfUnavailable() match
                 case Some(error) =>
+                  // Same %20-escape as the analysis path -- see AnalysisJobStore.submit.
                   logWarn(
-                    s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+                    s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
                   )
                   Left(error)
                 case None =>
@@ -600,8 +610,9 @@ private[web] object JobQueue:
             s"playing hall job completed jobId=$jobId durationMs=${completedAt - startedAt} queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
           )
         case Failed(_, _, completedAt, errorStatus, error) =>
+          // Same Failed.error %20-escape as the analyze branch above.
           logWarn(
-            s"playing hall job failed jobId=$jobId durationMs=${completedAt - startedAt} errorStatus=$errorStatus queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} error=$error"
+            s"playing hall job failed jobId=$jobId durationMs=${completedAt - startedAt} errorStatus=$errorStatus queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} error=${error.replace(" ", "%20")}"
           )
         case Cancelled(_, _, completedAt, _) =>
           logInfo(
