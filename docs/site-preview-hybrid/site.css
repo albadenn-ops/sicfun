@@ -483,6 +483,21 @@ h3 {
   font-size: 0.95rem;
 }
 
+/* Keyboard focus indicator: the default browser focus ring (typically a
+   blue 1-2px outline) is hard to spot on the dark #0b120f input
+   background and doesn't match the site's signal-green palette that
+   .button:focus-visible already uses. Use :focus-visible (not :focus)
+   so a click on a select doesn't permanently show the ring; keyboard
+   Tab focus AND arrow-key navigation both trigger :focus-visible.
+   outline-offset:2px keeps the ring outside the existing 1px border
+   so it stays visible even when the field is .invalid (which paints
+   the border --warning orange). */
+.field input:focus-visible,
+.field select:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
 .field input[type="file"] {
   padding: 12px 14px;
 }
@@ -542,6 +557,20 @@ h3 {
   background: rgba(74, 246, 38, 0.12);
   color: var(--ink);
   box-shadow: 0 0 18px rgba(74, 246, 38, 0.12);
+}
+
+/* The actual <input type="checkbox"> is visually hidden (opacity:0,
+   position:absolute) and the sibling <span> is the painted chip.
+   Without this rule, keyboard users Tabbing through the villain-pool
+   / toggle chips see NO focus indicator -- the focus is on the
+   invisible checkbox. Mirror the focus state onto the visible span so
+   the user can tell where the cursor is before they hit Space to
+   toggle. Same signal-green outline used for the text/select fields
+   above, for consistency. */
+.chip-check input:focus-visible + span,
+.toggle input:focus-visible + span {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
 }
 
 .hall-toggles {
