@@ -474,7 +474,20 @@
             <details class="form-section" open>
               <summary>Villains</summary>
               <div class="form-section-body">
-                <div class="field field-block">
+                <!-- role="group" + aria-label gives the six villain-pool
+                     checkboxes a single semantic container so screen
+                     readers announce "Villain pool group" before reading
+                     the checkbox names individually. Without the group
+                     the checkboxes are read in isolation ("tag checkbox
+                     checked, lag checkbox checked, ...") and the
+                     "Pool" span is rendered as ambient prose rather
+                     than as the group label. <fieldset>/<legend> would
+                     be the most native pattern but ships default
+                     borders + spacing that would clash with the
+                     existing .field-block layout; role="group" matches
+                     the visual structure exactly and adds the same
+                     accessibility tree. -->
+                <div class="field field-block" role="group" aria-label="Villain pool">
                   <span>Pool <span class="help" tabindex="0" data-help="Archetypes eligible to sit. One is picked per seat per hand.">ⓘ</span></span>
                   <div class="hall-pool">
                     <label class="chip-check"><input type="checkbox" name="villain-pool" value="tag" checked><span>tag</span></label>
