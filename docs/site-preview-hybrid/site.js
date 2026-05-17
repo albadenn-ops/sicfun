@@ -1034,7 +1034,22 @@ const OIDC_ERROR_MESSAGES = {
   // both cases ("registration is temporarily unavailable"); the friendly
   // version below tells the OIDC user this is a deployment-side capacity
   // issue, not something they did wrong.
-  "registration is temporarily unavailable": "This deployment is at capacity and not accepting new sign-ins. Please try again later or contact the operator."
+  "registration is temporarily unavailable": "This deployment is at capacity and not accepting new sign-ins. Please try again later or contact the operator.",
+  // Google-specific failures from parseGoogleUserInfo / token exchange.
+  // The server emits these verbatim from the OIDC exchange flow; the
+  // raw strings are accurate but read as a developer log entry, so
+  // translate to actionable language that names what's wrong and how
+  // the user can fix it (verified-email failure) or who to ask
+  // (operator misconfig). Rare in practice -- most Google accounts
+  // have email_verified=true and the userinfo shape is stable -- but
+  // worth covering so the user never sees "OIDC sign-in failed:
+  // Google userinfo response was missing required identity fields".
+  "Google did not return a verified email address for this account":
+    "Google reports your account email is not verified. Verify your email in your Google account settings, then try signing in again.",
+  "Google userinfo response was missing required identity fields":
+    "Google did not return the required account info. This is usually a deployment-side OIDC scope misconfiguration -- please contact the operator.",
+  "Google token exchange did not return an access token":
+    "Sign in with Google did not complete -- the provider did not return an access token. Please try again, or contact the operator if this keeps happening."
 };
 
 function renderAuthFlash() {
