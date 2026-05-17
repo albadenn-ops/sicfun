@@ -1046,7 +1046,16 @@ function renderAuthFlash() {
     updateAccountUi("OIDC sign-in completed.");
   } else if (authError) {
     const friendly = OIDC_ERROR_MESSAGES[authError];
-    const displayed = friendly || `OIDC sign-in failed: ${authError.replaceAll("+", " ")}`;
+    // No `.replaceAll("+", " ")` here: URLSearchParams.get() already
+    // applies the application/x-www-form-urlencoded `+`-to-space
+    // conversion during parsing per the WHATWG URL spec, AND the
+    // server's PlatformUserAuth.urlEncode emits `%20` for spaces (not
+    // `+`) precisely so the client doesn't have to guess. Any literal
+    // `+` in `authError` is a percent-decoded `%2B` representing a
+    // real `+` in the provider's error string (e.g. an upstream
+    // response containing a literal `+`), and turning it back into a
+    // space would silently lose data.
+    const displayed = friendly || `OIDC sign-in failed: ${authError}`;
     updateAccountUi(displayed);
   } else {
     return;
