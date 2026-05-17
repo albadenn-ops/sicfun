@@ -261,7 +261,13 @@ private[web] object AuthStack:
           // are short -- 256 chars is generous for any legitimate value and
           // far below any browser's URL cap.
           val error = capOidcErrorString(rawError)
-          logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=provider-error:$error")
+          // %20-escape the provider-supplied error before logging. Per the
+          // OIDC spec error codes are unreserved tokens (no spaces), but
+          // the spec is advisory -- a non-conforming or hostile provider
+          // could return "?error=foo bar" and split the structured
+          // key=value log fields. capOidcErrorString already truncates
+          // length; this completes the per-field discipline.
+          logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=provider-error:${error.replace(" ", "%20")}")
           Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(error)))
         case None =>
           (query.get("state"), query.get("code")) match
