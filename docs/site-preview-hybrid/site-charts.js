@@ -176,6 +176,20 @@
       el.textContent = "No per-hand data";
       return;
     }
+    // Defensive fallback when vendor/uPlot.iife.min.js fails to load
+    // (404 from a misconfigured proxy, blocked by a CSP-tightening
+    // browser extension, network blip during page load). Without this
+    // guard `new uPlot(...)` throws "uPlot is not defined", which the
+    // surrounding renderHallResults / renderResults does not catch,
+    // and the whole results board half-renders -- the KPI cards (raw
+    // SVG, no uPlot dependency) and the renderBarH / renderDonut /
+    // renderStackedBarH / renderMatrix charts all silently disappear
+    // because the uncaught exception aborts the call chain. A text
+    // placeholder keeps the rest of the panel intact.
+    if (typeof uPlot === "undefined") {
+      el.textContent = "Chart library unavailable.";
+      return;
+    }
     const opts = uPlotTheme({
       width: el.clientWidth || 600,
       height: (options && options.height) || 220,
@@ -193,6 +207,12 @@
     const values = (data.values || []).map(Number);
     if (values.length === 0) {
       el.textContent = "No equity data";
+      return;
+    }
+    // Same vendor-script-missing fallback as renderLine -- see comment
+    // there for the failure modes that drop window.uPlot.
+    if (typeof uPlot === "undefined") {
+      el.textContent = "Chart library unavailable.";
       return;
     }
     const bucketCount = (options && options.bucketCount) || 10;
