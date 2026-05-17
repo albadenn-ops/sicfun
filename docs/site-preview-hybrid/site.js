@@ -1901,19 +1901,6 @@ function applyHallConfig(config) {
   if (hallBunchingTrialsInput && config.bunchingTrials != null) hallBunchingTrialsInput.value = config.bunchingTrials;
   if (hallEquityTrialsInput && config.equityTrials != null) hallEquityTrialsInput.value = config.equityTrials;
   if (hallSeedInput && config.seed != null) hallSeedInput.value = config.seed;
-  // If the loaded config carries an explicit numeric seed, also turn
-  // OFF the random-seed checkbox and re-enable the seed input. Without
-  // this step a user with random-seed currently checked who clicks
-  // "Load" on a saved recent run would get the seed value populated
-  // but ignored at submit time (random-seed=true overrides the seed
-  // input and rolls a fresh Math.random() per Run click). The saved
-  // recent run captured the SEED THAT ACTUALLY RAN (even if the
-  // original toggle was random), so reproducing it must use that
-  // captured seed verbatim.
-  if (hallRandomSeedInput && hallSeedInput && config.seed != null) {
-    hallRandomSeedInput.checked = false;
-    hallSeedInput.disabled = false;
-  }
   if (hallSaveReviewInput) hallSaveReviewInput.checked = Boolean(config.saveReviewHandHistory);
   if (hallFullRingInput) hallFullRingInput.checked = Boolean(config.fullRing);
   if (Array.isArray(config.villainPool)) {
@@ -2026,7 +2013,24 @@ function renderRecentRuns() {
   hallRecentList.querySelectorAll("button[data-recent-index]").forEach(btn => {
     btn.addEventListener("click", () => {
       const entry = entries[Number(btn.dataset.recentIndex)];
-      if (entry) applyHallConfig(entry.request);
+      if (!entry) return;
+      applyHallConfig(entry.request);
+      // Recent runs capture the SEED THAT ACTUALLY RAN, even when the
+      // submit toggled random-seed at the time. Loading a recent run is
+      // the user explicitly asking to reproduce that captured state, so
+      // also turn OFF the random-seed checkbox + re-enable the seed
+      // input -- otherwise a user with random-seed currently checked
+      // would see the captured seed populated but silently overridden
+      // by a fresh Math.random() at submit time. Presets DO NOT do
+      // this (they're configurable starting points, and a user toggling
+      // random-seed deliberately would expect that preference to
+      // survive a preset click), so the override lives at the recent-
+      // run handler rather than inside applyHallConfig.
+      if (hallRandomSeedInput && hallSeedInput && entry.request && entry.request.seed != null) {
+        hallRandomSeedInput.checked = false;
+        hallSeedInput.disabled = false;
+        validateHallForm();
+      }
     });
   });
   // Per-entry remove: localStorage is bounded at RECENT_RUNS_MAX so old
