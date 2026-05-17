@@ -117,21 +117,36 @@ const SINGLE_SHOT_FETCH_TIMEOUT_MS = 15_000;
 const POLL_FETCH_TIMEOUT_MS = 30_000;
 
 function fetchWithTimeout(url, options, timeoutMs = SINGLE_SHOT_FETCH_TIMEOUT_MS) {
-  // Feature-detect AbortSignal.timeout (Chrome 103+, Firefox 100+, Safari
-  // 16+). Older browsers throw TypeError ('AbortSignal.timeout is not a
-  // function') the moment we call it -- before fetch even starts -- and
-  // describeFetchError wouldn't recognize the message, so every single
-  // request would surface a confusing developer-facing error to the user.
-  // Fall back to a fetch without timeout (matches the pre-timeout
-  // behavior) so the page still works on legacy browsers; modern users
-  // keep the timeout they had.
-  if (typeof AbortSignal === "undefined" || typeof AbortSignal.timeout !== "function") {
-    return fetch(url, options);
+  // Three-tier feature detection so the timeout actually fires on
+  // every browser that supports the underlying AbortController
+  // primitive, not just the ones with the modern sugar.
+  //
+  // Tier 1: AbortSignal.timeout (Chrome 103+, Firefox 100+, Safari
+  // 16+). One-liner; throws DOMException name='TimeoutError' that
+  // describeFetchError translates to actionable text. Use it when
+  // available.
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
   }
-  return fetch(url, {
-    ...options,
-    signal: AbortSignal.timeout(timeoutMs)
-  });
+  // Tier 2: AbortController + setTimeout (Chrome 66+, Firefox 57+,
+  // Safari 11.1+ -- 2018+ browsers). The aborted fetch rejects with
+  // DOMException name='AbortError' which describeFetchError also
+  // recognizes. Wider support than AbortSignal.timeout by ~4 years.
+  // Without this tier, every fetch on Chrome 66..102 / Firefox
+  // 57..99 / Safari 11.1..15 ran without a timeout (could hang on a
+  // dropped TCP socket for the OS-level idle timeout, often minutes).
+  if (typeof AbortController !== "undefined") {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(url, { ...options, signal: controller.signal })
+      .finally(() => window.clearTimeout(timeoutId));
+  }
+  // Tier 3: truly ancient browser without AbortController. Best
+  // effort: no timeout. Below this floor the page also doesn't
+  // support fetch credentials, ESM, async/await, etc. -- so the
+  // bundled UI wouldn't fully boot anyway. Documented in the
+  // deployment doc's browser-support floor.
+  return fetch(url, options);
 }
 
 // Translate a thrown async error into a user-facing message. The cases
