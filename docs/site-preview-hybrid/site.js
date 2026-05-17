@@ -604,14 +604,17 @@ function resolvedUploadSite() {
 }
 
 function resolvedHeroName() {
-  const explicit = heroInput.value.trim();
-  if (explicit) {
-    return explicit;
-  }
-  if (authState.user && authState.user.heroName) {
-    return authState.user.heroName;
-  }
-  return null;
+  // hydrateUploadDefaults already prefills heroInput from
+  // authState.user.heroName when the user signs in, so whatever the
+  // input shows is the user's effective choice. Returning the saved
+  // heroName here too used to OVERRIDE an explicit clear: a signed-in
+  // user with heroName='Mig_Pro22' who deleted the input value
+  // intending to fall back to auto-detect for THIS upload silently got
+  // 'Mig_Pro22' sent anyway, because heroInput.value.trim() === ''
+  // fell through to the saved-name branch. Trust the input; it
+  // already reflects the prefill, and an explicit clear means 'auto-
+  // detect this run'. Symmetric with the resolvedUploadSite fix above.
+  return heroInput.value.trim() || null;
 }
 
 function hydrateUploadDefaults() {
