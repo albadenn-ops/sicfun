@@ -125,7 +125,7 @@ function fetchWithTimeout(url, options, timeoutMs = SINGLE_SHOT_FETCH_TIMEOUT_MS
   });
 }
 
-// Translate a thrown fetch error into a user-facing message. The two cases
+// Translate a thrown async error into a user-facing message. The cases
 // the user benefits from naming explicitly:
 //   - AbortSignal.timeout throws DOMException with name='TimeoutError' and
 //     a terse "signal timed out" message that reads like a bug to a non-
@@ -133,6 +133,11 @@ function fetchWithTimeout(url, options, timeoutMs = SINGLE_SHOT_FETCH_TIMEOUT_MS
 //   - A network-layer failure (server unreachable, DNS down, offline)
 //     throws TypeError "Failed to fetch" in Chrome / "NetworkError when
 //     attempting to fetch resource" in Firefox -- match either substring.
+//   - file.text() throws DOMException with name='NotReadableError' when
+//     the picked file has gone away (renamed, moved, deleted, removable
+//     drive unplugged) since the user clicked Choose File. The default
+//     Chrome message reads as a developer log entry; translate to
+//     actionable "pick the file again" language.
 // Anything else passes through the original error.message so a server-
 // thrown reason (e.g., from pollAnalysisJob's manual throws) still
 // surfaces verbatim.
@@ -143,6 +148,9 @@ function describeFetchError(error) {
   }
   if (error instanceof TypeError && /fetch|network/i.test(error.message)) {
     return "could not reach the server -- check your connection";
+  }
+  if (error.name === "NotReadableError") {
+    return "the file could not be read -- it may have been moved or deleted since you picked it; pick the file again and retry";
   }
   return error instanceof Error ? error.message : "unknown error";
 }
