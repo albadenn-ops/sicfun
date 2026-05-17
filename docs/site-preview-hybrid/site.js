@@ -66,18 +66,27 @@ const profileTimeZone = document.getElementById("profile-time-zone");
 const authLogoutButton = document.getElementById("auth-logout");
 const profileSaveButton = document.getElementById("profile-save");
 
-// 16 minutes: 1 minute of slack over the default PLAYING_HALL_TIMEOUT_MS
-// (15 min) so the frontend deadline check at the top of the poll loop
-// doesn't throw "timed out" the moment the server's own timeout fires.
-// Without slack the two deadlines line up exactly, and the queue wait
-// between submit and the worker start (which the server measures from)
-// means the server can return a terminal status (completed OR timeout-
-// failed) microseconds after the frontend's pre-poll deadline check
-// has already given up. The user then sees a misleading client-side
-// "timed out" instead of the server's actual outcome. ANALYZE jobs use
-// a 2-min server timeout so they have 14 min of slack and aren't
-// affected.
-const MAX_POLL_WAIT_MS = 16 * 60 * 1000;
+// Polling deadline for both the analyze and hall job pollers. Initial
+// value is 16 minutes -- 1 minute of slack over the default
+// PLAYING_HALL_TIMEOUT_MS (15 min) so the frontend deadline check at
+// the top of the poll loop doesn't throw "timed out" the moment the
+// server's own timeout fires. Without slack the two deadlines line up
+// exactly, and the queue wait between submit and the worker start
+// (which the server measures from) means the server can return a
+// terminal status (completed OR timeout-failed) microseconds after
+// the frontend's pre-poll deadline check has already given up. The
+// user then sees a misleading client-side "timed out" instead of the
+// server's actual outcome. ANALYZE jobs use a 2-min server timeout by
+// default so they have 14 min of slack and aren't affected.
+//
+// probeServerLimits() at boot reads /api/health.analysisTimeoutMs and
+// /api/health.playingHallTimeoutMs and EXTENDS this value (never
+// shortens) so an operator who raises PLAYING_HALL_TIMEOUT_MS beyond
+// 15 min also gets a matching frontend deadline without a frontend
+// rebuild. Pure extension: a network failure on the probe leaves the
+// 16-min default in place, which is still correct for the shipped
+// server defaults.
+let maxPollWaitMs = 16 * 60 * 1000;
 
 // Initial cap matches the server's default --maxUploadBytes (2 MiB). The
 // server already rejects oversize bodies with 413, but the frontend has no
@@ -101,7 +110,7 @@ const SINGLE_SHOT_FETCH_TIMEOUT_MS = 15_000;
 
 // Poll-status timeout: more generous than single-shot so a brief server
 // stall doesn't kill the loop, but tight enough that a genuinely hung
-// fetch fails well before MAX_POLL_WAIT_MS (16 min) is exhausted.
+// fetch fails well before maxPollWaitMs (16 min default) is exhausted.
 // Without this, an OS-level TCP idle timeout (minutes) could leave one
 // poll waiting while the deadline check at the top of the loop never
 // gets a chance to re-evaluate.
@@ -450,14 +459,21 @@ async function boot() {
   mirrorHelpDataToAriaLabel();
 }
 
-// Read the server's actual maxUploadBytes from /api/health and adopt it
-// as the client-side upload cap. Without this, an operator who raises
-// MAX_UPLOAD_BYTES beyond the 2 MiB default would have the frontend still
-// refusing files larger than 2 MiB because the cap was hard-coded.
-// Falls back silently to the initial 2 MiB if the probe fails -- worst
-// case is the frontend stops at 2 MiB even though the server would accept
-// more, which is strictly safer than the opposite. Uses the same
-// AbortSignal timeout as other single-shot fetches.
+// Read server limits from /api/health and adopt them on the client side
+// so an operator who raises MAX_UPLOAD_BYTES or the job timeouts doesn't
+// need a frontend rebuild for the page to honor the new values.
+//   - maxUploadBytes -> client-side file-size check (refuses oversize
+//     files before reading + uploading them).
+//   - analysisTimeoutMs / playingHallTimeoutMs -> extend (never shorten)
+//     maxPollWaitMs so the frontend's poll deadline outlasts whichever
+//     server timeout would fire later. Pure extension: if the probe
+//     fails or the server uses default timeouts, the 16-min default
+//     stays in place, which is already correct for the shipped server
+//     defaults.
+// Falls back silently to the initial 2 MiB upload cap + 16-min poll
+// budget if the probe fails -- worst case the frontend is stricter
+// than the server, which is strictly safer than the opposite. Uses
+// the same AbortSignal timeout as other single-shot fetches.
 async function probeServerLimits() {
   try {
     const response = await fetchWithTimeout("/api/health", {
@@ -470,9 +486,30 @@ async function probeServerLimits() {
     if (Number.isFinite(serverMax) && serverMax > 0) {
       maxUploadFileBytes = serverMax;
     }
+    // Extend the poll deadline so it outlasts the larger of the two
+    // server timeouts (analyze vs hall) plus a 1-minute slack. Math.max
+    // ensures we never SHORTEN the default 16-min cap -- if both server
+    // timeouts are small (defaults), the default stays. A 0 (disabled)
+    // server timeout contributes nothing here so the default also
+    // stays; we don't want to wait indefinitely on a misconfigured
+    // bottomless job.
+    const analyzeTimeoutMs = Number(body && body.analysisTimeoutMs);
+    const hallTimeoutMs = Number(body && body.playingHallTimeoutMs);
+    const slackMs = 60 * 1000;
+    const candidates = [maxPollWaitMs];
+    if (Number.isFinite(analyzeTimeoutMs) && analyzeTimeoutMs > 0) {
+      candidates.push(analyzeTimeoutMs + slackMs);
+    }
+    if (Number.isFinite(hallTimeoutMs) && hallTimeoutMs > 0) {
+      candidates.push(hallTimeoutMs + slackMs);
+    }
+    maxPollWaitMs = Math.max(...candidates);
   } catch (_) {
     // Probe is best-effort. A network blip leaves the 2 MiB default in
-    // place, which still allows legitimate hand-history uploads.
+    // place, which still allows legitimate hand-history uploads, AND
+    // leaves the 16-min poll deadline in place, which still works for
+    // any deployment that hasn't raised PLAYING_HALL_TIMEOUT_MS past
+    // its shipped 15-min default.
   } finally {
     // Always refresh the visible size hint -- on probe failure it'll
     // show 'Max 2 MB' (the default), on success it reflects the actual
@@ -1194,7 +1231,7 @@ function renderHallStatus(message) {
 
 async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
   let pollAfterMs = normalizePollAfterMs(initialPollAfterMs);
-  const deadline = Date.now() + MAX_POLL_WAIT_MS;
+  const deadline = Date.now() + maxPollWaitMs;
 
   for (;;) {
     if (Date.now() >= deadline) {
@@ -1203,9 +1240,10 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
       // don't assume the analysis crashed; the frontend budget should
       // rarely fire because the server's analyze timeout is 2 minutes
       // (the job would have terminated long before this). Derive the
-      // minute count from MAX_POLL_WAIT_MS so a future bump stays in
-      // sync with the message.
-      const minutes = Math.round(MAX_POLL_WAIT_MS / 60000);
+      // minute count from maxPollWaitMs so the message reflects the
+      // value actually in effect, including any boot-time extension
+      // probeServerLimits applied.
+      const minutes = Math.round(maxPollWaitMs / 60000);
       throw new Error(`Stopped polling after ${minutes} minutes. The job may still be running on the server -- check back later by reloading the page.`);
     }
 
@@ -1262,19 +1300,21 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
 
 async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
   let pollAfterMs = normalizePollAfterMs(initialPollAfterMs);
-  const deadline = Date.now() + MAX_POLL_WAIT_MS;
+  const deadline = Date.now() + maxPollWaitMs;
 
   for (;;) {
     if (Date.now() >= deadline) {
       // Same shape as the analysis poller: this is a client-side
       // polling budget exhaustion, not a server-side job failure. The
-      // hall server timeout is 15 minutes (default PLAYING_HALL_TIMEOUT_MS),
-      // so reaching the frontend budget means either the server is
-      // silently slow OR the queue wait was long enough to push the
-      // worker's own deadline past ours. The job may still run to
-      // completion. Derive the minute count from MAX_POLL_WAIT_MS so
-      // a future bump stays in sync with the message.
-      const minutes = Math.round(MAX_POLL_WAIT_MS / 60000);
+      // hall server timeout defaults to 15 minutes (PLAYING_HALL_TIMEOUT_MS),
+      // and probeServerLimits at boot extends maxPollWaitMs to match
+      // any raised server timeout, so reaching the frontend budget
+      // means either the server is silently slow OR the queue wait
+      // was long enough to push the worker's own deadline past ours.
+      // The job may still run to completion. Derive the minute count
+      // from maxPollWaitMs so the message reflects the active value
+      // including the boot-time extension.
+      const minutes = Math.round(maxPollWaitMs / 60000);
       throw new Error(`Stopped polling after ${minutes} minutes. The hall run may still be finishing on the server -- check back later by reloading the page.`);
     }
 
