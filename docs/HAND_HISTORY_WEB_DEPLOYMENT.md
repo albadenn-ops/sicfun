@@ -109,8 +109,8 @@ Common settings:
 - `MAX_UPLOAD_BYTES`: upload cap (applies to both `/api/analyze-hand-history` and `/api/playing-hall` request bodies). The frontend probes `/api/health` at page load and adopts this value as its client-side file-size check, so raising the server cap automatically raises what the upload form accepts without a frontend rebuild.
 - `ANALYSIS_TIMEOUT_MS`: per-job timeout for `/api/analyze-hand-history` jobs (default `120000`, i.e. 2 min); `0` disables it
 - `PLAYING_HALL_TIMEOUT_MS`: per-job timeout for `/api/playing-hall` jobs (default `900000`, i.e. 15 min); `0` disables it
-- `MAX_CONCURRENT_JOBS` / `MAX_QUEUED_JOBS`: admission limits shared across both job stores
-- `SHUTDOWN_GRACE_MS`: graceful shutdown budget
+- `MAX_CONCURRENT_JOBS` / `MAX_QUEUED_JOBS`: admission limits shared across both job stores. Defaults derive from host CPU: concurrent is `clamp(availableProcessors - 1, 1, 4)` (so a 2-core host gets 1, an 8-core host gets 4, and a 32-core host still gets 4 — the cap stops the worker pool from contending with the JVM's own threads), and queued is `max(8, concurrent * 8)`. A small dual-core deployment lands at 1 concurrent + 8 queued; a typical 8-core lands at 4 + 32.
+- `SHUTDOWN_GRACE_MS`: graceful shutdown budget (default `5000`, i.e. 5 sec)
 - `DRAIN_SIGNAL_FILE`: path used to mark the instance unready before shutdown; while present, new submissions for both analysis and Playing Hall are rejected with `503`
 
 Auth modes:
