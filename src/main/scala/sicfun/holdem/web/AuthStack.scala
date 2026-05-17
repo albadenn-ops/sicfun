@@ -102,10 +102,12 @@ private[web] object AuthStack:
                   // Failure path logs the SUBMITTED email -- there may be no
                   // canonical user, and operators want to see exactly what the
                   // attacker typed (which may differ from the stored email).
-                  // Replace ASCII spaces with %20 so a submitted email like
-                  // "alice bob@example.com" (which validateEmail rejects) does
-                  // not split the structured key=value log fields.
-                  logWarn(s"auth.register.failure email=${formatSubmittedEmailForLog(email)} remote=${remoteAddress(exchange)} reason=$error")
+                  // Replace ASCII spaces with %20 in BOTH the email and the
+                  // registerLocal-returned reason ("password must be at least
+                  // 10 characters", "registration is temporarily unavailable",
+                  // etc., all space-bearing) so neither field splits the
+                  // structured key=value log line.
+                  logWarn(s"auth.register.failure email=${formatSubmittedEmailForLog(email)} remote=${remoteAddress(exchange)} reason=${error.replace(" ", "%20")}")
                   Left(400 -> error)
             }
             .map(result => loginJsonResponse(service, result, status = 201))
@@ -136,9 +138,11 @@ private[web] object AuthStack:
                   // log it so operators can spot brute-force patterns (e.g. many
                   // failures from one IP across many emails, or many failures
                   // from many IPs against one email). %20-escape ASCII spaces
-                  // so a probe with embedded whitespace doesn't split the
-                  // structured key=value log fields.
-                  logWarn(s"auth.login.failure email=${formatSubmittedEmailForLog(email)} remote=${remoteAddress(exchange)} reason=$error")
+                  // in BOTH the email and the loginLocal-returned reason
+                  // ("invalid credentials", "account temporarily locked", etc.,
+                  // all space-bearing) so neither field splits the structured
+                  // key=value log line.
+                  logWarn(s"auth.login.failure email=${formatSubmittedEmailForLog(email)} remote=${remoteAddress(exchange)} reason=${error.replace(" ", "%20")}")
                   Left(401 -> error)
             }
             .map(result => loginJsonResponse(service, result, status = 200))
@@ -200,7 +204,11 @@ private[web] object AuthStack:
       extractOidcProviderId(exchange, "/start").flatMap { providerId =>
         platformAuth.startOidc(providerId) match
           case Left(error) =>
-            logWarn(s"auth.oidc.start.failure provider=$providerId remote=${remoteAddress(exchange)} reason=$error")
+            // %20-escape -- startOidc Left value is "unknown OIDC provider
+            // '<id>'" which contains spaces. Same pattern as the auth.login
+            // / auth.register failure paths above and the analyze / playing-
+            // hall job rejection paths in JobQueue.
+            logWarn(s"auth.oidc.start.failure provider=$providerId remote=${remoteAddress(exchange)} reason=${error.replace(" ", "%20")}")
             Left(400 -> error)
           case Right(start) =>
             // INFO not WARN -- this is normal user behavior, but the log entry
@@ -293,7 +301,13 @@ private[web] object AuthStack:
                 else
                   platformAuth.finishOidc(providerId, state, code) match
                   case Left(error) =>
-                    logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=$error")
+                    // %20-escape -- finishOidc Left values include "OIDC
+                    // login state expired or is invalid", "an account with
+                    // that email already exists; sign in with its existing
+                    // method", "Google did not return a verified email
+                    // address for this account", and friends -- all
+                    // space-bearing. Same pattern as start.failure above.
+                    logWarn(s"auth.oidc.failure provider=$providerId remote=${remoteAddress(exchange)} reason=${error.replace(" ", "%20")}")
                     Right(RedirectResponse(location = PlatformUserAuth.oidcFailureRedirect(error)))
                   case Right(result) =>
                     // Revoke the OLD session (if the user was already signed in
