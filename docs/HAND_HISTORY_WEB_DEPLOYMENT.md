@@ -86,7 +86,7 @@ Playing Hall simulation:
   - `seed` (any Long, default 42), `saveReviewHandHistory` (bool, default false), `fullRing` (bool, default false)
 
   Rate-limited as Submit; admission shares the same `MAX_CONCURRENT_JOBS` / `MAX_QUEUED_JOBS` budget as hand-history analysis.
-- `GET /api/playing-hall/jobs/{jobId}` — poll job status. Rate-limited as JobStatus.
+- `GET /api/playing-hall/jobs/{jobId}` — poll job status. Returns `queued` / `running` / `completed` / `failed` / `cancelled` (cancelled is reachable only via `DELETE` below; analyze jobs share the rest of the state set but never reach cancelled). Rate-limited as JobStatus.
 - `DELETE /api/playing-hall/jobs/{jobId}` — request cooperative cancellation of an in-flight Playing Hall job. Returns `200` with `status=cancelled` once accepted, `409` if the job already finished, `404` if unknown. Rate-limited as JobStatus.
 
 Platform-user auth (when `USER_STORE_PATH` is set):
