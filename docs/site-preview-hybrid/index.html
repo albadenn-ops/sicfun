@@ -454,7 +454,17 @@
                   </select>
                 </label>
                 <div class="field field-block">
-                  <span>Seed <span class="help" tabindex="0" data-help="RNG seed for cards and villain shuffles. Same seed + config = same run.">ⓘ</span></span>
+                  <!-- Explicit <label for="hall-seed"> wraps the visible
+                       "Seed ⓘ" span so the input has a proper accessible
+                       name. The outer container is a <div> (not a
+                       <label>) because the seed-row contains a second
+                       input (the random-seed checkbox) wrapped in its
+                       own <label class="chip-check">, and nested labels
+                       are invalid HTML5 (the inner label would break
+                       the outer's implicit association with the number
+                       input). The for=hall-seed binding stays valid
+                       even with the sibling chip-check label below. -->
+                  <label for="hall-seed"><span>Seed <span class="help" tabindex="0" data-help="RNG seed for cards and villain shuffles. Same seed + config = same run.">ⓘ</span></span></label>
                   <div class="seed-row">
                     <input id="hall-seed" type="number" min="0" step="1" value="42">
                     <label class="chip-check"><input id="hall-random-seed" type="checkbox"><span>random</span></label>
