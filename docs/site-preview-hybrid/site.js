@@ -1667,6 +1667,7 @@ function validateField(input) {
   // button even though the value gets discarded.
   if (input.disabled) {
     input.classList.remove("invalid");
+    clearFieldErrorAria(input);
     const err = input.parentElement && input.parentElement.querySelector(".field-error");
     if (err) err.remove();
     return true;
@@ -1689,6 +1690,15 @@ function validateField(input) {
     if (!err) {
       err = document.createElement("span");
       err.className = "field-error";
+      // Wire the error span to the input via aria-describedby + aria-
+      // invalid (set below) so screen-reader users get an audible "this
+      // field is invalid: Max 5000" announcement instead of a silent
+      // disabled Run button. aria-live="polite" queues the message
+      // until the user pauses typing rather than interrupting each
+      // keystroke. Stable id ($input.id-error) so re-validation reuses
+      // the same node without orphaning aria-describedby references.
+      err.id = `${input.id}-error`;
+      err.setAttribute("aria-live", "polite");
       input.parentElement.appendChild(err);
     }
     // Use the input's step to surface a specific message: step=1 reads as
@@ -1706,6 +1716,8 @@ function validateField(input) {
       value < min ? `Min ${min}` :
       value > max ? `Max ${max}` :
       stepHint;
+    input.setAttribute("aria-invalid", "true");
+    input.setAttribute("aria-describedby", err.id);
     // Force the parent <details> open if the user collapsed the section
     // that contains an invalid field. Otherwise the submit button is
     // disabled (because validateHallForm returns false) but the red
@@ -1716,8 +1728,22 @@ function validateField(input) {
     if (parentDetails) parentDetails.open = true;
   } else if (err) {
     err.remove();
+    clearFieldErrorAria(input);
   }
   return ok;
+}
+
+// Removes the aria-invalid attribute and the aria-describedby link the
+// field-error span owned. Only clears aria-describedby if it currently
+// points at the field-error id (so a future input with multiple
+// describing relationships -- e.g., a separate hint span -- won't be
+// stripped). Idempotent if the attributes were never set.
+function clearFieldErrorAria(input) {
+  input.removeAttribute("aria-invalid");
+  const errorId = `${input.id}-error`;
+  if (input.getAttribute("aria-describedby") === errorId) {
+    input.removeAttribute("aria-describedby");
+  }
 }
 
 function validateVillainPool() {
