@@ -129,7 +129,7 @@ Auth modes:
 
 Optional OIDC:
 
-- Set `GOOGLE_OIDC_CLIENT_ID`, `GOOGLE_OIDC_CLIENT_SECRET`, and `GOOGLE_OIDC_REDIRECT_URI`
+- Set `GOOGLE_OIDC_CLIENT_ID`, `GOOGLE_OIDC_CLIENT_SECRET`, and `GOOGLE_OIDC_REDIRECT_URI`. OIDC layers on top of platform-user auth so `USER_STORE_PATH` must also be set; otherwise startup fails with `user auth with OIDC requires --userStorePath/USER_STORE_PATH`. All three Google knobs are required together (configuring just one or two also fails at startup).
 - On non-loopback binds, set `USER_AUTH_COOKIE_SECURE=true` and use an `https://...` redirect URI unless you explicitly set `ALLOW_INSECURE_USER_AUTH=true` for trusted private-network testing
 
 Rate limiting:
