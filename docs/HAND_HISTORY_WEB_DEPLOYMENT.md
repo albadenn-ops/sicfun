@@ -102,8 +102,8 @@ Edit `conf/hand-history-web.env` instead of hard-coding long-lived settings into
 
 Common settings:
 
-- `HOST` / `PORT`: bind address and port
-- `ALLOW_UNAUTHENTICATED_PUBLIC_BIND`: explicit override for non-loopback binds without auth on a trusted private network
+- `HOST` / `PORT`: bind address and port (default `127.0.0.1` / `8080`)
+- `ALLOW_UNAUTHENTICATED_PUBLIC_BIND` (default `false`): explicit override for non-loopback binds without auth on a trusted private network. The server otherwise refuses to bind to a non-loopback host without one of the auth modes configured.
 - `STATIC_DIR`: directory served as the upload UI (default `docs/site-preview-hybrid` in source mode; `static/` relative to the bundle root after `release-hand-history-web.ps1` packages it). Override only when you've copied or modified the static assets to a non-standard location.
 - `MODEL_DIR`: optional model artifact directory
 - `MAX_UPLOAD_BYTES`: upload cap in bytes (default `2097152`, i.e. 2 MiB; applies to both `/api/analyze-hand-history` and `/api/playing-hall` request bodies). The frontend probes `/api/health` at page load and adopts this value as its client-side file-size check, so raising the server cap automatically raises what the upload form accepts without a frontend rebuild.
@@ -117,7 +117,7 @@ Auth modes:
 
 - Basic auth: set `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD`
 - Platform-user auth: set `USER_STORE_PATH`
-- `ALLOW_INSECURE_USER_AUTH`: explicit override for non-loopback platform-user auth without secure cookies or an HTTPS OIDC callback on a trusted private-network test deployment
+- `ALLOW_INSECURE_USER_AUTH` (default `false`): explicit override for non-loopback platform-user auth without secure cookies or an HTTPS OIDC callback on a trusted private-network test deployment. The server otherwise refuses to start when `USER_STORE_PATH` is set on a non-loopback host without `USER_AUTH_COOKIE_SECURE=true`.
 - Do not enable both at the same time
 - For safety, non-loopback binds now require one of those auth modes unless you explicitly set `ALLOW_UNAUTHENTICATED_PUBLIC_BIND=true` for a trusted private network
 - For safety, non-loopback platform-user auth also requires `USER_AUTH_COOKIE_SECURE=true` unless you explicitly set `ALLOW_INSECURE_USER_AUTH=true` for trusted private-network testing
