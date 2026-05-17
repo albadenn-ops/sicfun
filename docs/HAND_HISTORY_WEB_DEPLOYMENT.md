@@ -69,7 +69,7 @@ All body-reading endpoints (`POST /api/auth/*`, `POST /api/analyze-hand-history`
 
 Hand-history analysis:
 
-- `POST /api/analyze-hand-history` — submit a hand history for analysis. Body: JSON `{handHistoryText, heroName?, site?}`. `handHistoryText` is required (whitespace-only and BOM-only payloads are rejected with `400`); `heroName` is capped at 64 chars and may not contain C0 control characters or DEL (defense in depth against log injection if any future code path logs the value); `site` accepts one of the recognised aliases (`pokerstars`/`stars`/`winamax`/`wina`/`ggpoker`/`gg`/`ggnetwork`) and is otherwise capped at 64 chars. Rate-limited as Submit.
+- `POST /api/analyze-hand-history` — submit a hand history for analysis. Body: JSON `{handHistoryText, heroName?, site?}`. `handHistoryText` is required (whitespace-only and BOM-only payloads are rejected with `400`); `heroName` is capped at 64 chars and may not contain C0 control characters or DEL (defense in depth against log injection if any future code path logs the value); `site` accepts one of the recognised aliases (`pokerstars`/`stars`/`winamax`/`wina`/`ggpoker`/`gg`/`ggnetwork`), or the literal string `auto` / an absent/empty value to ask the server to auto-detect from the file's first non-empty line, and is otherwise capped at 64 chars before any other validation runs. Rate-limited as Submit.
 - `GET /api/analyze-hand-history/jobs/{jobId}` — poll job status. Returns `queued` / `running` / `completed` / `failed`. Rate-limited as JobStatus.
 
 Playing Hall simulation:
