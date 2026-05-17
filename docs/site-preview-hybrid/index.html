@@ -220,8 +220,16 @@
               <span>Time zone</span>
               <!-- spellcheck=false: IANA time-zone names ("Europe/Madrid",
                    "America/Argentina/Buenos_Aires") aren't dictionary
-                   words. -->
-              <input id="profile-time-zone" type="text" placeholder="e.g. Europe/Madrid" spellcheck="false" maxlength="64">
+                   words. autocomplete=off: there is no HTML5
+                   autocomplete token for IANA time-zone identifiers
+                   (the spec covers country/country-name/language but
+                   not tz). Without the explicit "off", browsers fall
+                   back to heuristic autofill keyed on the placeholder
+                   / id and may suggest a stored country or city name
+                   that does NOT match an IANA identifier; the value
+                   then round-trips through the server's sanitize-only
+                   path and persists as a junk time-zone string. -->
+              <input id="profile-time-zone" type="text" placeholder="e.g. Europe/Madrid" spellcheck="false" autocomplete="off" maxlength="64">
             </label>
 
             <div class="auth-actions">
