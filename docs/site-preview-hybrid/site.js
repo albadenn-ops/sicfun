@@ -203,6 +203,7 @@ if (form && fileInput && siteSelect && heroInput) {
     setTitleStatus(`Submitting ${file.name}`);
     reviewResults.classList.add("hidden");
 
+    let resultReady = false;
     try {
       const payload = {
         handHistoryText: await file.text(),
@@ -234,15 +235,28 @@ if (form && fileInput && siteSelect && heroInput) {
         renderStatus(jobStatusMessage(file.name, body.status));
         const result = await pollAnalysisJob(file.name, statusUrl, body.pollAfterMs);
         renderResults(file.name, result);
+        resultReady = true;
         return;
       }
 
       renderResults(file.name, body);
+      resultReady = true;
     } catch (error) {
       renderStatus(`Request failed: ${describeFetchError(error)}`);
     } finally {
       setSubmitting(false);
-      setTitleStatus(null);
+      // If the review landed while the user had the tab backgrounded,
+      // leave 'Review ready' in the title so they get a completion cue
+      // in their browser tab list rather than seeing the default title
+      // come back with no signal that the work is done. The
+      // visibilitychange listener clears it the moment they return to
+      // the tab. For errors / cancellations, fall through to the
+      // normal reset.
+      if (resultReady && document.hidden) {
+        setTitleStatus("Review ready");
+      } else {
+        setTitleStatus(null);
+      }
     }
   });
 }
@@ -289,6 +303,7 @@ if (hallForm) {
     setTitleStatus("Hall run queued");
     hallResults.classList.add("hidden");
 
+    let runReady = false;
     try {
       const response = await fetchWithTimeout("/api/playing-hall", {
         method: "POST",
@@ -316,17 +331,27 @@ if (hallForm) {
         const result = await pollPlayingHallJob(statusUrl, body.pollAfterMs);
         renderHallResults(result);
         pushRecentRun(payload, (result && result.summary) || {});
+        runReady = true;
         return;
       }
 
       renderHallResults(body);
       pushRecentRun(payload, (body && body.summary) || {});
+      runReady = true;
     } catch (error) {
       renderHallStatus(`Playing hall request failed: ${describeFetchError(error)}`);
     } finally {
       setHallSubmitting(false);
       finishHallProgress();
-      setTitleStatus(null);
+      // Same backgrounded-tab signaling as the analyze submit -- if the
+      // hall run lands while the user is looking at another tab, leave
+      // 'Hall done' in the title so they get a completion cue in their
+      // browser tab list. visibilitychange clears it on return.
+      if (runReady && document.hidden) {
+        setTitleStatus("Hall done");
+      } else {
+        setTitleStatus(null);
+      }
     }
   });
 }
@@ -1103,6 +1128,20 @@ const DEFAULT_TITLE = "SICFUN | Hand-History Review & Playing Hall";
 function setTitleStatus(message) {
   document.title = message ? `${message} · SICFUN` : DEFAULT_TITLE;
 }
+
+// Job-completion titles ('Review ready', 'Hall done') linger when the
+// user has the tab backgrounded so they get a completion cue in their
+// browser tab list. Reset to default the moment they come back -- the
+// title has served its purpose, and leaving a stale 'done' title would
+// be misleading on the next visit. Match the exact 'done' strings so a
+// mid-poll switch back ('Reviewing X', 'Hall running') doesn't get
+// clobbered.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  if (document.title === "Review ready · SICFUN" || document.title === "Hall done · SICFUN") {
+    setTitleStatus(null);
+  }
+});
 
 function renderHallStatus(message) {
   if (!hallStatus) {
