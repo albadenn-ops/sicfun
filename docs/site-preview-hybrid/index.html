@@ -753,7 +753,22 @@
                    without aria-valuenow is interpreted as indeterminate. -->
               <div class="hall-progress-bar" role="progressbar" aria-label="Playing hall run in progress" aria-busy="true"><div class="hall-progress-bar-inner"></div></div>
               <div class="hall-progress-meta">
-                <span id="hall-elapsed">Elapsed 00:00</span>
+                <!-- aria-hidden="true" excludes the elapsed ticker from the
+                     hall-panel's aria-live="polite" live-region announcements.
+                     tickHallElapsed (site.js) updates the text every second
+                     via setInterval; without the opt-out NVDA/JAWS would
+                     queue an announcement on every tick ("Elapsed 1m 23s,
+                     Elapsed 1m 24s, ..."), spamming the screen-reader
+                     output stream for the entire 5-15 minute hall run.
+                     The elapsed counter is sighted-only feedback (the
+                     visible glance "how long has this been running") --
+                     SR users get the same information once at completion
+                     via renderHallResults' "(took Xm Ys)" status tail,
+                     which lands as a single polite announcement on the
+                     hall-status text. Cancel Run stays in the SR reach
+                     because aria-hidden is on the span only, not the
+                     parent .hall-progress-meta. -->
+                <span id="hall-elapsed" aria-hidden="true">Elapsed 00:00</span>
                 <button type="button" class="button button-secondary" id="hall-cancel">Cancel Run</button>
               </div>
             </div>
