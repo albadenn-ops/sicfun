@@ -2527,13 +2527,24 @@ function renderRecentRuns() {
       // panel just to remove the next entry. Set focus to the entry
       // that now sits at the same index (i.e., the entry that was
       // just below the removed one), clamped to the last entry if
-      // we removed the tail. If no entries remain, focus is left
-      // for the browser to handle -- the next Tab naturally moves
-      // to whatever follows the now-empty Recent runs panel.
+      // we removed the tail. If no entries remain after the removal,
+      // focus the panel's own <summary> -- the disclosure toggle
+      // remains visible and focusable, and lands the user on the
+      // Recent runs region itself rather than dropping focus to
+      // <body> (where Tab-from-body behavior varies across browsers:
+      // some resume from where focus was, some reset to document
+      // start). Empty-state focusing the summary also keeps screen-
+      // reader users oriented -- they hear "Recent runs, 0, summary,
+      // expanded" rather than the page-language announcement that
+      // follows a focus-to-body drop.
       const remaining = hallRecentList.querySelectorAll("button[data-recent-remove]");
       if (remaining.length > 0) {
         const focusIdx = Math.min(idx, remaining.length - 1);
         remaining[focusIdx].focus();
+      } else {
+        const recentRunsDetails = document.getElementById("hall-recent-runs");
+        const summary = recentRunsDetails ? recentRunsDetails.querySelector("summary") : null;
+        if (summary) summary.focus({preventScroll: true});
       }
     });
   });
