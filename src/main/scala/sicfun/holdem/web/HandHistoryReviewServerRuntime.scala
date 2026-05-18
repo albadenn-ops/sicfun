@@ -85,11 +85,18 @@ private[web] object HandHistoryReviewServerRuntime:
             // when draining / queue-full / timed-out-worker). Content-
             // Length is NOT sent on HEAD: the JDK HttpExchange contract
             // requires sendResponseHeaders(status, -1L) for HEAD, which
-            // suppresses the length header (and Content-Encoding for the
-            // same reason). RFC 7231 sec 3.3 explicitly allows payload-
-            // header fields to be omitted on HEAD, so this is compliant;
-            // a monitor that needs the exact body size should fetch via
-            // GET.
+            // suppresses the length header. Content-Encoding is also
+            // absent from the HEAD response, but for a different reason
+            // -- writeBytes only sets it inside the GET-with-gzip branch
+            // since the empty-body HEAD response wouldn't be gzipped
+            // anyway. (StaticAssetsHandler takes the stricter approach
+            // and DOES advertise Content-Encoding on HEAD via
+            // wouldCompressIfGet for HEAD-then-GET cache parity, which
+            // proves the JDK contract isn't the constraint here -- it
+            // happily emits Content-Encoding alongside a -1L body.) RFC
+            // 7231 sec 3.3 explicitly allows payload-header fields to
+            // be omitted on HEAD, so this is compliant; a monitor that
+            // needs the exact body size should fetch via GET.
             val method = exchange.getRequestMethod
             if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, HEAD"))
             else if !method.equalsIgnoreCase("GET") && !method.equalsIgnoreCase("HEAD") then
