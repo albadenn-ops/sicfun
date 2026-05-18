@@ -2250,7 +2250,21 @@ function validateHallForm() {
   const allOk = fieldsOk && poolOk;
   if (hallSubmitButton) {
     const locked = requiresPlatformSignIn() && !authState.authenticated;
-    hallSubmitButton.disabled = !allOk || locked;
+    // hallActiveJobId is set non-null by startHallElapsed once the
+    // server accepts a hall job and stays non-null until
+    // finishHallProgress runs in the submit handler's finally block.
+    // validateHallForm fires on every form input event, so a user
+    // typing into hall fields to prep a follow-up run (a common
+    // pattern during the 5-15 min wait for a long simulation) would
+    // otherwise re-enable the submit button while setHallSubmitting
+    // (true) has it disabled -- letting them fire a SECOND submit
+    // before the first poll loop has finished, ending up with two
+    // concurrent poll loops fighting over the hall-status panel,
+    // the elapsed timer, and the title-cue ladder. Honor the in-
+    // flight state so the form-validity recompute never undoes
+    // setHallSubmitting's disabled gate.
+    const inFlight = hallActiveJobId !== null;
+    hallSubmitButton.disabled = !allOk || locked || inFlight;
   }
   return allOk;
 }
