@@ -1504,7 +1504,24 @@ function setHallSubmitting(isSubmitting) {
   hallSubmitButton.textContent = isSubmitting ? "Running Hall..." : "Run Playing Hall";
 }
 
+// Cache the last-rendered status string so a poll loop that calls
+// renderStatus with the SAME message every ~750ms (e.g. status='running'
+// throughout a 2-min analyze run) doesn't keep mutating the DOM. The
+// review-panel <article> carries aria-live="polite", and while most
+// modern screen readers de-dupe identical announcements per the aria-
+// live spec's "if the announcement text is identical to the previous
+// one, skip it" guidance, the spec doesn't MANDATE de-dup and some
+// readers (older NVDA, certain JAWS configs) re-announce on every DOM
+// mutation regardless of text equality. A cached string + early-return
+// closes that variability AND saves the innerHTML reparse cost on the
+// hot polling path. Reset to null on any path that intentionally clears
+// the panel so the next non-empty render isn't suppressed.
+let lastRenderedStatus = null;
 function renderStatus(message) {
+  if (message === lastRenderedStatus) {
+    return;
+  }
+  lastRenderedStatus = message;
   reviewStatus.innerHTML = `
     <p class="card-kicker">Status</p>
     <h3>${escapeHtml(message)}</h3>
@@ -1545,10 +1562,34 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+// Cache last-rendered (message, badge) so the hall-panel's polite
+// aria-live region doesn't keep re-announcing the SAME status text
+// on every ~750ms poll tick during a 5-15 min hall run -- same screen-
+// reader-spam fix renderStatus got above, with a bigger payoff here
+// because hall polls run far longer (the analyze flow times out at
+// 2 min default; hall runs default to 15 min and can be tuned higher
+// via PLAYING_HALL_TIMEOUT_MS). Cache both args because a status
+// transition like queued->running keeps the message stable while only
+// the badge would change (e.g. a future per-status badge), and vice
+// versa for cancelled vs completed at the same message.
+let lastRenderedHallMessage = null;
+let lastRenderedHallBadge = null;
 function renderHallStatus(message, badge) {
   if (!hallStatus) {
     return;
   }
+  // Normalise undefined to null for the cache comparison -- the function
+  // is called with badge omitted (e.g. renderHallStatus("Queueing...")),
+  // making `badge` === undefined, vs explicit null elsewhere. Treat
+  // both as the same "no badge" state so the equality check doesn't
+  // fire spuriously on the first explicit-null call after an
+  // undefined-arg call.
+  const normalizedBadge = badge == null ? null : badge;
+  if (message === lastRenderedHallMessage && normalizedBadge === lastRenderedHallBadge) {
+    return;
+  }
+  lastRenderedHallMessage = message;
+  lastRenderedHallBadge = normalizedBadge;
   // Optional `badge` renders a styled <span class="cancelled-badge">
   // (defined in site.css, originally added for this purpose but
   // never wired up -- the cancelled indicator was previously inlined
@@ -1556,7 +1597,7 @@ function renderHallStatus(message, badge) {
   // the styled box the CSS was designed for). The badge text gets
   // escapeHtml just like the message; the surrounding span is the
   // only fixed HTML.
-  const badgeHtml = badge ? ` <span class="cancelled-badge">${escapeHtml(badge)}</span>` : "";
+  const badgeHtml = normalizedBadge ? ` <span class="cancelled-badge">${escapeHtml(normalizedBadge)}</span>` : "";
   hallStatus.innerHTML = `
     <p class="card-kicker">Status</p>
     <h3>${escapeHtml(message)}${badgeHtml}</h3>
