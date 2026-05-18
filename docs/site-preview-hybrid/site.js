@@ -2304,6 +2304,26 @@ function renderRecentRuns() {
   }
 }
 
+// Cross-tab sync for the Recent runs panel. The WHATWG HTML spec
+// fires `storage` events only in tabs OTHER than the one that wrote
+// localStorage, so tab A pushing a new entry (via pushRecentRun on
+// hall completion) lands in tab B's listener and re-renders the
+// panel without a page refresh -- a user keeping the page open in
+// multiple tabs (e.g., one for analyze, one for hall) sees runs
+// from the sibling tab show up live instead of catching up only on
+// the next reload. The current tab's own writes are correctly
+// excluded by the spec, so pushRecentRun's existing inline
+// renderRecentRuns call still owns the within-tab update with no
+// double-render. Match RECENT_RUNS_KEY directly, OR event.key ===
+// null which the spec fires on localStorage.clear() from another
+// tab (no current call site, but defensive against a future
+// 'reset all browser data' feature wiping the key).
+window.addEventListener("storage", event => {
+  if (event.key === null || event.key === RECENT_RUNS_KEY) {
+    renderRecentRuns();
+  }
+});
+
 // ----- Progress / elapsed timer / cancel -----
 
 let hallElapsedTimer = null;
