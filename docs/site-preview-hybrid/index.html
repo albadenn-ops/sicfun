@@ -147,7 +147,24 @@
                    (shows @ and . prominently). spellcheck="false" keeps
                    email addresses out of the autocorrect dictionary so
                    "user.name" doesn't become "user.Name" on mobile. -->
-              <input id="auth-email" type="email" autocomplete="username email" inputmode="email" spellcheck="false" placeholder="player@example.com" required maxlength="254">
+              <!-- aria-describedby + visible hint complete the auth-form
+                   a11y pattern (auth-password and auth-display-name
+                   already carry hints; this is the last field). The
+                   placeholder "player@example.com" is a format example
+                   only and never reaches an NVDA/JAWS user on Tab focus
+                   (default placeholder=off). Two non-obvious semantics
+                   land in the hint: (a) the email IS the sign-in
+                   identifier on this server (not the display name --
+                   newcomers sometimes assume the display name is the
+                   handle they log in with), and (b) the server runs
+                   normalizeEmail = trim.toLowerCase before matching,
+                   so Alice@Example.com and alice@example.com are the
+                   same account. Without the case-insensitivity signal
+                   a user who registered with mixed-case and tries to
+                   sign in with all-lowercase concludes the password is
+                   wrong; with it, they know the casing is irrelevant. -->
+              <input id="auth-email" type="email" autocomplete="username email" inputmode="email" spellcheck="false" placeholder="player@example.com" required maxlength="254" aria-describedby="auth-email-hint">
+              <small class="field-hint" id="auth-email-hint">Becomes your sign-in identifier on this server &middot; matched case-insensitively (Alice@Example.com and alice@example.com are the same account)</small>
             </label>
 
             <label class="field">
