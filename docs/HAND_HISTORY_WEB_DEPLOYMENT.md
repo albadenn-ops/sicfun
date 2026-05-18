@@ -119,7 +119,7 @@ Common settings:
 Auth modes:
 
 - Basic auth: set `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD` (both required together — setting one without the other fails startup with a clear error). The username may not contain `:` (HTTP Basic uses it as the user:password separator per RFC 7617), and both values are trimmed; empty / whitespace-only values are treated as unset.
-- Platform-user auth: set `USER_STORE_PATH`
+- Platform-user auth: set `USER_STORE_PATH` to the absolute path where the JSON-formatted user store should live. The file does not need to be pre-created -- the server starts with an empty in-memory store when the path doesn't exist yet and creates the file atomically on the first successful registration (or the first OIDC sign-up). The parent directory DOES need to exist and be writable by the service account. If the file is present but unreadable (e.g., partial write from a crash, manual edit that broke JSON syntax), startup fails fast with `user store at <path> is unreadable: <ujson parse error>. Back up the file and restore from backup, or remove it to start fresh.` -- the remove-to-start-fresh option drops all stored users so prefer the backup path when one exists.
 - `ALLOW_INSECURE_USER_AUTH` (default `false`): explicit override for non-loopback platform-user auth without secure cookies or an HTTPS OIDC callback on a trusted private-network test deployment. The server otherwise refuses to start when `USER_STORE_PATH` is set on a non-loopback host without `USER_AUTH_COOKIE_SECURE=true`.
 - Do not enable both at the same time
 - For safety, non-loopback binds now require one of those auth modes unless you explicitly set `ALLOW_UNAUTHENTICATED_PUBLIC_BIND=true` for a trusted private network
