@@ -1545,12 +1545,26 @@ async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
       throw new Error(formatErrorMessage(response, body));
     }
 
-    renderHallStatus(playingHallJobStatusMessage(body.status));
-    // Same title-mirroring as the analyze poller -- the 'Hall run queued'
-    // title set at submit time should advance to 'Hall running' once the
-    // worker picks it up.
-    if (body.status === "running") setTitleStatus("Hall running");
-    else if (body.status === "queued") setTitleStatus("Hall queued");
+    // When the user has clicked Cancel and the server has accepted but
+    // not yet flipped the job to cancelled, suppress the normal
+    // "Running the playing hall in the background..." / "Queued the
+    // playing hall run..." messages -- they'd overwrite the "Cancel
+    // accepted. Finishing in-flight hands..." message and make the
+    // user think their cancel was dropped. Render a cancelling-aware
+    // message instead until the next poll sees status=cancelled and
+    // exits via finishHallProgress (which clears the flag). Title
+    // mirroring also pivots to "Hall cancelling" for the same reason.
+    if (hallCancelRequested && (body.status === "queued" || body.status === "running")) {
+      renderHallStatus("Cancel accepted. Finishing in-flight hands...");
+      setTitleStatus("Hall cancelling");
+    } else {
+      renderHallStatus(playingHallJobStatusMessage(body.status));
+      // Same title-mirroring as the analyze poller -- the 'Hall run queued'
+      // title set at submit time should advance to 'Hall running' once the
+      // worker picks it up.
+      if (body.status === "running") setTitleStatus("Hall running");
+      else if (body.status === "queued") setTitleStatus("Hall queued");
+    }
 
     if (body.status === "completed") {
       return body.result || {};
@@ -2352,10 +2366,22 @@ window.addEventListener("storage", event => {
 let hallElapsedTimer = null;
 let hallActiveJobId = null;
 let hallActiveStartedAt = 0;
+// True between the Cancel click (when the DELETE returns 200) and the
+// next poll seeing status=cancelled. Lets pollPlayingHallJob suppress
+// the normal "Running the playing hall in the background..." status
+// message in favor of a "Cancelling..." form, so a polling tick that
+// fires after Cancel but before the server flips the job to cancelled
+// doesn't overwrite the "Cancel accepted. Finishing in-flight hands..."
+// message with "Running..." and make the user think their cancel was
+// dropped. Reset on every startHallElapsed (new job) and
+// finishHallProgress (any job winding down) so a fresh run starts
+// clean.
+let hallCancelRequested = false;
 
 function startHallElapsed(jobId) {
   hallActiveJobId = jobId;
   hallActiveStartedAt = Date.now();
+  hallCancelRequested = false;
   if (hallProgress) hallProgress.classList.remove("hidden");
   if (hallCancelButton) {
     hallCancelButton.disabled = false;
@@ -2394,6 +2420,7 @@ function tickHallElapsed() {
 function finishHallProgress() {
   stopHallElapsed();
   hallActiveJobId = null;
+  hallCancelRequested = false;
   if (hallProgress) hallProgress.classList.add("hidden");
 }
 
@@ -2422,6 +2449,13 @@ if (hallCancelButton) {
         // ~pollAfterMs (capped at 5s) and trigger finishHallProgress. Give
         // the user IMMEDIATE feedback so they know their click landed and
         // the UI didn't freeze on "Cancelling..." for the poll window.
+        // Set hallCancelRequested so the next polling tick that fires
+        // BEFORE the server flips the job to cancelled doesn't overwrite
+        // this message with "Running the playing hall in the background..."
+        // (which would make the user think the cancel was lost). The
+        // poll-status renderer reads this flag and uses a "Cancelling..."
+        // form for queued/running statuses while it's set.
+        hallCancelRequested = true;
         renderHallStatus("Cancel accepted. Finishing in-flight hands...");
       } else {
         await maybeReauthOn401(response);
