@@ -2607,8 +2607,17 @@ function renderRecentRuns() {
     const durationStr = Number.isFinite(entry.durationMs) && entry.durationMs > 0
       ? ` &middot; ${escapeHtml(formatDuration(entry.durationMs))}`
       : "";
+    // Cancelled-run meta line surfaces captured-vs-target so a reader of
+    // the panel can tell a 250-of-1000 partial run from a 0-of-1000
+    // zero-data abort without expanding the entry. summary.handsPlayed
+    // is what the server actually emitted; Number coerces a missing /
+    // null value to NaN which Number.isFinite then catches, falling
+    // back to 0. Same partial-vs-no-data distinction the hall-status
+    // panel badge got in 594e7de, applied to the historical record.
+    const cancelCaptured = Number(entry.summary && entry.summary.handsPlayed);
+    const cancelCapturedHands = Number.isFinite(cancelCaptured) && cancelCaptured > 0 ? cancelCaptured : 0;
     const metaLine = cancelled
-      ? `${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands target &middot; cancelled before completion${durationStr} &middot; [${escapeHtml(pool)}] &middot; seed ${escapeHtml(entry.request.seed)}`
+      ? `${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(cancelCapturedHands)} of ${formatInteger(entry.request.hands)} hands &middot; cancelled${durationStr} &middot; [${escapeHtml(pool)}] &middot; seed ${escapeHtml(entry.request.seed)}`
       : `${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands &middot; ${formatSigned(entry.summary.heroNetChips)} chips${durationStr} &middot; [${escapeHtml(pool)}] &middot; seed ${escapeHtml(entry.request.seed)}`;
     return `
       <article class="recent-run">
