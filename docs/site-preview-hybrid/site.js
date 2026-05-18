@@ -2353,6 +2353,24 @@ function renderRecentRuns() {
       const next = entries.filter((_, i) => i !== idx);
       writeRecentRuns(next);
       renderRecentRuns();
+      // Restore keyboard focus after the renderRecentRuns rebuild
+      // wipes the original Remove button. Without this, a keyboard
+      // user removing entry N has their focus drop to document-start
+      // (the Remove button that was focused no longer exists, so the
+      // browser's default focus-restore lands on <body>), and the
+      // next Tab moves to the Skip-to-content link -- forcing them
+      // to re-Tab through the page to get back to the Recent runs
+      // panel just to remove the next entry. Set focus to the entry
+      // that now sits at the same index (i.e., the entry that was
+      // just below the removed one), clamped to the last entry if
+      // we removed the tail. If no entries remain, focus is left
+      // for the browser to handle -- the next Tab naturally moves
+      // to whatever follows the now-empty Recent runs panel.
+      const remaining = hallRecentList.querySelectorAll("button[data-recent-remove]");
+      if (remaining.length > 0) {
+        const focusIdx = Math.min(idx, remaining.length - 1);
+        remaining[focusIdx].focus();
+      }
     });
   });
   // Clear all: complement to per-entry remove for users who want to
