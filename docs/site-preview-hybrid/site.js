@@ -193,6 +193,24 @@ if (form && fileInput && siteSelect && heroInput) {
       return;
     }
 
+    // Defensive guard against re-entry. setSubmitting(true) disables the
+    // submit BUTTON before the first await, but a rapid Enter key in
+    // any focused form field (file input, site select, hero name input)
+    // ALSO fires the submit event -- the button-disabled state only
+    // blocks button-click submits, not keyboard submits. Without this
+    // guard a user mashing Enter would fire two parallel submit
+    // handlers, each posting its own /api/analyze-hand-history and
+    // each polling its own jobId; the frontend would track only the
+    // last one and the first job becomes a ghost server-side. Check
+    // submitButton.disabled (which setSubmitting flips synchronously
+    // before the first await) and bail out if a submit is already in
+    // flight -- the user gets visual feedback from the still-disabled
+    // button and the existing 'Submitting <file>' status message,
+    // rather than a confusing duplicate-job condition.
+    if (submitButton && submitButton.disabled) {
+      return;
+    }
+
     const file = fileInput.files && fileInput.files[0];
     if (!file) {
       renderStatus("Choose a `.txt` hand-history export to start the review.");
@@ -309,6 +327,21 @@ if (hallForm) {
     if (requiresPlatformSignIn() && !authState.authenticated) {
       renderHallStatus("Sign in to launch a playing hall run on this deployment.");
       hallResults.classList.add("hidden");
+      return;
+    }
+
+    // Same re-entry guard as the analyze submit. Hall submits can fire
+    // multiple times in rapid succession via the Enter key in any
+    // focused form field (the form has 9+ keyboard-reachable inputs
+    // including hands/tables/seed numbers); button-disabled blocks
+    // button-click submits but not keyboard submits. The hall case is
+    // worse than analyze because the random-seed checkbox runs a
+    // fresh Math.random() per submit-handler invocation, so two
+    // rapid Enter presses with random-seed checked queue two hall
+    // runs with DIFFERENT seeds -- not reproducible, double the
+    // worker-pool slot consumption, and the frontend tracks only
+    // the second.
+    if (hallSubmitButton && hallSubmitButton.disabled) {
       return;
     }
 
