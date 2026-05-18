@@ -283,7 +283,19 @@
                    that does NOT match an IANA identifier; the value
                    then round-trips through the server's sanitize-only
                    path and persists as a junk time-zone string. -->
-              <input id="profile-time-zone" type="text" placeholder="e.g. Europe/Madrid" spellcheck="false" autocomplete="off" maxlength="64">
+              <!-- aria-describedby + visible hint complete the profile-
+                   form a11y pattern (the other three fields already
+                   carry hints). The placeholder "e.g. Europe/Madrid"
+                   never reaches an NVDA/JAWS user on Tab focus, so
+                   without the explicit hint a screen reader hears
+                   only "Time zone, edit text" -- no signal that an
+                   IANA identifier is required vs a country name vs a
+                   numeric UTC offset (the three most common user
+                   guesses). Naming the format upfront prevents the
+                   "I typed 'Eastern Standard Time' and it saved as
+                   a junk string" support ticket. -->
+              <input id="profile-time-zone" type="text" placeholder="e.g. Europe/Madrid" spellcheck="false" autocomplete="off" maxlength="64" aria-describedby="profile-time-zone-hint">
+              <small class="field-hint" id="profile-time-zone-hint">IANA time-zone identifier (Region/City form, e.g. Europe/Madrid, America/New_York). Stored on your profile -- the server only sanitizes the string, so plain-English names like "Eastern Standard Time" persist as-is but won't be parsed correctly by anything that consumes the field.</small>
             </label>
 
             <div class="auth-actions">
