@@ -1068,6 +1068,27 @@ summary:focus-visible {
   outline: none;
   border-color: var(--signal);
 }
+/* Keyboard focus needs an actual ring -- the :hover/:focus rule above
+   strips the user-agent default outline (which clashes with the dark
+   theme as a thin blue line) but the border-color shift from --line
+   (12% green) to --signal (100% green) is a thin 1px change that's easy
+   to miss on Tab, especially in lower-vision setups. Mirror the same
+   2px signal-green outline the .field input / .button / .chip-check /
+   summary :focus-visible rules use elsewhere on the page so keyboard
+   focus on the help icon reads identically to every other focusable
+   element. :focus-visible (not :focus) so a mouse-click on the icon
+   does not paint the ring -- the user has the mouse on the element
+   already and gets the tooltip via :hover::after, no focus indicator
+   needed. :focus-visible has higher source-order weight than the
+   :hover/:focus rule above so this outline wins over outline:none for
+   keyboard focus. Older browsers without :focus-visible support (pre-
+   Chrome 86 / Firefox 85 / Safari 15.4, March 2022) ignore this rule
+   and keep the existing outline-none + green-border behavior, so no
+   regression -- only modern browsers gain the explicit ring. */
+.help:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
 .help:hover::after, .help:focus::after {
   content: attr(data-help);
   position: absolute;
