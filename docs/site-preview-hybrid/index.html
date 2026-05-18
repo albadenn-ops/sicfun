@@ -619,7 +619,21 @@
                        even with the sibling chip-check label below. -->
                   <label for="hall-seed"><span>Seed <span class="help" tabindex="0" data-help="RNG seed for cards and villain shuffles. Same seed + config = same run.">ⓘ</span></span></label>
                   <div class="seed-row">
-                    <input id="hall-seed" type="number" min="0" step="1" value="42">
+                    <!-- No `min` attribute: the server's optionalLong accepts any
+                         Long (positive or negative) and the deployment doc's
+                         hall-body inventory documents `seed (any Long, default 42)`.
+                         Previously `min="0"` blocked negative seeds at the
+                         validateField gate, leaving the Run button stuck disabled
+                         with a "Min 0" hint when a user pasted a negative seed --
+                         e.g. one derived from a hash-output reinterpreted as a
+                         signed long. Removing min lets the frontend match the
+                         doc + server contract. step=1 stays because Long is
+                         integer-valued; partial values like 1.5 still bounce
+                         at validateField with the "Whole number required"
+                         message. The random-seed checkbox path is unaffected --
+                         it bypasses this input entirely and generates a fresh
+                         Math.random()-derived seed at submit time. -->
+                    <input id="hall-seed" type="number" step="1" value="42">
                     <label class="chip-check"><input id="hall-random-seed" type="checkbox"><span>random</span></label>
                   </div>
                 </div>
