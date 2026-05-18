@@ -250,12 +250,24 @@
 
             <label class="field">
               <span>Preferred site</span>
-              <select id="profile-preferred-site">
+              <!-- aria-describedby + visible hint match the rest of
+                   the profile + analyze form fields. Without it a
+                   screen reader Tabbing here hears only "Preferred
+                   site, combobox, Auto-detect, 1 of 4" with no
+                   indication of WHAT the preference actually
+                   affects -- the field name alone could plausibly
+                   mean "tag yourself as a PokerStars player" or "set
+                   account-level default" or anything in between. The
+                   linked hint names the actual prefill behavior
+                   (analyze-form site dropdown, only while it shows
+                   Auto-detect) so a user knows whether to set it. -->
+              <select id="profile-preferred-site" aria-describedby="profile-preferred-site-hint">
                 <option value="">Auto-detect</option>
                 <option value="pokerstars">PokerStars</option>
                 <option value="winamax">Winamax</option>
                 <option value="ggpoker">GGPoker</option>
               </select>
+              <small class="field-hint" id="profile-preferred-site-hint">Prefills the analyze form's site selector on this browser when it's still showing Auto-detect. Once you pick a specific site on the analyze form, your manual choice wins.</small>
             </label>
 
             <label class="field">
