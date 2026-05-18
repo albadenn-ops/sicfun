@@ -2302,11 +2302,34 @@ function validateVillainPool() {
         group.appendChild(err);
       }
       group.setAttribute("aria-invalid", "true");
-      group.setAttribute("aria-describedby", errorId);
+      // Append-not-overwrite, same shape as validateField post-ebc8982.
+      // The villain-pool role="group" element doesn't currently carry an
+      // aria-describedby in index.html, so the previous single-attribute
+      // overwrite was benign on the shipped markup -- but if a future
+      // commit adds a hint reference (e.g., a "pick from nit / tag /
+      // lag / ... / gto" explainer) the overwrite would silently clobber
+      // it. Use the same space-separated append/remove dance the
+      // numeric fields use so the two code paths stay in lockstep.
+      const existingDescribedBy = group.getAttribute("aria-describedby") || "";
+      const describedByIds = existingDescribedBy.split(/\s+/).filter(Boolean);
+      if (!describedByIds.includes(errorId)) describedByIds.push(errorId);
+      group.setAttribute("aria-describedby", describedByIds.join(" "));
     } else {
       if (err) err.remove();
       group.removeAttribute("aria-invalid");
-      if (group.getAttribute("aria-describedby") === errorId) {
+      // Mirror the filter-not-clear shape clearFieldErrorAria uses:
+      // remove only the errorId from the space-separated list, leaving
+      // any future hint reference attached. The pre-fix exact-match
+      // check would have failed if validateVillainPool had appended to
+      // an existing hint (which it now does, per the append branch
+      // above) and erased the whole attribute when it did match --
+      // same two-bug shape ebc8982 documented for the numeric-fields
+      // path.
+      const existing = group.getAttribute("aria-describedby") || "";
+      const remaining = existing.split(/\s+/).filter(id => id && id !== errorId);
+      if (remaining.length > 0) {
+        group.setAttribute("aria-describedby", remaining.join(" "));
+      } else {
         group.removeAttribute("aria-describedby");
       }
     }
