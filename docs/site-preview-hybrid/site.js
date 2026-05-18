@@ -1204,6 +1204,24 @@ async function logout() {
       syncRandomSeedState();
     }
     applyAuthState(body, "Signed out.");
+    // applyAuthState -> updateAccountUi hides the profile card (which
+    // contained the Sign Out button the user just clicked), so the
+    // browser moves focus to document.body. A keyboard / screen-reader
+    // user would then have to Tab through skip-link + brand + nav
+    // links before reaching the now-visible sign-in form -- a real
+    // "where did focus go?" disruption matching the pattern Remove-on-
+    // recent-runs fixed in 6ba388b. Move focus to authEmail, the first
+    // interactive element on the now-visible auth form, so they can
+    // continue working without the Tab re-entry penalty. authEmail is
+    // always rendered post-logout in platform-user mode (basic-auth
+    // mode doesn't surface the Sign Out button in the first place,
+    // and no-auth mode never had an auth panel). preventScroll is
+    // intentionally omitted -- the auth form sits at the top of the
+    // page, so the implicit scroll lands the user on exactly the
+    // panel they need to act on next.
+    if (authEmail) {
+      authEmail.focus();
+    }
   } catch (error) {
     updateAccountUi(`Sign out failed: ${describeFetchError(error)}`);
   } finally {
