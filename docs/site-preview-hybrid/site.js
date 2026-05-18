@@ -622,6 +622,24 @@ async function maybeReauthOn401(response) {
   }
 }
 
+// Extract retry-after seconds from a server response. The 429 body carries
+// retryAfterSeconds explicitly (the precise server-computed wait), and both
+// 429 and 503 also set the Retry-After header (per RFC 7231 sec 7.1.3 +
+// 6.6.4). Prefer the body field when present because it survives proxies
+// that strip headers; fall back to the header for 503 (which has no body
+// field). Returns null when neither is present or parseable so callers can
+// pick their own default.
+function parseRetryAfterSeconds(response, body) {
+  if (body && Number.isFinite(Number(body.retryAfterSeconds))) {
+    const fromBody = Number(body.retryAfterSeconds);
+    if (fromBody > 0) return fromBody;
+  }
+  const headerValue = response.headers.get("Retry-After");
+  const parsed = headerValue ? parseInt(headerValue, 10) : NaN;
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return null;
+}
+
 // Build a user-facing error message that augments the server's `error` field
 // with retry-after info for transient failures the user can re-try. Applies
 // to 429 (rate-limited) AND 503 (queue full / drain mode / timed-out worker
@@ -634,15 +652,8 @@ function formatErrorMessage(response, body) {
   const base = body && typeof body.error === "string" && body.error ? body.error : fallback;
   const isRetryable = response.status === 429 || response.status === 503;
   if (!isRetryable) return base;
-  let retrySeconds = body && Number.isFinite(Number(body.retryAfterSeconds))
-    ? Number(body.retryAfterSeconds)
-    : null;
-  if (retrySeconds == null) {
-    const headerValue = response.headers.get("Retry-After");
-    const parsed = headerValue ? parseInt(headerValue, 10) : NaN;
-    retrySeconds = Number.isFinite(parsed) ? parsed : null;
-  }
-  if (retrySeconds == null || retrySeconds <= 0) return base;
+  const retrySeconds = parseRetryAfterSeconds(response, body);
+  if (retrySeconds == null) return base;
   const unit = retrySeconds === 1 ? "second" : "seconds";
   return `${base} Try again in ${retrySeconds} ${unit}.`;
 }
@@ -1367,6 +1378,26 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
         await maybeReauthOn401(response);
         throw new Error("Session expired during the review. The job is still running on the server -- sign in again to keep polling, or check back later.");
       }
+      if (response.status === 429) {
+        // Status-poll rate limit hit -- most plausibly from a handful of
+        // sibling tabs polling the same user/session concurrently (the
+        // JobStatus bucket caps at 240/min/principal by default, and each
+        // tab polls at ~750ms = 80/min, so 3+ tabs can push past the
+        // ceiling). The job itself is still running server-side; throwing
+        // here would blow up the polling loop on a transient retryable
+        // condition and leave the user thinking the review failed. Read
+        // Retry-After (capped at 30s so a misconfigured server can't pin
+        // us indefinitely), surface what's happening so the user doesn't
+        // read the long sleep as a frozen page, then continue. The
+        // existing deadline check at the top of the loop guards against
+        // an infinite retry loop -- maxPollWaitMs eventually expires and
+        // throws the deadline error if the rate limit never clears.
+        const retrySeconds = parseRetryAfterSeconds(response, body) || 5;
+        const waitMs = Math.min(retrySeconds, 30) * 1000;
+        renderStatus(`Polling rate-limited; resuming in ${Math.round(waitMs / 1000)}s.`);
+        await sleep(waitMs);
+        continue;
+      }
       throw new Error(formatErrorMessage(response, body));
     }
 
@@ -1434,6 +1465,19 @@ async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
         // and the job remains queryable until it finishes or is purged.
         await maybeReauthOn401(response);
         throw new Error("Session expired during the hall run. The job is still running on the server -- sign in again to keep polling, or check back later.");
+      }
+      if (response.status === 429) {
+        // Same retry-after-respecting backoff the analysis poller does.
+        // Hall runs poll for much longer (15-min server-side default vs
+        // 2-min analyze), so the multi-tab rate-limit collision is even
+        // more likely to bite -- a single 429 mid-run should pause and
+        // resume polling, not kill the whole poll loop and report the
+        // hall run as failed when it's actually still executing.
+        const retrySeconds = parseRetryAfterSeconds(response, body) || 5;
+        const waitMs = Math.min(retrySeconds, 30) * 1000;
+        renderHallStatus(`Polling rate-limited; resuming in ${Math.round(waitMs / 1000)}s.`);
+        await sleep(waitMs);
+        continue;
       }
       throw new Error(formatErrorMessage(response, body));
     }
