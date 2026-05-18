@@ -1239,6 +1239,31 @@ async function logout() {
       validateHallForm();
       syncRandomSeedState();
     }
+    // Clear the previous user's analysis + hall output before the next
+    // person signs in on the same browser. The result panels persist
+    // after logout otherwise: a shared-computer scenario where user A
+    // finishes an analyze (or a hall run) and then signs out leaves
+    // user B looking at A's hero name, decision EVs, opponent reads
+    // (analyze) or per-villain chip flow + model id (hall) below the
+    // freshly-restored sign-in form. Hide both result panels and reset
+    // the two status cards to the pre-run "ready to start" copy so
+    // the new user lands on a clean slate. setTitleStatus(null) drops
+    // any terminal title ("Review ready · SICFUN" / "Hall done · SICFUN")
+    // that lingered from the previous run -- the visibilitychange
+    // handler at the bottom of the file resets to default ONLY when
+    // the user returns to the tab from background, but a logout while
+    // the user is still on the active tab needs an explicit reset.
+    // Sub-fields of reviewResults / hallResults (summary-grid,
+    // warning-block, decision-list, opponent-list, hallKpiGrid, the
+    // chart canvases, hallOutputList) stay populated underneath the
+    // .hidden class -- they're not visible, so no leak, and the next
+    // job's render functions overwrite them anyway. Cheaper than
+    // walking + clearing every child node.
+    if (reviewResults) reviewResults.classList.add("hidden");
+    if (hallResults) hallResults.classList.add("hidden");
+    renderStatus("Upload a hand-history file to start a local review job.");
+    renderHallStatus("Configure a hall run and launch it from the browser.");
+    setTitleStatus(null);
     applyAuthState(body, "Signed out.");
     // applyAuthState -> updateAccountUi hides the profile card (which
     // contained the Sign Out button the user just clicked), so the
