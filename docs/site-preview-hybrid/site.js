@@ -305,7 +305,18 @@ if (form && fileInput && siteSelect && heroInput) {
       renderResults(file.name, body, analyzeStartedAt);
       resultReady = true;
     } catch (error) {
-      renderStatus(`Request failed: ${describeFetchError(error)}`);
+      // Same duration-on-failure treatment as the hall submit catch.
+      // The success path appends "(took Xm Ys)" via renderResults;
+      // failures didn't have that signal -- a 60-second polling
+      // timeout looked identical to an instant validation error in
+      // the rendered message. Include the elapsed-since-submit time
+      // so the user can distinguish those modes. analyzeStartedAt is
+      // captured immediately after setSubmitting(true) so it covers
+      // file.text() + POST + poll-loop, matching what the user
+      // perceives as "the request" duration.
+      const failDurationMs = analyzeStartedAt > 0 ? Date.now() - analyzeStartedAt : 0;
+      const failDurationStr = failDurationMs > 0 ? ` (after ${formatDuration(failDurationMs)})` : "";
+      renderStatus(`Request failed: ${describeFetchError(error)}${failDurationStr}`);
       resultFailed = true;
     } finally {
       setSubmitting(false);
@@ -434,7 +445,19 @@ if (hallForm) {
       pushRecentRun(payload, (body && body.summary) || {});
       runReady = true;
     } catch (error) {
-      renderHallStatus(`Playing hall request failed: ${describeFetchError(error)}`);
+      // Include the run duration in the failure message too, parallel
+      // to the success path's "(took Xm Ys)" tail. Reading "Playing
+      // hall request failed: ... (after 5m 30s)" tells the user
+      // immediately whether they hit an instant validation error vs
+      // a timeout-after-long-run vs a network blip mid-poll -- three
+      // failure modes that look identical without the duration
+      // context. hallActiveStartedAt is still set here (finishHallProgress
+      // runs in the finally below); guard against 0 for the early-
+      // failure paths (sign-in not authenticated, validation rejection,
+      // double-submit) that throw before startHallElapsed was called.
+      const failDurationMs = hallActiveStartedAt > 0 ? Date.now() - hallActiveStartedAt : 0;
+      const failDurationStr = failDurationMs > 0 ? ` (after ${formatDuration(failDurationMs)})` : "";
+      renderHallStatus(`Playing hall request failed: ${describeFetchError(error)}${failDurationStr}`);
       runFailed = true;
     } finally {
       setHallSubmitting(false);
