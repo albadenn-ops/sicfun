@@ -165,7 +165,21 @@
             <label class="field">
               <span>Display name</span>
               <!-- maxlength matches sanitizeDisplayName cap (96). -->
-              <input id="auth-display-name" type="text" autocomplete="nickname" placeholder="Optional for local registration" maxlength="96">
+              <!-- aria-describedby + visible hint mirror the hero-name
+                   pattern: the placeholder "Optional for local
+                   registration" never reaches an NVDA/JAWS user
+                   (default placeholder=off) AND is ambiguous even
+                   when read -- "for local registration" could mean
+                   "required for local registration" or "only used by
+                   local registration". The linked hint below names
+                   the actual behavior: the value is consumed only by
+                   POST /api/auth/register, the sign-in path ignores
+                   it. A user who fills the field expecting to update
+                   their display name on sign-in would otherwise see
+                   no effect with no signal why; this tells them
+                   upfront to use the profile-save flow instead. -->
+              <input id="auth-display-name" type="text" autocomplete="nickname" placeholder="Optional for local registration" maxlength="96" aria-describedby="auth-display-name-hint">
+              <small class="field-hint" id="auth-display-name-hint">Optional · only consumed by Register; Sign In ignores it (update existing display names via the profile panel after signing in)</small>
             </label>
 
             <div class="auth-actions">
