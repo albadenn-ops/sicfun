@@ -577,6 +577,22 @@ if (authForm) {
 }
 
 if (profileForm) {
+  // Same two-layer defense as the auth-form submit handler above:
+  // index.html line 251 carries `method="post" action="/api/auth/profile"`
+  // as a JS-failed-to-load fallback. If the JS bundle 404s mid-deploy,
+  // hits a CSP block, or otherwise never wires this handler, the
+  // browser's default Enter-key submit still POSTs to a real endpoint --
+  // server then 415s the form-urlencoded body (the profile route
+  // requires `application/json` per readRequestBody) but the
+  // displayName / heroName / preferredSite / timeZone values stay in
+  // the request body rather than landing in the URL bar, browser
+  // history, or Referer header (which a method-less form would expose
+  // via the default GET, persisting identifying info -- display name,
+  // poker handle, IANA tz -- into shareable URL artifacts). When the
+  // JS path IS live, preventDefault here skips the form's POST fallback
+  // so we don't double-submit (JSON XHR via saveProfile + browser-
+  // default POST firing for the same Enter press). See index.html
+  // line 232-249 for the full inline rationale on the HTML side.
   profileForm.addEventListener("submit", event => {
     event.preventDefault();
     void saveProfile();
