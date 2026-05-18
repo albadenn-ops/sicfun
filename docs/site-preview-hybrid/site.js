@@ -400,6 +400,13 @@ if (hallForm) {
 
     let runReady = false;
     let runFailed = false;
+    // Distinguish a user-initiated cancel from a clean completion so the
+    // backgrounded-tab title cue at the bottom of the finally block can
+    // report "Hall cancelled" instead of "Hall done". Without this, a
+    // cancelled run that lands while the user is on another tab gets a
+    // "Hall done" title cue -- semantically wrong: the user told the
+    // server to stop, calling that "done" misrepresents what happened.
+    let runCancelled = false;
     try {
       const response = await fetchWithTimeout("/api/playing-hall", {
         method: "POST",
@@ -437,7 +444,17 @@ if (hallForm) {
         const hallDurationMs = hallActiveStartedAt > 0 ? Date.now() - hallActiveStartedAt : 0;
         renderHallResults(result);
         pushRecentRun(payload, (result && result.summary) || {}, {cancelled: !!(result && result.cancelled), durationMs: hallDurationMs});
-        runReady = true;
+        // Branch the terminal state: a result.cancelled return is a
+        // user-initiated stop, not a successful completion, and the
+        // backgrounded-tab title cue distinguishes them ("Hall
+        // cancelled" vs "Hall done"). The Recent runs panel already
+        // distinguishes them via the cancelled flag passed above; this
+        // is the tab-title-only parity. The poll loop above only
+        // returns with result.cancelled when body.status === "cancelled"
+        // (line 1622-1626), so this branch is reachable iff the server
+        // actually flipped the job to cancelled state.
+        if (result && result.cancelled) runCancelled = true;
+        else runReady = true;
         return;
       }
 
@@ -472,6 +489,7 @@ if (hallForm) {
       // either title on return.
       if (document.hidden) {
         if (runReady) setTitleStatus("Hall done");
+        else if (runCancelled) setTitleStatus("Hall cancelled");
         else if (runFailed) setTitleStatus("Hall failed");
         else setTitleStatus(null);
       } else {
@@ -1421,6 +1439,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.title === "Review ready · SICFUN"
       || document.title === "Review failed · SICFUN"
       || document.title === "Hall done · SICFUN"
+      || document.title === "Hall cancelled · SICFUN"
       || document.title === "Hall failed · SICFUN") {
     setTitleStatus(null);
   }
