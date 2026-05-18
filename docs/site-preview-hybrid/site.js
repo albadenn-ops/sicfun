@@ -2997,14 +2997,24 @@ if (hallCancelButton) {
         // the user-facing message. Don't reset the button here: it stays
         // disabled until finishHallProgress hides the whole progress card.
       } else if (response.ok) {
-        // 200/202: server accepted the cancel. The job is now winding down
-        // server-side; the polling loop will see status="cancelled" within
-        // ~pollAfterMs (capped at 5s) and trigger finishHallProgress. Give
-        // the user IMMEDIATE feedback so they know their click landed and
-        // the UI didn't freeze on "Cancelling..." for the poll window.
-        // Set hallCancelRequested so the next polling tick that fires
-        // BEFORE the server flips the job to cancelled doesn't overwrite
-        // this message with "Running the playing hall in the background..."
+        // Any 2xx: server accepted the cancel. The current handler returns
+        // 200 with a minimal `{jobId, status: "cancelled"}` body (see the
+        // DELETE bullet in HAND_HISTORY_WEB_DEPLOYMENT.md -- intentionally
+        // doesn't carry result/timestamps/durationMs; this is the cancel
+        // ACKNOWLEDGMENT, not the final terminal state). `response.ok`
+        // instead of `response.status === 200` so a future move to another
+        // 2xx code (e.g. 202 Accepted to make the async nature explicit,
+        // or 204 No Content if the body were ever dropped) doesn't break
+        // this branch. The job is now winding down server-side; the
+        // polling loop will see status="cancelled" within ~pollAfterMs
+        // (capped at 5s) and trigger finishHallProgress, which is what
+        // actually surfaces any partial result captured before interrupt
+        // (via the next poll's full job-status response). Give the user
+        // IMMEDIATE feedback so they know their click landed and the UI
+        // didn't freeze on "Cancelling..." for the poll window. Set
+        // hallCancelRequested so the next polling tick that fires BEFORE
+        // the server flips the job to cancelled doesn't overwrite this
+        // message with "Running the playing hall in the background..."
         // (which would make the user think the cancel was lost). The
         // poll-status renderer reads this flag and uses a "Cancelling..."
         // form for queued/running statuses while it's set.
