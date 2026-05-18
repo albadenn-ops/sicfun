@@ -2504,6 +2504,25 @@ function renderRecentRuns() {
       // queues the announcement.
       const ts = new Date(entry.timestamp).toLocaleString();
       renderHallStatus(`Loaded run from ${ts}.`);
+      // The Recent runs <details> sits ABOVE the hall form in DOM
+      // order. When the user expands the panel to pick a saved run,
+      // their viewport is on the entries -- and clicking Load leaves
+      // them there, with the now-populated form scrolled off-screen
+      // below. They have to manually scroll down to see what got
+      // loaded, defeating the "I want to re-run this captured state"
+      // intent that drove the Load click. Move focus to the hall
+      // submit button: the browser's default focus-scroll lands the
+      // button at the bottom of the viewport, which puts the
+      // populated form fields visible above it. The user sees the
+      // values they just loaded AND lands on the action button they
+      // most likely want to click next; a Tab back is the cheap path
+      // for the minority case of "load this then tweak one value
+      // before running". Presets don't need this treatment -- the
+      // preset bar lives INSIDE the hall form, so a preset click
+      // never scrolls the form out of view to begin with.
+      if (hallSubmitButton) {
+        hallSubmitButton.focus();
+      }
     });
   });
   // Per-entry remove: localStorage is bounded at RECENT_RUNS_MAX so old
