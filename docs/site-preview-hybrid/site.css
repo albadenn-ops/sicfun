@@ -502,6 +502,27 @@ h3 {
   padding: 12px 14px;
 }
 
+/* iOS Safari (and some Android browsers) auto-zoom the viewport on
+   input/select focus when the effective font-size is below 16px. The
+   .field rule above uses 0.95rem (~15.2px) for desktop visual density,
+   which is fine on hover-capable pointers but trips the zoom on touch
+   devices. Once it fires there is no scripted way to undo the zoom --
+   the user is stuck zoomed in until they pinch-zoom out manually, and
+   on a one-handed phone hold that's an awkward two-handed gesture. We
+   key on (pointer: coarse) -- which catches iPhone, iPad, and Android
+   touch devices regardless of viewport width -- and bump the font-size
+   to exactly 16px so the auto-zoom threshold isn't crossed. Desktop
+   rendering is unaffected because pointer:fine doesn't match the
+   query. The change is purely visual (text reads at 16px instead of
+   15.2px on touch), no layout consequences -- min-height: 48px on the
+   inputs already accommodates the slightly taller text. */
+@media (pointer: coarse) {
+  .field input,
+  .field select {
+    font-size: 16px;
+  }
+}
+
 .field input::file-selector-button {
   margin-right: 12px;
   padding: 8px 12px;
