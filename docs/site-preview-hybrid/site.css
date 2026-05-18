@@ -988,6 +988,21 @@ h3 {
 .form-section > summary::-webkit-details-marker { display: none; }
 .form-section > summary::before { content: "▸ "; color: var(--signal); }
 .form-section[open] > summary::before { content: "▾ "; }
+
+/* Visible keyboard-focus ring for the page's <details> disclosure
+   widgets (collapsible form sections, recent-runs drawer, dashboard-
+   chart drilldowns). Browser-default focus on a <summary> is a thin
+   blue outline that's hard to spot against the dark #0a0f0d
+   background, the same problem the .field input :focus-visible rule
+   solves. Use :focus-visible (not :focus) so a click-to-toggle does
+   not pin the ring on every closed summary; keyboard Tab and
+   space/enter activation still trigger :focus-visible. Generic
+   `summary:focus-visible` covers every <details> on the page in one
+   rule. */
+summary:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
 .form-section-body {
   padding: 12px 14px 14px;
   display: grid;
