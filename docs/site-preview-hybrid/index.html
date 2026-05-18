@@ -334,12 +334,23 @@
 
             <label class="field">
               <span>Site</span>
-              <select id="hand-history-site">
+              <!-- aria-describedby + visible hint match the file-input
+                   and hero-name treatment on this same form: a screen
+                   reader Tabbing to the select otherwise hears only
+                   "Site, combobox, Auto-detect, 1 of 4" with no
+                   indication that Auto-detect tries to identify the
+                   site from the file's first line, or when an explicit
+                   override is warranted. The hint also helps sighted
+                   users who don't already know that PokerStars /
+                   Winamax / GGPoker exports each carry distinct
+                   first-line markers Auto-detect keys on. -->
+              <select id="hand-history-site" aria-describedby="hand-history-site-hint">
                 <option value="auto">Auto-detect</option>
                 <option value="pokerstars">PokerStars</option>
                 <option value="winamax">Winamax</option>
                 <option value="ggpoker">GGPoker</option>
               </select>
+              <small class="field-hint" id="hand-history-site-hint">Auto-detect reads the file's first non-empty line to pick the right parser. Override only when auto-detect picks the wrong site for your export.</small>
             </label>
 
             <label class="field">
