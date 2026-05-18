@@ -1134,6 +1134,29 @@ summary:focus-visible {
   color: var(--warning) !important;
 }
 
+/* Forced-colors parity for the .invalid validation state. The orange
+   --warning border on input/select fields + the inset box-shadow glow
+   + the warning-colored chip border all collapse in Windows High
+   Contrast Mode: --warning gets remapped to the same system
+   CanvasText slot as --line, so an invalid field's border looks
+   identical to a valid field's, and the rgba box-shadow drops
+   entirely. The .field-error message below the input still renders,
+   so a careful reader can still spot the rejected value -- but the
+   at-a-glance "which field is bad?" cue the colored border was
+   carrying is gone. Replace it with a dashed outline (geometry-only
+   signal that survives the color flattening); pairs with the
+   :checked-state forced-colors rule earlier on this file so both
+   "user input is wrong" and "this chip is selected" remain
+   distinguishable from their neutral states in High Contrast. */
+@media (forced-colors: active) {
+  .field input.invalid,
+  .field select.invalid,
+  .chip-check span.invalid {
+    outline: 2px dashed CanvasText;
+    outline-offset: -2px;
+  }
+}
+
 .recent-runs {
   margin: 0 0 16px;
   border: 1px solid var(--line);
