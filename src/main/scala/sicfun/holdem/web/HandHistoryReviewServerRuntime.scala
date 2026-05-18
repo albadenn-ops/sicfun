@@ -78,9 +78,18 @@ private[web] object HandHistoryReviewServerRuntime:
           new JsonHandler(exchange =>
             // Accept GET and HEAD on the health endpoint. Monitoring tools
             // commonly probe with HEAD to skip the body; writeBytes is
-            // HEAD-aware now and suppresses the body while still emitting
-            // the headers, so HEAD returns 200 + Content-Length matching
-            // what GET would send.
+            // HEAD-aware and suppresses the body while still emitting the
+            // status code plus Content-Type, Cache-Control, Vary, and the
+            // security headers a GET would carry, so a HEAD probe sees
+            // the same readiness signal (200 while up, 503 on /api/ready
+            // when draining / queue-full / timed-out-worker). Content-
+            // Length is NOT sent on HEAD: the JDK HttpExchange contract
+            // requires sendResponseHeaders(status, -1L) for HEAD, which
+            // suppresses the length header (and Content-Encoding for the
+            // same reason). RFC 7231 sec 3.3 explicitly allows payload-
+            // header fields to be omitted on HEAD, so this is compliant;
+            // a monitor that needs the exact body size should fetch via
+            // GET.
             val method = exchange.getRequestMethod
             if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, HEAD"))
             else if !method.equalsIgnoreCase("GET") && !method.equalsIgnoreCase("HEAD") then
