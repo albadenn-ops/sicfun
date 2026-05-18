@@ -580,6 +580,27 @@ h3 {
   box-shadow: 0 0 18px rgba(74, 246, 38, 0.12);
 }
 
+/* Windows High Contrast Mode (Contrast Themes in Win 11, surfaced as
+   the `forced-colors: active` media query) strips the green-tinted
+   background, the box-shadow glow, AND collapses the border-color
+   flip from --line to --signal because both colors get remapped to
+   the same system CanvasText slot. The result: checked and unchecked
+   chip-check / toggle controls render identically -- the user cannot
+   tell which villain-pool entries are selected, which gtoMode is
+   active, or which seed/fullRing toggles are on. Re-introduce a
+   forced-colors-aware checked signal with an inner CanvasText
+   outline; outline width is exempt from forced-colors color flattening
+   and -2px offset draws the outline INSIDE the existing border so it
+   reads as a double-rule chip rather than colliding with the
+   surrounding flex layout. */
+@media (forced-colors: active) {
+  .chip-check input:checked + span,
+  .toggle input:checked + span {
+    outline: 2px solid CanvasText;
+    outline-offset: -2px;
+  }
+}
+
 /* The actual <input type="checkbox"> is visually hidden (opacity:0,
    position:absolute) and the sibling <span> is the painted chip.
    Without this rule, keyboard users Tabbing through the villain-pool
