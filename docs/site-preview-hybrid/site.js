@@ -1050,6 +1050,26 @@ async function logout() {
     // refresh leaves the data intact for the same signed-in user.
     clearRecentRuns();
     renderRecentRuns();
+    // Same browser-scoped argument applies to the live hall form:
+    // user A's last-edited values (hands, table count, hero style,
+    // villain pool, seed, etc.) sit in the DOM until the page reloads.
+    // Without this reset, user B signing in on the same browser sees
+    // A's working configuration prefilled in the form -- less load-
+    // bearing than the persisted Recent runs panel (no "Load" link to
+    // dispatch A's choices in one click) but still a leak of a logged-
+    // out user's session state to whoever sits down next, and one of
+    // the values is a captured RNG seed that's plausibly worth
+    // hiding. Native form.reset() snaps every control back to its
+    // HTML default value=/checked=/selected= attribute; re-run
+    // validateHallForm and syncRandomSeedState afterwards so the
+    // rendered form matches the reset values (no stale aria-invalid
+    // markers, no editable seed input next to an unchecked random-
+    // seed box).
+    if (hallForm) {
+      hallForm.reset();
+      validateHallForm();
+      syncRandomSeedState();
+    }
     applyAuthState(body, "Signed out.");
   } catch (error) {
     updateAccountUi(`Sign out failed: ${describeFetchError(error)}`);
