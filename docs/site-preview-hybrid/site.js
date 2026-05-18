@@ -851,8 +851,27 @@ function updateUploadAvailability() {
     }
   });
   if (hallSubmitButton) {
-    hallSubmitButton.disabled = locked;
-    hallSubmitButton.textContent = locked ? "Sign In Required" : "Run Playing Hall";
+    // hallActiveJobId is non-null while a hall run is being polled,
+    // and setHallSubmitting(true) has already pinned the button to
+    // disabled + "Running Hall..." text. updateUploadAvailability
+    // fires on every applyAuthState (auth probe completion, sibling-
+    // tab sign-in/-out via the storage event, post-CSRF-refresh
+    // /api/auth/me re-pull) -- rare during a 5-15 min hall run but
+    // not impossible. The pre-fix unconditional assignments would
+    // clobber the in-flight state: disabled flips to !locked (false
+    // when the user is authenticated, which is always the case mid-
+    // run), and the text resets from "Running Hall..." to "Run
+    // Playing Hall" -- both signals telling the user the run is over
+    // when it isn't, AND opening the same concurrent-submit race
+    // 7eb3251 fixed in validateHallForm. Skip the in-flight case so
+    // setHallSubmitting's pinning survives auth-state churn. The
+    // submit-handler's finally block will overwrite this freshly
+    // once finishHallProgress nulls hallActiveJobId.
+    const hallInFlight = hallActiveJobId !== null;
+    if (!hallInFlight) {
+      hallSubmitButton.disabled = locked;
+      hallSubmitButton.textContent = locked ? "Sign In Required" : "Run Playing Hall";
+    }
   }
   if (locked && hallStatus) {
     renderHallStatus("Sign in to launch a playing hall run on this deployment.");
