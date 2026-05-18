@@ -1995,7 +1995,25 @@ function readRecentRuns() {
     const raw = localStorage.getItem(RECENT_RUNS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    // Filter to entries whose shape matches what renderRecentRuns
+    // dereferences without null-guards: entry.request must be an
+    // object (the render path reads .villainPool / .heroStyle /
+    // .hands / .seed directly) and entry.summary must be an object
+    // (it reads .heroNetChips). A malformed entry from a future
+    // schema change, a half-written cross-tab race, or a hand-
+    // edited localStorage value would otherwise throw a TypeError
+    // partway through the render loop and silently break the entire
+    // Recent runs panel until the user manually clears localStorage.
+    // Filtering here makes the panel render the surviving entries
+    // and the bad ones age out naturally on the next pushRecentRun
+    // (which writes back the filtered list capped at
+    // RECENT_RUNS_MAX).
+    return parsed.filter(entry =>
+      entry !== null && typeof entry === "object"
+        && entry.request !== null && typeof entry.request === "object"
+        && entry.summary !== null && typeof entry.summary === "object"
+    );
   } catch (_) { return []; }
 }
 
