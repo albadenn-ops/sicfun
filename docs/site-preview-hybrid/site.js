@@ -2214,7 +2214,22 @@ function validateField(input) {
       value > max ? `Max ${max}` :
       stepHint;
     input.setAttribute("aria-invalid", "true");
-    input.setAttribute("aria-describedby", err.id);
+    // aria-describedby is a space-separated list of IDs per WAI-ARIA, and
+    // most of the validated inputs already point at a `<field-id>-hint`
+    // span from index.html (e.g. hero-name -> hero-name-hint, profile-
+    // time-zone -> profile-time-zone-hint). Pre-fix this line wrote
+    // `err.id` as a single value, CLOBBERING the hint reference -- so a
+    // field that ever failed validation lost its hint announcement for
+    // the rest of the session, and clearFieldErrorAria below couldn't
+    // restore it because the original value was gone. Append the error
+    // id to the existing list (de-duped) so screen readers announce
+    // BOTH the hint and the error; clearFieldErrorAria mirrors this
+    // shape on the other side, removing only the error id and leaving
+    // the hint reference intact for the next focus.
+    const existingDescribedBy = input.getAttribute("aria-describedby") || "";
+    const describedByIds = existingDescribedBy.split(/\s+/).filter(Boolean);
+    if (!describedByIds.includes(err.id)) describedByIds.push(err.id);
+    input.setAttribute("aria-describedby", describedByIds.join(" "));
     // Force the parent <details> open if the user collapsed the section
     // that contains an invalid field. Otherwise the submit button is
     // disabled (because validateHallForm returns false) but the red
@@ -2238,7 +2253,23 @@ function validateField(input) {
 function clearFieldErrorAria(input) {
   input.removeAttribute("aria-invalid");
   const errorId = `${input.id}-error`;
-  if (input.getAttribute("aria-describedby") === errorId) {
+  // Mirror the append-not-overwrite shape validateField uses on the
+  // failing side: remove only the error id from the space-separated
+  // aria-describedby list, leaving any other ids (typically the
+  // `<field-id>-hint` reference from index.html) attached so the
+  // hint announcement returns to screen readers once the field
+  // re-validates. Pre-fix this branch matched the FULL attribute
+  // value against the errorId, then removed the whole attribute --
+  // which (a) failed to match if validateField had appended to an
+  // existing hint (which it now does, post the same-fire fix above)
+  // and (b) erased the hint reference entirely when it did match,
+  // breaking the field's documented aria-describedby contract for
+  // the rest of the session.
+  const existing = input.getAttribute("aria-describedby") || "";
+  const remaining = existing.split(/\s+/).filter(id => id && id !== errorId);
+  if (remaining.length > 0) {
+    input.setAttribute("aria-describedby", remaining.join(" "));
+  } else {
     input.removeAttribute("aria-describedby");
   }
 }
