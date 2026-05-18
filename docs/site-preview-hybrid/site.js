@@ -542,14 +542,31 @@ if (authRegisterButton) {
 }
 
 if (authForm) {
-  // Without this handler, hitting Enter in the password (or email) field
-  // implicitly submits the <form>, which has no `action` or `method` -- so
-  // the browser defaults to method=GET against the current URL and appends
-  // every form field as a query parameter. The PASSWORD ends up in the URL
-  // bar, in browser history, and in any subsequent Referer header. Catch
-  // the submit event, prevent the default GET-with-credentials navigation,
-  // and route to the login flow (the most common action). The user can
-  // still click Register explicitly if that was their intent.
+  // Catch the form's implicit submit (Enter in email / password / display-
+  // name) and route to submitAuth -- the JSON XHR path the server actually
+  // accepts. POST `/api/auth/login` requires `application/json` per the
+  // readRequestBody Content-Type check, so the form's default-submit POST
+  // would 415 anyway; the JS handler converts it into the proper JSON
+  // request that the server will process.
+  //
+  // The HTML form ALSO carries `method="post" action="/api/auth/login"`
+  // (see the long comment in index.html at line 128-143) as a defense-in-
+  // depth fallback for the case where THIS handler never runs because the
+  // JS bundle 404s mid-deploy, hits a CSP block, or otherwise fails to
+  // load. In that scenario the browser's default Enter-key submit still
+  // POSTs to a real endpoint (server then 415s the form-urlencoded body
+  // since it isn't application/json), and the password lands in the
+  // request body rather than the URL bar / history / Referer header
+  // (which a method-less form would expose via the default GET). Earlier
+  // versions of this comment claimed the form had no action/method --
+  // stale; the HTML attributes have been there for a while and the
+  // index.html comment explains the belt-and-braces rationale.
+  //
+  // preventDefault here skips the form's POST fallback when the JS path
+  // IS live, so the same Enter press doesn't fire BOTH the JSON XHR AND
+  // the form-default POST against the same endpoint. Default action is
+  // login (the most common Enter-press intent); the user can still
+  // explicitly click Register if that was their goal.
   authForm.addEventListener("submit", event => {
     event.preventDefault();
     if (authState.authenticationMode !== "users") return;
