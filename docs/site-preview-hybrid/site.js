@@ -2350,9 +2350,22 @@ function stopHallElapsed() {
 function tickHallElapsed() {
   if (!hallElapsed) return;
   const sec = Math.floor((Date.now() - hallActiveStartedAt) / 1000);
-  const mm = String(Math.floor(sec / 60)).padStart(2, "0");
+  const hh = Math.floor(sec / 3600);
+  const mm = String(Math.floor((sec % 3600) / 60)).padStart(2, "0");
   const ss = String(sec % 60).padStart(2, "0");
-  hallElapsed.textContent = `Elapsed ${mm}:${ss}`;
+  // Promote to h:mm:ss format past one hour so a long-running hall
+  // job doesn't display "Elapsed 120:00" once minutes overflow the
+  // two-digit pad. With the shipped PLAYING_HALL_TIMEOUT_MS default
+  // of 15 min, sub-hour is the only case in practice -- but the
+  // deployment doc explicitly supports operators raising the knob
+  // (and the dynamic-poll-deadline work extends maxPollWaitMs to
+  // match), so a 2-hour-timeout configuration could otherwise show
+  // an ambiguous three-digit-minute count where the layout expects
+  // two. Common case (under one hour) stays mm:ss for visual
+  // stability with the surrounding labels.
+  hallElapsed.textContent = hh > 0
+    ? `Elapsed ${hh}:${mm}:${ss}`
+    : `Elapsed ${mm}:${ss}`;
 }
 
 function finishHallProgress() {
