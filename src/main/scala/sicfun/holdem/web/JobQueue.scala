@@ -277,7 +277,7 @@ private[web] object JobQueue:
       // for submitted emails.
       val loggedHeroName = request.heroName.getOrElse("-").replace(" ", "%20")
       logInfo(
-        s"job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} heroName=$loggedHeroName site=${request.site.map(_.toString).getOrElse("auto")} analysisTimeoutMs=$analysisTimeoutMs"
+        s"job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} heroName=$loggedHeroName site=${request.site.map(_.toString).getOrElse("auto")} timeoutMs=$analysisTimeoutMs"
       )
       val completedState =
         try
