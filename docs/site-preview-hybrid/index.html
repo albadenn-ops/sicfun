@@ -221,7 +221,17 @@
                    normalizePlayerName comparison is case-sensitive so
                    'alice' typed on mobile must NOT silently become
                    'Alice'. -->
-              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form" spellcheck="false" autocapitalize="off" autocomplete="off" maxlength="64">
+              <!-- aria-describedby + visible hint mirror the analyze
+                   form's hero-name treatment: most screen readers
+                   skip placeholder text by default (NVDA + JAWS),
+                   so "Prefill the upload form" never reaches an
+                   assistive-tech user on Tab focus. The linked hint
+                   below spells out what saving this field actually
+                   does (prefill the analyze form's hero-name input
+                   on next visit) so the user knows whether it's
+                   worth filling in. -->
+              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form" spellcheck="false" autocapitalize="off" autocomplete="off" maxlength="64" aria-describedby="profile-hero-name-hint">
+              <small class="field-hint" id="profile-hero-name-hint">Optional · prefills the analyze form's hero-name field on this browser so you don't retype it per upload</small>
             </label>
 
             <label class="field">
