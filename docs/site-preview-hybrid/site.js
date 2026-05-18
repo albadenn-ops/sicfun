@@ -1102,6 +1102,15 @@ const OIDC_ERROR_MESSAGES = {
   // by a previous attempt. Tell them what to do without leaking the
   // internal token-store mechanics.
   "OIDC login state expired or is invalid": "Your sign-in took too long or was already completed in another tab. Please try again.",
+  // upsertOidcIdentity rejects when the provider returns a `sub` claim
+  // longer than 256 chars. Google subjects are short (~21 digits) so
+  // this almost never trips in practice, but a non-Google IdP added in
+  // the future could legitimately emit longer subjects -- and a hostile
+  // provider could deliberately send a giant one to probe the failure
+  // path. Either way the user can't fix it; surface a friendly message
+  // that names the actionable response without exposing the 256-char
+  // cap to a probing attacker.
+  "OIDC subject is too long": "The sign-in provider returned an unexpectedly long account identifier. Please try again, or contact the operator if this keeps happening.",
   // upsertOidcIdentity rejects when the email is already linked to a
   // different identity (e.g. local password) so two flows don't collide
   // on the same email. The user needs to use their original method.
@@ -1131,6 +1140,35 @@ const OIDC_ERROR_MESSAGES = {
     "Sign in with Google did not complete -- the provider did not return an access token. Please try again, or contact the operator if this keeps happening."
 };
 
+// Translate a server-emitted OIDC error code to a user-readable message.
+// Tries an exact-match lookup in OIDC_ERROR_MESSAGES first, then falls
+// back to prefix patterns for the three Google-exchange error strings
+// that embed a variable suffix (HTTP status code or upstream exception
+// message): finishOidc emits `Google token exchange failed with status
+// <N>`, `Google userinfo request failed with status <N>`, and `Google
+// OIDC exchange failed: <NonFatal.getMessage>`. Without the prefix
+// pass these fell through to the raw `OIDC sign-in failed: Google
+// token exchange failed with status 401` fallback -- readable but
+// with awkward double-failed wording and no actionable advice. The
+// prefix translations name the actionable response (retry, then
+// contact the operator) and stay consistent with the exact-match
+// mappings on the success surface. Returns null when nothing matches
+// so the caller can decide its own fallback.
+function lookupOidcErrorMessage(authError) {
+  const exact = OIDC_ERROR_MESSAGES[authError];
+  if (exact) return exact;
+  if (authError.startsWith("Google token exchange failed with status ")) {
+    return "Sign in with Google could not complete -- the provider rejected our token exchange. Please try again, or contact the operator if this keeps happening.";
+  }
+  if (authError.startsWith("Google userinfo request failed with status ")) {
+    return "Sign in with Google could not complete -- the provider rejected our account-info request. Please try again, or contact the operator if this keeps happening.";
+  }
+  if (authError.startsWith("Google OIDC exchange failed: ")) {
+    return "Sign in with Google did not complete due to a provider or network error. Please try again, or contact the operator if this keeps happening.";
+  }
+  return null;
+}
+
 function renderAuthFlash() {
   const params = new URLSearchParams(window.location.search);
   const authResult = params.get("auth");
@@ -1139,7 +1177,7 @@ function renderAuthFlash() {
   if (authResult === "success") {
     updateAccountUi("OIDC sign-in completed.");
   } else if (authError) {
-    const friendly = OIDC_ERROR_MESSAGES[authError];
+    const friendly = lookupOidcErrorMessage(authError);
     // No `.replaceAll("+", " ")` here: URLSearchParams.get() already
     // applies the application/x-www-form-urlencoded `+`-to-space
     // conversion during parsing per the WHATWG URL spec, AND the
