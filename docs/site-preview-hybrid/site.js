@@ -407,7 +407,7 @@ if (hallForm) {
         renderHallStatus(playingHallJobStatusMessage(body.status));
         const result = await pollPlayingHallJob(statusUrl, body.pollAfterMs);
         renderHallResults(result);
-        pushRecentRun(payload, (result && result.summary) || {});
+        pushRecentRun(payload, (result && result.summary) || {}, {cancelled: !!(result && result.cancelled)});
         runReady = true;
         return;
       }
@@ -2216,7 +2216,14 @@ function clearRecentRuns() {
   catch (_) { /* private mode - ignore */ }
 }
 
-function pushRecentRun(request, summary) {
+function pushRecentRun(request, summary, options) {
+  // `options.cancelled` flags entries that came from a cancelled hall
+  // run -- summary is typically empty (the worker didn't capture
+  // partial data before the interrupt) so renderRecentRuns would
+  // otherwise display "0 hands, +0.00 chips" and make the entry
+  // look like a broken run. The flag lets the render path show a
+  // "(cancelled)" marker instead, preserving the config for re-
+  // launch while honestly representing the outcome.
   const entry = {
     timestamp: Date.now(),
     request,
@@ -2227,7 +2234,8 @@ function pushRecentRun(request, summary) {
       heroWins: summary.heroWins,
       heroLosses: summary.heroLosses,
       heroTies: summary.heroTies
-    }
+    },
+    cancelled: !!(options && options.cancelled)
   };
   const existing = readRecentRuns();
   writeRecentRuns([entry, ...existing]);
@@ -2262,19 +2270,30 @@ function renderRecentRuns() {
     // run is which. The visible "Load" / "x" stays terse for sighted
     // users; the label only kicks in for assistive tech.
     const tsForLabel = escapeHtml(ts);
+    // Mark cancelled entries explicitly. Without this, a cancelled
+    // run with no captured partial data renders as "0 hands · +0.00
+    // chips" -- looks like a broken or zero-result successful run.
+    // The "(cancelled)" suffix on the timestamp + the muted meta
+    // line tells the user the entry came from an intentional
+    // cancellation, and the Load button still works for re-launch
+    // with the captured config. `entry.cancelled` is falsy for old
+    // entries (added before this field existed) so legacy data
+    // renders unchanged.
+    const cancelled = !!entry.cancelled;
+    const cancelledSuffix = cancelled ? ` <span class="recent-run-cancelled">(cancelled)</span>` : "";
+    const metaLine = cancelled
+      ? `${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands target &middot; cancelled before completion &middot; [${escapeHtml(pool)}] &middot; seed ${escapeHtml(entry.request.seed)}`
+      : `${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands &middot; ${formatSigned(entry.summary.heroNetChips)} chips &middot; [${escapeHtml(pool)}] &middot; seed ${escapeHtml(entry.request.seed)}`;
     return `
       <article class="recent-run">
         <div class="recent-run-head">
-          <span class="recent-run-ts">${escapeHtml(ts)}</span>
+          <span class="recent-run-ts">${escapeHtml(ts)}${cancelledSuffix}</span>
           <span class="recent-run-actions">
-            <button type="button" class="button button-secondary" data-recent-index="${idx}" aria-label="Load run from ${tsForLabel}">Load</button>
-            <button type="button" class="button button-secondary recent-run-remove" data-recent-remove="${idx}" aria-label="Remove run from ${tsForLabel}" title="Remove">×</button>
+            <button type="button" class="button button-secondary" data-recent-index="${idx}" aria-label="Load run from ${tsForLabel}${cancelled ? ", cancelled" : ""}">Load</button>
+            <button type="button" class="button button-secondary recent-run-remove" data-recent-remove="${idx}" aria-label="Remove run from ${tsForLabel}${cancelled ? ", cancelled" : ""}" title="Remove">×</button>
           </span>
         </div>
-        <p class="recent-run-meta">
-          ${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands &middot;
-          ${formatSigned(entry.summary.heroNetChips)} chips &middot; [${escapeHtml(pool)}] &middot; seed ${escapeHtml(entry.request.seed)}
-        </p>
+        <p class="recent-run-meta">${metaLine}</p>
       </article>
     `;
   }).join("");

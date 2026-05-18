@@ -1111,6 +1111,12 @@ summary:focus-visible {
 .recent-run { padding: 8px 10px; border: 1px solid var(--line); background: rgba(74, 246, 38, 0.04); }
 .recent-run-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .recent-run-ts { color: var(--muted); font-family: "Consolas", "Courier New", monospace; font-size: 0.82rem; }
+/* "(cancelled)" suffix on a recent-run timestamp. Uses --warning to
+   visually distinguish from successful runs without shouting -- the
+   user clicked Cancel intentionally so the entry is informational
+   rather than an error. Same font as the timestamp so it doesn't
+   visually separate from the ts string. */
+.recent-run-cancelled { color: var(--warning); }
 .recent-run-meta { margin: 6px 0 0; color: var(--muted); font-family: "Consolas", "Courier New", monospace; font-size: 0.8rem; }
 /* Group the Load + remove buttons so flex space-between keeps them
    together on the right instead of distributing across the row. The
