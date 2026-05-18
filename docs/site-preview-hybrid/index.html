@@ -334,7 +334,17 @@
                    strings in the hand-history file; auto-suggested
                    personal names would silently produce a non-match
                    and the review would fall back to auto-detect. -->
-              <input id="hero-name" type="text" placeholder="Optional override" spellcheck="false" autocapitalize="off" autocomplete="off" maxlength="64">
+              <!-- aria-describedby links the input to the hint span
+                   below so screen-reader users get the actual purpose
+                   of the field (override the auto-detected hero) on
+                   focus. Without it the placeholder "Optional override"
+                   is ambient prose -- many screen readers don't read
+                   placeholder at all, and even when they do, "Optional
+                   override" alone gives no signal of WHAT is being
+                   overridden. Mirrors the hand-history-file-hint
+                   pattern on the file input above. -->
+              <input id="hero-name" type="text" placeholder="Optional override" spellcheck="false" autocapitalize="off" autocomplete="off" maxlength="64" aria-describedby="hero-name-hint">
+              <small class="field-hint" id="hero-name-hint">Optional · overrides the auto-detected hero name when the file resolves more than one player or picks the wrong one</small>
             </label>
 
             <div class="upload-actions">
