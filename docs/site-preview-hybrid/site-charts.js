@@ -200,6 +200,18 @@
       ]
     });
     new uPlot(opts, [xs, ys], el);
+    // Label the container so screen readers announce a meaningful chart
+    // name. uPlot renders a <canvas>; canvas elements have no inherent
+    // semantics and would otherwise leave the dashboard chart slot
+    // silent to assistive tech. The 5 SVG chart primitives above
+    // (renderBarH / renderDonut / renderStackedBarH / renderMatrix /
+    // renderKpiCard) all set role + aria-label on their <svg> root
+    // directly; uPlot doesn't expose that hook, so attach to the
+    // wrapper el instead. Default "line chart" mirrors the other
+    // primitives' silent fallback so a caller omitting options.title
+    // still gets a non-empty accessible name.
+    el.setAttribute("role", "img");
+    el.setAttribute("aria-label", (options && options.title) || "line chart");
   }
 
   function renderHistogram(el, data, options) {
@@ -253,6 +265,12 @@
       ]
     });
     new uPlot(opts, [centers, counts], el);
+    // Same screen-reader-labeling treatment as renderLine -- uPlot's
+    // canvas is opaque to assistive tech, so attach role + aria-label
+    // to the container element. Default "histogram" mirrors the other
+    // primitives' silent fallback.
+    el.setAttribute("role", "img");
+    el.setAttribute("aria-label", (options && options.title) || "histogram");
   }
 
   global.SicfunCharts = {

@@ -1701,7 +1701,7 @@ function renderHallResults(data) {
       const ys = [];
       let acc = 0;
       perHand.forEach(v => { acc += v; ys.push(acc); });
-      SicfunCharts.renderLine(hallChartChips, {xs, ys}, {yLabel: "cumulative chips", height: 220});
+      SicfunCharts.renderLine(hallChartChips, {xs, ys}, {yLabel: "cumulative chips", height: 220, title: "Hero cumulative chips over time"});
     } else {
       hallChartChips.innerHTML = `<p class="section-note">No per-hand data returned for this run.</p>`;
     }
@@ -1741,7 +1741,7 @@ function renderHallResults(data) {
   if (hallChartEquityHist) {
     const equities = Array.isArray(summary.heroDecisionEquities) ? summary.heroDecisionEquities.map(Number) : [];
     if (equities.length > 0) {
-      SicfunCharts.renderHistogram(hallChartEquityHist, {values: equities}, {bucketCount: 10, min: 0, max: 1, height: 200});
+      SicfunCharts.renderHistogram(hallChartEquityHist, {values: equities}, {bucketCount: 10, min: 0, max: 1, height: 200, title: "Hero decision-equity distribution"});
     } else {
       hallChartEquityHist.innerHTML = `<p class="section-note">No hero decision equities recorded.</p>`;
     }
