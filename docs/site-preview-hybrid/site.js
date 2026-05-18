@@ -236,6 +236,7 @@ if (form && fileInput && siteSelect && heroInput) {
     reviewResults.classList.add("hidden");
 
     let resultReady = false;
+    let resultFailed = false;
     try {
       const payload = {
         handHistoryText: await file.text(),
@@ -254,6 +255,7 @@ if (form && fileInput && siteSelect && heroInput) {
       if (!response.ok) {
         await maybeReauthOn401(response);
         renderStatus(formatErrorMessage(response, body));
+        resultFailed = true;
         return;
       }
 
@@ -261,6 +263,7 @@ if (form && fileInput && siteSelect && heroInput) {
         const statusUrl = body.statusUrl || response.headers.get("Location");
         if (!statusUrl) {
           renderStatus("Server accepted the upload but did not return a job status URL.");
+          resultFailed = true;
           return;
         }
 
@@ -275,17 +278,23 @@ if (form && fileInput && siteSelect && heroInput) {
       resultReady = true;
     } catch (error) {
       renderStatus(`Request failed: ${describeFetchError(error)}`);
+      resultFailed = true;
     } finally {
       setSubmitting(false);
-      // If the review landed while the user had the tab backgrounded,
-      // leave 'Review ready' in the title so they get a completion cue
-      // in their browser tab list rather than seeing the default title
-      // come back with no signal that the work is done. The
-      // visibilitychange listener clears it the moment they return to
-      // the tab. For errors / cancellations, fall through to the
-      // normal reset.
-      if (resultReady && document.hidden) {
-        setTitleStatus("Review ready");
+      // If the review reached a terminal state while the user had the
+      // tab backgrounded, leave a completion cue in the title so they
+      // spot the outcome in their browser tab list without refocusing
+      // the tab: 'Review ready' on success, 'Review failed' when the
+      // upload errored, the server rejected the request, or polling
+      // threw. Without the failure cue the title would silently reset
+      // to default and a user who walked away would have no signal at
+      // all that the run ended. The visibilitychange listener clears
+      // either title the moment they return -- the renderStatus panel
+      // is the source of truth once the user is looking again.
+      if (document.hidden) {
+        if (resultReady) setTitleStatus("Review ready");
+        else if (resultFailed) setTitleStatus("Review failed");
+        else setTitleStatus(null);
       } else {
         setTitleStatus(null);
       }
@@ -336,6 +345,7 @@ if (hallForm) {
     hallResults.classList.add("hidden");
 
     let runReady = false;
+    let runFailed = false;
     try {
       const response = await fetchWithTimeout("/api/playing-hall", {
         method: "POST",
@@ -348,6 +358,7 @@ if (hallForm) {
       if (!response.ok) {
         await maybeReauthOn401(response);
         renderHallStatus(formatErrorMessage(response, body));
+        runFailed = true;
         return;
       }
 
@@ -355,6 +366,7 @@ if (hallForm) {
         const statusUrl = body.statusUrl || response.headers.get("Location");
         if (!statusUrl) {
           renderHallStatus("Server accepted the hall run but did not return a job status URL.");
+          runFailed = true;
           return;
         }
 
@@ -372,15 +384,22 @@ if (hallForm) {
       runReady = true;
     } catch (error) {
       renderHallStatus(`Playing hall request failed: ${describeFetchError(error)}`);
+      runFailed = true;
     } finally {
       setHallSubmitting(false);
       finishHallProgress();
       // Same backgrounded-tab signaling as the analyze submit -- if the
-      // hall run lands while the user is looking at another tab, leave
-      // 'Hall done' in the title so they get a completion cue in their
-      // browser tab list. visibilitychange clears it on return.
-      if (runReady && document.hidden) {
-        setTitleStatus("Hall done");
+      // hall run reaches a terminal state while the user is looking at
+      // another tab, leave a completion cue in the title: 'Hall done'
+      // on success, 'Hall failed' when the queue rejected the request
+      // or the poll loop threw. Without the failure cue the title
+      // would reset to default and a user who walked away would have
+      // no signal at all that the run ended. visibilitychange clears
+      // either title on return.
+      if (document.hidden) {
+        if (runReady) setTitleStatus("Hall done");
+        else if (runFailed) setTitleStatus("Hall failed");
+        else setTitleStatus(null);
       } else {
         setTitleStatus(null);
       }
@@ -1216,16 +1235,20 @@ function setTitleStatus(message) {
   document.title = message ? `${message} · SICFUN` : DEFAULT_TITLE;
 }
 
-// Job-completion titles ('Review ready', 'Hall done') linger when the
-// user has the tab backgrounded so they get a completion cue in their
-// browser tab list. Reset to default the moment they come back -- the
-// title has served its purpose, and leaving a stale 'done' title would
-// be misleading on the next visit. Match the exact 'done' strings so a
-// mid-poll switch back ('Reviewing X', 'Hall running') doesn't get
-// clobbered.
+// Job-terminal titles ('Review ready', 'Review failed', 'Hall done',
+// 'Hall failed') linger when the user has the tab backgrounded so they
+// get a completion cue in their browser tab list. Reset to default the
+// moment they come back -- the title has served its purpose and the
+// renderStatus panel is now visible as the source of truth; leaving a
+// stale terminal title would be misleading on the next visit. Match
+// the exact terminal strings so a mid-poll switch back ('Reviewing X',
+// 'Hall running') doesn't get clobbered.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
-  if (document.title === "Review ready · SICFUN" || document.title === "Hall done · SICFUN") {
+  if (document.title === "Review ready · SICFUN"
+      || document.title === "Review failed · SICFUN"
+      || document.title === "Hall done · SICFUN"
+      || document.title === "Hall failed · SICFUN") {
     setTitleStatus(null);
   }
 });
