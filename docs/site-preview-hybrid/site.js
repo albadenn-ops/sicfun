@@ -821,8 +821,23 @@ function updateUploadAvailability() {
     }
   });
   if (submitButton) {
-    submitButton.disabled = locked;
-    submitButton.textContent = locked ? "Sign In Required" : "Queue Review";
+    // Same in-flight-pinning preservation as the hallSubmitButton block
+    // below (c6587e6 + 7eb3251). analyzeInFlight is set true by
+    // setSubmitting(true) at submit-handler entry and stays true until
+    // the handler's finally block runs setSubmitting(false). If
+    // updateUploadAvailability fires in between (auth probe completion,
+    // post-401 refreshAuthState, post-CSRF-refresh /api/auth/me re-pull,
+    // sibling-tab storage-event sign-in/-out), the pre-fix unconditional
+    // assignments would clobber the "Queueing Review..." pinning: the
+    // button would flip back to "Queue Review" + enabled mid-flight,
+    // telling the user the run is over when it isn't and opening the
+    // same re-entry race the hall side had. Skip when in flight so
+    // setSubmitting's pinning survives auth-state churn; the handler's
+    // finally will overwrite cleanly once the analyze poll loop exits.
+    if (!analyzeInFlight) {
+      submitButton.disabled = locked;
+      submitButton.textContent = locked ? "Sign In Required" : "Queue Review";
+    }
   }
   if (locked) {
     renderStatus("Sign in to queue a review job for this deployment.");
@@ -1415,10 +1430,24 @@ function jsonHeaders(includeCsrf) {
   return headers;
 }
 
+// In-flight flag for the analyze submit handler. Parallels the hall
+// flow's hallActiveJobId, but the analyze flow has no globally-tracked
+// jobId to read (each submit's body.jobId is local to the handler
+// closure, no DELETE-cancel path that would need a shared identifier).
+// Instead, setSubmitting writes this flag so updateUploadAvailability
+// can decide whether to clobber the button's mid-flight pinning -- the
+// same fix shape c6587e6 applied to the hall path. False at module
+// init, flipped true by setSubmitting(true) at submit-handler entry,
+// flipped back to false by setSubmitting(false) in the handler's
+// finally block. Module-level scope (not nested in the submit handler
+// closure) so updateUploadAvailability can read it across calls.
+let analyzeInFlight = false;
+
 function setSubmitting(isSubmitting) {
   if (!submitButton) {
     return;
   }
+  analyzeInFlight = isSubmitting;
   if (requiresPlatformSignIn() && !authState.authenticated) {
     submitButton.disabled = true;
     submitButton.textContent = "Sign In Required";
