@@ -89,7 +89,7 @@ Playing Hall simulation:
 
   Rate-limited as Submit; admission shares the same `MAX_CONCURRENT_JOBS` / `MAX_QUEUED_JOBS` budget as hand-history analysis.
 - `GET /api/playing-hall/jobs/{jobId}` — poll job status. Returns `200` with `status=queued` / `running` / `completed` / `failed` / `cancelled` (cancelled is reachable only via `DELETE` below; analyze jobs share the rest of the state set but never reach cancelled). `404` if the job is unknown (never existed, expired off retention, or owned by a different user under platform-user auth). Failed responses include `errorStatus` (`500` / `504`) and `error` text; cancelled responses include partial `result` when the worker captured it before interrupt. Rate-limited as JobStatus.
-- `DELETE /api/playing-hall/jobs/{jobId}` — request cooperative cancellation of an in-flight Playing Hall job. Returns `200` with `status=cancelled` once accepted, `409` if the job already finished, `404` if unknown. Rate-limited as JobStatus.
+- `DELETE /api/playing-hall/jobs/{jobId}` — request cooperative cancellation of an in-flight Playing Hall job. Returns `200` with `status=cancelled` while the job is still cancellable (queued or running), `409` if it already reached a terminal state (completed / failed / cancelled — re-DELETEing an already-cancelled job returns 409, not 200), `404` if unknown / expired / cross-user. Rate-limited as JobStatus.
 
 Platform-user auth (when `USER_STORE_PATH` is set):
 
