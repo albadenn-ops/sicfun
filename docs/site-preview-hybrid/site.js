@@ -252,6 +252,16 @@ if (form && fileInput && siteSelect && heroInput) {
     renderStatus(`Submitting ${file.name} for local review...`);
     setTitleStatus(`Submitting ${file.name}`);
     reviewResults.classList.add("hidden");
+    // Capture the submit-click timestamp so renderResults can report
+    // the review duration in the completion message. Same rationale as
+    // the hall flow's hallActiveStartedAt: the analyze form has no
+    // visible elapsed timer, so without this the user has no signal
+    // of how long the review took -- a question that matters when
+    // operators are tuning ANALYSIS_TIMEOUT_MS or comparing review
+    // latency across deployments. Local to the handler closure so it
+    // doesn't leak across concurrent submits (which the re-entry
+    // guard prevents anyway, but local scope is the natural fit).
+    const analyzeStartedAt = Date.now();
 
     let resultReady = false;
     let resultFailed = false;
@@ -287,12 +297,12 @@ if (form && fileInput && siteSelect && heroInput) {
 
         renderStatus(jobStatusMessage(file.name, body.status));
         const result = await pollAnalysisJob(file.name, statusUrl, body.pollAfterMs);
-        renderResults(file.name, result);
+        renderResults(file.name, result, analyzeStartedAt);
         resultReady = true;
         return;
       }
 
-      renderResults(file.name, body);
+      renderResults(file.name, body, analyzeStartedAt);
       resultReady = true;
     } catch (error) {
       renderStatus(`Request failed: ${describeFetchError(error)}`);
@@ -1640,9 +1650,20 @@ function playingHallJobStatusMessage(status) {
   }
 }
 
-function renderResults(fileName, data) {
+function renderResults(fileName, data, startedAt) {
+  // Same duration-reporting treatment as renderHallResults: include
+  // how long the review took in the completion message. The analyze
+  // form has no visible elapsed timer (the hall flow's progress card
+  // pattern doesn't apply because analyze typically completes in
+  // seconds-to-a-minute vs hall's 5-15 min), so this is the only
+  // place the user sees the latency. Useful for operators tuning
+  // ANALYSIS_TIMEOUT_MS or comparing review latency across
+  // deployments. Caller passes the submit-click timestamp; if
+  // unavailable (defensive fallback) the duration tail is skipped.
+  const durationMs = Number.isFinite(startedAt) && startedAt > 0 ? Date.now() - startedAt : 0;
+  const durationStr = durationMs > 0 ? ` (took ${formatDuration(durationMs)})` : "";
   renderStatus(
-    `Review ready: imported ${formatInteger(data.handsImported)} hand${data.handsImported === 1 ? "" : "s"} from ${fileName}.`
+    `Review ready: imported ${formatInteger(data.handsImported)} hand${data.handsImported === 1 ? "" : "s"} from ${fileName}${durationStr}.`
   );
 
   summaryGrid.innerHTML = [
