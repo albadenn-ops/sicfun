@@ -744,33 +744,53 @@
               The result board returns hero win-rate, action mix, per-villain chip flow, and the output
               files written for that run.
             </p>
-            <div class="hall-progress hidden" id="hall-progress">
-              <!-- role="progressbar" + aria-label tells screen readers what
-                   the animated bar represents. Omit aria-valuenow because
-                   this is indeterminate (CSS animation slides a gradient
-                   left-to-right indefinitely; the server doesn't report a
-                   completion percentage). Per WAI-ARIA, a progressbar
-                   without aria-valuenow is interpreted as indeterminate. -->
-              <div class="hall-progress-bar" role="progressbar" aria-label="Playing hall run in progress" aria-busy="true"><div class="hall-progress-bar-inner"></div></div>
-              <div class="hall-progress-meta">
-                <!-- aria-hidden="true" excludes the elapsed ticker from the
-                     hall-panel's aria-live="polite" live-region announcements.
-                     tickHallElapsed (site.js) updates the text every second
-                     via setInterval; without the opt-out NVDA/JAWS would
-                     queue an announcement on every tick ("Elapsed 1m 23s,
-                     Elapsed 1m 24s, ..."), spamming the screen-reader
-                     output stream for the entire 5-15 minute hall run.
-                     The elapsed counter is sighted-only feedback (the
-                     visible glance "how long has this been running") --
-                     SR users get the same information once at completion
-                     via renderHallResults' "(took Xm Ys)" status tail,
-                     which lands as a single polite announcement on the
-                     hall-status text. Cancel Run stays in the SR reach
-                     because aria-hidden is on the span only, not the
-                     parent .hall-progress-meta. -->
-                <span id="hall-elapsed" aria-hidden="true">Elapsed 00:00</span>
-                <button type="button" class="button button-secondary" id="hall-cancel">Cancel Run</button>
-              </div>
+          </div>
+          <!-- hall-progress sits as a sibling of hall-status (NOT nested
+               inside it) on purpose. renderHallStatus (site.js) updates
+               the status text by setting `hallStatus.innerHTML = ...` --
+               which would wipe any nested progress card on every call,
+               including the very first "Queueing a local playing hall
+               run..." render that fires BEFORE startHallElapsed un-hides
+               the card. Pre-fix the progress card lived inside hall-
+               status and was destroyed on that first render; the const
+               hallProgress reference site.js captured at module init
+               then pointed at a detached element, so subsequent
+               classList.remove("hidden") calls had no visual effect and
+               the elapsed timer + indeterminate progress bar + Cancel
+               button were silently missing. Keeping the progress card
+               as a sibling means renderHallStatus's innerHTML wipe
+               can't reach it, the .hidden -> visible toggle works as
+               written, and the const hallProgress reference stays
+               attached for the lifetime of the page. CSS margin-top
+               on .hall-progress still spaces it below the status
+               section because the rule keys on the class, not on
+               structural nesting. -->
+          <div class="hall-progress hidden" id="hall-progress">
+            <!-- role="progressbar" + aria-label tells screen readers what
+                 the animated bar represents. Omit aria-valuenow because
+                 this is indeterminate (CSS animation slides a gradient
+                 left-to-right indefinitely; the server doesn't report a
+                 completion percentage). Per WAI-ARIA, a progressbar
+                 without aria-valuenow is interpreted as indeterminate. -->
+            <div class="hall-progress-bar" role="progressbar" aria-label="Playing hall run in progress" aria-busy="true"><div class="hall-progress-bar-inner"></div></div>
+            <div class="hall-progress-meta">
+              <!-- aria-hidden="true" excludes the elapsed ticker from the
+                   hall-panel's aria-live="polite" live-region announcements.
+                   tickHallElapsed (site.js) updates the text every second
+                   via setInterval; without the opt-out NVDA/JAWS would
+                   queue an announcement on every tick ("Elapsed 1m 23s,
+                   Elapsed 1m 24s, ..."), spamming the screen-reader
+                   output stream for the entire 5-15 minute hall run.
+                   The elapsed counter is sighted-only feedback (the
+                   visible glance "how long has this been running") --
+                   SR users get the same information once at completion
+                   via renderHallResults' "(took Xm Ys)" status tail,
+                   which lands as a single polite announcement on the
+                   hall-status text. Cancel Run stays in the SR reach
+                   because aria-hidden is on the span only, not the
+                   parent .hall-progress-meta. -->
+              <span id="hall-elapsed" aria-hidden="true">Elapsed 00:00</span>
+              <button type="button" class="button button-secondary" id="hall-cancel">Cancel Run</button>
             </div>
           </div>
 
