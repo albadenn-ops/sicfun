@@ -917,6 +917,21 @@ async function submitAuth(path, includeDisplayName) {
     return;
   }
 
+  // Same re-entry guard as the analyze + hall submit handlers: the auth
+  // form's <form> wrapper means an Enter press in email / password /
+  // display-name fires the form's submit handler, which calls submitAuth.
+  // setAuthButtonsBusy(true) disables both auth buttons synchronously
+  // before the first await, but only blocks subsequent button clicks --
+  // a rapid Enter mash still fires the form-submit handler again and
+  // would race a duplicate POST against the same login (wasting one
+  // PBKDF2 verify per duplicate, plus a CSRF-token-and-cookie roundtrip
+  // the rate-limiter charges to the auth bucket). Bail out when the
+  // login button is already disabled (the canonical busy signal --
+  // setAuthButtonsBusy sets it regardless of which path is in flight).
+  if (authLoginButton && authLoginButton.disabled) {
+    return;
+  }
+
   const email = authEmail ? authEmail.value.trim() : "";
   const password = authPassword ? authPassword.value : "";
   const displayName = authDisplayName ? authDisplayName.value.trim() : "";
@@ -992,6 +1007,21 @@ function setAuthButtonsBusy(busy) {
 async function saveProfile() {
   if (!authState.authenticated || !authState.csrfToken) {
     updateAccountUi("Sign in before saving a profile.");
+    return;
+  }
+
+  // Same re-entry guard as the analyze + hall + submitAuth handlers:
+  // the profile form's <button type="submit"> means Enter in any of the
+  // four profile fields (display name, hero name, preferred site,
+  // timezone) fires the form's submit handler, which calls saveProfile.
+  // The button-disabled toggle below happens synchronously before the
+  // first await, but only blocks button-click submits -- a rapid Enter
+  // would otherwise race a duplicate POST with the same CSRF token
+  // against the same profile. Idempotent server-side, but the duplicate
+  // burns rate-limit budget and the second response's applyAuthState
+  // arrives on a slightly later tick where the user might already be
+  // looking at a different panel.
+  if (profileSaveButton && profileSaveButton.disabled) {
     return;
   }
 
