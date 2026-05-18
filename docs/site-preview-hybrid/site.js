@@ -1385,13 +1385,21 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-function renderHallStatus(message) {
+function renderHallStatus(message, badge) {
   if (!hallStatus) {
     return;
   }
+  // Optional `badge` renders a styled <span class="cancelled-badge">
+  // (defined in site.css, originally added for this purpose but
+  // never wired up -- the cancelled indicator was previously inlined
+  // as " · CANCELLED (partial data)" plain text into the H3, dropping
+  // the styled box the CSS was designed for). The badge text gets
+  // escapeHtml just like the message; the surrounding span is the
+  // only fixed HTML.
+  const badgeHtml = badge ? ` <span class="cancelled-badge">${escapeHtml(badge)}</span>` : "";
   hallStatus.innerHTML = `
     <p class="card-kicker">Status</p>
-    <h3>${escapeHtml(message)}</h3>
+    <h3>${escapeHtml(message)}${badgeHtml}</h3>
     <p class="section-note">
       SICFUN runs the configured hall batch in the background, then returns the run summary, action mix,
       per-villain chip flow, and the generated output files here.
@@ -1676,10 +1684,16 @@ function renderHallResults(data) {
   const request = data && typeof data.request === "object" && data.request ? data.request : {};
   const summary = data && typeof data.summary === "object" && data.summary ? data.summary : {};
   const cancelled = !!(data && data.cancelled);
-  const cancelledNote = cancelled ? " · CANCELLED (partial data)" : "";
 
+  // Pass the cancelled state as a renderHallStatus badge rather than
+  // inline " · CANCELLED" text. The badge picks up the warning-color
+  // border + monospace styling from `.cancelled-badge` in site.css
+  // (originally added for exactly this purpose but never wired up
+  // before this commit), and reads as a visually distinct marker
+  // rather than buried punctuation in a long status sentence.
   renderHallStatus(
-    `Hall ready: ${formatInteger(summary.handsPlayed)} hands, ${formatSigned(summary.heroNetChips)} chips, ${formatSigned(summary.heroBbPer100)} bb/100${cancelledNote}.`
+    `Hall ready: ${formatInteger(summary.handsPlayed)} hands, ${formatSigned(summary.heroNetChips)} chips, ${formatSigned(summary.heroBbPer100)} bb/100.`,
+    cancelled ? "CANCELLED (partial data)" : null
   );
 
   if (hallKpiGrid) {
