@@ -2039,6 +2039,19 @@ function formatDuration(ms) {
 }
 
 function escapeHtml(value) {
+  // null / undefined render as empty string rather than the literal
+  // text "null" / "undefined". The default String() coercion turns
+  // them into those four / nine character strings respectively, which
+  // then sail through the replaceAll chain unchanged and surface in
+  // the UI verbatim -- a universally-recognized "the site is broken"
+  // signal whenever a server response is missing an optional field,
+  // a normalize* helper hasn't run yet, or a recent-runs entry was
+  // persisted before a new field existed on the entry shape. Falsy-
+  // but-meaningful values (0, false, the empty string itself) still
+  // round-trip through String() to their canonical text form, which
+  // is what the existing call sites expect (e.g. "(took 0s)" reads
+  // fine, "after false" doesn't but no call site builds that).
+  if (value == null) return "";
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
