@@ -55,7 +55,7 @@ Default behavior:
 
 - Binds to `127.0.0.1:8080`
 - Serves the upload UI from `static/`
-- Loads settings from `conf/hand-history-web.env`
+- Loads settings from `conf/hand-history-web.env` (override the file location via `-ConfigFile <path>` on the launcher CLI or `CONFIG_FILE=<path>` in the environment — useful when one host runs multiple sicfun instances on different ports with sibling config files)
 - Exposes `/api/health` for liveness and `/api/ready` for readiness
 - Exposes async job endpoints for hand-history analysis and Playing Hall simulation (see "HTTP Endpoints" below)
 
