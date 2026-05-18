@@ -254,7 +254,25 @@
 
       <div class="upload-grid">
         <article class="surface upload-card">
-          <form class="upload-form" id="hand-upload-form">
+          <!--
+            method="post" + action="/api/analyze-hand-history" close the
+            same JS-broken-form defense-in-depth gap the auth form uses.
+            If the JS submit handler ever fails to load (404, network
+            blip mid-deploy, CSP block) and the user presses Enter in
+            the hero-name input, the browser's default submit would
+            otherwise serialize the hero name + site selection into the
+            URL as a GET against the current page, persisting the hero
+            name in the URL bar, browser history, and Referer header.
+            With POST + a real endpoint, the fallback submission lands
+            at the analyze endpoint (which 415s because the body is
+            form-urlencoded not JSON, matching the auth form's failure
+            mode), and the URL stays clean. The file input can't be
+            GET-submitted per HTML5 anyway so the file content is never
+            at risk; this just keeps the URL tidy in the failure mode.
+            The JS handler preventDefaults so the normal flow is
+            unchanged.
+          -->
+          <form class="upload-form" id="hand-upload-form" method="post" action="/api/analyze-hand-history">
             <label class="field">
               <span>Hand history file</span>
               <!-- aria-describedby links the file input to the size hint
@@ -421,7 +439,21 @@
 
       <div class="hall-grid">
         <article class="surface hall-card">
-          <form class="hall-form" id="playing-hall-form">
+          <!--
+            Same JS-broken-form defense-in-depth as the auth + analyze
+            forms. The hall form has 9+ keyboard-reachable inputs
+            (hands, tableCount, seed, exploration rate, raise size,
+            learning windows, bunching/equity trials) plus the
+            villain-pool checkboxes; without method+action, a JS-
+            failure-mode Enter press in any of them would default-
+            submit GET-to-current-URL and persist the full hall config
+            into the URL bar, browser history, and Referer header. The
+            POST to /api/playing-hall lands at the actual hall endpoint
+            (which 415s on form-urlencoded bodies the same way analyze
+            does), and the URL stays clean. The JS handler
+            preventDefaults so the normal flow is unchanged.
+          -->
+          <form class="hall-form" id="playing-hall-form" method="post" action="/api/playing-hall">
             <!-- role="group" + aria-label gives the preset buttons a single
                  semantic container so screen readers announce "Hall
                  configuration presets, group" before reading each
