@@ -916,9 +916,13 @@ class HandHistoryReviewServerTest extends FunSuite:
           "connect-src 'self'",
           "form-action 'self'",
           "frame-ancestors 'none'",
+          "frame-src 'none'",
+          "manifest-src 'none'",
+          "media-src 'none'",
           "object-src 'none'",
           "script-src 'self'",
-          "style-src 'self'"
+          "style-src 'self'",
+          "worker-src 'none'"
         ) do
           assert(csp.contains(directive), s"CSP missing `$directive`: $csp")
         val permissionsPolicy = headerValue(index, "Permissions-Policy").getOrElse(

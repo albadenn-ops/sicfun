@@ -12,8 +12,25 @@ import java.util.zip.GZIPOutputStream
   */
 private[web] object WebResponses:
 
+  // Restrictive CSP. Beyond the well-known `'self'` allowances for scripts,
+  // styles, connections, and form actions, four directives are explicitly
+  // pinned to `'none'` even though they'd default-src-fall-back to `'self'`:
+  //   - frame-src    -- the page doesn't embed iframes; deny so an injected
+  //                     <iframe src=//evil/> can't load even from same-origin.
+  //   - manifest-src -- no PWA manifest; deny so an injection can't link
+  //                     a hostile <link rel=manifest> that re-themes the
+  //                     installed app or attaches a malicious service worker.
+  //   - media-src    -- no <audio>/<video>/<track>; deny to prevent media
+  //                     elements from being used as exfiltration channels
+  //                     (Range requests, codec-side-channel timing).
+  //   - worker-src   -- no Web/Service/Shared workers; deny so an injected
+  //                     `new Worker('/...')` can't spawn a same-origin worker
+  //                     to bypass main-thread CSP heuristics.
+  // Same defense-in-depth philosophy as base-uri / object-src / frame-
+  // ancestors -- explicitly denying capabilities the app never needs means a
+  // future XSS or compromised dependency can't promote itself into them.
   private val ContentSecurityPolicy =
-    "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'"
+    "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data:; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'self'; style-src 'self'; worker-src 'none'"
 
   // Defense-in-depth: explicitly deny browser features the app does not use, so any
   // future inline-script-induced exploit (or compromised vendored library) cannot
