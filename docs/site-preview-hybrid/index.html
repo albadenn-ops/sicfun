@@ -159,7 +159,24 @@
                    "password must be at least 10 characters" 400. The JS
                    button-click path still goes through submitAuth without
                    relying on these attributes. -->
-              <input id="auth-password" type="password" autocomplete="current-password" placeholder="At least 10 characters" required minlength="10" maxlength="256">
+              <!-- aria-describedby + visible hint complete the auth-form
+                   a11y pattern (auth-display-name already carries one).
+                   The placeholder "At least 10 characters" never reaches
+                   an NVDA/JAWS user on Tab focus (default placeholder=off
+                   on both), so a screen-reader user hears only "Password,
+                   password edit text" -- no signal about the 10-char
+                   minimum until they submit and round-trip a server 400.
+                   The visible hint also names two things the placeholder
+                   couldn't fit: the 256-char ceiling (so a generated
+                   passphrase doesn't silently fail the maxlength gate)
+                   and the no-complexity-rule policy (so a paste from a
+                   password manager that's all-lowercase with no digits
+                   doesn't trigger the user's "this site will reject it"
+                   reflex). NIST SP 800-63B explicitly forbids composition
+                   rules, and validatePassword imposes none -- the hint
+                   surfaces that policy choice. -->
+              <input id="auth-password" type="password" autocomplete="current-password" placeholder="At least 10 characters" required minlength="10" maxlength="256" aria-describedby="auth-password-hint">
+              <small class="field-hint" id="auth-password-hint">10&ndash;256 characters &middot; spaces and any keyboard symbols are accepted, with no required mix of digit / uppercase / symbol (a password-manager-generated passphrase pastes in as-is)</small>
             </label>
 
             <label class="field">
