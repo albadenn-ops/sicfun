@@ -867,6 +867,8 @@ function updateUploadAvailability() {
   });
   if (hallSubmitButton) {
     // hallActiveJobId is non-null while a hall run is being polled,
+    // hallSubmittingPending is true during the POST-round-trip
+    // window between setHallSubmitting(true) and startHallElapsed,
     // and setHallSubmitting(true) has already pinned the button to
     // disabled + "Running Hall..." text. updateUploadAvailability
     // fires on every applyAuthState (auth probe completion, sibling-
@@ -879,10 +881,10 @@ function updateUploadAvailability() {
     // Playing Hall" -- both signals telling the user the run is over
     // when it isn't, AND opening the same concurrent-submit race
     // 7eb3251 fixed in validateHallForm. Skip the in-flight case so
-    // setHallSubmitting's pinning survives auth-state churn. The
-    // submit-handler's finally block will overwrite this freshly
-    // once finishHallProgress nulls hallActiveJobId.
-    const hallInFlight = hallActiveJobId !== null;
+    // setHallSubmitting's pinning survives auth-state churn at every
+    // stage (POST window + poll window). The submit-handler's finally
+    // block will overwrite this freshly once both flags clear.
+    const hallInFlight = hallActiveJobId !== null || hallSubmittingPending;
     if (!hallInFlight) {
       hallSubmitButton.disabled = locked;
       hallSubmitButton.textContent = locked ? "Sign In Required" : "Run Playing Hall";
@@ -1471,10 +1473,28 @@ function setSubmitting(isSubmitting) {
   submitButton.textContent = isSubmitting ? "Queueing Review..." : "Queue Review";
 }
 
+// In-flight flag for the hall submit POST window. hallActiveJobId
+// (set by startHallElapsed once the server returns body.jobId, read by
+// validateHallForm + updateUploadAvailability per 7eb3251 / c6587e6)
+// is the in-flight signal during the POLL phase, but it's NULL during
+// the 100ms-2s POST round-trip that sits BETWEEN setHallSubmitting(true)
+// and startHallElapsed. A user typing into a hall form field during
+// that window triggers validateHallForm, which would see inFlight=false
+// and re-enable the submit button -- reopening the concurrent-submit
+// race those two fixes closed for the poll phase. Parallels analyzeInFlight
+// (which closes the equivalent race for the analyze side via setSubmitting).
+// False at module init, flipped true by setHallSubmitting(true) BEFORE
+// the POST kicks off, flipped back to false by setHallSubmitting(false)
+// in the parent finally block AFTER finishHallProgress has already
+// nulled hallActiveJobId. So the OR (hallActiveJobId !== null ||
+// hallSubmittingPending) covers the union of POST-window + poll-window.
+let hallSubmittingPending = false;
+
 function setHallSubmitting(isSubmitting) {
   if (!hallSubmitButton) {
     return;
   }
+  hallSubmittingPending = isSubmitting;
   if (requiresPlatformSignIn() && !authState.authenticated) {
     hallSubmitButton.disabled = true;
     hallSubmitButton.textContent = "Sign In Required";
@@ -2401,17 +2421,21 @@ function validateHallForm() {
     // hallActiveJobId is set non-null by startHallElapsed once the
     // server accepts a hall job and stays non-null until
     // finishHallProgress runs in the submit handler's finally block.
+    // hallSubmittingPending covers the additional POST-round-trip
+    // window between setHallSubmitting(true) and startHallElapsed,
+    // where hallActiveJobId is still null but a submit IS in flight.
     // validateHallForm fires on every form input event, so a user
     // typing into hall fields to prep a follow-up run (a common
-    // pattern during the 5-15 min wait for a long simulation) would
-    // otherwise re-enable the submit button while setHallSubmitting
-    // (true) has it disabled -- letting them fire a SECOND submit
-    // before the first poll loop has finished, ending up with two
-    // concurrent poll loops fighting over the hall-status panel,
-    // the elapsed timer, and the title-cue ladder. Honor the in-
-    // flight state so the form-validity recompute never undoes
-    // setHallSubmitting's disabled gate.
-    const inFlight = hallActiveJobId !== null;
+    // pattern during the 5-15 min wait for a long simulation) -- or
+    // typing during the 100ms-2s POST round-trip -- would otherwise
+    // re-enable the submit button while setHallSubmitting (true) has
+    // it disabled, letting them fire a SECOND submit before the first
+    // poll loop has finished, ending up with two concurrent poll
+    // loops fighting over the hall-status panel, the elapsed timer,
+    // and the title-cue ladder. The OR covers the union of POST-
+    // window + poll-window so the form-validity recompute never
+    // undoes setHallSubmitting's disabled gate at any in-flight stage.
+    const inFlight = hallActiveJobId !== null || hallSubmittingPending;
     hallSubmitButton.disabled = !allOk || locked || inFlight;
   }
   return allOk;
