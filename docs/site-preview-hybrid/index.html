@@ -182,7 +182,25 @@
             <h3>Sign in to manage profile defaults.</h3>
           </div>
 
-          <form class="auth-form" id="profile-form">
+          <!--
+            method="post" + action="/api/auth/profile" close the same
+            JS-broken-form defense-in-depth gap the auth + analyze +
+            hall forms cover. If the JS submit handler ever fails to
+            load (404, network blip mid-deploy, CSP block) and the user
+            presses Enter in any of the four profile fields, the
+            browser's default submit would otherwise serialize display
+            name + hero name + preferred site + time zone into the URL
+            as a GET against the current page -- persisting the user's
+            identifying values (display name, the poker handle in hero
+            name, and the geo-narrowing IANA tz) into the URL bar,
+            browser history, and Referer header. With POST + the real
+            endpoint, the fallback submission lands at the profile
+            endpoint (which 415s on form-urlencoded body, matching the
+            auth/analyze/hall failure mode), and the URL stays clean.
+            The JS handler preventDefaults so the normal flow is
+            unchanged.
+          -->
+          <form class="auth-form" id="profile-form" method="post" action="/api/auth/profile">
             <!-- maxlength caps match the server-side sanitizeOptionalField
                  limits in PlatformUserAuth.updateProfile (displayName=96,
                  heroName=64, preferredSite=32, timeZone=64). Native
