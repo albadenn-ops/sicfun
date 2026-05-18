@@ -416,8 +416,16 @@ if (hallForm) {
         startHallElapsed(body.jobId);
         renderHallStatus(playingHallJobStatusMessage(body.status));
         const result = await pollPlayingHallJob(statusUrl, body.pollAfterMs);
+        // Capture duration once before finishHallProgress (in the
+        // finally block) nulls hallActiveStartedAt -- shared between
+        // renderHallResults (for the "(took Xm Ys)" status tail) and
+        // pushRecentRun (so the Recent runs panel can show duration
+        // on each entry). renderHallResults still falls back to its
+        // own compute if data.durationMs is missing, so old call
+        // patterns continue to work.
+        const hallDurationMs = hallActiveStartedAt > 0 ? Date.now() - hallActiveStartedAt : 0;
         renderHallResults(result);
-        pushRecentRun(payload, (result && result.summary) || {}, {cancelled: !!(result && result.cancelled)});
+        pushRecentRun(payload, (result && result.summary) || {}, {cancelled: !!(result && result.cancelled), durationMs: hallDurationMs});
         runReady = true;
         return;
       }
@@ -2296,6 +2304,16 @@ function pushRecentRun(request, summary, options) {
   // look like a broken run. The flag lets the render path show a
   // "(cancelled)" marker instead, preserving the config for re-
   // launch while honestly representing the outcome.
+  // `options.durationMs` records the client-observed run latency
+  // (submit click -> result rendered) so the Recent runs panel can
+  // show "took Xm Ys" on each entry -- useful for comparing config-
+  // to-latency tradeoffs across the captured history. Optional;
+  // missing means "no duration data was captured at the time," and
+  // renderRecentRuns just omits the duration field rather than
+  // displaying "0s".
+  const durationMs = options && Number.isFinite(options.durationMs) && options.durationMs > 0
+    ? options.durationMs
+    : null;
   const entry = {
     timestamp: Date.now(),
     request,
@@ -2307,7 +2325,8 @@ function pushRecentRun(request, summary, options) {
       heroLosses: summary.heroLosses,
       heroTies: summary.heroTies
     },
-    cancelled: !!(options && options.cancelled)
+    cancelled: !!(options && options.cancelled),
+    durationMs
   };
   const existing = readRecentRuns();
   writeRecentRuns([entry, ...existing]);
@@ -2353,9 +2372,19 @@ function renderRecentRuns() {
     // renders unchanged.
     const cancelled = !!entry.cancelled;
     const cancelledSuffix = cancelled ? ` <span class="recent-run-cancelled">(cancelled)</span>` : "";
+    // Append duration when present. `entry.durationMs` is captured at
+    // push time (commit history); old entries written before this
+    // field existed leave it null, in which case the duration is
+    // omitted entirely rather than rendering an awkward "0s" or
+    // "unknown" placeholder. Cancelled entries also get the duration
+    // since "cancelled in 2m 15s" gives the user a sense of how
+    // long it ran before the interrupt landed.
+    const durationStr = Number.isFinite(entry.durationMs) && entry.durationMs > 0
+      ? ` &middot; ${escapeHtml(formatDuration(entry.durationMs))}`
+      : "";
     const metaLine = cancelled
-      ? `${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands target &middot; cancelled before completion &middot; [${escapeHtml(pool)}] &middot; seed ${escapeHtml(entry.request.seed)}`
-      : `${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands &middot; ${formatSigned(entry.summary.heroNetChips)} chips &middot; [${escapeHtml(pool)}] &middot; seed ${escapeHtml(entry.request.seed)}`;
+      ? `${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands target &middot; cancelled before completion${durationStr} &middot; [${escapeHtml(pool)}] &middot; seed ${escapeHtml(entry.request.seed)}`
+      : `${escapeHtml(entry.request.heroStyle || "-")} &middot; ${formatInteger(entry.request.hands)} hands &middot; ${formatSigned(entry.summary.heroNetChips)} chips${durationStr} &middot; [${escapeHtml(pool)}] &middot; seed ${escapeHtml(entry.request.seed)}`;
     return `
       <article class="recent-run">
         <div class="recent-run-head">
