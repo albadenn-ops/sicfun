@@ -1189,7 +1189,17 @@ summary:focus-visible {
 .recent-run-actions { display: inline-flex; align-items: center; gap: 6px; }
 .recent-run-remove { padding: 4px 10px; min-width: 0; }
 
-.hall-progress { display: grid; gap: 8px; margin-top: 12px; }
+/* margin-top dropped in the same change that promoted hall-progress
+   from a nested child of hall-status to a sibling under .review-panel
+   (382d264). The 12px was sized to space the progress card from the
+   section-note above it inside hall-status (block layout, no gap), but
+   .review-panel uses `display: grid; gap: 18px` -- so any vertical
+   spacing between hall-status and hall-progress comes from the grid
+   gap automatically. Keeping the margin-top stacked an asymmetric
+   30px above the card (18px gap + 12px margin) vs the clean 18px
+   below it; the grid gap alone gives consistent spacing with the
+   sibling cards (hall-status above, hall-results below). */
+.hall-progress { display: grid; gap: 8px; }
 .hall-progress-bar {
   position: relative;
   height: 6px;
