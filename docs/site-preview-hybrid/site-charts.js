@@ -114,7 +114,18 @@
     const sparklineValues = Array.isArray(data.sparklineValues) ? data.sparklineValues : null;
     const width = el.clientWidth || 180;
     const height = 92;
-    const card = svg("svg", {width: "100%", height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": label});
+    // Build a composite aria-label that includes the value + note.
+    // With role="img" the SVG is treated as a single atomic image
+    // and screen readers ignore the inner <text> nodes -- a label-
+    // only aria-label was leaving the actual numeric content
+    // ("+250.50", "240 hands") invisible to assistive tech. The
+    // composite form "<Label>: <Value>, <Note>" produces a natural
+    // announcement like "Net Chips: +250.50, 240 hands" while the
+    // visible card layout stays unchanged. Skip the trailing
+    // ", <Note>" when note is empty so the announcement doesn't
+    // dangle on a trailing comma.
+    const ariaLabel = note ? `${label}: ${value}, ${note}` : `${label}: ${value}`;
+    const card = svg("svg", {width: "100%", height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": ariaLabel});
     card.appendChild(svg("text", {x: 8, y: 16, fill: COLOR_MUTED, "font-family": FONT, "font-size": 10, "letter-spacing": 1.4}, [document.createTextNode(label.toUpperCase())]));
     card.appendChild(svg("text", {x: 8, y: 44, fill: COLOR_INK, "font-family": FONT, "font-size": 22, "font-weight": 700}, [document.createTextNode(value)]));
     if (note) card.appendChild(svg("text", {x: 8, y: 84, fill: COLOR_MUTED, "font-family": FONT, "font-size": 10}, [document.createTextNode(note)]));
