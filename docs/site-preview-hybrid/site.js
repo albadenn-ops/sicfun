@@ -751,7 +751,45 @@ function formatErrorMessage(response, body) {
 }
 
 function applyAuthState(data, flashMessage = "") {
-  authState = normalizeAuthState(data);
+  // Detect an authenticated -> unauthenticated transition before
+  // overwriting the cached authState. Three call sites flow through
+  // this function on a logout-equivalent:
+  //   - logout() success path with the post-logout /api/auth/logout body
+  //   - maybeReauthOn401 -> refreshAuthState -> applyAuthState when a
+  //     mid-poll request 401s because the session expired (12h sliding
+  //     TTL) or was revoked in a sibling tab
+  //   - refreshAuthState called from any later trigger that observes a
+  //     server-side session change (cross-tab logout, OIDC re-auth
+  //     elsewhere, etc.)
+  // ALL of them previously left the analyze + hall result panels
+  // visible underneath the freshly-restored sign-in form -- a privacy
+  // leak on shared-computer setups where the next person sitting down
+  // sees the previous user's hero name, decision EVs, per-opponent
+  // exploit hints (analyze) or per-villain chip flow + model id (hall).
+  // 6fa2c08 closed only the explicit-logout path by adding the hide
+  // code inline to logout(); centralising it here covers the
+  // session-expiry + sibling-tab paths too. Same render functions and
+  // initial copy as that commit so the transition lands on a clean
+  // slate identical to a freshly-loaded page.
+  //
+  // The explicit logout() ALSO does a fuller wipe (heroInput +
+  // siteSelect + hall form via .reset() + Recent runs from
+  // localStorage + auth fields) before reaching here, because "user
+  // signed out" implies "the next person might sit down" -- preserve
+  // nothing. The session-expiry / sibling-tab paths through this
+  // branch deliberately preserve form state because the user typically
+  // wants to re-auth and resume their working configuration -- wiping
+  // their in-progress hall preset and Recent runs on a stale-session
+  // 401 would be hostile UX, the user didn't ASK to sign out.
+  const nextAuthState = normalizeAuthState(data);
+  if (authState.authenticated && !nextAuthState.authenticated) {
+    if (reviewResults) reviewResults.classList.add("hidden");
+    if (hallResults) hallResults.classList.add("hidden");
+    renderStatus("Upload a hand-history file to start a local review job.");
+    renderHallStatus("Configure a hall run and launch it from the browser.");
+    setTitleStatus(null);
+  }
+  authState = nextAuthState;
   hydrateUploadDefaults();
   updateUploadAvailability();
   updateAccountUi(flashMessage);
@@ -1239,31 +1277,15 @@ async function logout() {
       validateHallForm();
       syncRandomSeedState();
     }
-    // Clear the previous user's analysis + hall output before the next
-    // person signs in on the same browser. The result panels persist
-    // after logout otherwise: a shared-computer scenario where user A
-    // finishes an analyze (or a hall run) and then signs out leaves
-    // user B looking at A's hero name, decision EVs, opponent reads
-    // (analyze) or per-villain chip flow + model id (hall) below the
-    // freshly-restored sign-in form. Hide both result panels and reset
-    // the two status cards to the pre-run "ready to start" copy so
-    // the new user lands on a clean slate. setTitleStatus(null) drops
-    // any terminal title ("Review ready · SICFUN" / "Hall done · SICFUN")
-    // that lingered from the previous run -- the visibilitychange
-    // handler at the bottom of the file resets to default ONLY when
-    // the user returns to the tab from background, but a logout while
-    // the user is still on the active tab needs an explicit reset.
-    // Sub-fields of reviewResults / hallResults (summary-grid,
-    // warning-block, decision-list, opponent-list, hallKpiGrid, the
-    // chart canvases, hallOutputList) stay populated underneath the
-    // .hidden class -- they're not visible, so no leak, and the next
-    // job's render functions overwrite them anyway. Cheaper than
-    // walking + clearing every child node.
-    if (reviewResults) reviewResults.classList.add("hidden");
-    if (hallResults) hallResults.classList.add("hidden");
-    renderStatus("Upload a hand-history file to start a local review job.");
-    renderHallStatus("Configure a hall run and launch it from the browser.");
-    setTitleStatus(null);
+    // applyAuthState below detects the authenticated -> unauthenticated
+    // transition and hides reviewResults + hallResults, resets the two
+    // status cards to their initial pre-run copy, and clears any
+    // terminal document.title -- closes the privacy leak on shared
+    // browsers (the previous user's hero name, decision EVs, opponent
+    // reads, per-villain chip flow). Moved into applyAuthState in the
+    // commit after 6fa2c08 so the same hide also fires on session-
+    // expiry-mid-poll (maybeReauthOn401 -> refreshAuthState -> apply)
+    // and cross-tab logout, not just on this explicit-logout path.
     applyAuthState(body, "Signed out.");
     // applyAuthState -> updateAccountUi hides the profile card (which
     // contained the Sign Out button the user just clicked), so the
