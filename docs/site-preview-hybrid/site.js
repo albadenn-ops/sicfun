@@ -2012,10 +2012,13 @@ function formatFileSize(bytes) {
   return `${size} B`;
 }
 
-// Human-readable elapsed time in ms. Used in the hall completion
-// status message so the user sees the actual run duration after
+// Human-readable elapsed time in ms. Used in the analyze + hall
+// completion status messages, the failure messages, and the Recent
+// runs panel so the user sees the actual run duration after
 // finishHallProgress hides the live elapsed timer. Scales the unit
-// to the magnitude: sub-minute as plain seconds, sub-hour as
+// to the magnitude: sub-second renders as `<1s` (not `0s` -- a
+// 200ms validation failure showing "(after 0s)" reads as a defect
+// rather than "instant"), sub-minute as plain seconds, sub-hour as
 // "Xm Ys", longer as "Xh Ym Zs". The mm:ss-pad-format used by the
 // live tickHallElapsed isn't appropriate here -- this is one-shot
 // reporting, not a moving counter, so prose-form scales better
@@ -2024,6 +2027,7 @@ function formatFileSize(bytes) {
 function formatDuration(ms) {
   const n = Number(ms);
   if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1000) return "<1s";
   const sec = Math.round(n / 1000);
   if (sec < 60) return `${sec}s`;
   const min = Math.floor(sec / 60);
