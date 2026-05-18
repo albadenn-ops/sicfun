@@ -2864,6 +2864,25 @@ function renderRecentRuns() {
       if (proceed) {
         clearRecentRuns();
         renderRecentRuns();
+        // Mirror the per-entry Remove handler's empty-state focus
+        // restore (see the comment above). After Clear all wipes
+        // the list, renderRecentRuns rebuilds hallRecentList's
+        // innerHTML and the Clear-all button itself is gone -- so
+        // a keyboard user's focus would drop to document.body, and
+        // their next Tab would resume from the Skip-to-content link
+        // (or arbitrary position depending on the browser's focus-
+        // from-body policy). Move focus to the Recent runs panel's
+        // own <summary> instead -- the same target the per-entry
+        // Remove handler uses when the last entry is removed.
+        // preventScroll keeps the page position stable; the panel
+        // sits above the hall form so the user's viewport doesn't
+        // need to move. Screen-reader users also get a coherent
+        // announcement ("Recent runs, 0, summary, expanded")
+        // instead of the page-language announcement that follows
+        // a focus-to-body drop.
+        const recentRunsDetails = document.getElementById("hall-recent-runs");
+        const summary = recentRunsDetails ? recentRunsDetails.querySelector("summary") : null;
+        if (summary) summary.focus({preventScroll: true});
       }
     });
   }
