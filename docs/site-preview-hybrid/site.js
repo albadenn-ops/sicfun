@@ -1843,8 +1843,21 @@ function renderHallResults(data) {
   // and frontend observing it is bounded.
   const durationMs = hallActiveStartedAt > 0 ? Date.now() - hallActiveStartedAt : 0;
   const durationStr = durationMs > 0 ? ` (took ${formatDuration(durationMs)})` : "";
+  // Switch the leading verb on cancellation: "Hall ready" is wrong when
+  // the user explicitly clicked Cancel -- the run did NOT complete in
+  // any meaningful sense, only a worker that was already mid-run was
+  // interrupted and surfaced partial data. The CANCELLED badge below
+  // already marks the partial-data state, but the leading "Hall ready"
+  // semantically claims completion that didn't happen and reads as a
+  // contradiction next to its own CANCELLED badge ("Hall ready: 200
+  // hands [CANCELLED]" -- which is it?). Using "Hall cancelled" as the
+  // verb on the cancelled path makes the title-cue ladder (set in
+  // the submit handler's finally block at line 491-493: runReady ->
+  // "Hall done" / runCancelled -> "Hall cancelled" / runFailed ->
+  // "Hall failed") consistent with the hall-status panel verb here.
+  const verb = cancelled ? "Hall cancelled" : "Hall ready";
   renderHallStatus(
-    `Hall ready: ${formatInteger(summary.handsPlayed)} hands, ${formatSigned(summary.heroNetChips)} chips, ${formatSigned(summary.heroBbPer100)} bb/100${durationStr}.`,
+    `${verb}: ${formatInteger(summary.handsPlayed)} hands, ${formatSigned(summary.heroNetChips)} chips, ${formatSigned(summary.heroBbPer100)} bb/100${durationStr}.`,
     cancelled ? "CANCELLED (partial data)" : null
   );
 
