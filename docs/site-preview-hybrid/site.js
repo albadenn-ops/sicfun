@@ -2636,6 +2636,31 @@ function finishHallProgress() {
   stopHallElapsed();
   hallActiveJobId = null;
   hallCancelRequested = false;
+  // If focus is currently inside the hall-progress region we're about
+  // to hide (typical path: the user just clicked Cancel and the Cancel
+  // button lives inside this card), the browser would drop focus to
+  // document.body once the region becomes display:none. A keyboard /
+  // screen-reader user would then have to Tab from the very top of
+  // the page to reach anything useful. Match the logout-focus-restore
+  // pattern from 948fccc: check if we own the active focus before
+  // hiding, and if so move it to the hall submit button -- the
+  // natural next action after a cancelled or completed run. By this
+  // point setHallSubmitting(false) has already run from the parent
+  // finally block, so the submit button is enabled and a sensible
+  // target. preventScroll keeps the page position stable; the hall
+  // form and progress card sit in adjacent viewport rows so the
+  // submit button is already on screen. The check is skipped if
+  // focus is outside the progress card (e.g. the user was reading
+  // the Recent runs panel while the run finished on its own --
+  // moving their focus would be a worse disruption than leaving
+  // it alone).
+  if (
+    hallProgress &&
+    hallProgress.contains(document.activeElement) &&
+    hallSubmitButton
+  ) {
+    hallSubmitButton.focus({preventScroll: true});
+  }
   if (hallProgress) hallProgress.classList.add("hidden");
 }
 
