@@ -1900,14 +1900,47 @@ function clearFieldErrorAria(input) {
 function validateVillainPool() {
   const ok = selectedVillainPool().length > 0;
   document.querySelectorAll(".hall-pool .chip-check span").forEach(el => el.classList.toggle("invalid", !ok));
+  const pool = document.querySelector(".hall-pool");
+  const group = pool && pool.closest('[role="group"]');
+  // Manage aria-invalid + aria-describedby on the role="group" wrapper
+  // so screen-reader users get the same audible "invalid: select at
+  // least one" announcement as the numeric fields do via validateField.
+  // The .invalid CSS class on each chip span only signals visually --
+  // without an ARIA pairing a user with assistive tech sees a stuck
+  // Run button with no spoken cause. Append a polite aria-live span
+  // mirroring the .field-error pattern validateField uses, then
+  // remove it when the pool re-validates so a recovered form
+  // doesn't leak a stale "select at least one" announcement on the
+  // next focus.
+  if (group) {
+    const errorId = "villain-pool-error";
+    let err = group.querySelector("#" + errorId);
+    if (!ok) {
+      if (!err) {
+        err = document.createElement("span");
+        err.id = errorId;
+        err.className = "field-error";
+        err.setAttribute("aria-live", "polite");
+        err.textContent = "Select at least one villain.";
+        group.appendChild(err);
+      }
+      group.setAttribute("aria-invalid", "true");
+      group.setAttribute("aria-describedby", errorId);
+    } else {
+      if (err) err.remove();
+      group.removeAttribute("aria-invalid");
+      if (group.getAttribute("aria-describedby") === errorId) {
+        group.removeAttribute("aria-describedby");
+      }
+    }
+  }
   // Same auto-open as validateField: if the villain section is collapsed
   // and the pool has no entries, the user sees a stuck Run button with
   // no visible 'why'. Force the villain <details> open so the red chips
   // are visible. Look up via the first chip's nearest ancestor so the
   // selector stays cheap and survives DOM restructuring.
   if (!ok) {
-    const firstChip = document.querySelector(".hall-pool");
-    const parentDetails = firstChip && firstChip.closest("details");
+    const parentDetails = pool && pool.closest("details");
     if (parentDetails) parentDetails.open = true;
   }
   return ok;
