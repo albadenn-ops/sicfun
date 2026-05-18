@@ -1421,7 +1421,21 @@ function toggleHidden(element, hidden) {
 }
 
 function jsonHeaders(includeCsrf) {
+  // Content-Type names what we're SENDING; Accept names what we want in
+  // the response. The four GET fetches that go directly to /api/health,
+  // /api/auth/me, and the two poll endpoints already set Accept:
+  // application/json inline; this brings the six POST/DELETE call sites
+  // (analyze submit, hall submit, register, login, profile save,
+  // logout, hall cancel) onto the same shape -- explicit content-
+  // negotiation hint to any intermediate proxy that might honor it
+  // (rare in our reverse-proxy stack but a documented HTTP idiom), and
+  // future-proofs against a server endpoint that someday negotiates
+  // text/html vs application/json off Accept. fetch() defaults Accept
+  // to */* when unspecified, so this is a strict-narrowing change with
+  // no on-the-wire regression for the current server which ignores the
+  // header.
   const headers = {
+    "Accept": "application/json",
     "Content-Type": "application/json"
   };
   if (includeCsrf && authState.csrfToken) {
