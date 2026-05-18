@@ -1856,9 +1856,28 @@ function renderHallResults(data) {
   // "Hall done" / runCancelled -> "Hall cancelled" / runFailed ->
   // "Hall failed") consistent with the hall-status panel verb here.
   const verb = cancelled ? "Hall cancelled" : "Hall ready";
+  // Distinguish two cancel sub-cases for the trailing badge:
+  // - Cancel landed AFTER the worker had captured at least one hand
+  //   (handsPlayed > 0): the result has partial data, badge reads
+  //   "CANCELLED (partial data)" and the leading verb's "0 hands,
+  //   +0.00 chips, ..." numbers DO reflect a real sample.
+  // - Cancel landed BEFORE the worker captured anything (handsPlayed
+  //   <= 0): the result has no useful summary; the displayed
+  //   "0 hands, +0.00 chips, +0.00 bb/100" numbers are placeholders,
+  //   not a real partial sample. Badge "CANCELLED (no data captured)"
+  //   is honest about that -- "partial data" claimed data that
+  //   wasn't there. Either summary.handsPlayed being missing or zero
+  //   triggers the no-data branch.
+  let badge = null;
+  if (cancelled) {
+    const handsCaptured = Number(summary.handsPlayed);
+    badge = Number.isFinite(handsCaptured) && handsCaptured > 0
+      ? "CANCELLED (partial data)"
+      : "CANCELLED (no data captured)";
+  }
   renderHallStatus(
     `${verb}: ${formatInteger(summary.handsPlayed)} hands, ${formatSigned(summary.heroNetChips)} chips, ${formatSigned(summary.heroBbPer100)} bb/100${durationStr}.`,
-    cancelled ? "CANCELLED (partial data)" : null
+    badge
   );
 
   if (hallKpiGrid) {
