@@ -1691,8 +1691,23 @@ function renderHallResults(data) {
   // (originally added for exactly this purpose but never wired up
   // before this commit), and reads as a visually distinct marker
   // rather than buried punctuation in a long status sentence.
+  //
+  // Include the run duration in the status message: hallActiveStartedAt
+  // is still set when renderHallResults fires (the submit handler's
+  // finally block calls finishHallProgress, which clears it, AFTER
+  // renderHallResults returns). Without this, the live "Elapsed mm:ss"
+  // counter on the progress card disappears the moment the card hides,
+  // and the result panel never says how long the run took -- a
+  // common-enough operator + power-user question that the timer is
+  // worth preserving in the completion message. Client-side duration
+  // (rather than the server's response.durationMs, which would require
+  // restructuring pollPlayingHallJob's return shape) is close enough:
+  // the polling cadence is ~750 ms so the gap between server completion
+  // and frontend observing it is bounded.
+  const durationMs = hallActiveStartedAt > 0 ? Date.now() - hallActiveStartedAt : 0;
+  const durationStr = durationMs > 0 ? ` (took ${formatDuration(durationMs)})` : "";
   renderHallStatus(
-    `Hall ready: ${formatInteger(summary.handsPlayed)} hands, ${formatSigned(summary.heroNetChips)} chips, ${formatSigned(summary.heroBbPer100)} bb/100.`,
+    `Hall ready: ${formatInteger(summary.handsPlayed)} hands, ${formatSigned(summary.heroNetChips)} chips, ${formatSigned(summary.heroBbPer100)} bb/100${durationStr}.`,
     cancelled ? "CANCELLED (partial data)" : null
   );
 
@@ -1943,6 +1958,28 @@ function formatFileSize(bytes) {
   if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
   if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${size} B`;
+}
+
+// Human-readable elapsed time in ms. Used in the hall completion
+// status message so the user sees the actual run duration after
+// finishHallProgress hides the live elapsed timer. Scales the unit
+// to the magnitude: sub-minute as plain seconds, sub-hour as
+// "Xm Ys", longer as "Xh Ym Zs". The mm:ss-pad-format used by the
+// live tickHallElapsed isn't appropriate here -- this is one-shot
+// reporting, not a moving counter, so prose-form scales better
+// across PLAYING_HALL_TIMEOUT_MS values raised past the 15-min
+// default.
+function formatDuration(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return "";
+  const sec = Math.round(n / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const remSec = sec % 60;
+  if (min < 60) return `${min}m ${remSec}s`;
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  return `${hr}h ${remMin}m ${remSec}s`;
 }
 
 function escapeHtml(value) {
