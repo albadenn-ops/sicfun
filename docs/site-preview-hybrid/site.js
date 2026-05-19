@@ -187,23 +187,29 @@ let authState = normalizeAuthState({});
 // throw -- sync from the setup batch or async from the network probes
 // -- without this catch becomes an unhandled rejection (browser
 // console only, invisible to the user) and the page silently loses
-// the half of its UI that boot() was supposed to wire up. Realistic
-// failure modes the catch matters for:
-//   - renderRecentRuns reads localStorage; Safari private mode can
-//     throw SecurityError on getItem and Firefox throws
-//     QuotaExceededError when storage is full. Either kills boot().
-//   - mirrorHelpDataToAriaLabel walks data-help anchors; a future
-//     index.html edit that drops one without updating the JS query
-//     selector list would hit an unexpected null deref here.
-//   - refreshAuthState / probeServerLimits go to /api/auth/me and
-//     /api/health. A CSP-violation SecurityError mid-fetch (the page
-//     is served with a strict CSP -- WebResponses.scala sets
-//     Content-Security-Policy on every response) wouldn't surface
-//     through describeFetchError
-//     because describeFetchError only handles TimeoutError /
-//     AbortError / NotReadableError / TypeError-network; a
-//     SecurityError would propagate up to boot's await Promise.all
-//     and reject the boot() promise.
+// the half of its UI that boot() was supposed to wire up.
+// This is primarily defense-in-depth -- every realistic failure path
+// today is ALREADY guarded internally: readRecentRuns /
+// writeRecentRuns / clearRecentRuns each wrap localStorage in
+// try/catch so Safari-private-mode SecurityError and Firefox-quota
+// QuotaExceededError get swallowed there before they can reach
+// boot(); refreshAuthState / probeServerLimits each have their own
+// try/catch around fetchWithTimeout so a network/timeout/CSP failure
+// surfaces as a no-op rather than a thrown rejection at the
+// Promise.all boundary; the DOM-touching functions all early-return
+// on null element references rather than dereferencing. So the
+// realistic "this catch fires today" scenarios are narrow:
+//   - A future refactor inside any of the above functions strips
+//     one of those internal try/catches or removes a null-guard,
+//     and the previously-swallowed error escapes for the first time.
+//   - A browser bug or extension injects a synchronous throw into
+//     a DOM API (querySelectorAll, addEventListener) the page
+//     trusts -- rare but possible, particularly with aggressive
+//     content-blockers that monkey-patch fetch / DOM APIs.
+//   - A pathological mismatch between site.js and index.html where
+//     an element id the JS dereferences without a null-guard moved
+//     in the HTML (this codebase pretty consistently null-guards,
+//     but a future addition could miss one).
 // Without the catch, the user-visible symptom is "loaded the page,
 // the sign-in panel never appeared, no error in sight". With the
 // catch the user sees the #page-init-error banner in index.html
