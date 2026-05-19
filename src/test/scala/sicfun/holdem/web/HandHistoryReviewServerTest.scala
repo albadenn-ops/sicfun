@@ -779,6 +779,57 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the hardcoded 16 KiB body cap on POST /api/auth/login (and, by
+  // call-site symmetry, /register and /profile -- all three handlers in
+  // AuthStack.scala wrap their parse in `readRequestBody(exchange,
+  // 16 * 1024)` per the three matching call sites; a single endpoint
+  // test exercises the shared readRequestBody path and proves the cap
+  // is wired up, with the per-handler symmetry left as a code-review
+  // contract). The deploy doc explicitly documents this cap as
+  // "hardcoded 16 KiB (16384 bytes) -- separate from the analyze + hall
+  // routes' MAX_UPLOAD_BYTES cap (default 2 MiB), much tighter to bound
+  // the credential-stuffing attack surface" -- a refactor that widened
+  // the cap (e.g., to use MAX_UPLOAD_BYTES) would silently expand the
+  // credential-stuffing attack surface AND make the deploy doc
+  // inaccurate. The deploy doc also documents the EXACT 413 message
+  // shape -- "the literal message `request body exceeds max upload size
+  // of 16384 bytes`" -- which a scripted client might key on for
+  // bounded-retry vs unrecoverable-error classification, so the
+  // assertion checks the full documented substring (not just the
+  // status code) to catch a future "let me make the message friendlier"
+  // refactor that broke that contract. Sends 16385 bytes (cap+1) -- the
+  // boundary check in readRequestBody is `> maxUploadBytes` so exactly
+  // 16384 would pass through (and then 400 at JSON-parse since the
+  // body isn't valid JSON); 16385 is the smallest value that exercises
+  // the 413 path. Same regression-pin pattern as c71ff6c (OIDC URL
+  // params) and 5291216 / 9af8a38 / 2064190 (operator-visible defensive
+  // contracts) -- documented body-cap behavior gets pinned so refactors
+  // can't silently regress it.
+  test("POST /api/auth/login rejects bodies exceeding the hardcoded 16 KiB cap with 413 + the documented literal error message") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          // 16385 bytes = cap + 1. Body content is intentionally non-
+          // JSON-meaningful: readRequestBody's cap check fires BEFORE
+          // JSON parsing, so any oversize body triggers it. The fast-
+          // path branch in readRequestBody uses the Content-Length
+          // header which the JDK HttpClient (used by postJson) sets
+          // automatically based on the body's byte length.
+          val oversizeBody = "x" * 16385
+          val response = postJson(s"$baseUri/api/auth/login", oversizeBody)
+          assertEquals(response.statusCode(), 413,
+            clue = s"16385-byte body (cap+1) must 413 at the readRequestBody check (AuthStack.scala's `readRequestBody(exchange, 16 * 1024)` call site for /api/auth/login); a refactor that widened the cap to MAX_UPLOAD_BYTES would let this body through silently, expanding the credential-stuffing attack surface and contradicting the deploy doc's 16 KiB claim")
+          assert(response.body().contains("max upload size of 16384 bytes"),
+            s"413 body must contain the deploy-doc-documented literal message `request body exceeds max upload size of 16384 bytes`; the documented exact wording is what scripted clients key on for bounded-retry vs unrecoverable-error classification. Body was: ${response.body()}")
+        }
+      }
+    }
+  }
+
   // Footgun without the zero-width filter in normalizeEmail (see
   // PlatformUserAuth.scala): some paste sources (text editors saving as
   // UTF-8 with BOM, clipboard pipelines that inject zero-width chars)
