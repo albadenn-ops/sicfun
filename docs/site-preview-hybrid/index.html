@@ -54,6 +54,30 @@
       </div>
     </noscript>
 
+    <!-- Mirror of the noscript-notice above, but for the "JS ran but
+         boot() threw" failure mode rather than "JS disabled". The
+         noscript path covers "no JS at all"; this element covers "JS
+         loaded but the synchronous DOM setup or the async network
+         probes inside boot() threw an unhandled exception" (e.g.
+         localStorage SecurityError in a browser private mode the
+         renderRecentRuns reader hits, a CSP-violation SecurityError
+         mid-fetch in refreshAuthState/probeServerLimits, an
+         unexpected-null in mirrorHelpDataToAriaLabel after a future
+         data-help anchor drift). Hidden in the happy path via the
+         .hidden class; site.js's boot().catch() handler (see
+         showBootError in that file) removes the .hidden class to
+         reveal it when boot rejects. Visual treatment intentionally
+         reuses noscript-notice so the two failure modes share the
+         same "page-not-ready warning" affordance -- one less style
+         to maintain, identical semantic intent. role="alert" +
+         aria-live="assertive" so screen readers announce the banner
+         immediately when it gets revealed (the user doesn't have to
+         re-Tab to discover it). -->
+    <div id="page-init-error" class="noscript-notice hidden" role="alert" aria-live="assertive">
+      <p><strong>This page didn't finish loading.</strong> Some controls (sign-in, file upload, Playing Hall) may not respond.</p>
+      <p>Try reloading the page. If this keeps happening, check the browser's developer console for details and share them with your SICFUN operator.</p>
+    </div>
+
     <header class="site-header surface">
       <div class="brand-block">
         <a class="brand" href="#hero">SICFUN</a>

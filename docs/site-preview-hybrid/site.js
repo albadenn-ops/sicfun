@@ -181,7 +181,56 @@ function describeFetchError(error) {
 
 let authState = normalizeAuthState({});
 
-void boot();
+// boot() is async and runs network probes AFTER a batch of synchronous
+// DOM setup (mirrorHelpDataToAriaLabel, renderPresetBar,
+// renderRecentRuns, wireHallValidation, syncRandomSeedState). Any
+// throw -- sync from the setup batch or async from the network probes
+// -- without this catch becomes an unhandled rejection (browser
+// console only, invisible to the user) and the page silently loses
+// the half of its UI that boot() was supposed to wire up. Realistic
+// failure modes the catch matters for:
+//   - renderRecentRuns reads localStorage; Safari private mode can
+//     throw SecurityError on getItem and Firefox throws
+//     QuotaExceededError when storage is full. Either kills boot().
+//   - mirrorHelpDataToAriaLabel walks data-help anchors; a future
+//     index.html edit that drops one without updating the JS query
+//     selector list would hit an unexpected null deref here.
+//   - refreshAuthState / probeServerLimits go to /api/auth/me and
+//     /api/health. A CSP-violation SecurityError mid-fetch (the page
+//     is served with a strict CSP -- WebResponses.scala sets
+//     Content-Security-Policy on every response) wouldn't surface
+//     through describeFetchError
+//     because describeFetchError only handles TimeoutError /
+//     AbortError / NotReadableError / TypeError-network; a
+//     SecurityError would propagate up to boot's await Promise.all
+//     and reject the boot() promise.
+// Without the catch, the user-visible symptom is "loaded the page,
+// the sign-in panel never appeared, no error in sight". With the
+// catch the user sees the #page-init-error banner in index.html
+// directing them to reload, and the console still has the full
+// stack for operator/dev triage. The banner mirrors the noscript-
+// notice's visual treatment so the two failure modes ("JS disabled"
+// vs "JS ran but threw") read identically as page-level warnings.
+boot().catch(showBootError);
+
+function showBootError(error) {
+  // Surface the technical detail to the developer/operator via the
+  // browser console; the user sees only the generic banner.
+  // Intentionally no /api/client-error report: this codebase doesn't
+  // ship a client-error sink endpoint (by design), and a CSP /
+  // network error in boot() itself could be exactly the thing
+  // preventing the report from getting through.
+  if (typeof console !== "undefined" && typeof console.error === "function") {
+    console.error("SICFUN: page initialization failed", error);
+  }
+  const banner = document.getElementById("page-init-error");
+  // No-op silently if the banner element is absent (HTML/JS partial-
+  // deploy mismatch). The fallback under that scenario is the
+  // existing "silently half-broken page" symptom -- no worse than
+  // pre-catch behavior, just lacking the visible banner this commit
+  // adds. The console.error above still fires regardless.
+  if (banner) banner.classList.remove("hidden");
+}
 
 if (form && fileInput && siteSelect && heroInput) {
   form.addEventListener("submit", async event => {
