@@ -226,6 +226,21 @@ if (form && fileInput && siteSelect && heroInput) {
     if (!file) {
       renderStatus("Choose a `.txt` hand-history export to start the review.");
       reviewResults.classList.add("hidden");
+      // Move focus to the file input so a keyboard / screen-reader user
+      // can act on the announced status immediately. Without the focus
+      // move, focus stays on the submit button after the renderStatus
+      // call and the user has to Shift-Tab back through the hero-name
+      // and site fields to reach the input the announcement is asking
+      // them to fix. The aria-live region announces WHAT to fix; this
+      // focus move puts the cursor on WHERE to fix it, collapsing the
+      // announce-then-act loop into one step. preventScroll omitted
+      // because the file input sits above the submit button on the same
+      // card -- the natural scroll lands the user on it. Same focus-
+      // restoration pattern as the post-logout authEmail.focus() at
+      // line 1378 and the post-row-remove hallSubmitButton.focus() at
+      // line 2936; mirrors the codebase's existing "move focus to the
+      // next action target on every state transition" convention.
+      fileInput.focus();
       return;
     }
 
@@ -238,6 +253,11 @@ if (form && fileInput && siteSelect && heroInput) {
       // split rather than guess the cap.
       renderStatus(`File is ${formatFileSize(file.size)}, exceeds the ${formatFileSize(maxUploadFileBytes)} upload limit. Trim or split the hand history and try again.`);
       reviewResults.classList.add("hidden");
+      // Same focus-to-file-input restoration as the !file case above --
+      // the announced action ("Trim or split the hand history and try
+      // again") presupposes the user re-picks a different file via the
+      // file input, so keyboard/SR users land on that widget directly.
+      fileInput.focus();
       return;
     }
 
@@ -248,6 +268,11 @@ if (form && fileInput && siteSelect && heroInput) {
       // left only an empty placeholder.
       renderStatus(`${file.name} is empty. Pick a hand-history export with at least one hand.`);
       reviewResults.classList.add("hidden");
+      // Same focus-to-file-input restoration as the two early-return
+      // paths above -- the "Pick a hand-history export with at least
+      // one hand" message presupposes the user re-picks via the file
+      // input, so keyboard/SR users land on that widget directly.
+      fileInput.focus();
       return;
     }
 
