@@ -19,6 +19,20 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0a0f0d">
   <title>SICFUN | Hand-History Review &amp; Playing Hall</title>
+  <!-- Empty data-URI favicon suppresses the spurious GET /favicon.ico
+       that browsers default to when no rel=icon is declared. Without
+       this link, every page load fetches /favicon.ico, the static
+       handler 404s (no favicon.ico in the bundle), and the audit log
+       picks up a noise line per page load. The CSP set by
+       WebResponses.scala includes `data:` in its img-src source-list
+       specifically to permit this URI -- both halves (the CSP source
+       AND this link's `data:,` href) are co-required for the
+       suppression to work, and HandHistoryReviewServerTest's CSP-
+       directive-pin block enforces the CSP half. To ship a real
+       icon, ADD favicon.ico to the static bundle AND drop `data:`
+       from the CSP -- otherwise the policy stays unnecessarily
+       permissive (allowing a data: img source that no longer has a
+       documented consumer). -->
   <link rel="icon" href="data:,">
   <meta
     name="description"
