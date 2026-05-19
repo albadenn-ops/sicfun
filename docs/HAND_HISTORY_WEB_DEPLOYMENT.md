@@ -2,6 +2,8 @@
 
 This guide is for the packaged Windows hand-history review product under `dist/hand-history-web`.
 
+**See also:** [`docs/OPERATOR_RUNBOOK.md`](OPERATOR_RUNBOOK.md) (particularly section 5A) for the day-to-day operator-on-the-host workflow: source-tree launchers, service install / start / drain-stop / uninstall scripts, log triage entries (the Troubleshooting section walks the `/api/ready` `503` + `/api/health` `200` triage flow, the upload-UI-404-with-health-200 case, etc.), and deeper observability + security notes that this guide summarizes but the runbook owns. The two docs are complementary -- this one is the packaged-release reference (and ships verbatim as the bundle root's `README.md` so customers reach it without needing the source tree), the runbook is the day-to-day operations companion.
+
 ## Two Release Variants
 
 Two release scripts produce two artifact shapes. Both serve the same web app; the difference is what they bundle for the host.
