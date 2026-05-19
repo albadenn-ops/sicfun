@@ -1282,6 +1282,29 @@ class HandHistoryReviewServerTest extends FunSuite:
         // would silently regress the documented privacy floor.
         assertEquals(headerValue(index, "Referrer-Policy"), Some("no-referrer"))
         assertEquals(headerValue(index, "X-Robots-Tag"), Some("noindex, nofollow"))
+        // Pin the ABSENCE of Strict-Transport-Security. The deploy doc's
+        // Reverse-Proxy section explicitly documents the design choice:
+        // "The origin does NOT emit Strict-Transport-Security because it
+        // does not terminate TLS. For internet-facing deployments behind
+        // an HTTPS-terminating proxy, configure the proxy to add an HSTS
+        // header... For private-network/loopback deployments, HSTS is
+        // unnecessary." A well-meaning refactor that added HSTS to
+        // applySecurityHeaders would: (1) silently contradict the
+        // documented "we don't emit HSTS, the proxy does" stance, (2) brick
+        // mixed http+https deployment workflows (once a browser sees
+        // max-age in flight it REFUSES to fall back to http for that host
+        // until the TTL expires, which the deploy doc explicitly warns
+        // about: "a misconfigured HSTS during testing can lock you out of
+        // plain-HTTP access until the header's TTL expires"), and (3)
+        // potentially conflict with the proxy's own HSTS header on
+        // internet-facing deployments (two competing max-age values, the
+        // browser uses the most recently received but a probe sequence
+        // hitting origin-then-proxy-then-origin would see oscillation).
+        // Absence is a stronger contract than presence here -- a refactor
+        // adding HSTS is "obviously a security improvement" by intuition,
+        // so the test needs to be specific that we DO NOT want it.
+        assertEquals(headerValue(index, "Strict-Transport-Security"), None,
+          clue = "applySecurityHeaders must NOT emit Strict-Transport-Security -- the deploy doc's Reverse-Proxy section explicitly documents the origin as TLS-unaware and HSTS as the proxy's responsibility, and emitting it from the origin breaks mixed http+https testing workflows by locking the browser into https-only fallback")
 
         val oversizedPayload = s"""{"handHistoryText":"${"A" * 256}"}"""
         val oversizedResponse = postJson(s"$baseUri/api/analyze-hand-history", oversizedPayload)
