@@ -2920,6 +2920,119 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the OIDC-vs-local-password email-collision defense (deliberate
+  // account-hijack mitigation per the deploy doc + runbook documentation).
+  // The scenario: a local-password account exists for `alice@example.com`,
+  // and an OIDC sign-in arrives carrying the same email. Without the
+  // collision check, an attacker who controlled a Google account at
+  // alice@example.com (e.g., the legitimate owner of the email at Google,
+  // having registered there AFTER the local-password account was created
+  // on this server) could complete OIDC sign-in and silently take over
+  // the local-password account's session and stored profile data. The
+  // upsertOidcIdentity collision check at PlatformUserAuth.scala line 622
+  // closes this by refusing the upsert with the documented exact error
+  // string "an account with that email already exists; sign in with its
+  // existing method". The deploy doc enumerates this as one of the 13
+  // finishOidc Left values, the runbook's section 5A line 337 explains
+  // the operator-facing triage, and the frontend's lookupOidcErrorMessage
+  // maps this string to a user-friendly message. A refactor that removed
+  // the collision check (or changed the error string in a way that broke
+  // the frontend's exact-match lookup) would silently re-open the hijack
+  // path AND break the documented support triage flow without any test
+  // failure. Same regression-pin pattern as the rest of the chain --
+  // documented security-relevant behavior gets pinned so refactors can't
+  // silently regress it.
+  test("OIDC callback rejects sign-in when the email matches an existing local-password account -- pins the deliberate account-hijack defense documented in deploy doc + runbook") {
+    val collidingEmail = "collision@example.com"
+    val provider = new PlatformUserAuth.OidcProvider:
+      override val id = "google"
+      override val displayName = "Google"
+      override def authorizationUri(state: String, codeChallenge: String): String =
+        s"https://accounts.google.test/o/oauth2/v2/auth?state=$state&code_challenge=$codeChallenge"
+      override def exchangeCode(code: String, codeVerifier: String): Either[String, PlatformUserAuth.OidcIdentity] =
+        Right(PlatformUserAuth.OidcIdentity(
+          subject = "google-collision-12345",
+          email = collidingEmail,
+          displayName = "OIDC Hijacker",
+          avatarUrl = None
+        ))
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Step 1: Register a local-password user with the colliding
+          // email so the OIDC upsert has something to collide with.
+          val register = postJson(s"$baseUri/api/auth/register",
+            s"""{"email":"$collidingEmail","password":"correct-horse-battery","displayName":"Local Owner"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "local-password registration must succeed before the OIDC collision check can be exercised; the test's whole purpose is that an existing local-password account is in place when the OIDC attempt arrives")
+
+          // Step 2: Start a fresh OIDC flow as an anonymous client (no
+          // session from the register response is carried forward) --
+          // this is the threat model: an attacker hitting the OIDC
+          // entry point with the colliding email, not the legitimate
+          // local-password user signing in again via Google.
+          val start = get(s"$baseUri${provider.startPath}")
+          assertEquals(start.statusCode(), 302,
+            clue = "OIDC /start always 302-redirects to the provider")
+          val state = queryParam(headerValue(start, "Location").getOrElse(""), "state")
+            .getOrElse(fail("missing OIDC state in /start redirect"))
+          val stateCookie = headerValue(start, "Set-Cookie")
+            .map(_.takeWhile(_ != ';'))
+            .getOrElse(fail("missing OIDC state cookie from /start"))
+
+          // Step 3: Complete the OIDC callback with the colliding email
+          // in the exchanged identity. The collision check fires at
+          // upsertOidcIdentity time.
+          val callback = get(
+            s"$baseUri${provider.callbackPath}?state=$state&code=test-code",
+            Map("Cookie" -> stateCookie)
+          )
+          assertEquals(callback.statusCode(), 302,
+            clue = "OIDC callback always 302-redirects (success or failure shape is wire-identical)")
+          val location = headerValue(callback, "Location").getOrElse(fail("missing Location header on callback redirect"))
+
+          // The redirect must NOT be the success path -- it must
+          // carry the documented auth_error= with the collision
+          // message. Check both substrings (the auth_error= prefix
+          // proves it's the failure landing page, and the
+          // already%20exists fragment proves the specific collision
+          // error fired, not some other finishOidc Left).
+          assert(location.contains("auth_error="),
+            s"OIDC collision must redirect to ?auth_error=... not the success page; got: $location")
+          // The error string is "an account with that email already exists;
+          // sign in with its existing method" -- urlEncode replaces spaces
+          // with %20, so "already exists" becomes "already%20exists" in
+          // the redirect URL. Checking the substring AFTER url-encoding
+          // catches both message-text changes AND any future shift to a
+          // different encoding (e.g., `+` vs `%20`).
+          assert(location.toLowerCase.contains("already%20exists"),
+            s"OIDC collision must surface the documented 'an account with that email already exists' message in the auth_error redirect; got: $location")
+
+          // The critical security check: no session cookie is issued.
+          // If a session cookie WERE installed, an attacker would have
+          // taken over the local-password account -- the entire point
+          // of the collision check is to prevent this. A future refactor
+          // that "fixed" the collision by linking the OIDC identity to
+          // the existing local-password account would silently open
+          // exactly the account-hijack path the defense was designed to
+          // close.
+          assertEquals(headerValue(callback, "Set-Cookie"), None,
+            "OIDC collision MUST NOT install a session cookie -- doing so would let an attacker take over a local-password account via Google OIDC if they control a Google account with the same email. The deliberate account-hijack defense documented in deploy doc + runbook depends on the OIDC flow refusing to mint a session in this case.")
+        }
+      }
+    }
+  }
+
   test("OIDC callback refuses malformed queries (no params, partial params, unknown state)") {
     // Three callback-side failure modes besides the provider-error case:
     //   1. No query at all -- nothing to validate against.
