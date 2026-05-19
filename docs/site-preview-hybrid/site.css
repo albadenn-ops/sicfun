@@ -679,6 +679,34 @@ h3 {
     outline: 2px solid CanvasText;
     outline-offset: -2px;
   }
+
+  /* In normal mode, buttons signal keyboard focus via box-shadow (the
+     green glow on .button:focus-visible / .button-secondary:focus-
+     visible / .button-google:focus-visible above). The CSS Color
+     Adjustment Module Level 1 spec lets UAs suppress box-shadow when
+     `forced-colors: active` is in effect (Windows High Contrast /
+     Contrast Themes in Win 11), and the major browsers do exactly
+     that -- box-shadow is treated as a decorative effect rather than
+     a structural style. The net result on a button in forced-colors
+     mode: NO visible focus indicator on Tab-through, because the
+     focused-state's only difference from the resting state was the
+     glow that just got suppressed. Add an explicit outline so
+     keyboard users in forced-colors-active environments still see
+     where focus lands. Uses `CanvasText` (the system foreground
+     color) so the outline tracks the user's chosen high-contrast
+     scheme rather than carrying a hardcoded hex that the OS might
+     remap unpredictably. outline-offset: 2px draws the indicator
+     OUTSIDE the button's border so it doesn't collide with the
+     button text or the resting-state border styling. Same
+     `outline: 2px solid CanvasText` shape as the chip-check rule
+     above for visual consistency across the page's keyboard-focus
+     affordances. */
+  .button:focus-visible,
+  .button-secondary:focus-visible,
+  .button-google:focus-visible {
+    outline: 2px solid CanvasText;
+    outline-offset: 2px;
+  }
 }
 
 /* The actual <input type="checkbox"> is visually hidden (opacity:0,
