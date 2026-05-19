@@ -2329,8 +2329,29 @@ class HandHistoryReviewServerTest extends FunSuite:
             s"session cookie must be SameSite=Lax for CSRF defense; got: $setCookie")
           assert(setCookie.contains("Path=/"),
             s"session cookie must scope to Path=/; got: $setCookie")
-          assert(setCookie.contains("Max-Age="),
-            s"session cookie must declare Max-Age so browsers expire it on schedule; got: $setCookie")
+          // Pin the EXACT Max-Age value (12h = 43200 seconds), not
+          // just "Max-Age is present somewhere in the header." The
+          // default sessionTtlMs is PlatformUserAuth.DefaultSessionTtlMs
+          // = 12L * 60L * 60L * 1000L = 43_200_000 ms; the cookie
+          // serializer (sessionCookieHeader) divides ttlMs by 1000 so
+          // the Max-Age attribute carries 43200. The deploy doc's
+          // USER_AUTH_SESSION_TTL_MS bullet documents this exact 12h
+          // default (with the "FIXED at login time, NOT refreshed by
+          // subsequent activity" nuance the deploy-doc + runbook
+          // explanations both depend on -- see the record-slides-but-
+          // cookie-doesn't mechanic). A refactor changing the default
+          // (e.g. to 1h for tighter post-leak window or 24h for less
+          // re-auth friction) would silently invalidate both docs'
+          // claims AND change the leaked-token-lifetime upper bound
+          // operators reason about for incident response. Same exact-
+          // value pinning rationale as 121e5b5 (OIDC state-cookie
+          // Max-Age=600 pin). Test config uses
+          // PlatformUserAuth.Config(storePath = storePath) with no
+          // sessionTtlMs override so the default applies; if a future
+          // test wants a different TTL it should override it
+          // explicitly + adjust this assertion in lockstep.
+          assert(setCookie.contains("Max-Age=43200"),
+            s"session cookie must have Max-Age=43200 (default 12h sessionTtlMs) per deploy doc + runbook; got: $setCookie")
           assert(!setCookie.contains("Secure"),
             s"loopback test deployment with cookieSecure=false must NOT set Secure (would prevent cookie over HTTP); got: $setCookie")
           // Insecure mode: cookie name is `sicfun_session`. The `__Host-` prefix
