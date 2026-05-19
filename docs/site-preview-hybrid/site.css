@@ -385,6 +385,34 @@ h3 {
   box-shadow: none;
 }
 
+/* Forced-colors mode (Windows High Contrast) automatically applies
+   `color: GrayText` to :disabled elements via the UA stylesheet --
+   that's the system-defined "this control is disabled" signal in the
+   user's chosen high-contrast palette. But opacity is NOT among the
+   properties forced-colors flattens (only colors, background-color,
+   border-color, box-shadow get the flattening treatment), so the
+   opacity:0.6 from the rule above is still in effect inside forced-
+   colors. Result: a GrayText-colored button rendered at 60% opacity
+   against the system Canvas -- significantly REDUCED contrast vs the
+   100% opacity GrayText that forced-colors users explicitly opted
+   into for maximum visibility. The whole point of the high-contrast
+   theme is to maximize signal in low-vision conditions, and the
+   opacity-faded variant defeats that. Reset opacity to 1 so the
+   system's GrayText color provides the disabled signal at full
+   contrast, the way the user's accessibility settings intend. The
+   earlier comment block on `.button:disabled` was wrong to claim
+   "forced-colors flattens opacity anyway" -- it doesn't, and this
+   override is needed. cursor + box-shadow don't need forced-colors
+   overrides: cursor isn't a color property, and box-shadow is
+   already none in the base disabled rule (and forced-colors would
+   strip it anyway). */
+@media (forced-colors: active) {
+  .button:disabled,
+  .button-secondary:disabled {
+    opacity: 1;
+  }
+}
+
 .info-card-muted,
 .fit-card-muted {
   border-left: 2px solid rgba(255, 77, 0, 0.4);
