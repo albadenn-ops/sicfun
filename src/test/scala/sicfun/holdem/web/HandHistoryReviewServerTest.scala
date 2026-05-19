@@ -867,6 +867,55 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Parallel regression test for handleAuthRegister's 409 -- different
+  // rationale than handleAuthLogin's 409 (user-error prevention only, no
+  // leaked-token security implication; see the comment block on
+  // handleAuthRegister added in 6d01931) but the same wire contract: 409
+  // status + "already signed in" body. The frontend's submitAuth handler
+  // (site.js) treats 409 from EITHER endpoint identically -- it calls
+  // refreshAuthState to pull the live /api/auth/me state and flip the UI
+  // from sign-in-form to signed-in-view. If a future refactor changed
+  // register's 409 to a different code (e.g. 200 with a body field, or
+  // 400), the security-relevant login 409 might keep working but the
+  // frontend's state-divergence-refresh would silently break for the
+  // register flow, leaving users stuck staring at a stale sign-in form
+  // when their sibling tab actually signed them in. Pin both endpoints'
+  // 409 contracts so a refactor of either is caught.
+  test("register while already authenticated returns 409 'already signed in' for frontend state-divergence-refresh parity") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // First register establishes a session.
+          val firstRegister = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"alice@example.com","password":"correct-horse-battery","displayName":"Alice"}"""
+          )
+          assertEquals(firstRegister.statusCode(), 201)
+          val cookieHeader = sessionCookie(firstRegister)
+
+          // Second register with the same session cookie + a DIFFERENT email
+          // (so the duplicate-email-already-exists 400 doesn't fire first;
+          // we're testing the auth-state 409 gate specifically, which fires
+          // BEFORE the register-storage step).
+          val secondRegister = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"bob@example.com","password":"different-passphrase","displayName":"Bob"}""",
+            Map("Cookie" -> cookieHeader)
+          )
+          assertEquals(secondRegister.statusCode(), 409,
+            clue = "register attempt with a valid session cookie must return 409, not 201 -- the gate prevents the user from accidentally registering a second account while still signed in")
+          assertEquals(jsonBody(secondRegister)("error").str, "already signed in",
+            clue = "409 body must carry the exact `already signed in` text -- the frontend's submitAuth handler keys on this for the state-divergence-refresh and treats both register-409 and login-409 identically")
+        }
+      }
+    }
+  }
+
   test("PlatformUserAuth.Service.create returns a clear error for a corrupted user store file") {
     withUserStorePath { storePath =>
       // Write garbage that ujson will reject. Without the file-path-aware wrap,
