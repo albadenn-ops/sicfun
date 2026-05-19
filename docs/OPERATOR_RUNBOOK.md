@@ -411,6 +411,18 @@ Web upload UI returns `404 not found` but `/api/health` is `200`:
 - Cross-check the startup-banner log line for `staticDir=<resolved-absolute-path>` to see what path the server actually resolved -- the resolved absolute path can differ from the path you set when relative-vs-absolute semantics + an unexpected cwd combine.
 - Fix: set `STATIC_DIR` (env var) or `-StaticDir <path>` (CLI flag) to the absolute path of the bundle's `static/` subdirectory (`docs/site-preview-hybrid` in source mode), then restart the service to pick up the change. See `docs/HAND_HISTORY_WEB_DEPLOYMENT.md` for the full discussion.
 
+`/api/ready` returns `503` but `/api/health` is `200`:
+- The server is up (`/api/health` always returns `200` while the JVM is responding -- it's a pure liveness probe with no `503` path) but the instance is not currently accepting new analysis or hall jobs. The 503 has three distinct trigger reasons surfaced as `reason=<value>` in the `/api/ready` body (mirrored as `readyReason=<value>` in `/api/health`); triage by reading that field.
+- Triage:
+  ```
+  curl -s http://<host>:<port>/api/health | jq '{readyReason, draining, drainSignalPresent, queuedJobs, runningJobs, timedOutWorkersInFlight}'
+  ```
+  That projection names which of the three modes fired in one shot.
+- `readyReason=draining`: a drain signal is active. Either an operator created the `DRAIN_SIGNAL_FILE` to pre-stage a rolling restart (check `drainSignalPresent: true` -- remove the sentinel file to undrain), or the JVM shutdown hook is running (SIGTERM / Ctrl-C in flight; `drainSignalPresent: false` plus `reason=draining` means the process is exiting and there is no undrain path). Expected during rolling restarts; the deploy doc's `DRAIN_SIGNAL_FILE` bullet covers the four-step rolling pattern.
+- `readyReason=queue-full`: the shared `MAX_QUEUED_JOBS` / `MAX_CONCURRENT_JOBS` budget is saturated -- analyze and hall job submits share one `ThreadPoolExecutor` + one bounded queue. Check `queuedJobs` (vs `maxQueuedJobs` from the same response) and `runningJobs` (vs `maxConcurrentJobs`) -- both will be at or near their caps. Either raise the caps in `conf/hand-history-web.env` and restart, or wait for in-flight jobs to drain. The `POST /api/analyze-hand-history` and `POST /api/playing-hall` submit endpoints also return 503 in this state with body `... queue is full; try again later` and `Retry-After: 5`.
+- `readyReason=timed-out-worker`: an analyze or hall job hit its respective timeout (`ANALYSIS_TIMEOUT_MS` / `PLAYING_HALL_TIMEOUT_MS`), the worker was interrupted, but the worker thread has NOT yet finished unwinding -- the pool still considers the slot busy and admission gates close pre-emptively to prevent re-saturating an already-stressed pool. Check `timedOutWorkersInFlight` -- a positive integer means N workers are mid-unwind. Self-recovers in seconds for cleanly interruptible code paths; if the value stays positive for many minutes, the underlying worker is hung in a non-interruptible call (native CUDA/JNI code, blocking I/O without `InterruptedException` handling) and a process restart is the only escape.
+- Fix matrix: `draining` → finish the planned restart or remove `DRAIN_SIGNAL_FILE`; `queue-full` → raise budgets or wait; `timed-out-worker` → wait (seconds) or restart (minutes-stuck). See `docs/HAND_HISTORY_WEB_DEPLOYMENT.md` for the full readiness-reason + capacity-tuning discussion.
+
 ## 7. Minimal Command Set
 
 The minimal set most operators need:
