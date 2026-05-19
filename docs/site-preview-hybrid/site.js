@@ -975,11 +975,12 @@ function applyAuthState(data, flashMessage = "") {
   // leak on shared-computer setups where the next person sitting down
   // sees the previous user's hero name, decision EVs, per-opponent
   // exploit hints (analyze) or per-villain chip flow + model id (hall).
-  // 6fa2c08 closed only the explicit-logout path by adding the hide
-  // code inline to logout(); centralising it here covers the
-  // session-expiry + sibling-tab paths too. Same render functions and
-  // initial copy as that commit so the transition lands on a clean
-  // slate identical to a freshly-loaded page.
+  // An earlier version of the codebase closed only the explicit-logout
+  // path by adding the hide code inline to logout(); centralising it
+  // here covers the session-expiry + sibling-tab paths too. Same
+  // render functions and initial copy used historically so the
+  // transition lands on a clean slate identical to a freshly-loaded
+  // page.
   //
   // The explicit logout() ALSO does a fuller wipe (heroInput +
   // siteSelect + hall form via .reset() + Recent runs from
@@ -1519,10 +1520,11 @@ async function logout() {
     // status cards to their initial pre-run copy, and clears any
     // terminal document.title -- closes the privacy leak on shared
     // browsers (the previous user's hero name, decision EVs, opponent
-    // reads, per-villain chip flow). Moved into applyAuthState in the
-    // commit after 6fa2c08 so the same hide also fires on session-
-    // expiry-mid-poll (maybeReauthOn401 -> refreshAuthState -> apply)
-    // and cross-tab logout, not just on this explicit-logout path.
+    // reads, per-villain chip flow). Moved into applyAuthState (from
+    // an earlier inline-in-logout() location) so the same hide also
+    // fires on session-expiry-mid-poll (maybeReauthOn401 ->
+    // refreshAuthState -> apply) and cross-tab logout, not just on
+    // this explicit-logout path.
     applyAuthState(body, "Signed out.");
     // applyAuthState -> updateAccountUi hides the profile card (which
     // contained the Sign Out button the user just clicked), so the
