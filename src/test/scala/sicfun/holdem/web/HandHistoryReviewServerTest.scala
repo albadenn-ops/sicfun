@@ -455,6 +455,72 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pins the userAuthPendingOidcFlows counter that operators rely on for
+  // triage per the runbook's OIDC silent-failure entry (added in c7b18cd):
+  // "userAuthPendingOidcFlows counting up steadily ... WITHOUT a
+  // corresponding stream of auth.oidc.success / auth.oidc.failure log
+  // lines is the signature of 'users start, never finish.'" The triage
+  // depends on the counter incrementing on /start and decrementing when
+  // the matching /callback consumes the state-store entry. If a future
+  // refactor accidentally broke either side of that round-trip (always
+  // reported 0, decremented on /start, etc.), the operator triage
+  // guidance would silently mislead. Pin the round trip in a test so a
+  // future regression is caught by CI rather than by a confused operator.
+  test("userAuthPendingOidcFlows increments on /start and decrements on the matching /callback consume") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Baseline: no /start calls yet, counter at 0.
+          val healthBefore = getJson(s"$baseUri/api/health")
+          assertEquals(healthBefore("userAuthPendingOidcFlows").num.toInt, 0,
+            clue = "no OIDC flows started, so pending count must be 0")
+
+          // /start creates a state-store entry and returns a 302 redirect
+          // to the provider. The counter increments by 1 -- this is the
+          // signal operators use to spot the "users start, never finish"
+          // pattern when /callback never lands.
+          val start = get(s"$baseUri${provider.startPath}")
+          assertEquals(start.statusCode(), 302)
+          val redirect = headerValue(start, "Location").getOrElse(fail("missing OIDC redirect Location header"))
+          val state = queryParam(redirect, "state").getOrElse(fail("missing OIDC state query parameter"))
+          val stateCookie = headerValue(start, "Set-Cookie")
+            .map(_.takeWhile(_ != ';'))
+            .getOrElse(fail("missing OIDC state cookie"))
+
+          val healthMidFlow = getJson(s"$baseUri/api/health")
+          assertEquals(healthMidFlow("userAuthPendingOidcFlows").num.toInt, 1,
+            clue = "after /start, exactly one OIDC flow is pending callback completion -- this is the field operators key on for the 'users start, never finish' triage pattern")
+
+          // Matching /callback consumes the state-store entry. The counter
+          // returns to 0 -- the pending count being 0 again is operationally
+          // distinct from "no /start ever happened" because log lines
+          // (auth.oidc.start + auth.oidc.success) still record the flow.
+          val callback = get(
+            s"$baseUri${provider.callbackPath}?state=$state&code=test-code",
+            Map("Cookie" -> stateCookie)
+          )
+          assertEquals(callback.statusCode(), 302,
+            clue = "callback should succeed with valid state + cookie")
+
+          val healthAfter = getJson(s"$baseUri/api/health")
+          assertEquals(healthAfter("userAuthPendingOidcFlows").num.toInt, 0,
+            clue = "after the callback consumes the state entry, pending count returns to 0 -- the round trip closes cleanly")
+        }
+      }
+    }
+  }
+
   test("OIDC sign-up also honors the max-user cap so it cannot be a back door past the local-registration defense") {
     // The disk-fill defense applies to ALL new-user paths, not just local
     // registration. Before this fix, upsertOidcIdentity skipped the cap
