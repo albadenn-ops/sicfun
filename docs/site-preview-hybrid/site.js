@@ -1738,7 +1738,9 @@ function setHallSubmitting(isSubmitting) {
 // Cache the last-rendered status string so a poll loop that calls
 // renderStatus with the SAME message every ~750ms (e.g. status='running'
 // throughout a 2-min analyze run) doesn't keep mutating the DOM. The
-// review-panel <article> carries aria-live="polite", and while most
+// #review-status div carries aria-live="polite" (moved down from the
+// parent #review-panel article in 2a1e02d to narrow the announcement
+// surface), and while most
 // modern screen readers de-dupe identical announcements per the aria-
 // live spec's "if the announcement text is identical to the previous
 // one, skip it" guidance, the spec doesn't MANDATE de-dup and some
@@ -2835,11 +2837,12 @@ function renderPresetBar() {
         // applyHallConfig's silent mutation of 15+ fields would
         // otherwise be invisible -- the user clicks a preset, hears
         // nothing, and has to Tab through the form to verify. The
-        // hall-panel is aria-live=polite so this renderHallStatus
-        // call queues a polite announcement; the message is also
-        // visible context for sighted users who already saw the
-        // values change. Transient: the next renderHallStatus on
-        // submit / validation / poll overwrites it.
+        // #hall-status div is aria-live=polite (moved down from the
+        // parent .hall-panel article in 2a1e02d) so this
+        // renderHallStatus call queues a polite announcement; the
+        // message is also visible context for sighted users who
+        // already saw the values change. Transient: the next
+        // renderHallStatus on submit / validation / poll overwrites it.
         renderHallStatus(`Loaded preset: ${preset.label}.`);
       }
     });
@@ -3024,7 +3027,8 @@ function renderRecentRuns() {
       // run mutates 15+ form values plus the random-seed checkbox;
       // without an announcement screen readers and distant-focus
       // keyboard users have no signal that the click did anything.
-      // The hall-panel is aria-live=polite so renderHallStatus
+      // The #hall-status div is aria-live=polite (moved down from
+      // the parent .hall-panel article in 2a1e02d) so renderHallStatus
       // queues the announcement.
       const ts = new Date(entry.timestamp).toLocaleString();
       renderHallStatus(`Loaded run from ${ts}.`);
