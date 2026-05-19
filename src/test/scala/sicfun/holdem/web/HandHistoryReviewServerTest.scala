@@ -2436,6 +2436,30 @@ class HandHistoryReviewServerTest extends FunSuite:
             s"__Host- prefix requires Path=/, got: $setCookie")
           assert(!setCookie.contains("Domain="),
             s"__Host- prefix forbids Domain attribute, got: $setCookie")
+          // Symmetric coverage with the insecure-mode session-cookie
+          // wire-format test above: both modes share the same
+          // sessionCookieHeader code path and must carry the same
+          // generic-security attributes (HttpOnly to block JS-side
+          // theft via XSS, SameSite=Lax for CSRF defense on cross-
+          // origin POSTs, Max-Age=43200 for the documented 12h
+          // sessionTtlMs default per bd8e7f3's exact-value pinning
+          // rationale). The insecure-mode test pins all three on the
+          // sicfun_session=... cookie; before this addition, the
+          // secure-mode test only pinned __Host-prefix-specific
+          // attributes (__Host-, Secure, Path=/, !Domain=), so a
+          // refactor that broke ONLY the secure-mode branch of
+          // sessionCookieHeader (e.g. dropped HttpOnly or changed
+          // SameSite from Lax to None, both of which would be
+          // catastrophic for XSS / CSRF defense respectively) would
+          // pass this test silently. Mirror the insecure-mode
+          // assertions so a future regression has to break BOTH
+          // branches to slip through CI.
+          assert(setCookie.contains("HttpOnly"),
+            s"secure-mode cookie must be HttpOnly to block JS read access (XSS defense); got: $setCookie")
+          assert(setCookie.contains("SameSite=Lax"),
+            s"secure-mode cookie must be SameSite=Lax for CSRF defense; got: $setCookie")
+          assert(setCookie.contains("Max-Age=43200"),
+            s"secure-mode cookie must have Max-Age=43200 (default 12h sessionTtlMs) -- same exact-value pin as the insecure-mode test (see bd8e7f3's deploy-doc + runbook citation for the 12h default's operator-relevance); got: $setCookie")
         }
       }
     }
