@@ -470,8 +470,22 @@
           </div>
         </article>
 
-        <article class="frame review-panel" id="review-panel" aria-live="polite">
-          <div class="review-status" id="review-status">
+        <article class="frame review-panel" id="review-panel">
+          <!-- aria-live="polite" is on the status div (not the parent article)
+               so screen readers announce ONLY the brief queued/running/completed
+               status text that renderStatus updates, NOT the entire #review-results
+               panel that fills in at completion (summary grid + decisions list +
+               opponent notes + trace). The article-level version of this attribute
+               propagated to all descendants -- so the hundreds of words inside
+               the results panel got queued for the SR voice at every job
+               completion, which the comment near #hall-elapsed (in the sibling
+               hall-panel below) correctly identified as the failure mode that
+               drove the elapsed-ticker aria-hidden patch but only fixed the
+               symptom on that one ticker. Moving aria-live down to the status
+               div is the architectural fix: only the status messages announce,
+               and the results panel (which SR users know is ready from the
+               status announcement) stays sighted-only by default. -->
+          <div class="review-status" id="review-status" aria-live="polite">
             <p class="card-kicker">Ready</p>
             <h3>Upload a hand-history file to start a local review job.</h3>
             <p class="section-note">
@@ -765,8 +779,21 @@
           </div>
         </article>
 
-        <article class="frame review-panel hall-panel" aria-live="polite">
-          <div class="review-status" id="hall-status">
+        <article class="frame review-panel hall-panel">
+          <!-- aria-live="polite" on the status div (not the parent article)
+               for the same reason as the analyze form's review-panel above:
+               keeps the brief queued/running/completed status text announcing
+               while keeping the massive #hall-results panel (KPI grid +
+               per-villain chip flow + per-hand series + cumulative-chips
+               chart + equity histogram + output files) silent for SR users,
+               who learn the run is ready from the status announcement and
+               don't need the table of contents read out. Also makes the
+               #hall-elapsed aria-hidden patch (in the .hall-progress-meta
+               block below) defense-in-depth rather than load-bearing --
+               the elapsed ticker is no longer inside an aria-live region
+               at all, so its 1-second updates wouldn't queue announcements
+               regardless. -->
+          <div class="review-status" id="hall-status" aria-live="polite">
             <p class="card-kicker">Ready</p>
             <h3 id="hall-status-title">Configure a hall run and launch it from the browser.</h3>
             <p class="section-note" id="hall-status-note">
