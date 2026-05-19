@@ -2844,8 +2844,9 @@ function validateVillainPool() {
         group.appendChild(err);
       }
       group.setAttribute("aria-invalid", "true");
-      // Append-not-overwrite, same shape as validateField post-ebc8982.
-      // The villain-pool role="group" element doesn't currently carry an
+      // Append-not-overwrite, same shape as validateField's
+      // aria-describedby handling above (grep for `validateField` in
+      // this file). The villain-pool role="group" element doesn't currently carry an
       // aria-describedby in index.html, so the previous single-attribute
       // overwrite was benign on the shipped markup -- but if a future
       // commit adds a hint reference (e.g., a "pick from nit / tag /
@@ -2865,8 +2866,8 @@ function validateVillainPool() {
       // check would have failed if validateVillainPool had appended to
       // an existing hint (which it now does, per the append branch
       // above) and erased the whole attribute when it did match --
-      // same two-bug shape ebc8982 documented for the numeric-fields
-      // path.
+      // same two-bug shape (append-not-overwrite + filter-not-clear)
+      // that clearFieldErrorAria handles for the numeric-fields path.
       const existing = group.getAttribute("aria-describedby") || "";
       const remaining = existing.split(/\s+/).filter(id => id && id !== errorId);
       if (remaining.length > 0) {
