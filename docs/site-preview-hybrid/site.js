@@ -2541,7 +2541,22 @@ function formatPercent(value) {
 }
 
 function formatFileSize(bytes) {
-  const size = Number(bytes) || 0;
+  // Routes through the same coerceNumber helper as the format* group
+  // above (added af13670). The earlier `Number(bytes) || 0` short-circuit
+  // caught NaN (falsy → falls back to 0), but Infinity is truthy + non-
+  // zero and would have leaked through as `"Infinity MB"`. In practice
+  // bytes comes from the File API's `file.size` which is always a
+  // non-negative integer, but defending here keeps the helper uniform
+  // with the rest of the format-family + survives any future call site
+  // that passes a less-disciplined source (e.g. a network-reported
+  // size, an estimated value, a computed-but-unbounded total). Also
+  // catches negative inputs (`size < 0` is finite but nonsensical for
+  // a byte count) -- the helper now coerces them to 0 via the same
+  // `Math.max(0, ...)` guard so `formatFileSize(-100)` returns `"0 B"`
+  // rather than the misleading `"-100 B"` the prior implementation
+  // would have produced. Same defense-in-depth rationale: improbable
+  // today, cheap to defend.
+  const size = Math.max(0, coerceNumber(bytes));
   if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
   if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${size} B`;
