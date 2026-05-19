@@ -1810,7 +1810,7 @@ function setHallSubmitting(isSubmitting) {
 // renderStatus with the SAME message every ~750ms (e.g. status='running'
 // throughout a 2-min analyze run) doesn't keep mutating the DOM. The
 // #review-status div carries aria-live="polite" (moved down from the
-// parent #review-panel article in 2a1e02d to narrow the announcement
+// parent #review-panel article to narrow the announcement
 // surface), and while most
 // modern screen readers de-dupe identical announcements per the aria-
 // live spec's "if the announcement text is identical to the previous
@@ -1885,8 +1885,8 @@ document.addEventListener("visibilitychange", () => {
 });
 
 // Cache last-rendered (message, badge) so the #hall-status div's polite
-// aria-live region (moved down from the parent .hall-panel article in
-// 2a1e02d to narrow the announcement surface to status text only) doesn't
+// aria-live region (moved down from the parent .hall-panel article
+// to narrow the announcement surface to status text only) doesn't
 // keep re-announcing the SAME status text on every ~750ms poll tick
 // during a 5-15 min hall run -- same screen-reader-spam fix renderStatus
 // got above, with a bigger payoff here because hall polls run far longer
@@ -2984,7 +2984,7 @@ function renderPresetBar() {
         // otherwise be invisible -- the user clicks a preset, hears
         // nothing, and has to Tab through the form to verify. The
         // #hall-status div is aria-live=polite (moved down from the
-        // parent .hall-panel article in 2a1e02d) so this
+        // parent .hall-panel article) so this
         // renderHallStatus call queues a polite announcement; the
         // message is also visible context for sighted users who
         // already saw the values change. Transient: the next
@@ -3184,7 +3184,7 @@ function renderRecentRuns() {
       // without an announcement screen readers and distant-focus
       // keyboard users have no signal that the click did anything.
       // The #hall-status div is aria-live=polite (moved down from
-      // the parent .hall-panel article in 2a1e02d) so renderHallStatus
+      // the parent .hall-panel article) so renderHallStatus
       // queues the announcement.
       const ts = new Date(entry.timestamp).toLocaleString();
       renderHallStatus(`Loaded run from ${ts}.`);
