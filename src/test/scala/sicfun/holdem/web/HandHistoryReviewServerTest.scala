@@ -9,7 +9,7 @@ import java.io.ByteArrayInputStream
 import java.net.{InetAddress, URI}
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, Path, Paths}
 import java.util.Base64
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.zip.GZIPInputStream
@@ -1582,6 +1582,57 @@ class HandHistoryReviewServerTest extends FunSuite:
       // Cleanup: the parent temp directory wasn't auto-cleaned by withServer
       // because staticDir.resolve("does-not-exist") was never written to.
       Files.deleteIfExists(nonExistentStaticDir.getParent)
+  }
+
+  // Pin the boot-error banner element + ARIA semantics + user-visible
+  // message in the production bundle's index.html. The runbook's
+  // "Users report 'the page doesn't respond'" triage entry (section 6,
+  // just below the OIDC entry) keys on three operator-visible signals:
+  // (1) `curl -s / | grep page-init-error` returns the element so the
+  // bundle hasn't been silently regressed, (2) the banner carries
+  // role=alert + aria-live=assertive so SR users get an announcement
+  // on reveal, (3) the banner text matches the documented "This page
+  // didn't finish loading." prefix the operator asks the user to
+  // confirm. A future refactor that dropped the banner from
+  // index.html (or changed its id, class, ARIA shape, or user-message
+  // wording) would silently invalidate every one of those triage cues;
+  // this test makes that regression loud. Same pin pattern as 8d5f49e
+  // (STATIC_DIR-misconfig triage symptom): runbook-documented
+  // diagnostics get pinned in tests so refactors can't silently break
+  // the signals operators have been told to look for. Unlike the rest
+  // of the static-handler tests in this file (which use the synthetic
+  // withStaticSite temp directory), this test points withServer at
+  // the REAL `docs/site-preview-hybrid` bundle path -- a synthetic
+  // index would defeat the purpose of testing the SHIPPED bundle's
+  // markup.
+  test("bundled index.html ships the page-init-error banner with documented id + class + ARIA semantics + user message so the runbook's boot-error triage signal isn't silently regressed") {
+    val bundleDir = Paths.get("docs", "site-preview-hybrid").toAbsolutePath.normalize()
+    assert(Files.isDirectory(bundleDir),
+      s"bundle directory $bundleDir must exist -- test must run from the project root (SBT default cwd). Other tests in this file use Paths.get(\"src\", \"main\", \"native\", ...) the same way (see HeadsUpRangeGpuRuntimeTest for the existing precedent).")
+    withServer(bundleDir) { server =>
+      val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+      val response = get(s"$baseUri/")
+      assertEquals(response.statusCode(), 200,
+        clue = "served bundle root must return 200 -- the runbook entry's pre-condition before the banner-element grep cue")
+      val body = response.body()
+      // The element id is the runbook's `curl | grep` anchor.
+      assert(body.contains("""id="page-init-error""""),
+        "missing #page-init-error banner element -- runbook's `curl -s / | grep page-init-error` triage cue depends on this exact id appearing in the served bytes")
+      // Hidden by default via the .hidden class so the happy path
+      // doesn't show the banner; site.js's showBootError removes
+      // .hidden when boot() rejects.
+      assert(body.contains("""class="noscript-notice hidden""""),
+        "banner element missing 'noscript-notice hidden' class binding -- without 'hidden' the banner would be visible on every page load, falsely signaling boot failure on the happy path; without 'noscript-notice' it loses the warning-palette visual that mirrors the noscript-disabled element above it")
+      // SR users get the announcement on reveal (no re-Tab needed).
+      assert(body.contains("""role="alert""""),
+        "banner element missing role=alert -- screen readers wouldn't announce the banner when site.js reveals it, defeating the a11y intent of role-based live-region semantics")
+      assert(body.contains("""aria-live="assertive""""),
+        "banner element missing aria-live=assertive -- SR announcement would be polite/deferred instead of immediate, leaving the user interacting with a half-broken page before being told it's broken")
+      // The runbook tells operators to ask the user to confirm this
+      // exact string is visible in the browser.
+      assert(body.contains("This page didn't finish loading."),
+        "banner element missing the documented user-visible message -- runbook's triage step (\"user reports seeing 'This page didn't finish loading'\") depends on this exact wording")
+    }
   }
 
   test("static handler dotfile blocking handles percent-encoded backslash on Windows-style paths") {
