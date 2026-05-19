@@ -1294,7 +1294,13 @@ async function submitAuth(path, includeDisplayName) {
     // an empty email is the more common starting state (typically a
     // password manager filled the password but not the email after a
     // domain change). Same focus-restoration pattern as the analyze
-    // form's three early-return paths near line 226 (commit de7d982).
+    // form's three `fileInput.focus()` early-return paths inside the
+    // upload form's `form.addEventListener("submit", ...)` handler
+    // above (grep this file for `fileInput.focus()` to land on all
+    // three). Line / SHA references intentionally omitted: the
+    // anchor previously cited "near line 226 (commit de7d982)" but
+    // line 226 has since drifted to a completely unrelated function
+    // (showBootError) -- symbol-name references survive that rot.
     if (!email && authEmail) {
       authEmail.focus();
     } else if (authPassword) {
