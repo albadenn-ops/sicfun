@@ -250,8 +250,9 @@ if (form && fileInput && siteSelect && heroInput) {
     // GET-with-query-params fallback. When the JS path IS live we want
     // the proper application/json XHR via fetchWithTimeout below, not
     // the form-default POST also firing for the same submit event.
-    // See the auth-form handler comment (562874c) for the full two-
-    // layer defense rationale; same shape applies here.
+    // See the comment block above `authForm.addEventListener("submit",
+    // ...)` later in this file for the full two-layer defense
+    // rationale; same shape applies here.
     event.preventDefault();
 
     if (requiresPlatformSignIn() && !authState.authenticated) {
@@ -452,8 +453,9 @@ if (hallForm) {
     // (browser default-POSTs to a real endpoint that 415s the form-
     // urlencoded body, keeping the configured hall args off the URL
     // bar / history / Referer where a method-less default-GET would
-    // persist them). See the auth-form handler comment (562874c) for
-    // the full two-layer defense rationale.
+    // persist them). See the comment block above
+    // `authForm.addEventListener("submit", ...)` later in this file
+    // for the full two-layer defense rationale.
     event.preventDefault();
 
     if (requiresPlatformSignIn() && !authState.authenticated) {
