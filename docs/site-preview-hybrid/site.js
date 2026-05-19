@@ -1819,16 +1819,18 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-// Cache last-rendered (message, badge) so the hall-panel's polite
-// aria-live region doesn't keep re-announcing the SAME status text
-// on every ~750ms poll tick during a 5-15 min hall run -- same screen-
-// reader-spam fix renderStatus got above, with a bigger payoff here
-// because hall polls run far longer (the analyze flow times out at
-// 2 min default; hall runs default to 15 min and can be tuned higher
-// via PLAYING_HALL_TIMEOUT_MS). Cache both args because a status
-// transition like queued->running keeps the message stable while only
-// the badge would change (e.g. a future per-status badge), and vice
-// versa for cancelled vs completed at the same message.
+// Cache last-rendered (message, badge) so the #hall-status div's polite
+// aria-live region (moved down from the parent .hall-panel article in
+// 2a1e02d to narrow the announcement surface to status text only) doesn't
+// keep re-announcing the SAME status text on every ~750ms poll tick
+// during a 5-15 min hall run -- same screen-reader-spam fix renderStatus
+// got above, with a bigger payoff here because hall polls run far longer
+// (the analyze flow times out at 2 min default; hall runs default to 15
+// min and can be tuned higher via PLAYING_HALL_TIMEOUT_MS). Cache both
+// args because a status transition like queued->running keeps the
+// message stable while only the badge would change (e.g. a future per-
+// status badge), and vice versa for cancelled vs completed at the same
+// message.
 let lastRenderedHallMessage = null;
 let lastRenderedHallBadge = null;
 function renderHallStatus(message, badge) {
