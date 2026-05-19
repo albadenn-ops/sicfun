@@ -31,7 +31,22 @@
   <a class="skip-link" href="#main-content">Skip to content</a>
   <div class="backdrop" aria-hidden="true"></div>
 
-  <main class="page" id="main-content">
+  <!-- tabindex="-1" makes the <main> element programmatically focusable
+       so the skip link above actually moves keyboard focus into the
+       content region when activated. Without it, browser behavior on
+       anchor navigation to a non-focusable target varies: Firefox /
+       Chrome may move focus, Safari historically does NOT, and even
+       on browsers that do move focus, the behavior depends on whether
+       the target is focusable. Result without this attribute: keyboard
+       user activates the skip link, viewport scrolls to <main>, but
+       their next Tab resumes from wherever focus was BEFORE the click
+       -- typically the top nav, defeating the skip-link's entire
+       purpose of bypassing repeated navigation. The -1 value keeps
+       <main> out of the normal Tab order (so a Tab user doesn't
+       suddenly stop on a content block), but allows the anchor
+       fragment + browser's :target / focus behavior to programmatically
+       focus the element when the skip link fires. -->
+  <main class="page" id="main-content" tabindex="-1">
     <noscript>
       <div class="noscript-notice" role="alert">
         <p><strong>JavaScript is disabled.</strong> The hand-history upload, Playing Hall self-play, and account panels all require JavaScript to talk to the local SICFUN server.</p>
