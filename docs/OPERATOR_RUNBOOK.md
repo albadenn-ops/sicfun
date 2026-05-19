@@ -401,6 +401,16 @@ Short hall benchmark regressed after retuning the range GPU cache:
 - For `1000`-hand smoke/control runs, use a dedicated short-run cache file instead of a long-run tuned profile.
 - For `5000+` hand long exact-mode runs, benchmark with a cache that was tuned on the same machine/profile you plan to use.
 
+Web upload UI returns `404 not found` but `/api/health` is `200`:
+- The server started successfully but `STATIC_DIR` points to a non-existent or wrong directory. The path is NOT validated at startup -- the existence check is lazy (`Files.exists` per request inside `StaticAssetsHandler`), so a typo, a partially-extracted bundle missing the `static/` subdirectory, or a relative-path-vs-cwd mismatch (service manager starts the process from a different cwd than the launcher expected) silently produces 404s on every `GET /` and `GET /<asset>` while health and ready probes stay green.
+- Triage:
+  ```
+  curl -i http://<host>:<port>/
+  ```
+  `200` + `Content-Type: text/html` → STATIC_DIR is correct; `404` + `Content-Type: text/plain` body `"not found"` → STATIC_DIR is wrong.
+- Cross-check the startup-banner log line for `staticDir=<resolved-absolute-path>` to see what path the server actually resolved -- the resolved absolute path can differ from the path you set when relative-vs-absolute semantics + an unexpected cwd combine.
+- Fix: set `STATIC_DIR` (env var) or `-StaticDir <path>` (CLI flag) to the absolute path of the bundle's `static/` subdirectory (`docs/site-preview-hybrid` in source mode), then restart the service to pick up the change. See `docs/HAND_HISTORY_WEB_DEPLOYMENT.md` for the full discussion.
+
 ## 7. Minimal Command Set
 
 The minimal set most operators need:
