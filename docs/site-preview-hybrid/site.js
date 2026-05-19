@@ -2943,12 +2943,18 @@ function readRecentRuns() {
     // Filter to entries whose shape matches what renderRecentRuns
     // dereferences without null-guards: entry.request must be an
     // object (the render path reads .villainPool / .heroStyle /
-    // .hands / .seed directly) and entry.summary must be an object
-    // (it reads .heroNetChips). A malformed entry from a future
-    // schema change, a half-written cross-tab race, or a hand-
-    // edited localStorage value would otherwise throw a TypeError
-    // partway through the render loop and silently break the entire
-    // Recent runs panel until the user manually clears localStorage.
+    // .hands / .seed directly), entry.summary must be an object
+    // (it reads .heroNetChips), AND entry.timestamp must be a finite
+    // number (the render path passes it to `new Date(entry.timestamp).
+    // toLocaleString()` -- a non-finite or non-number timestamp would
+    // produce a Date NaN that renders as the literal string "Invalid
+    // Date" in the panel, which reads as a defect rather than the
+    // graceful-fallback the existing filter aims for). pushRecentRun
+    // always writes `Date.now()` so well-formed entries are always
+    // safe; the timestamp check guards against the same corruption
+    // vectors the request/summary checks already address (future
+    // schema change drops or renames the field, half-written cross-
+    // tab race leaves a partial object, hand-edited localStorage).
     // Filtering here makes the panel render the surviving entries
     // and the bad ones age out naturally on the next pushRecentRun
     // (which writes back the filtered list capped at
@@ -2957,6 +2963,7 @@ function readRecentRuns() {
       entry !== null && typeof entry === "object"
         && entry.request !== null && typeof entry.request === "object"
         && entry.summary !== null && typeof entry.summary === "object"
+        && Number.isFinite(entry.timestamp)
     );
   } catch (_) { return []; }
 }
