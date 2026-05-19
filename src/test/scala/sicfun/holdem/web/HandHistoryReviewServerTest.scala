@@ -774,6 +774,23 @@ class HandHistoryReviewServerTest extends FunSuite:
           // the same way an operator with filesystem access would
           // (e.g., for an incident-response audit of USER_STORE_PATH).
           val storeJson = ujson.read(Files.readString(storePath, StandardCharsets.UTF_8))
+          // Pin the documented top-level `"version": 1` schema marker.
+          // Deploy doc line 235: "The JSON content carries a top-level
+          // \"version\": 1 field for future schema migrations (the
+          // server currently ignores it on read)". The field exists
+          // so future-schema-migration code (when we eventually bump
+          // to 2) has something to branch on; if a refactor silently
+          // dropped the field from writes (or changed its value
+          // without an explicit migration plan), future readers
+          // expecting v1 vs v2 differentiation would have no
+          // signal to switch on -- the documented forward-compat
+          // contract would be silently broken. Asserting the exact
+          // value (1) means a deliberate schema bump WILL fail this
+          // test and force the maintainer to acknowledge the
+          // version change explicitly rather than slipping it past
+          // CI as a side-effect of an unrelated refactor.
+          assertEquals(storeJson.obj("version").num.toInt, 1,
+            clue = "user-store JSON must carry top-level `version: 1` per deploy doc line 235's documented schema-marker contract; future schema bumps require deliberate code change AND test update in lockstep so no migration is silent")
           val users = storeJson.obj("users").arr
           assertEquals(users.length, 1,
             clue = "exactly one user should be persisted after the single register call")
