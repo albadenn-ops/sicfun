@@ -655,6 +655,55 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Footgun without the zero-width filter in normalizeEmail (see
+  // PlatformUserAuth.scala): some paste sources (text editors saving as
+  // UTF-8 with BOM, clipboard pipelines that inject zero-width chars)
+  // prepend invisible bytes to copied text. Without normalization those
+  // bytes survive `String.trim` (which only removes <= 0x20) AND
+  // `validateEmail`'s `Character.isWhitespace` check (which doesn't
+  // classify BOM or zero-width chars as whitespace), so the canonical
+  // stored email ends up with the invisible byte embedded. The user can
+  // never sign in afterwards because their subsequent typed input lacks
+  // the invisible byte and the stored-vs-submitted comparison misses.
+  // Pin the round trip: register with a BOM-prefixed email succeeds,
+  // then login WITHOUT the BOM matches the same canonical record.
+  test("normalizeEmail strips BOM and zero-width chars so register-then-login is round-trip stable") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          // U+FEFF (BOM) at the start of the email -- the canonical
+          // failure case for "user pasted from a BOM-emitting source."
+          val bomPrefixedEmail = "﻿alice@example.com"
+          val bareEmail = "alice@example.com"
+
+          val register = postJson(s"$baseUri/api/auth/register",
+            s"""{"email":"$bomPrefixedEmail","password":"correcthorse","displayName":"Alice"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "register with BOM-prefixed email must succeed (the BOM is stripped during normalize)")
+
+          // Login WITHOUT the BOM must succeed: the stored record's
+          // canonical email matches the bare form after normalization.
+          val loginBare = postJson(s"$baseUri/api/auth/login",
+            s"""{"email":"$bareEmail","password":"correcthorse"}""")
+          assertEquals(loginBare.statusCode(), 200,
+            clue = "login with bare email must match the BOM-stripped canonical form")
+
+          // Login WITH the same BOM-prefixed email also works -- both
+          // forms normalize to the same canonical email so either
+          // produces a successful lookup.
+          val loginBom = postJson(s"$baseUri/api/auth/login",
+            s"""{"email":"$bomPrefixedEmail","password":"correcthorse"}""")
+          assertEquals(loginBom.statusCode(), 200,
+            clue = "login with BOM-prefixed email must also match (both forms normalize identically)")
+        }
+      }
+    }
+  }
+
   test("registration and login reject passwords beyond the max-length cap") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>

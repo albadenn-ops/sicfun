@@ -1160,7 +1160,41 @@ object PlatformUserAuth:
     if existing.trim.nonEmpty then existing else fallback
 
   private def normalizeEmail(email: String): String =
-    email.trim.toLowerCase(java.util.Locale.ROOT)
+    // Strip BOM and other zero-width characters BEFORE trim+lowercase so a
+    // user who pastes their email from a source that prepends one (some
+    // text editors emit U+FEFF when saving as UTF-8 with BOM; some clipboard
+    // pipelines inject U+200B/U+200C/U+200D between visually-identical
+    // characters) doesn't end up with a canonical form that fails round-trip
+    // lookup. The footgun without this filter: Scala's `String.trim` only
+    // removes chars where `ch <= 0x20` (ASCII control + space), and BOM
+    // (U+FEFF) sits at 0xFEFF, far above that threshold; `validateEmail`'s
+    // whitespace check is `Character.isWhitespace`, which also returns false
+    // for BOM and the zero-width family. So a register call with
+    // "<U+FEFF>alice@example.com" passes every gate, gets stored with the
+    // BOM still embedded, and the user can never sign in afterwards because
+    // their subsequent typed input lacks the BOM and the stored-vs-submitted
+    // string comparison misses. Stripping here closes both halves of the
+    // round trip: register normalizes to the bare ASCII form, login does
+    // too, the lookup succeeds. The five codepoints filtered are the
+    // standard Unicode zero-width family: U+FEFF (BOM / zero-width no-break
+    // space), U+200B (zero-width space), U+200C (zero-width non-joiner),
+    // U+200D (zero-width joiner), and U+2060 (word joiner). All five have
+    // zero rendered width AND zero semantic content in an email-address
+    // context, so silent stripping doesn't change what the user typed --
+    // it just removes invisible bytes that the user couldn't have
+    // intended to include. Comparing by `.toInt == 0xNNNN` (rather than
+    // against literal Char glyphs in the source) keeps this file pure
+    // ASCII for review and is immune to a future text-editor / lint
+    // pass that strips invisible bytes from source -- the filter would
+    // silently break if those literal chars were lost from the operand
+    // side, since `ch == ''` reduces to a non-meaningful comparison.
+    email
+      .filterNot(ch =>
+        val cp = ch.toInt
+        cp == 0xFEFF || cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0x2060
+      )
+      .trim
+      .toLowerCase(java.util.Locale.ROOT)
 
   private def hashPassword(password: String, updatedAtEpochMs: Long): LocalPasswordCredential =
     val salt = randomBytes(PasswordSaltBytes)
