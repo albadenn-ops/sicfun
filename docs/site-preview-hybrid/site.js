@@ -2945,25 +2945,28 @@ function readRecentRuns() {
     // object (the render path reads .villainPool / .heroStyle /
     // .hands / .seed directly), entry.summary must be an object
     // (it reads .heroNetChips), AND entry.timestamp must be a finite
-    // number (the render path passes it to `new Date(entry.timestamp).
-    // toLocaleString()` -- a non-finite or non-number timestamp would
-    // produce a Date NaN that renders as the literal string "Invalid
-    // Date" in the panel, which reads as a defect rather than the
-    // graceful-fallback the existing filter aims for). pushRecentRun
-    // always writes `Date.now()` so well-formed entries are always
-    // safe; the timestamp check guards against the same corruption
-    // vectors the request/summary checks already address (future
-    // schema change drops or renames the field, half-written cross-
-    // tab race leaves a partial object, hand-edited localStorage).
-    // Filtering here makes the panel render the surviving entries
-    // and the bad ones age out naturally on the next pushRecentRun
-    // (which writes back the filtered list capped at
-    // RECENT_RUNS_MAX).
+    // POSITIVE number (the render path passes it to
+    // `new Date(entry.timestamp).toLocaleString()`). The Number.isFinite
+    // check alone catches the NaN / non-number / ±Infinity cases that
+    // would have rendered as the literal string "Invalid Date"; the
+    // additional `> 0` check catches negative-finite values too, which
+    // are syntactically valid (e.g. `new Date(-1).toLocaleString()`
+    // returns a 1969 date string, NOT "Invalid Date") but semantically
+    // nonsensical for a "Recent run" entry -- a run can't have
+    // happened before Unix epoch. pushRecentRun always writes
+    // `Date.now()` so well-formed entries always pass; this check
+    // guards against the same corruption vectors the request/summary
+    // checks already address (future schema change drops or renames
+    // the field, half-written cross-tab race leaves a partial object,
+    // hand-edited localStorage). Filtering here makes the panel render
+    // the surviving entries and the bad ones age out naturally on the
+    // next pushRecentRun (which writes back the filtered list capped
+    // at RECENT_RUNS_MAX).
     return parsed.filter(entry =>
       entry !== null && typeof entry === "object"
         && entry.request !== null && typeof entry.request === "object"
         && entry.summary !== null && typeof entry.summary === "object"
-        && Number.isFinite(entry.timestamp)
+        && Number.isFinite(entry.timestamp) && entry.timestamp > 0
     );
   } catch (_) { return []; }
 }
