@@ -2232,10 +2232,14 @@ function renderHallResults(data) {
   // semantically claims completion that didn't happen and reads as a
   // contradiction next to its own CANCELLED badge ("Hall ready: 200
   // hands [CANCELLED]" -- which is it?). Using "Hall cancelled" as the
-  // verb on the cancelled path makes the title-cue ladder (set in
-  // the submit handler's finally block at line 491-493: runReady ->
-  // "Hall done" / runCancelled -> "Hall cancelled" / runFailed ->
-  // "Hall failed") consistent with the hall-status panel verb here.
+  // verb on the cancelled path makes the title-cue ladder (set in the
+  // hall submit handler's finally block where setTitleStatus dispatches
+  // on runReady / runCancelled / runFailed -- grep for `setTitleStatus("Hall
+  // done")` to find the cluster) consistent with the hall-status panel
+  // verb here. (Line numbers intentionally omitted -- an earlier version
+  // of this comment cited "line 491-493" which referenced the wrong block
+  // by ~55 lines because the comment didn't update when the submit handler
+  // grew; symbol-name references stay correct as the file evolves.)
   const verb = cancelled ? "Hall cancelled" : "Hall ready";
   // Distinguish two cancel sub-cases for the trailing badge:
   // - Cancel landed AFTER the worker had captured at least one hand
