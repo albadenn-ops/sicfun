@@ -1698,6 +1698,58 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the <noscript> fallback in the production bundle's index.html
+  // so a future maintainer removing it (perhaps thinking "everyone has
+  // JavaScript these days") fails this test rather than silently
+  // degrading the page for users with JS disabled into a "page chrome
+  // loaded but no controls work, no explanation of why" state. The
+  // failure mode is operator-INVISIBLE -- a user with JS disabled
+  // sees the static HTML, none of the submit handlers wire up, and
+  // they have no way to know whether the deployment is broken or
+  // their browser is the cause. The <noscript> element gives them
+  // an immediate answer. Without a test, removal goes unnoticed
+  // until the next time a JS-disabled user files a support ticket.
+  // This is the THIRD operator-visible defensive HTML invariant
+  // pinned via this regression-test pattern:
+  //   - <div id="page-init-error"> banner for the "JS ran but
+  //     boot() threw" case (page-init-error test above)
+  //   - <link rel="icon" href="data:,"> for favicon suppression /
+  //     audit-log hygiene (favicon test above)
+  //   - <noscript> for the "JS is disabled entirely" case (this test)
+  // All three are user-degraded-mode signals where silent removal
+  // produces an operator-invisible regression that only surfaces
+  // via support tickets from affected users.
+  test("bundled index.html ships the <noscript> fallback message so users who disabled JavaScript see a friendly explanation instead of a silently broken page") {
+    val bundleDir = Paths.get("docs", "site-preview-hybrid").toAbsolutePath.normalize()
+    assert(Files.isDirectory(bundleDir),
+      s"bundle directory $bundleDir must exist -- test must run from project root (SBT default cwd)")
+    withServer(bundleDir) { server =>
+      val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+      val response = get(s"$baseUri/")
+      assertEquals(response.statusCode(), 200,
+        clue = "served bundle root must return 200 before the <noscript> assertion can run")
+      val body = response.body()
+      // Element presence -- the bare <noscript> opens the fallback
+      // block. Without it, JS-disabled users get the static page
+      // with no functioning UI controls and no explanation.
+      assert(body.contains("<noscript>"),
+        "missing the <noscript> fallback element -- without it, users who disabled JavaScript see the page chrome but no functioning UI controls and no explanation of why; the operator only finds out about the regression via support tickets from those users, never from logs (the JS-disabled user never reaches any server endpoint that would log their visit)")
+      // The inner element's role=alert + .noscript-notice class
+      // binding gives SR users an immediate announcement AND
+      // mirrors the boot-error banner's visual treatment so the
+      // two "JS didn't fully run" failure modes (JS disabled / JS
+      // threw) read identically as page-level warnings.
+      assert(body.contains("""<div class="noscript-notice" role="alert">"""),
+        "noscript inner div missing the documented class + role binding -- without role=alert the SR doesn't announce the warning when the user lands on the page, without .noscript-notice the visual treatment drops and the message looks like ordinary body copy rather than a page-level warning that the deployment is partially unusable")
+      // The bold user-actionable lead. The exact phrasing matters
+      // because it's the operator's ultimate fallback "go look at
+      // the served HTML on the user's browser, do you see this
+      // sentence?" diagnostic.
+      assert(body.contains("<strong>JavaScript is disabled.</strong>"),
+        "noscript message missing the documented bold lead 'JavaScript is disabled.' -- this is the user-actionable headline the entire fallback message is structured around and serves as the operator's last-resort grep target ('user says they see the page but no buttons work; ask them if they see the <strong>JavaScript is disabled.</strong> sentence above the header')")
+    }
+  }
+
   test("static handler dotfile blocking handles percent-encoded backslash on Windows-style paths") {
     // On Windows, both `/` and `\` are filesystem path separators. The dotfile-
     // block check only saw `/` initially, so an attacker sending a URL with a
