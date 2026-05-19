@@ -333,6 +333,37 @@ h3 {
   box-shadow: none;
 }
 
+/* In-flight / unavailable button styling. Without an explicit rule the
+   browser default disabled styling varies (Chrome lowers opacity to
+   ~60%, Firefox lightens colors via filter, Safari does its own
+   thing), so an operator-facing button stuck on "Queueing Review..."
+   / "Running Hall..." / "Signing out..." / "Saving..." while a
+   request is in flight looks different across browsers AND may not
+   read clearly against the dark signal-green theme on any of them.
+   `opacity:0.6` is the consistent visual signal -- the button is
+   visibly faded vs its enabled neighbor. `cursor:not-allowed` is
+   the pointer cue ("you can't click this right now"). `box-shadow:
+   none` overrides the hover/focus glow (which has equal specificity
+   to :disabled but loses on source order via this rule sitting
+   after the hover rules above; both .button:hover and .button-
+   secondary:hover only set box-shadow + color/border properties
+   that compose acceptably with the disabled opacity reduction).
+   Covers .button + .button-secondary; .preset-button never gets
+   disabled in the JS (presets are stateless triggers), and the
+   .button-google anchor isn't a <button> so :disabled doesn't
+   apply to it anyway -- the JS toggles its .hidden class to
+   show/hide instead. forced-colors mode: the system disabled-text
+   color (GrayText) takes over via the browser default rendering;
+   no additional rule needed -- forced-colors flattens opacity
+   anyway, and CanvasText / GrayText already distinguishes enabled
+   from disabled. */
+.button:disabled,
+.button-secondary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
 .info-card-muted,
 .fit-card-muted {
   border-left: 2px solid rgba(255, 77, 0, 0.4);
