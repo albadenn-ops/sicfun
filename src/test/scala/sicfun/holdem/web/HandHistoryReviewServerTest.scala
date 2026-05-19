@@ -821,6 +821,52 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Locks in the handleAuthLogin 409 "already signed in" gate that the
+  // recent doc chain (1f949a0, a9cffa5, 3c87767) documented as
+  // security-relevant: this 409 BLOCKS a legitimate user from minting a
+  // fresh session via the local-password auth form while a leaked-but-
+  // still-valid token keeps the old session alive. Unlike handleOidcCallback
+  // which revokes the pre-existing session on the same request, this path
+  // is "explicit-reject" -- the test pins the reject behavior so a future
+  // refactor that "fixes" the 409 by overwriting the session would be
+  // caught by the assertion failure. See AuthStack.scala's handleAuthLogin
+  // 409 comment block (added in 85f8008) for the full rationale.
+  test("login while already authenticated returns 409 'already signed in' rather than minting a fresh session") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Register a user; the response Set-Cookies a fresh session.
+          val register = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"alice@example.com","password":"correct-horse-battery","displayName":"Alice"}"""
+          )
+          assertEquals(register.statusCode(), 201)
+          val cookieHeader = sessionCookie(register)
+
+          // POST /api/auth/login with the session cookie attached. The body
+          // is a valid login (would otherwise succeed) -- the 409 gate fires
+          // BEFORE the credential check, so we don't need correct credentials
+          // here, but using valid credentials proves the gate isn't a side-
+          // effect of a hashing failure.
+          val secondLogin = postJson(
+            s"$baseUri/api/auth/login",
+            """{"email":"alice@example.com","password":"correct-horse-battery"}""",
+            Map("Cookie" -> cookieHeader)
+          )
+          assertEquals(secondLogin.statusCode(), 409,
+            clue = "login attempt with a valid session cookie must return 409, not 200 -- the gate prevents minting a fresh session that would orphan a leaked-but-still-valid token")
+          assertEquals(jsonBody(secondLogin)("error").str, "already signed in",
+            clue = "409 body must carry the exact `already signed in` text the frontend keys on for the state-divergence-refresh handler")
+        }
+      }
+    }
+  }
+
   test("PlatformUserAuth.Service.create returns a clear error for a corrupted user store file") {
     withUserStorePath { storePath =>
       // Write garbage that ujson will reject. Without the file-path-aware wrap,
