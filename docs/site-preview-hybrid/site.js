@@ -507,8 +507,14 @@ if (hallForm) {
         // distinguishes them via the cancelled flag passed above; this
         // is the tab-title-only parity. The poll loop above only
         // returns with result.cancelled when body.status === "cancelled"
-        // (line 1622-1626), so this branch is reachable iff the server
-        // actually flipped the job to cancelled state.
+        // (grep `pollPlayingHallJob` for the `body.status === "cancelled"`
+        // branch -- it's the only path that returns a non-throw result
+        // with the cancelled flag set), so this branch is reachable iff
+        // the server actually flipped the job to cancelled state.
+        // (Line numbers intentionally omitted -- an earlier version of
+        // this comment cited "line 1622-1626" which by the time of this
+        // fix was the URLSearchParams +-vs-%20 handling comment in the
+        // OIDC error path, ~1560 lines stale AND in the wrong section.)
         if (result && result.cancelled) runCancelled = true;
         else runReady = true;
         return;
