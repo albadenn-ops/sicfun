@@ -1650,6 +1650,54 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the empty-data-URI favicon link in the production bundle's
+  // index.html so a future maintainer removing the seemingly-unused
+  // `<link rel="icon" href="data:,">` line (perhaps thinking it's a
+  // no-op stub) fails this test rather than silently turning on per-
+  // page-load audit-log noise from the spurious /favicon.ico GET that
+  // browsers default to when no rel=icon is declared. This is the
+  // HTML half of the favicon-suppression contract; the CSP half
+  // (`img-src 'self' data:` in WebResponses.scala's
+  // ContentSecurityPolicy constant) is pinned by the CSP-directive-
+  // pin block in `start serves health/static content and rejects
+  // oversized uploads`. Both halves are co-required -- dropping
+  // either silently breaks the suppression. The in-source HTML
+  // comment above the link in index.html names the contract; this
+  // test catches the silent regression if a future maintainer
+  // ignores the comment and removes the link anyway. Same
+  // regression-pin pattern as the page-init-error banner test above
+  // and the CSP `img-src 'self' data:` pin in the security-headers
+  // block: operator-visible / audit-log-hygiene contracts get
+  // pinned so refactors can't silently regress them.
+  test("bundled index.html ships the empty-data-URI favicon link so /favicon.ico 404s don't pollute the audit log on every page load") {
+    val bundleDir = Paths.get("docs", "site-preview-hybrid").toAbsolutePath.normalize()
+    assert(Files.isDirectory(bundleDir),
+      s"bundle directory $bundleDir must exist -- test must run from project root (SBT default cwd)")
+    withServer(bundleDir) { server =>
+      val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+      val response = get(s"$baseUri/")
+      assertEquals(response.statusCode(), 200,
+        clue = "served bundle root must return 200 before the favicon-link assertion can run")
+      val body = response.body()
+      // The exact-string assertion catches three regression vectors:
+      //   - Removing the link entirely (most likely if a maintainer
+      //     thinks it's an unused stub) -- substring vanishes.
+      //   - Changing the href to `data:image/png;base64,...` for a
+      //     real inline icon -- the `data:,` literal vanishes (and
+      //     the CSP `data:` source-list entry is no longer needed,
+      //     should be dropped too per the in-source comment's
+      //     refactor guidance).
+      //   - Reformatting the link with extra attributes (sizes=,
+      //     type=, etc.) that split the exact substring -- the test
+      //     fails until either the new shape is captured in the
+      //     assertion OR the change is reverted.
+      // Each of the three would silently break the suppression
+      // contract; the assertion makes any of them loud.
+      assert(body.contains("""<link rel="icon" href="data:,">"""),
+        "missing the `<link rel=\"icon\" href=\"data:,\">` favicon-suppression link -- without it, browsers default to GET /favicon.ico, the static handler 404s, and every page load emits an audit-log noise line; the inline HTML comment above the link in index.html names the contract and the CSP-directive-pin block above (in 'start serves health/static content and rejects oversized uploads') enforces the CSP half (`img-src 'self' data:` in WebResponses.scala); both halves must stay in sync")
+    }
+  }
+
   test("static handler dotfile blocking handles percent-encoded backslash on Windows-style paths") {
     // On Windows, both `/` and `\` are filesystem path separators. The dotfile-
     // block check only saw `/` initially, so an attacker sending a URL with a
