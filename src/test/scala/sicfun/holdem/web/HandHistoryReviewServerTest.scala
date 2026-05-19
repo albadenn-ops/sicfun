@@ -753,6 +753,79 @@ class HandHistoryReviewServerTest extends FunSuite:
   // bd8e7f3 (session cookie Max-Age) -- documented security-
   // relevant constants get pinned so refactors can't silently
   // drift them.
+  // Pin the documented "session cookie Max-Age is FIXED at login time
+  // and NOT refreshed by subsequent activity" behavior -- the security-
+  // critical foundation of the leaked-token-lifetime upper-bound
+  // calculation operators use during incident response. The deploy doc's
+  // USER_AUTH_SESSION_TTL_MS bullet explicitly says "the session
+  // cookie's Max-Age is fixed at login and NOT refreshed by subsequent
+  // activity, so a user is auto-signed-out at exactly loginTime + ttlMs
+  // regardless of how active they were in the interim", and the runbook
+  // section 5A line 348 quotes the same property as the foundation of
+  // the "Re-auth via OIDC is the only reliable upper bound on a
+  // leaked-token's lifetime" triage logic (an attacker using curl /
+  // scripted requests bypasses cookie expiry, but the SERVER-SIDE
+  // record sliding via resolveSession doesn't help the legitimate
+  // browser client whose Max-Age is fixed at login). Before this
+  // commit, the property was implicit in the design (the production
+  // server only emits Set-Cookie on register / login / OIDC callback,
+  // never on /api/auth/me or other authenticated endpoints) but had
+  // NO test enforcing it -- a refactor that started re-emitting
+  // Set-Cookie on every request to slide the Max-Age (a tempting
+  // "fix" to the "users complain about being signed out every 12h"
+  // support pattern) would silently break the documented upper-bound
+  // calculation AND extend leaked-session attack windows indefinitely
+  // as long as the attacker keeps the token in use, contradicting
+  // both docs' explicit "Re-auth via OIDC is the only reliable upper
+  // bound" framing. Test registers a user (asserts Set-Cookie present),
+  // then makes a follow-up GET /api/auth/me with the captured session
+  // cookie, asserts the follow-up response has NO Set-Cookie header.
+  // Same regression-pin pattern as bd8e7f3 (session cookie Max-Age=43200
+  // exact value), 121e5b5 (state cookie Max-Age=600), 44c9f9f (OIDC
+  // email-collision) -- documented security-relevant behavior pinned
+  // so refactors can't silently regress the operator-side reasoning.
+  test("authenticated follow-up requests do NOT re-emit Set-Cookie -- pins the documented session-cookie Max-Age FIXED at login time property") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Step 1: register and capture the session cookie.
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"slide@example.com","password":"correct-horse-battery","displayName":"NoSlide"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the follow-up-no-recookie check can fire")
+          val sessionCookieHeader = headerValue(register, "Set-Cookie")
+            .getOrElse(fail("registration must emit a session cookie on initial sign-in"))
+          val sessionCookieValue = sessionCookieHeader.takeWhile(_ != ';')
+
+          // Step 2: make an authenticated follow-up GET /api/auth/me
+          // with the captured session cookie. The follow-up response
+          // must NOT carry a Set-Cookie header -- the cookie's Max-Age
+          // was set at login and the documented "FIXED at login time"
+          // contract requires the server NOT re-emit it on activity.
+          val followUp = get(s"$baseUri/api/auth/me", Map("Cookie" -> sessionCookieValue))
+          assertEquals(followUp.statusCode(), 200,
+            clue = "follow-up authenticated request must succeed (the cookie still resolves server-side; the test is about the response, not auth)")
+          // The critical security assertion: NO new Set-Cookie. If
+          // present, the production code would be sliding the cookie's
+          // Max-Age forward on every request, which would silently
+          // (1) break the documented "12h from LOGIN TIME" leaked-
+          // token-lifetime upper bound, (2) contradict the runbook's
+          // "Re-auth via OIDC is the only reliable upper bound on a
+          // leaked-token's lifetime" framing, and (3) extend leaked-
+          // session attack windows indefinitely as long as the attacker
+          // keeps the token in use.
+          assertEquals(headerValue(followUp, "Set-Cookie"), None,
+            "authenticated follow-up request MUST NOT re-emit Set-Cookie -- the deploy doc's USER_AUTH_SESSION_TTL_MS bullet explicitly says 'the session cookie's Max-Age is fixed at login and NOT refreshed by subsequent activity'; a refactor that started sliding the cookie Max-Age would silently break the documented leaked-token-lifetime upper-bound calculation operators rely on during incident response, AND contradict the runbook's 'Re-auth via OIDC is the only reliable upper bound' framing")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
