@@ -185,6 +185,17 @@ void boot();
 
 if (form && fileInput && siteSelect && heroInput) {
   form.addEventListener("submit", async event => {
+    // preventDefault skips the form's HTML POST fallback (method="post"
+    // action="/api/analyze-hand-history" at index.html line 375). The
+    // HTML attributes are the JS-failed-to-load belt-and-braces -- if
+    // this handler never runs (bundle 404, CSP block), the browser
+    // default-submits to a real endpoint and the analyze service 415s
+    // the form-urlencoded body, keeping the upload from leaking via a
+    // GET-with-query-params fallback. When the JS path IS live we want
+    // the proper application/json XHR via fetchWithTimeout below, not
+    // the form-default POST also firing for the same submit event.
+    // See the auth-form handler comment (562874c) for the full two-
+    // layer defense rationale; same shape applies here.
     event.preventDefault();
 
     if (requiresPlatformSignIn() && !authState.authenticated) {
@@ -343,6 +354,20 @@ if (form && fileInput && siteSelect && heroInput) {
 
 if (hallForm) {
   hallForm.addEventListener("submit", async event => {
+    // preventDefault skips the form's HTML POST fallback (method="post"
+    // action="/api/playing-hall" at index.html line 577). The hall form
+    // has 9+ keyboard-reachable inputs (hands / tables / seed / equity
+    // trials / etc.) so an Enter press in ANY of them fires this
+    // handler -- without preventDefault, the JS path's JSON XHR would
+    // race the form's default POST against the same /api/playing-hall
+    // endpoint, doubling the rate-limit + admission cost and racing
+    // two CSRF-bearing requests against the same token. The HTML
+    // method+action exist as the JS-failed-to-load belt-and-braces
+    // (browser default-POSTs to a real endpoint that 415s the form-
+    // urlencoded body, keeping the configured hall args off the URL
+    // bar / history / Referer where a method-less default-GET would
+    // persist them). See the auth-form handler comment (562874c) for
+    // the full two-layer defense rationale.
     event.preventDefault();
 
     if (requiresPlatformSignIn() && !authState.authenticated) {
