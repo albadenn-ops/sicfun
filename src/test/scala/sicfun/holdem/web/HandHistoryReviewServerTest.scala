@@ -1542,6 +1542,48 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pins the documented STATIC_DIR-misconfig triage symptom (runbook
+  // Troubleshooting entry: "Web upload UI returns `404 not found` but
+  // `/api/health` is `200`"). The runbook tells operators that if STATIC_DIR
+  // points to a non-existent or wrong directory (typo, partially-extracted
+  // bundle, cwd mismatch), the server still starts, /api/health still
+  // returns 200, but every GET / and GET /<asset> returns generic 404 +
+  // text/plain "not found". A future refactor that fail-fast'd at startup
+  // (validating STATIC_DIR existence) would break the documented
+  // behavior the troubleshooting entry assumes -- without this test,
+  // such a refactor would silently invalidate the triage guidance. Test
+  // configures staticDir to a temp path that does NOT exist on disk;
+  // checks the server starts, /api/health returns 200, and GET / returns
+  // the documented 404 + text/plain shape an operator would curl-check.
+  test("STATIC_DIR pointing to a non-existent directory still starts cleanly, /api/health stays 200, but GET / returns 404 -- pins the runbook STATIC_DIR-misconfig triage symptom") {
+    val nonExistentStaticDir = Files.createTempDirectory("missing-static-").resolve("does-not-exist")
+    // Sanity check: parent exists but the directory itself doesn't.
+    assert(!Files.exists(nonExistentStaticDir),
+      s"setup precondition: $nonExistentStaticDir must not exist for this test to exercise the misconfig path")
+    try
+      withServer(nonExistentStaticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // /api/health stays 200 -- the runbook entry's premise.
+        val health = get(s"$baseUri/api/health")
+        assertEquals(health.statusCode(), 200,
+          clue = "STATIC_DIR misconfig must NOT affect /api/health -- this is the diagnostic the triage entry relies on (200 health + 404 / together signal STATIC_DIR is wrong)")
+
+        // GET / returns the documented 404 + text/plain "not found" shape.
+        val root = get(s"$baseUri/")
+        assertEquals(root.statusCode(), 404,
+          clue = "STATIC_DIR pointing to a non-existent path must produce 404 on GET / -- this is the curl symptom the runbook tells operators to check")
+        assertEquals(root.body(), "not found",
+          clue = "404 body must be the generic 'not found' string the runbook documents as the STATIC_DIR-wrong signature")
+        assertEquals(headerValue(root, "Content-Type"), Some("text/plain; charset=utf-8"),
+          clue = "404 must carry text/plain Content-Type so the runbook's 'curl -i and check Content-Type' triage distinguishes it from the 200+text/html healthy case")
+      }
+    finally
+      // Cleanup: the parent temp directory wasn't auto-cleaned by withServer
+      // because staticDir.resolve("does-not-exist") was never written to.
+      Files.deleteIfExists(nonExistentStaticDir.getParent)
+  }
+
   test("static handler dotfile blocking handles percent-encoded backslash on Windows-style paths") {
     // On Windows, both `/` and `\` are filesystem path separators. The dotfile-
     // block check only saw `/` initially, so an attacker sending a URL with a
