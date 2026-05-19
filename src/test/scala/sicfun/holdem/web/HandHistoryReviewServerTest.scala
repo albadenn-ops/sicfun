@@ -725,6 +725,71 @@ class HandHistoryReviewServerTest extends FunSuite:
   // exercises the JSON-key-absent path, (2) whitespace-only
   // displayName exercises the trim-to-empty path; both should
   // resolve to the email's local-part.
+  // Pin the PBKDF2 storage parameters documented in deploy doc line 235
+  // and runbook section 5A line 371: "PBKDF2-HMAC-SHA256 password hashes
+  // (per-account salted with 128-bit random salt, 210,000 iterations,
+  // 256-bit output -- meets NIST SP 800-132 §5.1 floor of ≥128-bit salt
+  // and ≥256-bit output)". Before this commit the iteration count + key
+  // length + salt size were defined as constants (PasswordSaltBytes=16,
+  // PasswordIterations=210000, PasswordKeyLengthBits=256 in
+  // PlatformUserAuth.scala lines 53-55) but NOT pinned in any test --
+  // a refactor that changed PasswordIterations from 210000 to e.g.
+  // 100000 (the OWASP "deprecated minimum" tier as of 2023) or
+  // 600000 (the OWASP "current recommended" tier) would silently
+  // drift the documented value without contradicting any test. The
+  // iteration count is operationally relevant for incident-response
+  // password-cracking-cost calculations: an operator who has reason
+  // to suspect a USER_STORE_PATH leak needs to know the actual
+  // iteration count to estimate offline-attack feasibility, AND the
+  // NIST 800-132 §5.1 compliance claim depends on staying at or
+  // above the documented floor. New test registers a user, reads
+  // the user-store JSON directly from disk (the codebase doesn't
+  // expose the credential through any HTTP endpoint -- by design,
+  // hash material must never leave the server), parses out the
+  // localPassword credential block, and asserts: (1) iterations =
+  // 210000, (2) keyLengthBits = 256, (3) saltBase64 decodes to
+  // exactly 16 bytes (128 bits). Same regression-pin pattern as
+  // a0fd8b3 (displayName auto-fill), 23ae2ff (OIDC URL params),
+  // bd8e7f3 (session cookie Max-Age) -- documented security-
+  // relevant constants get pinned so refactors can't silently
+  // drift them.
+  test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"crypto@example.com","password":"correct-horse-battery","displayName":"Crypto"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the user-store inspection can run")
+
+          // Read the persisted user-store JSON directly. The codebase
+          // doesn't expose credential material through any HTTP
+          // endpoint -- by design, hash + salt material must never
+          // leave the server. So the test reads the on-disk artifact
+          // the same way an operator with filesystem access would
+          // (e.g., for an incident-response audit of USER_STORE_PATH).
+          val storeJson = ujson.read(Files.readString(storePath, StandardCharsets.UTF_8))
+          val users = storeJson.obj("users").arr
+          assertEquals(users.length, 1,
+            clue = "exactly one user should be persisted after the single register call")
+          val credential = users(0).obj("localPassword").obj
+          assertEquals(credential("iterations").num.toInt, 210000,
+            clue = "PBKDF2 iterations must be 210000 per deploy doc line 235 + runbook section 5A line 371's NIST SP 800-132 §5.1 compliance claim; a refactor changing this drifts the documented password-cracking-cost calculation operators rely on for incident-response triage")
+          assertEquals(credential("keyLengthBits").num.toInt, 256,
+            clue = "PBKDF2 output must be 256 bits per the same deploy-doc claim; the NIST floor is ≥256-bit so dropping below silently violates the compliance claim")
+          val saltBytes = Base64.getDecoder.decode(credential("saltBase64").str)
+          assertEquals(saltBytes.length, 16,
+            clue = "PBKDF2 salt must be exactly 16 bytes = 128 bits per the same deploy-doc claim; the NIST floor is ≥128-bit so dropping below silently violates the compliance claim, AND a too-small salt makes per-account rainbow tables feasible")
+        }
+      }
+    }
+  }
+
   test("registration without displayName (omitted or whitespace-only) auto-fills the field from the email's local-part") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
