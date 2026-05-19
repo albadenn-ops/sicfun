@@ -1466,6 +1466,34 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // RFC 7232 sec 2.3.2 mandates WEAK comparison for If-None-Match: two
+  // entity-tags are equivalent if their opaque-tags match character-by-
+  // character "regardless of either or both being tagged as 'weak'". The
+  // server emits weak ETags like W/"123-456", and a well-behaved client
+  // echoes that exact value -- but a middleware (CDN, reverse proxy) can
+  // strip the `W/` prefix in transit, leaving the bare opaque-tag form
+  // "123-456". The strong-comparison path (pre-fix) would miss this
+  // because direct string equality requires both sides to be identically
+  // prefixed, forcing a full-body re-fetch on every poll. Verify that the
+  // weak-prefix-stripped form revalidates as the same resource.
+  test("static handler treats If-None-Match: bare-opaque-tag as equivalent to the server's W/-prefixed ETag (weak comparison per RFC 7232 sec 2.3.2)") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val first = get(s"$baseUri/")
+        val etag = headerValue(first, "ETag").getOrElse(fail("expected ETag on first response"))
+        assert(etag.startsWith("W/\""), s"server should emit a weak ETag; got $etag")
+
+        // Strip the `W/` prefix and resend; the server must still 304 because
+        // weak comparison treats W/"x" and "x" as the same entity-tag.
+        val stripped = etag.stripPrefix("W/")
+        val response = get(s"$baseUri/", Map("If-None-Match" -> stripped))
+        assertEquals(response.statusCode(), 304, clue = s"sent If-None-Match=$stripped against ETag=$etag")
+        assertEquals(response.body(), "")
+      }
+    }
+  }
+
   test("static handler emits Last-Modified header and honors If-Modified-Since") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>

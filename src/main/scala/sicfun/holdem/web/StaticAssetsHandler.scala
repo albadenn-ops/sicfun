@@ -109,7 +109,24 @@ private[web] final class StaticAssetsHandler(
               if ifNoneMatch.isDefined then
                 ifNoneMatch.exists { raw =>
                   val parts = raw.split(',').iterator.map(_.trim).filter(_.nonEmpty).toVector
-                  parts.contains("*") || parts.contains(etag)
+                  // RFC 7232 sec 2.3.2 mandates WEAK comparison for If-None-Match
+                  // ("two entity-tags are equivalent if their opaque-tags match
+                  // character-by-character, regardless of either or both being
+                  // tagged as 'weak'"). The server only ever emits weak ETags
+                  // (`W/"size-mtime"` or `W/"size-mtime-gz"` at line 93 above),
+                  // but a well-behaved client could echo back either the verbatim
+                  // weak form OR -- after a misbehaving CDN / proxy strips the
+                  // `W/` prefix in transit -- the bare opaque-tag form `"size-mtime"`.
+                  // Direct string equality would miss the latter and silently
+                  // fail revalidation, forcing a full-body re-fetch on every
+                  // poll. Normalize both sides by dropping the optional `W/`
+                  // prefix before comparing; the opaque-tag including its
+                  // surrounding DQUOTEs is the canonical form per sec 2.3.1.
+                  // `*` is special-cased: it's a wildcard rather than an
+                  // opaque-tag and never carries the `W/` prefix, so the
+                  // pre-normalization contains check still catches it.
+                  val normalizedEtag = stripWeakPrefix(etag)
+                  parts.contains("*") || parts.iterator.map(stripWeakPrefix).contains(normalizedEtag)
                 }
               else
                 ifModifiedSince.exists { raw =>
@@ -179,6 +196,13 @@ private[web] final class StaticAssetsHandler(
         catch case NonFatal(_) => ()
     finally
       exchange.close()
+
+  // Strip the optional `W/` weak-validator prefix from an entity-tag so a
+  // weak-comparison match (RFC 7232 sec 2.3.2) reduces to opaque-tag string
+  // equality. Used by the If-None-Match check above; see the inline comment
+  // there for the proxy/CDN-rewrite rationale.
+  private def stripWeakPrefix(tag: String): String =
+    if tag.startsWith("W/") then tag.substring(2) else tag
 
   private def hasDotPrefixedSegment(exchange: HttpExchange): Boolean =
     val raw = Option(exchange.getRequestURI.getPath).getOrElse("/")
