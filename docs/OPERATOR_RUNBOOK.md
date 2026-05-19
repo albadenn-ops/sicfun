@@ -409,7 +409,7 @@ Web upload UI returns `404 not found` but `/api/health` is `200`:
   curl -i http://<host>:<port>/
   ```
   `200` + `Content-Type: text/html` → STATIC_DIR is correct; `404` + `Content-Type: text/plain` body `"not found"` → STATIC_DIR is wrong.
-- Cross-check the startup-banner log line for `staticDir=<resolved-absolute-path>` to see what path the server actually resolved -- the resolved absolute path can differ from the path you set when relative-vs-absolute semantics + an unexpected cwd combine.
+- Cross-check the boot-time log line **`serving static site from <resolved-absolute-path>`** (logged by `HandHistoryReviewServer.scala` immediately after the HTTP server binds, separate from the longer `startup complete host=... port=...` banner; note the format is `from <path>` not `staticDir=<path>` -- the latter wording was a stale claim in an earlier version of this entry that pointed at a field the startup banner doesn't actually carry) to see what path the server actually resolved -- the resolved absolute path can differ from the path you set when relative-vs-absolute semantics + an unexpected cwd combine. Grep tip: `grep "serving static site from" logs/*.stdout.log`.
 - Fix: set `STATIC_DIR` (env var) or `-StaticDir <path>` (CLI flag) to the absolute path of the bundle's `static/` subdirectory (`docs/site-preview-hybrid` in source mode), then restart the service to pick up the change. See `docs/HAND_HISTORY_WEB_DEPLOYMENT.md` for the full discussion.
 
 `/api/ready` returns `503` but `/api/health` is `200`:
