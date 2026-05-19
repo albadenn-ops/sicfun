@@ -2797,8 +2797,24 @@ class HandHistoryReviewServerTest extends FunSuite:
             s"state cookie must be HttpOnly so JS cannot read or set it; got: $setCookie")
           assert(setCookie.toLowerCase.contains("samesite=lax"),
             s"state cookie must be SameSite=Lax so the provider's top-level redirect can send it back; got: $setCookie")
-          assert(setCookie.toLowerCase.contains("max-age="),
-            s"state cookie must have a Max-Age (10 minutes); got: $setCookie")
+          // Pin the EXACT Max-Age value (10 minutes = 600 seconds), not
+          // just "Max-Age is present somewhere in the header." Both the
+          // deploy doc and runbook claim "10-minute" specifically, AND
+          // upstream OAuth 2.0 BCP guidance treats state-store TTL as a
+          // security knob (long TTLs widen the window where an
+          // intercepted authorization redirect URL can be replayed; very
+          // short TTLs make legitimate flows fail when the user takes
+          // longer than expected on Google's consent screen). A refactor
+          // that changed DefaultOidcFlowTtlMs from 10 min to e.g. 1 hour
+          // (widening the replay window 6x) would silently pass a
+          // "max-age=" substring check while contradicting both docs;
+          // pinning the exact value catches that drift. Case-insensitive
+          // because the attribute name "Max-Age" is case-insensitive per
+          // RFC 6265 sec 4.1.1 but the cookie serializer here uses
+          // mixed-case "Max-Age=" -- the lowercased setCookie shape is
+          // what the existing has-attribute check above also uses.
+          assert(setCookie.toLowerCase.contains("max-age=600"),
+            s"state cookie must have Max-Age=600 (10 minutes) per deploy doc + runbook; got: $setCookie")
         }
       }
     }
