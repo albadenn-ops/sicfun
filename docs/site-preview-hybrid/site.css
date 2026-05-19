@@ -1240,20 +1240,21 @@ summary:focus-visible {
 }
 /* Keyboard focus needs a real ring, not just the 1px border-color shift
    from --line (12% green) to --signal (100% green) above -- same low-
-   contrast problem the .help :focus rule had before d15c995. The
-   preset-button hover and focus-visible declarations above are shared
-   today, so a sighted KEYBOARD user Tabbing across the preset row sees
-   the same visual state as a hovering mouse user (no distinguishing
-   focus indicator). The main .button uses a box-shadow glow for its
-   focus-visible state (line 324-327); the smaller preset buttons
-   inherit a thinner visual treatment and the 1px border shift alone is
-   easy to miss, especially on a lower-vision setup. Add the same 2px
-   signal-green outline pattern the .field input / .help / .chip-check /
-   summary focus-visible rules use elsewhere so keyboard focus on a
-   preset button reads identically to keyboard focus on any other
-   focusable control. :focus-visible (not :focus) so a mouse-click on
-   the preset still gets the existing hover-equivalent styling without
-   the additional ring. */
+   contrast problem the .help :focus rule had before its outline fix.
+   The preset-button hover and focus-visible declarations above are
+   shared today, so a sighted KEYBOARD user Tabbing across the preset
+   row sees the same visual state as a hovering mouse user (no
+   distinguishing focus indicator). The main .button uses a box-shadow
+   glow for its focus-visible state (grep `.button:focus-visible` in
+   this file); the smaller preset buttons inherit a thinner visual
+   treatment and the 1px border shift alone is easy to miss, especially
+   on a lower-vision setup. Add the same 2px signal-green outline
+   pattern the .field input / .help / .chip-check / summary focus-
+   visible rules use elsewhere so keyboard focus on a preset button
+   reads identically to keyboard focus on any other focusable control.
+   :focus-visible (not :focus) so a mouse-click on the preset still
+   gets the existing hover-equivalent styling without the additional
+   ring. */
 .preset-button:focus-visible {
   outline: 2px solid var(--signal);
   outline-offset: 2px;
