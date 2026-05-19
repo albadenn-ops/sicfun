@@ -118,6 +118,30 @@ private[web] object AuthStack:
   ): Either[(Int, String), JsonResponse] =
     if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("POST"))
     else if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
+    // 409 "already signed in" when the request carries a valid session cookie.
+    // The frontend uses this as a cross-tab state-divergence signal: the user
+    // signed in via another tab and this tab's auth form is stale, so the JS
+    // submit handler refreshes /api/auth/me to flip its UI to the signed-in
+    // state. Security caveat that operators triaging suspected session leaks
+    // need to know: this 409 also BLOCKS a legitimate user from minting a
+    // fresh session via the auth form while a leaked-but-still-valid token
+    // keeps the old session alive -- unlike `handleOidcCallback` which
+    // revokes the pre-existing session on the same request (grep this
+    // file for `platformAuth.revokeSession(cookieHeader(exchange))` inside
+    // the OIDC success branch -- it's the second of the two `revokeSession`
+    // calls in this file, the first being inside `handleAuthLogout`),
+    // `handleAuthLogin` makes NO attempt to overwrite the existing
+    // session, it just rejects the request. Operational
+    // consequence: under platform-user auth WITHOUT OIDC, the leaked-token
+    // recovery path is "user signs out first" (which requires their valid
+    // session cookie, not always available if the original device is lost)
+    // OR "operator restarts the server" -- documented at length in the
+    // deploy doc's USER_AUTH_SESSION_TTL_MS bullet (the three-revocation-
+    // paths discussion) and the runbook's leaked-token-lifetime triage
+    // decision matrix. Asymmetry naming convention: the OIDC path is
+    // "side-effect-revoke", this path is "explicit-reject"; both are
+    // intentional, the asymmetry is operator-relevant for incident
+    // response.
     else if authenticatedUser(exchange).nonEmpty then Left(409 -> "already signed in")
     else
       platformAuth match
