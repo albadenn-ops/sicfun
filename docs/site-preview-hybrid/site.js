@@ -1168,6 +1168,27 @@ async function submitAuth(path, includeDisplayName) {
 
   if (!email || !password) {
     updateAccountUi("Email and password are required.");
+    // Move focus to the first empty field so a keyboard / screen-reader
+    // user can act on the announced message immediately rather than
+    // Shift-Tabbing back from the (now-disabled) Sign In / Register
+    // button. Worth noting: the auth login + register buttons are
+    // `type="button"` at index.html line 235-236 (NOT `type="submit"`),
+    // so HTML5 form validation -- which would normally catch the empty
+    // case via the inputs' `required minlength` attributes before this
+    // handler ran -- is bypassed on button click. That makes this JS
+    // gate the only validation fence in the button-click path, not a
+    // defense-in-depth fallback, so the focus restoration here matters
+    // in modern browsers that otherwise honor `required`. Email goes
+    // first because the user reads top-to-bottom on a vertical form and
+    // an empty email is the more common starting state (typically a
+    // password manager filled the password but not the email after a
+    // domain change). Same focus-restoration pattern as the analyze
+    // form's three early-return paths near line 226 (commit de7d982).
+    if (!email && authEmail) {
+      authEmail.focus();
+    } else if (authPassword) {
+      authPassword.focus();
+    }
     return;
   }
 
