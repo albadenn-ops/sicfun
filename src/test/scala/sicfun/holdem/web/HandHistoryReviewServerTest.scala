@@ -1236,6 +1236,54 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // RFC 7231 sec 4.3.2: HEAD response MUST have the same headers a GET would
+  // emit. The static handler at StaticAssetsHandler.scala already advertises
+  // Content-Encoding: gzip on HEAD when the equivalent GET would compress
+  // (test above). writeBytes (WebResponses.scala) is the parallel code path
+  // for the JSON-API endpoints + the writePlain error paths -- HEAD on
+  // /api/health should mirror what GET would have sent so a cache that
+  // validates via HEAD then fetches via GET sees consistent Content-Encoding,
+  // not "plain on HEAD, gzip on GET" which would invalidate the entry.
+  test("JsonHandler HEAD advertises Content-Encoding: gzip when the GET variant would compress") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        def fetch(method: String, acceptEncoding: Option[String]): HttpResponse[String] =
+          val builder = HttpRequest.newBuilder(URI.create(s"$baseUri/api/health")).method(method, HttpRequest.BodyPublishers.noBody())
+          acceptEncoding.foreach(builder.header("Accept-Encoding", _))
+          httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+
+        // Accept-Encoding: gzip -- the gzipped variant. /api/health emits a
+        // JSON body well over the 256-byte MinGzipSize floor (~30 fields), so
+        // the GET response is always compressed for a gzip-accepting client.
+        val headGz = fetch("HEAD", Some("gzip"))
+        val getGz = fetch("GET", Some("gzip"))
+        assertEquals(headGz.statusCode(), 200)
+        assertEquals(headGz.body(), "", "HEAD response must have no body")
+        assertEquals(
+          headerValue(headGz, "Content-Encoding"),
+          headerValue(getGz, "Content-Encoding"),
+          "HEAD and GET on /api/health must agree on Content-Encoding for the gzipped variant"
+        )
+        assertEquals(headerValue(headGz, "Content-Encoding"), Some("gzip"),
+          "HEAD on /api/health with Accept-Encoding: gzip must declare gzip")
+        assertEquals(headerValue(headGz, "Vary"), Some("Accept-Encoding"),
+          "Vary: Accept-Encoding must be present on the JSON HEAD response so caches key by encoding")
+
+        // No Accept-Encoding -- the plain variant. Without the header the
+        // server has no signal that gzip is acceptable, so neither HEAD nor
+        // GET should emit Content-Encoding.
+        val headPlain = fetch("HEAD", None)
+        assertEquals(headPlain.statusCode(), 200)
+        assert(
+          headerValue(headPlain, "Content-Encoding").isEmpty,
+          s"HEAD on /api/health without Accept-Encoding must not declare Content-Encoding, got: ${headerValue(headPlain, "Content-Encoding")}"
+        )
+      }
+    }
+  }
+
   test("static handler honors If-None-Match on HEAD by returning 304") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>

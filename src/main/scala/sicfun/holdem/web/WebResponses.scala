@@ -135,6 +135,18 @@ private[web] object WebResponses:
     if compressible then
       exchange.getResponseHeaders.set("Vary", "Accept-Encoding")
     val isHead = exchange.getRequestMethod.equalsIgnoreCase("HEAD")
+    // Compute the would-compress decision ONCE so the HEAD branch and the GET
+    // branch agree on whether the response variant is gzipped. RFC 7231 sec
+    // 4.3.2: HEAD response MUST have the same headers a GET would emit -- a
+    // cache that validates a resource via HEAD then fetches via GET (a common
+    // pattern for connect-and-check probes that want to skip the body cost on
+    // the validate hop) only sees consistent variant headers if both compute
+    // the same `would-compress` decision. The static handler at
+    // StaticAssetsHandler.scala line 84-93 already does this for file serving;
+    // this mirrors it for JSON responses and the writePlain error paths so
+    // every HEAD response across the server advertises Content-Encoding: gzip
+    // when the equivalent GET would compress.
+    val wouldCompressIfGet = compressible && bytes.length >= MinGzipSize && clientAcceptsGzip(exchange)
     if isHead then
       // RFC 7231 sec 4.3.2: HEAD response has the same headers as GET but
       // MUST NOT include a body. The static handler routes HEAD to a dedicated
@@ -146,9 +158,16 @@ private[web] object WebResponses:
       // request MUST pass a body length of 0 or -1; passing the actual byte
       // count is out of contract. -1 means "no body, no Content-Length";
       // the JDK then emits a Content-Length-less response.
+      //
+      // Advertise the same Content-Encoding a GET would have used so a cache
+      // keying its stored representation by HEAD-emitted headers doesn't
+      // invalidate (or worse, store the wrong encoding label) when the
+      // matching GET arrives gzipped.
+      if wouldCompressIfGet then
+        exchange.getResponseHeaders.set("Content-Encoding", "gzip")
       exchange.sendResponseHeaders(status, -1L)
     else
-      val shouldCompress = compressible && bytes.length >= MinGzipSize && clientAcceptsGzip(exchange)
+      val shouldCompress = wouldCompressIfGet
       if shouldCompress then
         val buffer = new ByteArrayOutputStream(math.max(256, bytes.length / 4))
         val gz = new GZIPOutputStream(buffer)
