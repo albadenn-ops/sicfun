@@ -1117,7 +1117,21 @@ class HandHistoryReviewServerTest extends FunSuite:
         // removing object-src 'none' which kills legacy Flash injection, or
         // base-uri 'none' which prevents <base href> hijacking of relative
         // URLs) fails the test rather than passing on the still-present
-        // default-src.
+        // default-src. The `img-src 'self' data:` directive is ALSO pinned
+        // (with both source-list entries) because it's the one permissive
+        // allow-rule in the policy and the `data:` half is load-bearing for
+        // a specific frontend contract: index.html line 22 sets
+        // `<link rel="icon" href="data:,">` -- an empty data-URI favicon
+        // whose only purpose is to suppress the spurious GET /favicon.ico
+        // that browsers default to when no <link rel="icon"> is declared.
+        // A future CSP refactor dropping just the `data:` source (keeping
+        // `img-src 'self'`) would silently break that suppression: the
+        // browser would refuse the data: URI and fall back to fetching
+        // /favicon.ico which the static handler 404s, producing an
+        // operator-visible audit-log noise line every page load. Pinning
+        // the full directive (both `'self'` AND `data:`) catches that
+        // regression at test time rather than via support tickets about
+        // 404 spam.
         val csp = headerValue(index, "Content-Security-Policy")
           .getOrElse(fail("expected Content-Security-Policy header"))
         for directive <- Vector(
@@ -1127,6 +1141,7 @@ class HandHistoryReviewServerTest extends FunSuite:
           "form-action 'self'",
           "frame-ancestors 'none'",
           "frame-src 'none'",
+          "img-src 'self' data:",
           "manifest-src 'none'",
           "media-src 'none'",
           "object-src 'none'",
