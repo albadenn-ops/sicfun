@@ -631,16 +631,30 @@ if (authLogoutButton) {
 }
 
 async function boot() {
-  // /api/health is unauthenticated and cheap; do it in parallel with the
-  // auth probe so a slow auth-state response doesn't delay the upload cap
-  // sync. Both Promises are fire-and-forget on error.
-  await Promise.all([refreshAuthState(), probeServerLimits()]);
-  renderAuthFlash();
+  // Run the synchronous, network-independent setup BEFORE awaiting any
+  // network probes -- a screen-reader user who Tabs through the page
+  // while boot is mid-await would otherwise hit help icons / hall
+  // preset buttons / Recent runs entries with their aria-labels still
+  // unset. mirrorHelpDataToAriaLabel in particular is pure DOM mutation
+  // against the static HTML in index.html and has no reason to wait
+  // for /api/health or /api/auth/me to return. renderPresetBar and
+  // wireHallValidation are also DOM-only. renderRecentRuns reads
+  // localStorage (synchronous) so it too is safe to run pre-await.
+  // syncRandomSeedState is just one input.disabled assignment.
+  mirrorHelpDataToAriaLabel();
   renderPresetBar();
   renderRecentRuns();
   wireHallValidation();
   syncRandomSeedState();
-  mirrorHelpDataToAriaLabel();
+  // /api/health is unauthenticated and cheap; do it in parallel with the
+  // auth probe so a slow auth-state response doesn't delay the upload cap
+  // sync. Both Promises are fire-and-forget on error.
+  await Promise.all([refreshAuthState(), probeServerLimits()]);
+  // renderAuthFlash depends on authState being populated (it checks the
+  // current mode + queries authState.providers), so it stays AFTER the
+  // refreshAuthState await -- moving it earlier would render the flash
+  // against a stale empty authState.
+  renderAuthFlash();
 }
 
 // Read server limits from /api/health and adopt them on the client side
