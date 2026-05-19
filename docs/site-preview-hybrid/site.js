@@ -236,10 +236,14 @@ if (form && fileInput && siteSelect && heroInput) {
       // announce-then-act loop into one step. preventScroll omitted
       // because the file input sits above the submit button on the same
       // card -- the natural scroll lands the user on it. Same focus-
-      // restoration pattern as the post-logout authEmail.focus() at
-      // line 1378 and the post-row-remove hallSubmitButton.focus() at
-      // line 2936; mirrors the codebase's existing "move focus to the
-      // next action target on every state transition" convention.
+      // restoration pattern as the post-logout `authEmail.focus()` in
+      // logout() and the post-row-remove `hallSubmitButton.focus()` in
+      // the renderRecentRuns load-handler; mirrors the codebase's
+      // existing "move focus to the next action target on every state
+      // transition" convention. (Line numbers intentionally omitted --
+      // an earlier version of this comment cited "line 1378" and "line
+      // 2936" anchors that drifted 82 and 102 lines respectively as
+      // the file grew; symbol-name references survive that rot.)
       fileInput.focus();
       return;
     }
