@@ -904,8 +904,12 @@ function applyAuthState(data, flashMessage = "") {
   // this function on a logout-equivalent:
   //   - logout() success path with the post-logout /api/auth/logout body
   //   - maybeReauthOn401 -> refreshAuthState -> applyAuthState when a
-  //     mid-poll request 401s because the session expired (12h sliding
-  //     TTL) or was revoked in a sibling tab
+  //     mid-poll request 401s because the session ended (either the
+  //     cookie's 12h Max-Age FIXED from login time expired client-
+  //     side, OR the server-side record was idle past its ttlMs and
+  //     got purged -- the two-layer mechanic is documented in the
+  //     deploy doc's USER_AUTH_SESSION_TTL_MS bullet) or was revoked
+  //     in a sibling tab
   //   - refreshAuthState called from any later trigger that observes a
   //     server-side session change (cross-tab logout, OIDC re-auth
   //     elsewhere, etc.)

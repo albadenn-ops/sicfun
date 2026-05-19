@@ -330,12 +330,17 @@ private[web] object AuthStack:
                     // when they kicked off this OIDC flow) BEFORE the response
                     // installs the new session cookie. Without this step the
                     // old session record lingers in the in-memory store until
-                    // its TTL (default 12h sliding) expires, so an attacker
-                    // who had previously stolen the old session token (XSS,
-                    // network capture, etc.) could keep using it long after
-                    // the user re-authenticated. The browser overwrites its
-                    // cookie automatically; we just need server-side parity.
-                    // No-op if the request did not carry a session cookie.
+                    // its TTL (default 12h sliding -- the server-side record
+                    // refreshes on every authenticated request via
+                    // resolveSession, so an attacker actively using the leaked
+                    // token can keep the record alive INDEFINITELY past the
+                    // nominal 12h window; only an idle attacker would let it
+                    // expire on its own) elapses, so an attacker who had
+                    // previously stolen the old session token (XSS, network
+                    // capture, etc.) could keep using it long after the user
+                    // re-authenticated. The browser overwrites its cookie
+                    // automatically; we just need server-side parity. No-op
+                    // if the request did not carry a session cookie.
                     val _ = platformAuth.revokeSession(cookieHeader(exchange))
                     logInfo(s"auth.oidc.success provider=$providerId email=${result.user.email} remote=${remoteAddress(exchange)}")
                     Right(
