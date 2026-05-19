@@ -1658,25 +1658,43 @@ function renderStatus(message) {
 // and finally blocks; idempotent so a final reset doesn't overwrite a
 // later flow's in-progress title.
 const DEFAULT_TITLE = "SICFUN | Hand-History Review & Playing Hall";
+// Terminal status messages whose backgrounded-tab title cue should reset
+// to default the moment the user returns. These are the EXACT `message`
+// arguments passed to setTitleStatus on the corresponding completion
+// paths (lines 345-346 for analyze, 516-518 for hall) -- defined here
+// as plain message strings so the visibilitychange handler below can
+// reconstruct the full title via the same `${message} · SICFUN`
+// template setTitleStatus uses. Previous version hardcoded the full
+// composed strings ("Review ready · SICFUN" etc.) in the handler,
+// which silently desyncs from setTitleStatus if the title-format
+// template ever changes (` · SICFUN` -> something else) -- the
+// terminal-title reset would just stop firing with no failure signal.
+// Centralising the message list here ties the two sides to a single
+// source-of-truth string set.
+const TERMINAL_TITLE_STATUSES = [
+  "Review ready",
+  "Review failed",
+  "Hall done",
+  "Hall cancelled",
+  "Hall failed"
+];
 function setTitleStatus(message) {
   document.title = message ? `${message} · SICFUN` : DEFAULT_TITLE;
 }
 
-// Job-terminal titles ('Review ready', 'Review failed', 'Hall done',
-// 'Hall failed') linger when the user has the tab backgrounded so they
-// get a completion cue in their browser tab list. Reset to default the
-// moment they come back -- the title has served its purpose and the
+// Job-terminal titles linger when the user has the tab backgrounded so
+// they get a completion cue in their browser tab list. Reset to default
+// the moment they come back -- the title has served its purpose and the
 // renderStatus panel is now visible as the source of truth; leaving a
-// stale terminal title would be misleading on the next visit. Match
-// the exact terminal strings so a mid-poll switch back ('Reviewing X',
-// 'Hall running') doesn't get clobbered.
+// stale terminal title would be misleading on the next visit. Match the
+// exact terminal strings (via TERMINAL_TITLE_STATUSES above) so a mid-
+// poll switch back ('Reviewing X', 'Hall running') doesn't get
+// clobbered -- those transient titles aren't in the terminal list so
+// they survive the visibility change.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
-  if (document.title === "Review ready · SICFUN"
-      || document.title === "Review failed · SICFUN"
-      || document.title === "Hall done · SICFUN"
-      || document.title === "Hall cancelled · SICFUN"
-      || document.title === "Hall failed · SICFUN") {
+  const current = document.title;
+  if (TERMINAL_TITLE_STATUSES.some(status => current === `${status} · SICFUN`)) {
     setTitleStatus(null);
   }
 });
