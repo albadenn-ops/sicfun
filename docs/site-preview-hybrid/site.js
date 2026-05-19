@@ -186,7 +186,8 @@ void boot();
 if (form && fileInput && siteSelect && heroInput) {
   form.addEventListener("submit", async event => {
     // preventDefault skips the form's HTML POST fallback (method="post"
-    // action="/api/analyze-hand-history" at index.html line 375). The
+    // action="/api/analyze-hand-history" on the #hand-upload-form element
+    // in index.html -- grep for `id="hand-upload-form"`). The
     // HTML attributes are the JS-failed-to-load belt-and-braces -- if
     // this handler never runs (bundle 404, CSP block), the browser
     // default-submits to a real endpoint and the analyze service 415s
@@ -384,7 +385,8 @@ if (form && fileInput && siteSelect && heroInput) {
 if (hallForm) {
   hallForm.addEventListener("submit", async event => {
     // preventDefault skips the form's HTML POST fallback (method="post"
-    // action="/api/playing-hall" at index.html line 577). The hall form
+    // action="/api/playing-hall" on the #playing-hall-form element in
+    // index.html -- grep for `id="playing-hall-form"`). The hall form
     // has 9+ keyboard-reachable inputs (hands / tables / seed / equity
     // trials / etc.) so an Enter press in ANY of them fires this
     // handler -- without preventDefault, the JS path's JSON XHR would
@@ -604,7 +606,8 @@ if (authForm) {
   // request that the server will process.
   //
   // The HTML form ALSO carries `method="post" action="/api/auth/login"`
-  // (see the long comment in index.html at line 128-143) as a defense-in-
+  // (see the long inline rationale comment inside the #auth-form element
+  // in index.html -- grep for `id="auth-form"`) as a defense-in-
   // depth fallback for the case where THIS handler never runs because the
   // JS bundle 404s mid-deploy, hits a CSP block, or otherwise fails to
   // load. In that scenario the browser's default Enter-key submit still
@@ -631,8 +634,9 @@ if (authForm) {
 }
 
 if (profileForm) {
-  // Same two-layer defense as the auth-form submit handler above:
-  // index.html line 251 carries `method="post" action="/api/auth/profile"`
+  // Same two-layer defense as the auth-form submit handler above: the
+  // #profile-form element in index.html (grep for `id="profile-form"`)
+  // carries `method="post" action="/api/auth/profile"`
   // as a JS-failed-to-load fallback. If the JS bundle 404s mid-deploy,
   // hits a CSP block, or otherwise never wires this handler, the
   // browser's default Enter-key submit still POSTs to a real endpoint --
@@ -645,8 +649,9 @@ if (profileForm) {
   // poker handle, IANA tz -- into shareable URL artifacts). When the
   // JS path IS live, preventDefault here skips the form's POST fallback
   // so we don't double-submit (JSON XHR via saveProfile + browser-
-  // default POST firing for the same Enter press). See index.html
-  // line 232-249 for the full inline rationale on the HTML side.
+  // default POST firing for the same Enter press). See the inline
+  // rationale comment immediately above the #profile-form element in
+  // index.html for the full HTML-side reasoning.
   profileForm.addEventListener("submit", event => {
     event.preventDefault();
     void saveProfile();
@@ -1212,7 +1217,8 @@ async function submitAuth(path, includeDisplayName) {
     // user can act on the announced message immediately rather than
     // Shift-Tabbing back from the (now-disabled) Sign In / Register
     // button. Worth noting: the auth login + register buttons are
-    // `type="button"` at index.html line 235-236 (NOT `type="submit"`),
+    // `type="button"` on the #auth-login and #auth-register elements in
+    // index.html (grep for `id="auth-login"`) -- NOT `type="submit"` --
     // so HTML5 form validation -- which would normally catch the empty
     // case via the inputs' `required minlength` attributes before this
     // handler ran -- is bypassed on button click. That makes this JS
