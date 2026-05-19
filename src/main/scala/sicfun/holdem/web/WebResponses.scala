@@ -29,6 +29,26 @@ private[web] object WebResponses:
   // Same defense-in-depth philosophy as base-uri / object-src / frame-
   // ancestors -- explicitly denying capabilities the app never needs means a
   // future XSS or compromised dependency can't promote itself into them.
+  //
+  // One permissive ALLOW-list entry worth explaining since it's the only
+  // non-`'none'` / non-`'self'` source in the whole policy:
+  //   - img-src `data:` -- permits the empty-data-URI favicon link at
+  //                        index.html's `<link rel="icon" href="data:,">`,
+  //                        which exists to suppress the spurious GET
+  //                        /favicon.ico that browsers default to when no
+  //                        rel=icon is declared. The bundle has no
+  //                        favicon.ico file, so without the suppression
+  //                        the default-icon request 404s and adds an
+  //                        audit-log noise line per page load. Both halves
+  //                        of the suppression contract are pinned by
+  //                        regression tests in HandHistoryReviewServerTest:
+  //                        the favicon-link test on the HTML side and the
+  //                        CSP-directive-pin block on this CSP side; drop
+  //                        either and the suppression breaks. To ship a
+  //                        real favicon, ADD favicon.ico to the static
+  //                        bundle AND drop `data:` from this source-list
+  //                        so the policy doesn't carry an unnecessarily
+  //                        permissive source with no documented consumer.
   private val ContentSecurityPolicy =
     "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data:; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'self'; style-src 'self'; worker-src 'none'"
 
