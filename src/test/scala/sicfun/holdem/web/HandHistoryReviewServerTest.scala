@@ -511,6 +511,38 @@ class HandHistoryReviewServerTest extends FunSuite:
     // space-bearing scope string is URL-encoded as `%20`-separated.
     assert(authUri.contains("scope=openid%20email%20profile"),
       s"runbook 'Google sign-in fails' triage entry lists openid + email + profile as ALL required; dropping any one silently regresses to the documented separate failure mode (consent screen renders, callback fires, auth.oidc.failure with verified-email reason). Full URI: $authUri")
+    // access_type=online: the deploy doc's Optional-OIDC bullet
+    // explicitly says "The server requests access_type=online (no
+    // refresh tokens), so users staying signed in across long absences
+    // rely on USER_AUTH_SESSION_TTL_MS (default 12h from LOGIN TIME)
+    // ... not silent Google refresh -- explains the 'why does the user
+    // have to re-sign-in every morning' complaint and tells you which
+    // knob to raise if a longer-stay UX matters more than the post-leak
+    // window." A refactor that changed this to `access_type=offline`
+    // (which would request a refresh token) would silently break the
+    // documented "no refresh tokens" architecture AND require persistent
+    // refresh-token storage the codebase doesn't ship -- Google would
+    // grant the refresh token, the server would discard it, and the
+    // promised "users stay signed in beyond 12h via silent refresh"
+    // semantics wouldn't fire (the documented model would also be wrong:
+    // operators reasoning about the leaked-token-lifetime upper bound
+    // would no longer be correct since a refresh-token-bearing client
+    // could extend session lifetime indefinitely past the 12h TTL).
+    assert(authUri.contains("access_type=online"),
+      s"deploy doc's Optional-OIDC bullet documents access_type=online -- a refactor to 'offline' (refresh-token-requesting) would silently break the documented no-refresh-tokens architecture AND the 12h session-TTL leaked-token-lifetime upper-bound calculation. Full URI: $authUri")
+    // include_granted_scopes=true: Google-specific incremental-
+    // authorization knob. If a user has previously granted scopes to
+    // the same client_id, the access token returned by the new flow
+    // inherits those earlier grants in addition to the newly-requested
+    // scopes. Not directly documented in the deploy doc the way
+    // access_type and scope are, but pinned here as part of the
+    // production OIDC URL contract -- a refactor that dropped it
+    // would change the cross-flow grant-inheritance behavior in
+    // ways operators reasoning about the OIDC flow wouldn't expect.
+    // Same call site (PlatformUserAuth.scala line 235) as access_type
+    // so a refactor touching one likely touches the other.
+    assert(authUri.contains("include_granted_scopes=true"),
+      s"include_granted_scopes=true is part of the production OIDC URL set at PlatformUserAuth.scala line 235; dropping it would silently change Google's grant-inheritance behavior across flows. Full URI: $authUri")
   }
 
   // Pins the userAuthPendingOidcFlows counter that operators rely on for
