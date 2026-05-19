@@ -1475,6 +1475,25 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(healthJson("drainSignalPresent").bool, false)
         assertEquals(healthJson("maxUploadBytes").num.toInt, 64)
         assertEquals(healthJson("analysisTimeoutMs").num.toLong, 120000L)
+        // Pin the documented PLAYING_HALL_TIMEOUT_MS default (15 min =
+        // 900000 ms) per the deploy doc line 364's "Use
+        // -PlayingHallTimeoutMs or PLAYING_HALL_TIMEOUT_MS to cap a
+        // single Playing Hall job (default 900000 ms, i.e. 15 min)".
+        // The companion analysisTimeoutMs default (120000 = 2 min) is
+        // already pinned on the line above; this assertion symmetric-
+        // izes the coverage so the hall-timeout default has the same
+        // CI protection. A refactor changing
+        // HandHistoryReviewServerConfig.DefaultPlayingHallTimeoutMs
+        // from 900000L would silently drift the documented value
+        // AND break the frontend's maxPollWaitMs auto-extension logic
+        // documented in site.js's probeServerLimits (which reads the
+        // server's playingHallTimeoutMs from health and extends the
+        // poll budget to "max(16 min default, server timeout + 1 min
+        // slack)" -- a server-side value drop would silently shrink
+        // the frontend's poll deadline below the legitimate worker
+        // run time, causing the frontend to give up polling while
+        // the server is still working on the hall run).
+        assertEquals(healthJson("playingHallTimeoutMs").num.toLong, 900000L)
         assertEquals(healthJson("rateLimitSubmitsPerMinute").num.toInt, 6)
         assertEquals(healthJson("rateLimitStatusPerMinute").num.toInt, 240)
         assertEquals(healthJson("rateLimitAuthPerMinute").num.toInt, 10)
@@ -1503,6 +1522,11 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(readyJson("authenticationEnabled").bool, false)
         assertEquals(readyJson("authenticationMode").str, "none")
         assertEquals(readyJson("analysisTimeoutMs").num.toLong, 120000L)
+        // Mirror of the health-response playingHallTimeoutMs pin above.
+        // The /api/ready endpoint surfaces the same field (Readiness.scala
+        // emits it on both probes) so a load-balancer probe wired
+        // against /api/ready gets the same default-value protection.
+        assertEquals(readyJson("playingHallTimeoutMs").num.toLong, 900000L)
         assertEquals(readyJson("rateLimitSubmitsPerMinute").num.toInt, 6)
         assertEquals(readyJson("rateLimitStatusPerMinute").num.toInt, 240)
         assertEquals(readyJson("rateLimitAuthPerMinute").num.toInt, 10)
