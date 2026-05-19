@@ -435,6 +435,50 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented USER_AUTH_MAX_USERS default value of 100000.
+  // The deploy doc line 349 explicitly says "USER_AUTH_MAX_USERS
+  // (default 100000) caps the size of the platform-user store" AND
+  // ties the default to operator-side dashboard reasoning: "dashboards
+  // should chart userAuthStoredUsers / userAuthMaxUsers and alert at
+  // e.g. 80% / 90% so capacity is raised (or registration disabled)
+  // before legitimate users hit the wall". The existing
+  // "/api/health surfaces userAuthMaxUsers and userAuthStoredUsers"
+  // test (line ~404) uses an explicit `maxUsers = 50` override -- it
+  // proves the FIELD plumbing but NOT the documented default value.
+  // A refactor that changed PlatformUserAuth.Config.maxUsers's
+  // default from 100_000 to e.g. 10_000 would silently invalidate
+  // every dashboard alert keyed on the documented value (an alert
+  // configured at "80% of 100000 = 80000 stored users" would never
+  // fire because the cap secretly dropped to 10000 -- operators
+  // would think they're under-capacity right up until the actual
+  // 10k cap fires and legitimate registrations start failing). This
+  // test asserts the default exactly so a deliberate cap change
+  // requires the maintainer to acknowledge it explicitly in lockstep
+  // with the test update rather than slipping it past CI as a
+  // side-effect of an unrelated refactor. Same regression-pin pattern
+  // as bd8e7f3 (sessionTtlMs default 12h pinned via cookie Max-Age),
+  // 097bc64 (PBKDF2 parameters), a0fd8b3 (displayName auto-fill) --
+  // documented defaults with operator-relevant reasoning get pinned
+  // so drift can't go silent.
+  test("/api/health surfaces userAuthMaxUsers = 100000 default when no maxUsers override is set") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        // Config(storePath = storePath) with NO maxUsers override
+        // exercises the documented default (PlatformUserAuth.Config's
+        // `maxUsers: Int = 100_000` at line 81).
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val health = getJson(s"$baseUri/api/health")
+          assertEquals(health("userAuthMaxUsers").num.toInt, 100000,
+            clue = "userAuthMaxUsers default must be 100000 per deploy doc line 349; a silent drift here would invalidate operator-side dashboards keyed on the documented 80%/90% capacity-pressure thresholds (e.g., 80000-stored-users alert would never fire if cap secretly dropped to 10000, masking real capacity pressure right up until registrations start failing)")
+        }
+      }
+    }
+  }
+
   test("/api/health user-auth fields are null when platform-user auth is not configured") {
     // basic-auth / no-auth deployments have no user store, so the cap and
     // the live count are both null -- dashboards should treat null as
