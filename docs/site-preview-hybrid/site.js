@@ -1545,7 +1545,27 @@ const OIDC_ERROR_MESSAGES = {
   "Google userinfo response was missing required identity fields":
     "Google did not return the required account info. This is usually a deployment-side OIDC scope misconfiguration -- please contact the operator.",
   "Google token exchange did not return an access token":
-    "Sign in with Google did not complete -- the provider did not return an access token. Please try again, or contact the operator if this keeps happening."
+    "Sign in with Google did not complete -- the provider did not return an access token. Please try again, or contact the operator if this keeps happening.",
+  // The OIDC callback re-runs `validateEmail` on whatever the provider
+  // returned as the userinfo `email` field (PlatformUserAuth.scala calls
+  // it inside upsertOidcIdentity for defense in depth against a
+  // malformed-provider response). Google's emails always pass in
+  // practice, but a future provider added to the supported set OR a
+  // tampered userinfo response from a compromised upstream proxy could
+  // deliver a value that trips one of these three messages. The user
+  // cannot fix any of them (the email is provider-controlled), so all
+  // three friendly mappings name it as a provider-side issue and route
+  // the user to the operator rather than asking them to retry. Closes
+  // the 13-string `finishOidc` Left coverage previously missing here --
+  // without these three, the user saw a raw "OIDC sign-in failed: email
+  // must be at most 254 characters" surface, which reads as a developer
+  // log entry rather than actionable advice.
+  "email must be at most 254 characters":
+    "The sign-in provider returned an email address longer than allowed. Please contact the operator -- this is a provider-side issue.",
+  "email must not contain whitespace or control characters":
+    "The sign-in provider returned a malformed email address. Please contact the operator -- this is a provider-side issue.",
+  "email must be a valid address":
+    "The sign-in provider returned an unparseable email address. Please contact the operator -- this is a provider-side issue."
 };
 
 // Translate a server-emitted OIDC error code to a user-readable message.
