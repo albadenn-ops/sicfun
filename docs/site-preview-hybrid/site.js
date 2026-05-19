@@ -2209,15 +2209,35 @@ function renderHallResults(data) {
   if (hallOutputList) {
     const files = Array.isArray(summary.outputFiles) ? summary.outputFiles : [];
     hallOutputList.innerHTML = files.length > 0
-      ? files.map(file => `
-          <article class="opponent-card">
-            <div class="decision-head">
-              <h3 class="decision-title">Output File</h3>
-              <p class="card-meta">written</p>
-            </div>
-            <p class="opponent-meta">${escapeHtml(file)}</p>
-          </article>
-        `).join("")
+      ? files.map(file => {
+          // Use the file's basename as the card title rather than a
+          // generic "Output File". A hall run can emit up to five
+          // distinct files (hands.tsv, learning.tsv,
+          // training-selfplay.tsv, ddre-training-selfplay.tsv,
+          // review-upload-pokerstars.txt -- enumerated by
+          // existingOutputFiles in HandHistoryReviewServerApi.scala),
+          // and rendering each as "Output File" makes the list read as
+          // five duplicate cards with the only distinguishing detail
+          // buried in the trailing path meta. Basename in the title +
+          // full path in the meta gives both signals at the right
+          // visual weight: glance the list to see WHICH files got
+          // written, dig into the path for the absolute location.
+          // Split on both `/` and `\` so absolute paths on Windows
+          // (e.g. `C:\...\hands.tsv`) and Unix-style paths from
+          // outDir.resolve(...) both produce the right basename.
+          // The `|| file` fallback handles the unlikely degenerate
+          // case of an empty-string path component.
+          const basename = file.split(/[/\\]/).pop() || file;
+          return `
+            <article class="opponent-card">
+              <div class="decision-head">
+                <h3 class="decision-title">${escapeHtml(basename)}</h3>
+                <p class="card-meta">written</p>
+              </div>
+              <p class="opponent-meta">${escapeHtml(file)}</p>
+            </article>
+          `;
+        }).join("")
       : `<p class="section-note">${summary.outDir ? `Run directory: ${escapeHtml(summary.outDir)}` : "No output files were reported."}</p>`;
   }
 
