@@ -138,10 +138,20 @@ private[web] object AuthStack:
                   // log it so operators can spot brute-force patterns (e.g. many
                   // failures from one IP across many emails, or many failures
                   // from many IPs against one email). %20-escape ASCII spaces
-                  // in BOTH the email and the loginLocal-returned reason
-                  // ("invalid credentials", "account temporarily locked", etc.,
-                  // all space-bearing) so neither field splits the structured
-                  // key=value log line.
+                  // in BOTH the email and the loginLocal-returned reason -- the
+                  // latter is currently always the literal string `"invalid email
+                  // or password"` (a single timing-uniform message across the
+                  // unknown-email / OIDC-only-account / wrong-password paths
+                  // collapsed at PlatformUserAuth.scala:541-569, where the
+                  // deliberate non-branching blocks the email-enumeration timing
+                  // oracle a per-branch message would otherwise leak). The
+                  // %20-escape on the reason field is forward-looking rather
+                  // than load-bearing today: a future failure path that adds a
+                  // non-collapsed reason (e.g. an account-lockout reason once a
+                  // failed-login counter ships, or a deployment-disabled reason
+                  // gated on a config flag) would also be space-bearing and
+                  // benefit from the same escape, so neither field splits the
+                  // structured `key=value` log line.
                   logWarn(s"auth.login.failure email=${formatSubmittedEmailForLog(email)} remote=${remoteAddress(exchange)} reason=${error.replace(" ", "%20")}")
                   Left(401 -> error)
             }
