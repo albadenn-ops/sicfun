@@ -74,8 +74,8 @@ body::before {
 
 /* The skip-link target (<main id="main-content"> in index.html) carries
    tabindex="-1" so the link actually moves keyboard focus into the
-   content region (see 001c218 -- without that attribute the skip link
-   silently no-op's on Safari and some Chromium configs). With the
+   content region (without that attribute the skip link silently no-op's
+   on Safari and some Chromium configs). With the
    attribute in place, browsers may render a focus indicator on <main>
    when the user activates the skip link -- a large outline around the
    entire content block, which reads as a visual defect rather than
@@ -1339,9 +1339,9 @@ summary:focus-visible {
 .recent-run-actions { display: inline-flex; align-items: center; gap: 6px; }
 .recent-run-remove { padding: 4px 10px; min-width: 0; }
 
-/* margin-top dropped in the same change that promoted hall-progress
-   from a nested child of hall-status to a sibling under .review-panel
-   (382d264). The 12px was sized to space the progress card from the
+/* margin-top dropped when hall-progress was promoted from a nested
+   child of hall-status to a sibling under .review-panel. The previous
+   12px margin was sized to space the progress card from the
    section-note above it inside hall-status (block layout, no gap), but
    .review-panel uses `display: grid; gap: 18px` -- so any vertical
    spacing between hall-status and hall-progress comes from the grid
