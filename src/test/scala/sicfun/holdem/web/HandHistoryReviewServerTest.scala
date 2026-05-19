@@ -1199,6 +1199,7 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(headerValue(health, "X-Frame-Options"), Some("DENY"))
         assertEquals(headerValue(health, "Cross-Origin-Opener-Policy"), Some("same-origin"))
         assertEquals(headerValue(health, "Cross-Origin-Resource-Policy"), Some("same-origin"))
+        assertEquals(headerValue(health, "Referrer-Policy"), Some("no-referrer"))
         assertEquals(headerValue(health, "X-Robots-Tag"), Some("noindex, nofollow"))
 
         val ready = get(s"$baseUri/api/ready")
@@ -1270,6 +1271,16 @@ class HandHistoryReviewServerTest extends FunSuite:
         assert(permissionsPolicy.contains("usb=()"), s"missing usb=() in: $permissionsPolicy")
         assertEquals(headerValue(index, "Cross-Origin-Opener-Policy"), Some("same-origin"))
         assertEquals(headerValue(index, "Cross-Origin-Resource-Policy"), Some("same-origin"))
+        // Referrer-Policy: no-referrer is the strictest value per the deploy
+        // doc's Reverse-Proxy section -- "no Referer is ever sent on outbound
+        // navigations or fetches, so the user's path through this app doesn't
+        // leak to any third-party origin the user later visits via a link or
+        // redirect; one tier stricter than the browser-default
+        // strict-origin-when-cross-origin, which would still leak the origin
+        // in some cross-site cases." A refactor relaxing this to no-referrer-
+        // when-downgrade / strict-origin / origin-when-cross-origin / etc.
+        // would silently regress the documented privacy floor.
+        assertEquals(headerValue(index, "Referrer-Policy"), Some("no-referrer"))
         assertEquals(headerValue(index, "X-Robots-Tag"), Some("noindex, nofollow"))
 
         val oversizedPayload = s"""{"handHistoryText":"${"A" * 256}"}"""
