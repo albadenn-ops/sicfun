@@ -824,8 +824,44 @@ function parseRetryAfterSeconds(response, body) {
     if (fromBody > 0) return fromBody;
   }
   const headerValue = response.headers.get("Retry-After");
-  const parsed = headerValue ? parseInt(headerValue, 10) : NaN;
-  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  if (!headerValue) return null;
+  // RFC 7231 sec 7.1.3 allows Retry-After to be EITHER a delta-seconds
+  // integer ("Retry-After: 5") OR an HTTP-date ("Retry-After: Fri, 31 Dec
+  // 1999 23:59:59 GMT"). The origin server always emits delta-seconds
+  // (see HandHistoryReviewServerApi.scala's `retryAfterSeconds`, which
+  // formats `pollAfterMs` as an integer second count), so for direct
+  // origin traffic the integer branch below covers every case. The
+  // HTTP-date fallback after it exists for deployments behind a reverse
+  // proxy or CDN that rewrites Retry-After into HTTP-date form for its
+  // own back-pressure model (some CDNs do this when they layer their
+  // own 429/503 behavior on top of the origin's). Without the fallback
+  // the frontend would silently drop the proxy's retry hint and surface
+  // only the base error message -- the user gets "rate limited" with no
+  // wait-time guidance, even though the proxy is broadcasting one.
+  const parsedSeconds = parseInt(headerValue, 10);
+  if (Number.isFinite(parsedSeconds) && parsedSeconds > 0) return parsedSeconds;
+  // Date.parse accepts the three HTTP-date formats RFC 7231 names (RFC
+  // 1123 / RFC 850 / asctime) and returns NaN on parse failure. Compute
+  // the delta against the client's clock and round UP to the nearest
+  // second so a "1500 ms from now" deadline surfaces as "2 seconds"
+  // rather than "1" -- under-reporting would have the client retry
+  // slightly before the proxy's intended backoff window expires and
+  // bounce again at the still-active rate limit. Caveat worth knowing:
+  // this branch uses the CLIENT's wall clock vs the server-emitted
+  // HTTP-date, so a clock-skewed client (laptop with stale time on a
+  // long-suspended session, embedded device with no NTP) computes a
+  // wrong delta. Clock skew of a few seconds is harmless given the
+  // typical 5-60 second back-pressure horizon; skew of minutes would
+  // surface as a wildly-wrong "Try again in N seconds" message but the
+  // user can still retry manually. The origin-direct path (parseInt
+  // above) avoids this entirely -- the value IS the delta, no clock
+  // arithmetic involved -- which is why the server prefers integer
+  // emission rather than HTTP-date even though the RFC allows both.
+  const dateMs = Date.parse(headerValue);
+  if (Number.isFinite(dateMs)) {
+    const deltaSec = Math.ceil((dateMs - Date.now()) / 1000);
+    if (deltaSec > 0) return deltaSec;
+  }
   return null;
 }
 
