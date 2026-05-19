@@ -83,6 +83,19 @@ private[web] object AuthStack:
   ): Either[(Int, String), JsonResponse] =
     if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("POST"))
     else if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
+    // 409 "already signed in" -- same line shape as handleAuthLogin below
+    // but a DIFFERENT rationale: this gate is just user-error prevention
+    // (registering a new account while already signed in doesn't make
+    // sense; the frontend's 409 handler refreshes /api/auth/me to flip the
+    // UI). Unlike handleAuthLogin's 409, there's no leaked-token security
+    // implication here -- an attacker holding a leaked token can't use it
+    // to register a new account (the email-already-exists check upstream
+    // of register-storage would 400 the duplicate anyway), and the
+    // legitimate user can still register a DIFFERENT email without
+    // colliding with the leaked-but-still-valid session. So the parallel
+    // comment block on handleAuthLogin's 409 (just below) describing the
+    // OIDC-vs-local revocation asymmetry intentionally doesn't apply
+    // here; this register gate stays a simple state-divergence reject.
     else if authenticatedUser(exchange).nonEmpty then Left(409 -> "already signed in")
     else
       platformAuth match
