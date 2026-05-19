@@ -702,6 +702,66 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the displayName email-local-part auto-fill behavior documented
+  // in both deploy doc (line 100: "When displayName is omitted or trims
+  // to empty at register time, the server auto-fills it from the
+  // email's local-part (e.g. alice@example.com -> alice); the literal
+  // fallback SICFUN User only fires when the local-part is itself
+  // empty, which validateEmail already rejects, so that string is
+  // effectively unreachable") AND in the runbook section 5A line 340's
+  // "Why is my display name my email username?" support-triage entry
+  // (which assumes operators can tell users "the field is self-service
+  // via the Profile panel" -- a triage that's wrong if the auto-fill
+  // doesn't actually fire). Before this commit, the behavior had no
+  // test, so a refactor that changed defaultDisplayNameFor's split
+  // character (e.g. from @ to +), or removed the auto-fill entirely
+  // (leaving the field empty), or changed the fallback string would
+  // silently break both the documented behavior AND the operator-side
+  // support-triage script that depends on it. Same regression-pin
+  // pattern as 23ae2ff (access_type=online), 121e5b5 (state-cookie
+  // Max-Age), 44c9f9f (OIDC email-collision) -- documented
+  // operator-visible behavior gets pinned so refactors can't silently
+  // regress it. Tests both branches: (1) omitted displayName field
+  // exercises the JSON-key-absent path, (2) whitespace-only
+  // displayName exercises the trim-to-empty path; both should
+  // resolve to the email's local-part.
+  test("registration without displayName (omitted or whitespace-only) auto-fills the field from the email's local-part") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Case 1: displayName field omitted entirely from the
+          // register JSON body. The server defaults it from the email
+          // local-part "alice" (everything before @).
+          val omitted = postJson(s"$baseUri/api/auth/register",
+            """{"email":"alice@example.com","password":"correct-horse-battery"}""")
+          assertEquals(omitted.statusCode(), 201,
+            clue = "registration with omitted displayName must succeed (the field is optional per deploy doc line 100)")
+          val omittedUser = jsonBody(omitted)("user")
+          assertEquals(omittedUser("displayName").str, "alice",
+            clue = "omitted displayName must auto-fill from email local-part 'alice' per deploy doc + runbook; a future refactor that dropped this auto-fill (or changed defaultDisplayNameFor's split character) would silently regress both the documented behavior AND the runbook's 'Why is my display name my email username?' support-triage flow")
+
+          // Case 2: displayName field present but whitespace-only,
+          // which sanitizeDisplayName trims to empty, which then
+          // triggers the same defaultDisplayNameFor path. The trim
+          // happens in sanitizeOptionalField; the empty-result
+          // fallback fires in registerLocal / upsertOidcIdentity.
+          val whitespace = postJson(s"$baseUri/api/auth/register",
+            """{"email":"bob@example.com","password":"correct-horse-battery","displayName":"   "}""")
+          assertEquals(whitespace.statusCode(), 201,
+            clue = "registration with whitespace-only displayName must succeed (the trim+default path is the documented graceful-degradation shape)")
+          val whitespaceUser = jsonBody(whitespace)("user")
+          assertEquals(whitespaceUser("displayName").str, "bob",
+            clue = "whitespace-only displayName must trim to empty and auto-fill from email local-part 'bob' -- this is the second documented branch of the auto-fill behavior; the user's explicit-but-blank input is treated identically to omitting the field")
+        }
+      }
+    }
+  }
+
   test("registration rejects emails containing whitespace or control characters") {
     // RFC 5321 §4.1.2: unquoted local-part excludes whitespace. Beyond
     // compliance, a space in a stored email value also breaks the audit log
