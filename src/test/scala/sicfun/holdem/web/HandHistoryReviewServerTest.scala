@@ -455,6 +455,64 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the four OIDC start-URL parameters the deploy doc + runbook +
+  // OAuth 2.0 security model depend on. The existing OIDC tests in this
+  // file all use FakeOidcProvider (whose authorizationUri returns a
+  // hardcoded test URL without the production parameters), so the REAL
+  // GoogleOidcProvider.authorizationUri is otherwise unexercised by the
+  // suite -- a refactor that dropped any of the four documented
+  // parameters would silently break the documented behavior without
+  // any test failure. The four parameters and what depends on each:
+  //   - `prompt=select_account`: deploy doc's Optional-OIDC bullet
+  //     explicitly says "every /start forces Google's account picker
+  //     even when the user has exactly one Google account already
+  //     signed in -- useful for multi-account users (Work vs personal
+  //     Google), and an explainer for the 'why does it ask me every
+  //     time?' support question on single-account users." Dropping the
+  //     parameter silently regresses the multi-account-user experience.
+  //   - `code_challenge_method=S256`: the deploy doc's lead line says
+  //     "OIDC + PKCE (SHA-256 challenge)". RFC 7636 also defines
+  //     `plain` (no transform) which is strictly weaker -- an attacker
+  //     who intercepts the authorization redirect URL gets the
+  //     verifier directly. Dropping to plain silently weakens PKCE.
+  //   - `response_type=code`: the authorization-code flow with PKCE
+  //     is the only OAuth 2.0 flow the BCP still endorses. The
+  //     deprecated `token` (implicit) flow puts the access token in
+  //     the URL fragment where browser history / referrers / log
+  //     analysers leak it. A refactor to `token` would silently
+  //     regress to a deprecated insecure flow.
+  //   - `scope=openid email profile` (URL-encoded as openid%20email
+  //     %20profile per formEncode/urlEncode): the runbook's "Google
+  //     sign-in fails" triage entry says "openid, email, and profile
+  //     are all required. A missing email scope is a DIFFERENT
+  //     failure mode -- the consent screen still renders fine, the
+  //     callback DOES fire, and the auth.oidc.failure line appears
+  //     with the verified-email reason." Dropping one of the three
+  //     silently regresses to that failure path.
+  // Pure unit test of GoogleOidcProvider.authorizationUri -- no server,
+  // no HTTP. Same regression-pin pattern as the other "documented
+  // contract has no test" pins recently added.
+  test("GoogleOidcProvider.authorizationUri carries the four documented OIDC start-URL parameters (prompt=select_account, code_challenge_method=S256, response_type=code, scope=openid email profile)") {
+    val provider = new PlatformUserAuth.GoogleOidcProvider(
+      PlatformUserAuth.GoogleOidcConfig(
+        clientId = "test-client-id",
+        clientSecret = "test-client-secret",
+        redirectUri = "https://example.test/api/auth/oidc/google/callback"
+      )
+    )
+    val authUri = provider.authorizationUri("test-state-value", "test-code-challenge-value")
+    assert(authUri.contains("prompt=select_account"),
+      s"deploy doc's Optional-OIDC bullet documents prompt=select_account as the multi-account-user picker trigger; missing from authorizationUri output. Full URI: $authUri")
+    assert(authUri.contains("code_challenge_method=S256"),
+      s"deploy doc's lead line documents OIDC + PKCE (SHA-256 challenge); a refactor to `plain` would silently weaken PKCE protection. Full URI: $authUri")
+    assert(authUri.contains("response_type=code"),
+      s"OAuth 2.0 BCP recommends the authorization-code flow with PKCE; a refactor to `token` (implicit) would silently regress to a deprecated insecure flow that leaks the access token via the URL fragment. Full URI: $authUri")
+    // formEncode uses urlEncode which replaces `+` with `%20`, so the
+    // space-bearing scope string is URL-encoded as `%20`-separated.
+    assert(authUri.contains("scope=openid%20email%20profile"),
+      s"runbook 'Google sign-in fails' triage entry lists openid + email + profile as ALL required; dropping any one silently regresses to the documented separate failure mode (consent screen renders, callback fires, auth.oidc.failure with verified-email reason). Full URI: $authUri")
+  }
+
   // Pins the userAuthPendingOidcFlows counter that operators rely on for
   // triage per the runbook's OIDC silent-failure entry (added in c7b18cd):
   // "userAuthPendingOidcFlows counting up steadily ... WITHOUT a
