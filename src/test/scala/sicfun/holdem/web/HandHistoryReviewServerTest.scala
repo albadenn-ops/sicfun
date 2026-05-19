@@ -2865,6 +2865,78 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Parallel secure-mode OIDC state-cookie test, mirroring 72358a3's
+  // session-cookie secure-mode symmetric pattern. The deploy doc
+  // documents the secure-mode OIDC state cookie as `__Host-
+  // sicfun_oidc_state` with `Secure` set "plus Secure in secure mode"
+  // (deploy doc line 220), and the runbook section 5A line 344 makes
+  // the same claim with the same operator-side log-grep / proxy-ACL
+  // consideration callout. Before this test, the secure-mode branch
+  // of `oidcStateCookieHeader(state, ttlMs, secure=true)` was
+  // entirely uncovered: a refactor that broke ONLY the secure-mode
+  // path (e.g. dropped the `__Host-` prefix, omitted Secure, dropped
+  // HttpOnly on the secure branch only, or drifted Max-Age on one
+  // branch but not the other) would pass the insecure-mode test
+  // above and silently regress the documented secure-mode contract.
+  // Same exact-value pinning policy as 121e5b5 (insecure-mode
+  // Max-Age=600) + 72358a3 (secure-mode session cookie added the
+  // same generic-security attributes that were already pinned in
+  // the insecure-mode session-cookie test) -- two cookie-emission
+  // branches sharing one helper must pin the same security
+  // contract on BOTH branches.
+  test("OIDC /start secure-mode state cookie uses __Host-sicfun_oidc_state with Secure + HttpOnly + SameSite=Lax + Max-Age=600") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              allowLocalRegistration = false,
+              cookieSecure = true,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val start = get(s"$baseUri${provider.startPath}")
+          val urlState = queryParam(headerValue(start, "Location").getOrElse(""), "state")
+            .getOrElse(fail("missing OIDC state in redirect"))
+          val setCookie = headerValue(start, "Set-Cookie").getOrElse(fail("missing Set-Cookie on secure-mode /start"))
+          // __Host- prefix per RFC 6265 sec 4.1.3 (browsers reject the
+          // cookie unless Secure + Path=/ + no Domain attribute). The
+          // deploy doc explicitly notes "same `__Host-` prefix and
+          // same operator-side log-grep / proxy-ACL consideration as
+          // the session cookie" -- the symmetry across the two
+          // __Host-prefixed cookies is the operator-relevant contract
+          // (an operator grepping log lines for sibling-subdomain
+          // attempted overwrites uses the same patterns for both).
+          assert(setCookie.startsWith("__Host-sicfun_oidc_state="),
+            s"secure-mode state cookie name must be __Host-sicfun_oidc_state per the RFC 6265 prefix protection; got: $setCookie")
+          val cookieValue = setCookie.takeWhile(_ != ';').drop("__Host-sicfun_oidc_state=".length)
+          assertEquals(cookieValue, urlState,
+            "state cookie value must match the URL state so the callback's compare succeeds (same shape as insecure-mode test above)")
+          assert(setCookie.contains("Secure"),
+            s"secure-mode state cookie must set Secure (required by __Host- prefix and by USER_AUTH_COOKIE_SECURE=true semantics); got: $setCookie")
+          assert(setCookie.contains("Path=/"),
+            s"__Host- prefix requires Path=/; got: $setCookie")
+          assert(!setCookie.contains("Domain="),
+            s"__Host- prefix forbids Domain attribute; got: $setCookie")
+          assert(setCookie.toLowerCase.contains("httponly"),
+            s"state cookie must be HttpOnly so JS cannot read or set it; got: $setCookie")
+          assert(setCookie.toLowerCase.contains("samesite=lax"),
+            s"state cookie must be SameSite=Lax so the provider's top-level redirect can send it back; got: $setCookie")
+          // Same exact-value Max-Age pin as the insecure-mode test
+          // above -- DefaultOidcFlowTtlMs is mode-independent so
+          // both branches must carry Max-Age=600 (10 min).
+          assert(setCookie.toLowerCase.contains("max-age=600"),
+            s"secure-mode state cookie must have Max-Age=600 (10 min) per the same deploy-doc + runbook claim that the insecure-mode test pins; got: $setCookie")
+        }
+      }
+    }
+  }
+
   test("OIDC callback handles provider-side ?error= by redirecting to the failure landing page") {
     // When the user denies consent on Google's screen, or the authorization
     // code expires before redemption, the provider redirects back to our
