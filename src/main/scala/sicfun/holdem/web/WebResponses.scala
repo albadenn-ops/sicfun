@@ -97,6 +97,25 @@ private[web] object WebResponses:
     headers.set("Permissions-Policy", PermissionsPolicy)
     headers.set("Referrer-Policy", "no-referrer")
     headers.set("X-Content-Type-Options", "nosniff")
+    // X-Frame-Options: DENY is the legacy clickjacking-block header
+    // (predates CSP frame-ancestors by several years). CSP
+    // `frame-ancestors 'none'` (set above in ContentSecurityPolicy)
+    // is the modern equivalent and is browser-authoritative when
+    // both are set on a UA that supports CSP 2+. X-Frame-Options
+    // stays as defense-in-depth for failure modes that would
+    // invalidate the CSP without invalidating the legacy header:
+    // a browser CSP-parser bug that mishandles frame-ancestors, an
+    // unrecognized directive in a future CSP refactor that triggers
+    // strict-mode rejection of the whole policy, or a partial CSP
+    // deployment that omits frame-ancestors. Either header alone
+    // blocks framing; together they cover any CSP-parser failure at
+    // the cost of one extra response header (a few bytes). Removing
+    // this line is NOT a noise-reduction "cleanup" -- it silently
+    // drops the defense-in-depth fallback. The test at
+    // HandHistoryReviewServerTest line ~1115 pins `X-Frame-Options:
+    // DENY` (and the CSP-directive-pin block in the same test pins
+    // `frame-ancestors 'none'`) so both halves of this redundant-by-
+    // design pair are regression-protected.
     headers.set("X-Frame-Options", "DENY")
     // CSP `frame-ancestors 'none'` + X-Frame-Options already block framing.
     // COOP/CORP cover orthogonal threats: cross-origin window references
