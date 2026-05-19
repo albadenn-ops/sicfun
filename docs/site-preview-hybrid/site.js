@@ -1937,6 +1937,26 @@ async function pollAnalysisJob(fileName, statusUrl, initialPollAfterMs) {
     }
 
     if (body.status === "failed") {
+      // Translate the server's "analysis timed out after 120000ms" raw
+      // message into a friendlier duration. The server emits raw
+      // milliseconds (JobQueue.scala's `timeoutFailure` formats the
+      // configured ANALYSIS_TIMEOUT_MS verbatim into the error string)
+      // because that's the only form it has -- the env var IS specified
+      // in ms -- but non-developer users read durations in minutes/
+      // seconds, and "120000ms" reads as a developer log entry rather
+      // than actionable feedback. Keyed on body.errorStatus === 504
+      // (the timeout-specific HTTP equivalent set by timeoutFailure)
+      // AND a regex match on the message shape, so a server change to
+      // the message format only loses the prettification (falls back
+      // to the verbatim string), never breaks the failure path. Same
+      // formatDuration helper the success path uses for "(took Xm Ys)"
+      // so the time format is consistent across success and timeout.
+      if (body.errorStatus === 504 && typeof body.error === "string") {
+        const match = body.error.match(/^analysis timed out after (\d+)ms$/);
+        if (match) {
+          throw new Error(`Analysis timed out after ${formatDuration(Number(match[1]))}.`);
+        }
+      }
       throw new Error(body.error || "Analysis failed.");
     }
 
@@ -2056,6 +2076,22 @@ async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
     }
 
     if (body.status === "failed") {
+      // Same timeout-message prettification as the analyze poller above:
+      // the server emits "playing hall timed out after 900000ms" verbatim
+      // (15-min default formatted as raw ms) which reads as a developer
+      // log entry; translate to "Playing hall timed out after 15m 0s."
+      // when the errorStatus + message shape both match, fall through
+      // to the verbatim string on any mismatch so a future server-side
+      // message change doesn't break the failure path. PLAYING_HALL_TIMEOUT_MS
+      // defaults to 15 min but can be raised to hours via env var, so the
+      // formatDuration h:mm:ss promotion in formatDuration matters here
+      // more than it does for the analyze flow (2-min default).
+      if (body.errorStatus === 504 && typeof body.error === "string") {
+        const match = body.error.match(/^playing hall timed out after (\d+)ms$/);
+        if (match) {
+          throw new Error(`Playing hall timed out after ${formatDuration(Number(match[1]))}.`);
+        }
+      }
       throw new Error(body.error || "Playing hall failed.");
     }
 
