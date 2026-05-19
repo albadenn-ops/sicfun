@@ -1901,7 +1901,26 @@ async function pollPlayingHallJob(statusUrl, initialPollAfterMs) {
     // exits via finishHallProgress (which clears the flag). Title
     // mirroring also pivots to "Hall cancelling" for the same reason.
     if (hallCancelRequested && (body.status === "queued" || body.status === "running")) {
-      renderHallStatus("Cancel accepted. Finishing in-flight hands...");
+      // Differentiate the in-flight-hands message based on whether the
+      // worker has actually started. status="queued" means the job is
+      // still in the FIFO queue waiting for a free worker slot
+      // (typically because MAX_CONCURRENT_JOBS is saturated) -- the
+      // worker hasn't started, so there are NO in-flight hands and
+      // the prior "Finishing in-flight hands..." message was
+      // misleading. status="running" means the worker is mid-loop
+      // and may have partial-data hands captured before the cancel
+      // flag is observed at the next per-hand check. Both cases
+      // resolve via the cancel flag (jobStore.cancel sets the
+      // cancelFlags atomic; a queued job's worker checks the flag
+      // immediately on pickup and exits before playing any hands;
+      // a running job's worker checks at the next per-hand boundary
+      // and exits then). The hallCancelRequested flag stays set
+      // through both cases until the next poll observes status=
+      // "cancelled" and finishHallProgress clears it.
+      const cancelMessage = body.status === "queued"
+        ? "Cancel accepted. Removing job from queue..."
+        : "Cancel accepted. Finishing in-flight hands...";
+      renderHallStatus(cancelMessage);
       setTitleStatus("Hall cancelling");
     } else {
       renderHallStatus(playingHallJobStatusMessage(body.status));
