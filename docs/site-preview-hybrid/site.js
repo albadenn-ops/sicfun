@@ -2502,25 +2502,42 @@ function objectEntries(value) {
     : [];
 }
 
+// All five format* helpers below use `coerceNumber` to defend against a
+// server response that ever ships a non-numeric value where the renderer
+// expects a number. The earlier pattern `Number(value || 0)` only handled
+// null / undefined / empty-string / 0 -- it left `Number("not-a-number")`
+// as NaN, which then flows through `.toFixed(2)` and `.toLocaleString()`
+// as the literal string "NaN" in the rendered summary card. That's
+// operator-visible as a defect rather than the intended graceful "0"
+// fallback. coerceNumber additionally guards against ±Infinity for the
+// same reason -- `(Infinity).toFixed(2)` returns "Infinity" rather than
+// a numeric-looking string. Both NaN and Infinity are improbable in
+// practice (server fields are well-typed Long / Double), but cheap to
+// defend.
+function coerceNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function formatInteger(value) {
-  return Number(value || 0).toLocaleString("en-US");
+  return coerceNumber(value).toLocaleString("en-US");
 }
 
 function formatNumber(value) {
-  return Number(value || 0).toFixed(2);
+  return coerceNumber(value).toFixed(2);
 }
 
 function formatSigned(value) {
-  const number = Number(value || 0);
+  const number = coerceNumber(value);
   return `${number > 0 ? "+" : ""}${number.toFixed(2)}`;
 }
 
 function formatMetric(value) {
-  return Number(value || 0).toFixed(3);
+  return coerceNumber(value).toFixed(3);
 }
 
 function formatPercent(value) {
-  return `${(Number(value || 0) * 100).toFixed(1)}%`;
+  return `${(coerceNumber(value) * 100).toFixed(1)}%`;
 }
 
 function formatFileSize(bytes) {
