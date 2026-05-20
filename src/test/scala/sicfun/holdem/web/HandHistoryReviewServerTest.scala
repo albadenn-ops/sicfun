@@ -3490,6 +3490,197 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented BOOT-TIME-COUNT-LOAD contract through the
+  // startup banner -- closes the OTHER dimension the f0e7066
+  // auth-mode-variant series didn't cover (auth-mode pins
+  // 7c47f88/1c87e04/f0e7066 covered the per-mode banner-shape
+  // divergence; THIS commit covers the per-INSTANCE-LIFETIME
+  // count-load semantic); the inline comment at HandHistory
+  // ReviewServerRuntime.scala lines 329-332 EXPLICITLY documents
+  // the userAuthStoredUsers field as the boot-time count emission
+  // for restart-survival verification: "At boot we have JUST
+  // loaded the user store; emit the current count so operators
+  // can verify the persistent store survived restart and see
+  // capacity headroom vs maxUsers without having to hit
+  // /api/health first"; the existing 758b86e commit pinned the
+  // JSON-store persistent-account-data survival via /api/auth/
+  // login (cross-restart credentials still resolve), but NOT
+  // specifically through the BANNER -- 758b86e proved the data
+  // survives at the storage layer, this commit proves the BOOT
+  // EMISSION reflects the post-restart loaded count, which is
+  // what operators actually grep for in boot logs to verify
+  // restart-survival WITHOUT touching the /api/auth/login flow;
+  // the test flow: (1) FIRST withServer with platformAuth +
+  // fresh storePath, capture stdout, verify SECOND banner emits
+  // userAuthStoredUsers=0 (matching 1c87e04 baseline), (2)
+  // register 2 users via /api/auth/register inside the first
+  // withServer (the registrations PERSIST to the storePath via
+  // PlatformUserAuth.scala's writeState atomic-move at line
+  // 968-972, per 758b86e's coverage), (3) close the first
+  // server (withServer's finally fires server.close), (4)
+  // SECOND withServer with the SAME storePath, capture stdout
+  // separately, verify the SECOND startup banner emits
+  // userAuthStoredUsers=2 (the persisted count), NOT 0 (which
+  // would indicate the store wasn't loaded) NOT "-" (which
+  // would indicate the platform-auth mode flag was lost across
+  // restart); per-field regression vectors SPECIFIC to this
+  // boot-time-count-load contract that the prior auth-mode
+  // banner pins (7c47f88/1c87e04/f0e7066) don't catch: (i) a
+  // refactor that emitted the count BEFORE the store was loaded
+  // would silently emit 0 even for restarted-with-users
+  // deployments -- the operator's restart-survival diagnostic
+  // would silently mislead (operator sees userAuthStoredUsers=0
+  // after restart, assumes store was wiped, but the store is
+  // fine, just emitted at the wrong lifecycle moment), the
+  // emission order at HandHistoryReviewServerRuntime.scala line
+  // 333 is `val userAuthStoredUsersField = platformAuthService.
+  // map(_.storedUserCount.toString).getOrElse("-")` which
+  // CAPTURES the count via storedUserCount AT BANNER FORMAT TIME
+  // (line 333) -- but platformAuthService was created via
+  // PlatformUserAuth.Service.create AT LINE 232 of the same
+  // file, BEFORE the bind happens at line 290-295, AND
+  // PlatformUserAuth.Service.create LOADS the store (per the
+  // implementation reading from storePath at construction time);
+  // so by the time line 333 captures the count, the store IS
+  // already loaded -- the timing is correct, and this test pins
+  // that invariant by asserting non-zero count on the restart
+  // path, (ii) a refactor that bypassed PlatformUserAuth.Service.
+  // create's store-load (e.g. "lazy-load on first lookup for
+  // faster startup") would silently emit 0 in the banner even
+  // when the store is non-empty -- the lazy load would happen
+  // later via /api/auth/login or /api/auth/me, by which time
+  // the banner already emitted, (iii) a refactor that changed
+  // the userAuthStoredUsers field from "live count" to "static
+  // baseline" (e.g. cached at server-start and never updated)
+  // would still PASS THIS TEST because we only check the boot-
+  // time count, not the runtime evolution -- a future fire could
+  // add a separate test for the runtime-count-evolution via
+  // /api/health.userAuthStoredUsers across registrations; the
+  // test uses TWO sequential withServer blocks sharing a single
+  // storePath (the same pattern 758b86e established for the
+  // persistent-account-data test); the captured stdout is
+  // RESET between the two server lifecycles -- this is critical
+  // because the FIRST server's startup banner also emits to
+  // stdout, and if the captures merged the test couldn't
+  // distinguish "userAuthStoredUsers=0 from first banner" vs
+  // "userAuthStoredUsers=2 from second banner" by simple
+  // contains check (both would appear in a merged stream); the
+  // RESET pattern uses TWO independent ByteArrayOutputStreams +
+  // two paired System.setOut + finally restore cycles; with
+  // this commit the boot-time-count-load contract is pinned at
+  // the BANNER LAYER -- complementing 758b86e's storage-layer
+  // pin (both flows together: storage survives the restart per
+  // 758b86e AND the boot banner reflects the survival per this
+  // commit) so operators can rely on the runbook's "grep boot
+  // logs for userAuthStoredUsers" diagnostic without having to
+  // separately verify the storage layer is intact.
+  test("startup banner's userAuthStoredUsers field reflects post-restart loaded count -- pins the documented boot-time-count-load contract (HandHistoryReviewServerRuntime.scala lines 329-332's restart-survival diagnostic) by registering users in a first server, closing it, then verifying the SECOND server's startup banner emits the persisted count") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        // FIRST server lifecycle: capture stdout, verify fresh-
+        // boot count is 0, register 2 users.
+        val firstOutBuf = new java.io.ByteArrayOutputStream()
+        val firstOriginalOut = System.out
+        System.setOut(new java.io.PrintStream(firstOutBuf, true, StandardCharsets.UTF_8))
+        try
+          withServer(
+            staticDir,
+            platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+          ) { server =>
+            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+            // Register 2 users -- the registrations PERSIST to the
+            // storePath via PlatformUserAuth.scala's writeState
+            // atomic-move (per 758b86e's coverage). After both
+            // registrations succeed, the storePath JSON file
+            // contains the credentials AND the SECOND server's
+            // PlatformUserAuth.Service.create will load them at
+            // startup, making storedUserCount return 2 at the
+            // SECOND banner's emission moment.
+            val firstRegister = postJson(s"$baseUri/api/auth/register",
+              """{"email":"first@example.com","password":"correct-horse-battery","displayName":"First"}""")
+            assertEquals(firstRegister.statusCode(), 201,
+              clue = "first registration must succeed before testing the boot-time count-load contract")
+            val secondRegister = postJson(s"$baseUri/api/auth/register",
+              """{"email":"second@example.com","password":"correct-horse-battery","displayName":"Second"}""")
+            assertEquals(secondRegister.statusCode(), 201,
+              clue = "second registration must succeed -- the test verifies the SECOND banner emits userAuthStoredUsers=2 (not 1) so both registrations must complete")
+          }
+        finally
+          System.setOut(firstOriginalOut)
+
+        // Verify the FIRST banner emitted userAuthStoredUsers=0
+        // (baseline -- the fresh-boot count before any
+        // registrations; matches 1c87e04's pin)
+        val firstCaptured = firstOutBuf.toString(StandardCharsets.UTF_8)
+        val firstBannerLine = firstCaptured.split('\n').iterator
+          .find(_.contains("startup complete"))
+          .getOrElse(fail(s"no `startup complete` line in first server's captured stdout; got: ${firstCaptured.take(2000)}"))
+        assert(firstBannerLine.contains("userAuthStoredUsers=0"),
+          clue = s"FIRST server's startup banner must carry userAuthStoredUsers=0 (fresh boot, no users registered yet at startup time -- registrations happen AFTER the banner emits) -- this is the BASELINE against which the SECOND banner's userAuthStoredUsers=2 is compared to prove the boot-time-count-load contract; got: $firstBannerLine")
+
+        // SECOND server lifecycle: capture stdout FRESH (NOT
+        // shared with first capture -- the reset is critical),
+        // open the same storePath, verify the SECOND banner emits
+        // userAuthStoredUsers=2 reflecting the persisted count.
+        val secondOutBuf = new java.io.ByteArrayOutputStream()
+        val secondOriginalOut = System.out
+        System.setOut(new java.io.PrintStream(secondOutBuf, true, StandardCharsets.UTF_8))
+        try
+          withServer(
+            staticDir,
+            platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+          ) { _ =>
+            // No HTTP requests in the second server -- the test
+            // pins the BOOT-TIME banner emission, which fires
+            // BEFORE the run callback executes. The empty body
+            // keeps the second server alive long enough for the
+            // banner to flush.
+            ()
+          }
+        finally
+          System.setOut(secondOriginalOut)
+
+        val secondCaptured = secondOutBuf.toString(StandardCharsets.UTF_8)
+        val secondBannerLine = secondCaptured.split('\n').iterator
+          .find(_.contains("startup complete"))
+          .getOrElse(fail(s"no `startup complete` line in second server's captured stdout -- if missing, the second server's banner emission was suppressed; got: ${secondCaptured.take(2000)}"))
+
+        // THE LOAD-BEARING ASSERTION: the SECOND banner must
+        // carry userAuthStoredUsers=2 reflecting the persisted
+        // count from the storePath that the first server wrote.
+        assert(secondBannerLine.contains("userAuthStoredUsers=2"),
+          clue = s"SECOND server's startup banner MUST carry userAuthStoredUsers=2 reflecting the count loaded from the persisted storePath that the FIRST server wrote to -- this is the documented boot-time-count-load contract per HandHistoryReviewServerRuntime.scala lines 329-332's inline comment ('operators can verify the persistent store survived restart and see capacity headroom vs maxUsers without having to hit /api/health first'); a refactor that emitted the count BEFORE the store was loaded (e.g. lazy-load refactor) would silently emit 0 here EVEN THOUGH the store has 2 users -- operators relying on the boot log grep for userAuthStoredUsers would silently see 0 after restart, mistakenly conclude the store was wiped, AND skip the actual restart-survival diagnostic (which would have shown the store IS intact); got: $secondBannerLine")
+
+        // EXCLUSION: must NOT contain the placeholder (catches a
+        // refactor that lost the platform-auth mode flag during
+        // the restart -- would emit "-" for both userAuth* fields
+        // as if no platformAuth was configured); the test uses
+        // the SAME PlatformUserAuth.Config in both withServer
+        // calls so the auth-mode flag is correctly set; this
+        // assertion catches a refactor where the SECOND server
+        // somehow inherited the "no auth" defaults despite the
+        // explicit platformAuth config -- a subtle bug that
+        // would silently make the boot-time count-load
+        // diagnostic always show "-" for restarted servers
+        assert(!secondBannerLine.contains("userAuthStoredUsers=-"),
+          clue = s"SECOND server's startup banner MUST NOT carry userAuthStoredUsers=- (the no-auth/basic-auth placeholder pinned by 7c47f88/f0e7066) because the test explicitly configures platformAuth in the second withServer -- a refactor where the second server somehow lost the platform-auth mode flag during the restart would silently emit \"-\" and silently break the boot-time count-load diagnostic; got: $secondBannerLine")
+
+        // Cross-check: the SECOND banner ALSO carries
+        // authenticationMode=users (per 1c87e04) -- pins that
+        // the platform-auth mode survived the restart cleanly
+        // alongside the user-count
+        assert(secondBannerLine.contains("authenticationMode=users"),
+          clue = s"SECOND server's startup banner must carry authenticationMode=users matching the 1c87e04 platform-auth pin -- this cross-checks that the platform-auth mode flag survived the restart (otherwise the userAuthStoredUsers=2 assertion above would have failed too because the mode-detection helper returns the count placeholder \"-\" for non-platform-auth modes); got: $secondBannerLine")
+        // Cross-check: the SECOND banner's userAuthMaxUsers=100000
+        // also matches the 1c87e04 pin -- the cap config survives
+        // restart alongside the count
+        assert(secondBannerLine.contains("userAuthMaxUsers=100000"),
+          clue = s"SECOND server's startup banner must carry userAuthMaxUsers=100000 matching the 1c87e04 platform-auth pin -- pins that the cap config survives restart (the cap is a CONFIG value, not a STORE value, so it should always reflect the running config's maxUsers regardless of restart); a refactor that lost the cap config across restart would silently emit a different value here; got: $secondBannerLine")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
