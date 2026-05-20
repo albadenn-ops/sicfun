@@ -3358,6 +3358,138 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `startup complete` banner under BASIC
+  // authentication mode -- the THIRD and FINAL per-mode-variant
+  // completing the 3-of-3 auth-mode coverage for the startup
+  // banner (7c47f88 closed the none-mode variant, 1c87e04 closed
+  // the users-mode variant); together the 3 tests cover ALL the
+  // auth modes the deploy doc enumerates (none / basic / users)
+  // and pin the per-auth-mode banner-shape divergence the
+  // operator boot-time-diagnostic depends on; the basic-auth
+  // mode is OPERATIONALLY UNIQUE in TWO ways: (1) it emits
+  // authenticationMode=basic (NOT "none" pinned by 7c47f88, NOT
+  // "users" pinned by 1c87e04) per AuthStack.scala line 812's
+  // `if basicAuth.nonEmpty then "basic"`, AND (2) the userAuth*
+  // fields emit the "-" placeholder (same as 7c47f88's no-auth
+  // mode) because basic-auth doesn't use the user store per the
+  // inline comment at Readiness.scala lines 80-83 ("Only present
+  // when platform-user auth is enabled (basic auth and no-auth
+  // modes have no user store)"); the basic-mode banner is the
+  // ASYMMETRIC EDGE CASE the per-mode pin family catches: among
+  // the 3 modes, none + basic SHARE the "-" placeholder for
+  // userAuth* fields but DIFFER in the authenticationMode value,
+  // while basic + users SHARE the "authentication is enabled"
+  // category but DIFFER in BOTH authenticationMode AND userAuth*
+  // values; without this commit's pin, a refactor that
+  // accidentally routed basic-mode through the platform-auth
+  // userAuth*-integer branch (a common "fix the asymmetric
+  // userAuth* handling" refactor would attempt to unify the
+  // three modes) would silently emit userAuthMaxUsers=<integer>
+  // for basic-mode deployments AND silently desync the banner
+  // from /api/health which correctly emits null for those fields
+  // under basic-mode; ALTERNATIVELY, a refactor that conflated
+  // basic-mode with none-mode (e.g. "basic-auth is just
+  // HTTP-level auth, treat it like no-auth for the banner")
+  // would silently emit authenticationMode=none AND silently
+  // break operator dashboards filtering by authenticationMode=
+  // basic for instances actually running basic-auth -- the
+  // dashboards would see all deployments as authenticationMode=
+  // none and the runbook's basic-auth-specific triage entries
+  // (e.g. the BASIC_AUTH_USER / BASIC_AUTH_PASSWORD config
+  // checks documented in HAND_HISTORY_WEB_DEPLOYMENT.md line
+  // 130) would silently appear inapplicable to instances that
+  // actually use them; 8-tier format check matching the 1c87e04
+  // platform-auth + 7c47f88 no-auth pattern with the per-mode
+  // VARIANT values: (i) "startup complete" prefix (mode-
+  // invariant), (ii) authenticationMode=basic (per-mode VARIANT
+  // -- the distinguishing field), (iii) userAuthMaxUsers=- (the
+  // SHARED "-" placeholder with the no-auth mode -- pins that
+  // basic-mode correctly inherits the "no user store"
+  // placeholder rather than emitting a platform-mode-like
+  // integer), (iv) userAuthStoredUsers=- (same -- the SHARED
+  // placeholder), (v) host=127.0.0.1 (mode-invariant), (vi)
+  // port= field (mode-invariant), (vii) [INFO] level (mode-
+  // invariant), (viii) [hand-history-review] service-tag prefix
+  // (mode-invariant); the test ALSO asserts EXCLUSION of the
+  // OTHER 2 modes' authenticationMode values
+  // (authenticationMode=none and authenticationMode=users) --
+  // catches a refactor that emitted MULTIPLE auth-mode strings
+  // in the same banner (e.g. "authenticationMode=basic
+  // authenticationMode=users" if a consolidation refactor
+  // accidentally duplicated the field) which would silently
+  // pass the positive contains check while emitting an
+  // incoherent banner; with this commit the startup banner has
+  // FULL 3-of-3 per-mode coverage AND the per-mode-variant pin
+  // pattern is exhausted across the auth dimension; future
+  // fires can extend with other dimensions (custom
+  // userAuthMaxUsers, restart-with-stored-users, OIDC providers
+  // configured under platform-auth) but the BASIC AUTH-MODE
+  // DIMENSION is now fully covered.
+  test("server startup under BASIC authentication emits the documented banner with authenticationMode=basic + userAuthMaxUsers=- + userAuthStoredUsers=- -- closes the 3rd of 3 per-mode-variants completing the auth-mode coverage for the startup banner (7c47f88 none, 1c87e04 users, this commit basic)") {
+    withStaticSite { staticDir =>
+      // Same stdout-capture pattern as 7c47f88 + 1c87e04 but with
+      // basicAuth configured -- the banner's authenticationMode
+      // field flips to "basic" while the userAuth* fields stay
+      // as "-" placeholders (basic-auth has no user store per
+      // Readiness.scala lines 80-83).
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      try
+        withServer(
+          staticDir,
+          basicAuth = Some(HandHistoryReviewServer.BasicAuthConfig(username = "ops", password = "boot-banner-test"))
+        ) { _ =>
+          // No HTTP requests needed -- the banner emits at
+          // startup BEFORE the callback runs. basicAuth carries
+          // no user store so userAuth* fields stay as "-".
+          ()
+        }
+      finally
+        System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val bannerLine = captured.split('\n').iterator
+        .find(_.contains("startup complete"))
+        .getOrElse(fail(s"no `startup complete` line in captured stdout for the basic-auth variant -- the 7c47f88 + 1c87e04 startup pins should catch the absence independently for their modes, but this test verifies the basic-auth mode also emits the banner; if missing, the basic-auth branch suppressed the banner OR the banner shape differs across modes; got captured stdout: ${captured.take(2000)}"))
+
+      // (i) prefix (mode-invariant)
+      assert(bannerLine.contains("startup complete"),
+        clue = s"basic-auth startup banner must carry the mode-invariant `startup complete` prefix per HandHistoryReviewServerRuntime.scala line 349's hardcoded literal; got: $bannerLine")
+      // (ii) authenticationMode=basic (per-mode VARIANT -- the
+      // distinguishing field, catches rename refactors OR
+      // mode-confusion refactors)
+      assert(bannerLine.contains("authenticationMode=basic"),
+        clue = s"basic-auth startup banner MUST carry authenticationMode=basic (NOT \"none\" which is the no-auth-mode value pinned by 7c47f88, NOT \"users\" which is the platform-auth-mode value pinned by 1c87e04) per AuthStack.scala line 812's `if basicAuth.nonEmpty then \"basic\"`; a refactor that conflated basic-mode with none-mode (treating HTTP-level basic-auth as 'no auth' for banner purposes) would silently emit authenticationMode=none AND break the runbook's basic-auth-specific BASIC_AUTH_USER / BASIC_AUTH_PASSWORD triage entries; a refactor renaming the mode identifier (e.g. \"http-basic\" / \"basic-auth\") would silently break operator dashboards; got: $bannerLine")
+      // (iii) userAuthMaxUsers=- (SHARED placeholder with no-auth
+      // mode -- pins that basic-mode correctly inherits the
+      // placeholder rather than emitting a platform-mode-like
+      // integer)
+      assert(bannerLine.contains("userAuthMaxUsers=-"),
+        clue = s"basic-auth startup banner MUST carry userAuthMaxUsers=- (the documented \"-\" placeholder per HandHistoryReviewServerRuntime.scala line 328's getOrElse(\"-\") -- basic-auth has no user store per Readiness.scala lines 80-83's inline comment 'basic auth and no-auth modes have no user store') -- NOT a platform-mode integer like 100000; a refactor that accidentally routed basic-mode through the platform-auth integer branch would silently emit a misleading capacity-planning value AND silently desync the banner from /api/health which correctly emits null for these fields under basic-mode; got: $bannerLine")
+      // (iv) userAuthStoredUsers=- (SHARED placeholder)
+      assert(bannerLine.contains("userAuthStoredUsers=-"),
+        clue = s"basic-auth startup banner MUST carry userAuthStoredUsers=- matching the no-auth variant -- basic-auth shares the no-store property with no-auth mode per the auth-mode taxonomy; got: $bannerLine")
+      // (v-viii) cross-cutting (mode-invariant) fields
+      assert(bannerLine.contains("host=127.0.0.1"),
+        clue = s"basic-auth startup banner must carry host=127.0.0.1 matching the no-auth + platform-auth variants -- host is auth-mode-invariant; got: $bannerLine")
+      assert(bannerLine.contains("port="),
+        clue = s"basic-auth startup banner must carry port=<resolved-port> matching the no-auth + platform-auth variants; got: $bannerLine")
+      assert(bannerLine.contains("[INFO]"),
+        clue = s"basic-auth startup banner must be INFO-level matching the no-auth + platform-auth variants; got: $bannerLine")
+      assert(bannerLine.contains("[hand-history-review]"),
+        clue = s"basic-auth startup banner must carry the [hand-history-review] service-tag prefix matching all auth-mode variants -- the service-tag is mode-invariant; got: $bannerLine")
+
+      // EXCLUSION of the OTHER 2 modes' authenticationMode values
+      // -- catches a refactor that emitted MULTIPLE auth-mode
+      // strings in the same banner (consolidation-accident)
+      assert(!bannerLine.contains("authenticationMode=none"),
+        clue = s"basic-auth startup banner MUST NOT also contain authenticationMode=none (the no-auth-mode value pinned by 7c47f88) -- a refactor that emitted both auth-mode strings (e.g. due to accidentally duplicating the field in a consolidation refactor) would silently pass the positive authenticationMode=basic contains check while emitting an incoherent banner; got: $bannerLine")
+      assert(!bannerLine.contains("authenticationMode=users"),
+        clue = s"basic-auth startup banner MUST NOT also contain authenticationMode=users (the platform-auth-mode value pinned by 1c87e04) -- same consolidation-accident catch as above; got: $bannerLine")
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
