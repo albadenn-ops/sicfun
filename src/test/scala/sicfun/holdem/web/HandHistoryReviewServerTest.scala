@@ -545,6 +545,26 @@ class HandHistoryReviewServerTest extends FunSuite:
       )
     )
     val authUri = provider.authorizationUri("test-state-value", "test-code-challenge-value")
+    // Pin the documented GoogleAuthEndpoint URL prefix
+    // (https://accounts.google.com/o/oauth2/v2/auth -- documented in
+    // both deploy doc line 146 + runbook section 5A line 338 as one
+    // of the three Google endpoint hosts the server contacts, AND
+    // implicitly referenced by the operator-side firewall-egress
+    // guidance for OIDC). A refactor that changed
+    // PlatformUserAuth.GoogleAuthEndpoint to a different URL would
+    // silently break the documented host claim AND likely break the
+    // actual OIDC flow (the new URL might not be a Google OAuth
+    // endpoint). The full URL check ALSO ensures the path component
+    // is correct (`/o/oauth2/v2/auth` is the documented OAuth 2.0
+    // endpoint path Google publishes; a wrong path would 404 in
+    // production but pass any "starts with https://accounts.google
+    // .com" check); the `?` suffix is there because authorizationUri
+    // ALWAYS appends a query string with the state + code_challenge
+    // params -- an authorizationUri output without `?` would mean
+    // the formEncode'd query was somehow dropped, which would break
+    // every OIDC flow.
+    assert(authUri.startsWith("https://accounts.google.com/o/oauth2/v2/auth?"),
+      s"GoogleOidcProvider.authorizationUri must use the documented GoogleAuthEndpoint URL (deploy doc line 146 + runbook section 5A line 338 both name `accounts.google.com` as the OAuth-flow redirect host; the path `/o/oauth2/v2/auth` is Google's documented OAuth 2.0 endpoint); a refactor that changed PlatformUserAuth.GoogleAuthEndpoint would silently break both the doc claim AND the actual flow. Full URI: $authUri")
     assert(authUri.contains("prompt=select_account"),
       s"deploy doc's Optional-OIDC bullet documents prompt=select_account as the multi-account-user picker trigger; missing from authorizationUri output. Full URI: $authUri")
     assert(authUri.contains("code_challenge_method=S256"),
