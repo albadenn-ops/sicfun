@@ -3764,6 +3764,74 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented Location-header-on-202 contract for BOTH
+  // submission endpoints. Deploy doc line 66 explicitly says
+  // "Submissions return `202 Accepted` with `Location` and
+  // `Retry-After` headers plus a JSON body containing `jobId`,
+  // `status` (always the literal string "queued" on a fresh `202` --
+  // the worker hasn't started yet; the GET poll endpoint surfaces
+  // later state transitions), `statusUrl`, `submittedAtEpochMs`,
+  // `pollAfterMs`." The Location header carries the same value as
+  // the body's statusUrl field; that equality is the contract a
+  // generic HTTP-202-aware client (e.g. Postman's "follow Location"
+  // toggle, a generic REST library's auto-follow) relies on -- it
+  // reads Location from the response header rather than parsing the
+  // body, AND its poll loop expects the URL it gets back to be the
+  // canonical status URL the body would have surfaced. A refactor
+  // that dropped the Location header (or emitted a different value
+  // than statusUrl) would silently break those generic clients
+  // without affecting our own bundled frontend (which keys on
+  // body.statusUrl, not the header). HandHistoryReviewServerApi.scala
+  // emits the Location header at lines 110 (/api/analyze-hand-history)
+  // and 156 (/api/playing-hall), in both cases with value
+  // `accepted.statusUrl` -- so the contract is symmetric across both
+  // submission endpoints. Existing Retry-After test (line ~3775) was
+  // adjacent but specifically asserted Retry-After, not Location;
+  // before this commit Location was entirely untested at the 202
+  // response level. New test covers both endpoints in one test
+  // body since the contract is identical across them and a
+  // refactor would likely touch either both or just one (the
+  // either-both-or-only-one shape parallels the body-cap triplet
+  // [4e4b385 / 034b14c / e2045b9] and the CSRF quintuplet
+  // [a550186 / 26bf0d7 / eef3779 / e6e0961] -- per-endpoint pins
+  // catch the asymmetric-drift case).
+  test("submission 202 responses carry a Location header equal to the body's statusUrl on both /api/analyze-hand-history and /api/playing-hall") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      val playingHallBackend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, backend = backend, playingHallBackend = playingHallBackend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // /api/analyze-hand-history submission: 202 with Location =
+        // body.statusUrl (the relative status-poll URL, NOT a fully
+        // qualified URI -- the server emits relative URLs so a
+        // reverse proxy doesn't need to rewrite them).
+        val analyzeResp = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(analyzeResp.statusCode(), 202,
+          clue = "analyze submission must return 202 Accepted -- the documented submit-success shape per deploy doc line 66")
+        val analyzeStatusUrl = jsonBody(analyzeResp)("statusUrl").str
+        val analyzeLocation = headerValue(analyzeResp, "Location").getOrElse(
+          fail("analyze 202 response MUST emit a Location header per deploy doc line 66 -- generic HTTP-202-aware clients (e.g. Postman 'follow Location' toggle, REST libraries with auto-follow) rely on this header to find the status URL without parsing the body; missing Location silently breaks those clients while leaving our bundled frontend (which keys on body.statusUrl) unaffected"))
+        assertEquals(analyzeLocation, analyzeStatusUrl,
+          clue = s"analyze Location header must equal body.statusUrl -- both are documented to point at the same poll URL, and a divergence (e.g. body has the relative path but header has a fully qualified URI from a misconfigured proxy) would confuse generic clients that key on one OR the other; got header=$analyzeLocation, body=$analyzeStatusUrl")
+        // Drain the backend so the next submission isn't queue-blocked.
+        backend.release.countDown()
+
+        // /api/playing-hall submission: same contract, same shape.
+        val hallResp = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(hallResp.statusCode(), 202,
+          clue = "hall submission must return 202 Accepted -- same submit-success shape as analyze, symmetric across both endpoints")
+        val hallStatusUrl = jsonBody(hallResp)("statusUrl").str
+        val hallLocation = headerValue(hallResp, "Location").getOrElse(
+          fail("hall 202 response MUST emit a Location header per deploy doc line 66 -- same generic-client contract as analyze; HandHistoryReviewServerApi.scala emits the header at line 156 with value accepted.statusUrl"))
+        assertEquals(hallLocation, hallStatusUrl,
+          clue = s"hall Location header must equal body.statusUrl -- symmetric with analyze; got header=$hallLocation, body=$hallStatusUrl")
+        // Drain the hall backend on the way out.
+        playingHallBackend.release.countDown()
+      }
+    }
+  }
+
   test("analysis submission returns a job id, keeps the server responsive, and completes via polling") {
     withStaticSite { staticDir =>
       val backend = new BlockingBackend(Right(sampleAnalysisResult))
