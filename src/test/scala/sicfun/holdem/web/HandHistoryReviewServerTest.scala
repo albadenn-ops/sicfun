@@ -1755,6 +1755,156 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `auth.oidc.start` audit line format -- the
+  // FOURTH of the 5 SUCCESS-side auth-event formats deploy doc line
+  // 218 documents (1c8777f closed auth.logout, 49dcf46 closed
+  // auth.login.success, 3a6fea4 closed auth.register.success); this
+  // commit closes the OIDC FLOW START half of the OIDC pair (a
+  // future fire can close auth.oidc.success which requires more
+  // FakeOidcProvider mock orchestration to drive the callback
+  // exchange). The auth.oidc.start event is OPERATIONALLY UNIQUE in
+  // two ways: (1) it carries `provider=` instead of `email=` per
+  // deploy doc line 218 ("The OIDC auth.oidc.start / auth.oidc.
+  // start.failure / auth.oidc.failure lines do NOT carry email=
+  // because the OIDC flow doesn't yield a user email until the
+  // userinfo response completes -- `start` and `start.failure`
+  // fire before the provider redirect, and the callback `failure`
+  // paths exit before (or because of) the userinfo step that
+  // would have resolved one"), AND (2) it's the START half of the
+  // runbook's "users start, never finish" triage signature -- the
+  // runbook commits to "userAuthPendingOidcFlows counting up
+  // steadily ... WITHOUT a corresponding stream of auth.oidc.success
+  // / auth.oidc.failure log lines is the signature of 'users
+  // start, never finish'" (the same triage pattern already pinned
+  // at line ~712's userAuthPendingOidcFlows round-trip test, but
+  // that test pins the COUNTER side; this test pins the LOG-LINE
+  // side that the operator counts against in the triage); a
+  // refactor that broke the auth.oidc.start emission entirely (e.g.
+  // suppressed the logInfo call at AuthStack.scala line 265
+  // because "it's just normal user behavior") would silently
+  // invalidate the runbook triage -- without auth.oidc.start log
+  // lines to count, the operator can't tell "5 pending flows with
+  // 5 corresponding start log lines AND 0 success/failure log
+  // lines" (the 'users start, never finish' pattern) from "5
+  // pending flows with NO start log lines either" (a different
+  // refactor where the start emission was suppressed but the
+  // counter increment still works) -- both look identical to the
+  // operator if start emission is missing; per-field regression
+  // vectors specific to auth.oidc.start that the local-auth pins
+  // (1c8777f + 49dcf46 + 3a6fea4) don't catch: (i) refactor that
+  // ADDED an email= field to the line (e.g. "for consistency with
+  // login.success/register.success") would silently break the
+  // documented "do NOT carry email=" contract -- but more
+  // critically would expose private information (the OIDC start
+  // happens BEFORE the user has logged in, so there's no userinfo
+  // email available; the only way to populate email= would be to
+  // pull it from a session OR from request headers, both of which
+  // would leak operator-irrelevant data into the audit log AND
+  // create a confused-operator triage path where the email field
+  // suggests a specific user when really the OIDC flow hasn't
+  // resolved one yet), (ii) refactor demoting INFO to DEBUG (e.g.
+  // "OIDC starts are too verbose, demote for less log volume")
+  // would silently make the line invisible at default log levels
+  // AND silently invalidate the runbook triage entry that
+  // explicitly depends on these log lines being visible at default
+  // levels, (iii) refactor changing the provider= field's value
+  // from the provider's `id` to its `displayName` (e.g.
+  // "provider=Google" instead of "provider=google" -- subtle
+  // case-sensitive distinction) would silently break operator log-
+  // aggregation queries filtering by `provider=google` (lowercase),
+  // AND silently break the cross-event-correlation that lets
+  // operators match auth.oidc.start lines with their
+  // corresponding auth.oidc.success / auth.oidc.failure lines (all
+  // three emit `provider=<id>` not `provider=<displayName>`), (iv)
+  // refactor unifying provider= across the OIDC events with a
+  // helper that used the WRONG SOURCE (e.g. always emitted
+  // provider="oidc" as a generic placeholder) would silently break
+  // multi-provider deployments where operators need to distinguish
+  // Google failures from a future second IdP's failures -- the
+  // deploy doc line 218 explicitly contrasts: "they instead carry
+  // provider=<id> so the operator can tell Google-flow failures
+  // from a future multi-provider deployment's other-IdP failures";
+  // 6-tier format check: (i) event prefix `auth.oidc.start` (catches
+  // rename to e.g. `auth.oidc.begin`), (ii) `provider=google` field
+  // (catches rename of FakeOidcProvider.id OR rename of the
+  // logInfo emission template's `provider=`), (iii) ABSENCE of
+  // `email=` (catches the "add for consistency" refactor that
+  // would leak private info), (iv) `[INFO]` level (catches
+  // demote-to-DEBUG silently-hiding from triage), (v) `remote=`
+  // field (per deploy doc line 218 "remote= on every auth.* event"
+  // -- the brute-force triage correlator), (vi) `[hand-history-
+  // review]` service-tag prefix (matches the /api/health.service
+  // field pinned by 505ba6b); test uses FakeOidcProvider (same as
+  // userAuthPendingOidcFlows round-trip test at line ~712) so no
+  // new mock infrastructure is needed; capture stdout around the
+  // GET /api/auth/oidc/google/start call ONLY (a 302 redirect, the
+  // logInfo emission at line 265 runs synchronously BEFORE the
+  // redirect response is built, so by the time the GET returns the
+  // audit line is already on stdout); same regression-pin pattern
+  // as 1c8777f auth.logout + 49dcf46 auth.login.success + 3a6fea4
+  // auth.register.success (5-tier format check + service-tag-prefix
+  // coupling), extended with the unique-to-OIDC `!email=` ABSENCE
+  // check and the `provider=google` (id-not-displayName) precision
+  // pin.
+  test("GET /api/auth/oidc/google/start emits the documented `auth.oidc.start provider=<id> remote=<peer>` INFO audit line WITHOUT an email= field (per deploy doc line 218's 'OIDC start lines do NOT carry email=' contract)") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture stdout around the /start GET only. logInfo writes
+          // to System.out per HandHistoryReviewServerRuntime.scala line
+          // 418, so the auth.oidc.start emission at AuthStack.scala
+          // line 265 lands in System.out. The /start endpoint returns
+          // a 302 redirect; the logInfo runs synchronously BEFORE the
+          // redirect response is built, so by the time the GET
+          // returns the audit line is already flushed.
+          val outBuf = new java.io.ByteArrayOutputStream()
+          val originalOut = System.out
+          System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+          val start =
+            try get(s"$baseUri${provider.startPath}")
+            finally System.setOut(originalOut)
+          assertEquals(start.statusCode(), 302,
+            clue = s"OIDC /start must return 302 redirect to the provider's authorization endpoint -- a non-302 status means the handler exited via an error path that suppressed the auth.oidc.start emission; got: ${start.statusCode()}")
+
+          val captured = outBuf.toString(StandardCharsets.UTF_8)
+          val startLine = captured.split('\n').iterator
+            .find(_.contains("auth.oidc.start"))
+            .getOrElse(fail(s"no `auth.oidc.start` line in stdout capture -- deploy doc line 218 documents this event as INFO-level fired on every OIDC flow start; if the line is missing, either the logInfo at AuthStack.scala line 265 was suppressed (silent regression invalidating the runbook 'users start, never finish' triage) OR the test failed to capture the right stream; got captured stdout: ${captured.take(800)}"))
+
+          // (i) event prefix
+          assert(startLine.contains("auth.oidc.start"),
+            clue = s"OIDC start audit line must carry the literal `auth.oidc.start` event prefix per deploy doc line 218's enumeration; a refactor renaming to e.g. `auth.oidc.begin` would silently break the runbook's 'users start, never finish' triage workflow which keys on the literal event name; got: $startLine")
+          // (ii) provider=google (id, not displayName)
+          assert(startLine.contains("provider=google"),
+            clue = s"OIDC start audit line must carry the provider's `id` (lowercase `google`) in the `provider=` field, NOT the `displayName` (capitalized `Google`); the deploy doc line 218 explicitly says 'they instead carry provider=<id>' so multi-provider deployments can distinguish Google-flow failures from a future second IdP's failures; a refactor swapping to displayName would silently break operator queries filtering by `provider=google` (lowercase) AND silently break the cross-event-correlation between auth.oidc.start and the corresponding auth.oidc.success/failure lines (which also use id-not-displayName); got: $startLine")
+          // (iii) ABSENCE of email= (load-bearing OIDC-specific contract)
+          assert(!startLine.contains("email="),
+            clue = s"OIDC start audit line must NOT carry the `email=` field per deploy doc line 218's explicit 'do NOT carry email=' contract (the OIDC flow hasn't yielded a userinfo email yet, so emitting one would either leak unrelated session/request data OR populate a misleading value); a refactor that 'added email= for consistency with login.success/register.success' would silently expose privacy-relevant data AND create a confused-operator triage path where the field suggests a specific user when the OIDC flow hasn't resolved one yet; got: $startLine")
+          // (iv) INFO level
+          assert(startLine.contains("[INFO]"),
+            clue = s"OIDC start audit line must be INFO-level per AuthStack.scala line 261's explicit comment ('INFO not WARN -- this is normal user behavior, but the log entry lets operators correlate a later auth.oidc.success/failure with the start so a missing callback is visible') -- a refactor demoting to DEBUG would silently invalidate the runbook's 'users start, never finish' triage because the start lines wouldn't be visible at default log levels for the operator to count against userAuthPendingOidcFlows; got: $startLine")
+          // (v) remote= field
+          assert(startLine.contains("remote="),
+            clue = s"OIDC start audit line must carry the `remote=` field per deploy doc line 218 ('remote= on every auth.* event'); without this field operators lose the per-IP correlation between OIDC flow starts and any subsequent OIDC failures from the same IP (a brute-force-style probe testing OIDC provider behaviors would emit many auth.oidc.start lines from one IP -- removing remote= silently disables that detection); got: $startLine")
+          // (vi) service-tag prefix
+          assert(startLine.contains("[hand-history-review]"),
+            clue = s"OIDC start audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- the tag matches the /api/health.service field (pinned by 505ba6b) so a log aggregator filtering by service tag gets the same identifier on log lines as on probe responses; got: $startLine")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
