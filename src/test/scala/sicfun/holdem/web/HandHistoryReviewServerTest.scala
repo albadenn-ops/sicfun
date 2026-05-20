@@ -1758,6 +1758,49 @@ class HandHistoryReviewServerTest extends FunSuite:
         assert(permissionsPolicy.contains("browsing-topics=()"),
           s"missing browsing-topics=() (modern Topics-API opt-out, replacement for FLoC) in: $permissionsPolicy")
         assert(permissionsPolicy.contains("usb=()"), s"missing usb=() in: $permissionsPolicy")
+        // Three more high-impact security-relevant directives the
+        // original 6-pin selection (camera/microphone/geolocation +
+        // interest-cohort/browsing-topics + usb) missed -- the existing
+        // pins cover hardware-sensor privacy + Privacy-Sandbox tracking
+        // opt-outs + hardware comm, but leave three other documented
+        // categories untested: financial-actions (payment), WebAuthn
+        // credential-harvesting (publickey-credentials-get), and
+        // cross-subdomain origin-relaxation (document-domain). Each
+        // protects against a distinct attack surface a future XSS or
+        // compromised vendored library would otherwise be able to
+        // weaponize. Adding these as parallel one-liners to the
+        // existing block rather than as a separate test because they
+        // share the same lexical context (the Permissions-Policy
+        // header value already in scope) and the same operator-side
+        // contract (deploy doc line 208's deny-list claim).
+        // payment=(): blocks the Payment Request API. A future XSS
+        // injection without this directive could pop up a hostile
+        // payment dialog -- the user sees a legitimate-looking
+        // browser-native UI (so they trust it) but the merchant /
+        // amount fields are attacker-controlled.
+        assert(permissionsPolicy.contains("payment=()"),
+          s"missing payment=() -- without this directive a future XSS could trigger the Payment Request API and pop up a browser-native payment dialog with attacker-controlled merchant/amount fields, getting credential trust the application doesn't deserve; in: $permissionsPolicy")
+        // publickey-credentials-get=(): blocks WebAuthn navigator.
+        // credentials.get(). A future XSS without this could silently
+        // attempt to harvest the user's hardware-key / passkey
+        // assertions for any RP the attacker can name (typically with
+        // a phishing-styled credentialId list) -- the assertion
+        // wouldn't succeed against random RPs, but the credentialId
+        // list ITSELF is a fingerprinting / enumeration surface.
+        assert(permissionsPolicy.contains("publickey-credentials-get=()"),
+          s"missing publickey-credentials-get=() -- without this directive a future XSS could attempt WebAuthn credential enumeration / fingerprinting via navigator.credentials.get() with attacker-controlled RP + credentialId lists; in: $permissionsPolicy")
+        // document-domain=(): blocks the legacy document.domain=
+        // cross-subdomain origin-relaxation footgun. Setting
+        // document.domain in shared-cookie subdomain deployments
+        // historically let scripts at e.g. app.example.com and
+        // billing.example.com communicate by both setting
+        // document.domain="example.com"; modern best-practice
+        // (and Chrome's deprecation roadmap) closes that, but a
+        // future XSS that DID gain script execution could try the
+        // legacy API to attempt cross-subdomain access -- the
+        // directive denies it explicitly.
+        assert(permissionsPolicy.contains("document-domain=()"),
+          s"missing document-domain=() -- without this directive a future XSS could try the legacy document.domain= API to widen its origin scope to a parent domain (relevant on subdomain-sharing deployments, less so on bare-domain ones, but defense-in-depth applies); in: $permissionsPolicy")
         assertEquals(headerValue(index, "Cross-Origin-Opener-Policy"), Some("same-origin"))
         assertEquals(headerValue(index, "Cross-Origin-Resource-Policy"), Some("same-origin"))
         // Referrer-Policy: no-referrer is the strictest value per the deploy
