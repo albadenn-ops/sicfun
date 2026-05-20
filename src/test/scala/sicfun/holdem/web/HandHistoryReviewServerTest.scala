@@ -2081,6 +2081,155 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `auth.oidc.failure` audit line format for the
+  // FIRST of 5 emission sites in AuthStack.scala -- closes the FIRST
+  // failure-side OIDC event after b1213b6 closed the success-side
+  // OIDC pair (auth.oidc.start + auth.oidc.success); the auth.oidc.
+  // failure event has 5 DIFFERENT emission sites at AuthStack.scala
+  // lines 317, 335, 352, 363, and 397, EACH with a different reason=
+  // value (provider-error, oversize_callback_param, state-cookie-
+  // related reasons at 352, finishOidc errors at 363, and
+  // "missing_code_or_state" at 397) -- the deploy doc line 218
+  // documents the event type but operator triage depends on the
+  // SPECIFIC reason= values to know WHICH stage of the OIDC flow
+  // failed; this commit pins the LINE 397 emission ("missing_code_
+  // or_state") which is the cleanest single-fire target because:
+  // (a) it's reachable with the simplest test setup (just a GET to
+  // /callback with NO query params -- no need to issue a state
+  // cookie, no need to craft a malformed code, no need to wedge an
+  // exchangeCode to error), (b) the reason value is a literal
+  // string constant ("missing_code_or_state") that's documented
+  // for the operator to grep AT THAT EXACT VALUE -- a refactor
+  // renaming it to e.g. "missing-code-or-state" (hyphens not
+  // underscores) or "incomplete_callback" would silently break
+  // operator log-aggregation queries that filter by reason=
+  // missing_code_or_state; (c) it pairs operationally with the
+  // 976d7ad auth.oidc.start pin: a /start emits auth.oidc.start,
+  // a CORRESPONDING /callback that ARRIVES WITHOUT EITHER
+  // PARAMETER (e.g. the upstream provider's redirect was
+  // intercepted / dropped, or the user mashed the URL) emits
+  // this auth.oidc.failure -- so the user-start-never-finish
+  // signature documented in the runbook can be detected from
+  // EITHER direction (start without success, OR start followed
+  // by failure with missing params); per-field regression vectors
+  // SPECIFIC to auth.oidc.failure that the other 5 audit-event
+  // pins don't catch: (i) WARN level not INFO (this event is a
+  // FAILURE, AuthStack.scala line 397 uses logWarn which writes
+  // to System.err per HandHistoryReviewServerRuntime.scala line
+  // 421) -- a refactor demoting to INFO would silently bury the
+  // line in the success-side log stream, making operator alerts
+  // keying on WARN-level events miss it, AND a refactor promoting
+  // to ERROR would silently confuse incident-response automation
+  // that pages on ERROR but not WARN; (ii) the !email= ABSENCE
+  // matches auth.oidc.start (no userinfo yet) per deploy doc:
+  // "The OIDC auth.oidc.start / auth.oidc.start.failure /
+  // auth.oidc.failure lines do NOT carry email=" -- a refactor
+  // adding email= "for consistency with auth.oidc.success" would
+  // silently leak privacy data (the failed callback may have a
+  // tampered state cookie pointing at a victim user's session;
+  // emitting email= for that session would expose private data
+  // to log aggregation), (iii) the reason= value MUST be the
+  // specific "missing_code_or_state" string for THIS emission
+  // site -- a refactor consolidating the 5 emission sites' reason
+  // values to a single generic "callback_failed" reason would
+  // silently lose operator-relevant detail about WHICH stage of
+  // the flow failed (the runbook's OIDC triage can distinguish
+  // "user abandoned the flow" from "provider returned error"
+  // from "state cookie expired" based on this reason value;
+  // collapsing them would force operators back to logs of full
+  // request traces); 6-tier format check parallels the prior pins
+  // but at WARN level (System.err capture, not System.out): (i)
+  // `auth.oidc.failure` event prefix, (ii) `provider=google`
+  // matching auth.oidc.start + auth.oidc.success, (iii)
+  // `reason=missing_code_or_state` (NEW specific-value pin for
+  // this emission site), (iv) `[WARN]` level (catches demote-to-
+  // INFO / promote-to-ERROR), (v) `remote=` field, (vi)
+  // `[hand-history-review]` service-tag; ALSO an absence check
+  // for `email=` matching the auth.oidc.start ABSENCE pin; the
+  // test reuses FakeOidcProvider (id="google") -- just hits the
+  // /callback with NO query params, no cookie, no body; remaining
+  // failure-side gaps for future fires: the OTHER 4 auth.oidc.
+  // failure emission sites (lines 317 provider-error, 335 oversize_
+  // callback_param, 352 state-cookie-related, 363 finishOidc-errors)
+  // EACH with their distinct reason values worth pinning
+  // individually for asymmetric-drift; AND auth.oidc.start.failure
+  // (line 258 in AuthStack.scala) which is currently NOT
+  // reachable via the routing layer because contexts are only
+  // registered for known providers -- it appears to be defensive
+  // code for a hypothetical race condition (provider deregistered
+  // between context creation and handler invocation); a future
+  // fire could either remove the dead code OR document why it
+  // exists if a reachable path is identified.
+  test("GET /api/auth/oidc/google/callback with no query params emits the documented `auth.oidc.failure provider=<id> remote=<peer> reason=missing_code_or_state` WARN audit line WITHOUT an email= field (per deploy doc line 218's 'auth.oidc.failure lines do NOT carry email=' contract -- closes the first of 5 distinct emission-site reason values)") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture stderr around the /callback GET with NO query
+          // params. logWarn writes to System.err per
+          // HandHistoryReviewServerRuntime.scala line 421, so the
+          // auth.oidc.failure emission at AuthStack.scala line 397
+          // lands in System.err. NO state cookie / NO code / NO state
+          // query param means the callback handler's
+          // `(parseQuery.get("state"), parseQuery.get("code")) match`
+          // hits the catch-all `case _ =>` at line 396, firing the
+          // missing_code_or_state logWarn at line 397.
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          val callback =
+            try get(s"$baseUri${provider.callbackPath}")
+            finally System.setErr(originalErr)
+          assertEquals(callback.statusCode(), 302,
+            clue = s"OIDC /callback with no params must return 302 redirect to the documented oidcFailureRedirect -- a non-302 means the handler exited via a different path which would emit a different auth.oidc.failure reason; got: ${callback.statusCode()}")
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.oidc.failure"))
+            .getOrElse(fail(s"no `auth.oidc.failure` line in stderr capture -- deploy doc line 218 documents this event as WARN-level fired on every OIDC callback failure; if missing, either the logWarn at AuthStack.scala line 397 was suppressed OR the missing-params path failed to reach line 397 (check that /callback with no query string still routes to handleOidcCallback); got captured stderr: ${captured.take(800)}"))
+
+          // (i) event prefix
+          assert(failureLine.contains("auth.oidc.failure"),
+            clue = s"OIDC failure audit line must carry the literal `auth.oidc.failure` event prefix per deploy doc line 218's enumeration; a refactor renaming to e.g. `auth.oidc.error` would silently break operator log-aggregation queries that filter by event type; got: $failureLine")
+          // (ii) provider=google (lowercase id, matching auth.oidc.start + auth.oidc.success)
+          assert(failureLine.contains("provider=google"),
+            clue = s"OIDC failure audit line must carry the provider's `id` (lowercase `google`) -- a refactor breaking id resolution would fail this pin AND the 976d7ad auth.oidc.start + b1213b6 auth.oidc.success pins simultaneously; multi-provider deployments depend on provider= to distinguish Google failures from a future second IdP's failures per deploy doc line 218; got: $failureLine")
+          // (iii) reason=missing_code_or_state (THE specific reason
+          // value for THIS emission site at AuthStack.scala line 397
+          // -- the load-bearing per-emission-site contract that
+          // distinguishes this failure path from the other 4 sites)
+          assert(failureLine.contains("reason=missing_code_or_state"),
+            clue = s"OIDC failure audit line for the missing-params path MUST carry the EXACT reason value `missing_code_or_state` per AuthStack.scala line 397's hardcoded string; a refactor renaming to e.g. `missing-code-or-state` (hyphens not underscores), `incomplete_callback`, or consolidating to a generic `callback_failed` would silently lose operator-relevant detail about WHICH stage of the flow failed -- the runbook's OIDC triage distinguishes 'user abandoned' (missing_code_or_state) from 'provider returned error' (provider-error reason) from 'state cookie expired' (state-related reasons) based on THIS exact reason value; got: $failureLine")
+          // (iv) WARN level (NOT INFO -- this event is a failure)
+          assert(failureLine.contains("[WARN]"),
+            clue = s"OIDC failure audit line must be WARN-level per AuthStack.scala line 397's logWarn call (which writes to System.err per HandHistoryReviewServerRuntime.scala line 421); a refactor demoting to INFO would silently bury the line in the success-side log stream making WARN-level alert rules miss it, promoting to ERROR would silently confuse incident-response automation that pages on ERROR but not WARN; got: $failureLine")
+          // (v) remote= field
+          assert(failureLine.contains("remote="),
+            clue = s"OIDC failure audit line must carry the `remote=` field per deploy doc line 218 ('remote= on every auth.* event'); without this field the per-IP brute-force triage workflow loses the OIDC-failure correlation signal (operators spotting attempts to probe OIDC behaviors from a single IP could count failure events but couldn't tell whether the attempts come from one IP or many without remote=); got: $failureLine")
+          // (vi) ABSENCE of email= matching the auth.oidc.start pin
+          // (976d7ad) -- per deploy doc line 218's "auth.oidc.start /
+          // auth.oidc.start.failure / auth.oidc.failure lines do NOT
+          // carry email=" contract
+          assert(!failureLine.contains("email="),
+            clue = s"OIDC failure audit line must NOT carry the `email=` field per deploy doc line 218's explicit 'do NOT carry email=' contract for OIDC failure events (the callback may have a tampered state cookie pointing at a victim user's session; emitting email= for that session would expose private data to log aggregation); a refactor adding email= 'for consistency with auth.oidc.success' would silently leak privacy data AND create a confused-operator triage path where the email suggests a specific user when the failure may have been triggered by an attacker against a victim's session; got: $failureLine")
+          // (vii) service-tag prefix
+          assert(failureLine.contains("[hand-history-review]"),
+            clue = s"OIDC failure audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- matches /api/health.service (505ba6b) so log aggregators see the same identifier on log lines and probe responses; got: $failureLine")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
