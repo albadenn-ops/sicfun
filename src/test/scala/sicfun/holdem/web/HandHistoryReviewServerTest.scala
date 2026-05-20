@@ -3927,6 +3927,76 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin CSRF enforcement on POST /api/playing-hall -- continuing the
+  // CSRF-triplet sweep started by e6e0961 (which closed the /profile
+  // branch). This commit closes the second of the 4 originally-
+  // uncovered routes: per the deploy doc line 103 enumeration of
+  // CSRF-protected state-changing routes, the hall-POST is one of
+  // five (POST /api/auth/logout, POST /api/auth/profile, POST
+  // /api/analyze-hand-history, POST /api/playing-hall, DELETE
+  // /api/playing-hall/jobs/{id}); coverage so far: DELETE
+  // /api/playing-hall/jobs/{id} (existing test at line ~3810),
+  // POST /api/auth/profile (e6e0961), POST /api/playing-hall
+  // (this commit); leaving POST /api/auth/logout and POST
+  // /api/analyze-hand-history for future fires per the same
+  // "future fires can sweep the rest" pattern e2045b9 / 034b14c
+  // established for the body-cap triplet. The hall-POST branch is
+  // worth pinning specifically because a refactor that dropped its
+  // CSRF gate would let a cross-origin attacker spawn hall jobs
+  // against the victim's session -- consuming their PBKDF2-cost
+  // budget, polluting their Recent Runs localStorage entries on
+  // the next /api/playing-hall/jobs/{id} GET that the victim's
+  // own tab fires, AND burning the victim's RATE_LIMIT_SUBMITS_PER_MINUTE
+  // bucket so their legitimate hall submissions queue up against a
+  // saturated budget; the long worker run time (15 min default per
+  // the bd8e7f3 + 61e49a8-pinned PLAYING_HALL_TIMEOUT_MS) amplifies
+  // the disruption window since each attacker-spawned hall job
+  // eats a worker slot for the full duration. Same shape as the
+  // hall-DELETE CSRF test above + e6e0961's /profile test:
+  // register, attempt the request WITHOUT X-CSRF-Token and assert
+  // 403 + "csrf" in error, then sanity-check WITH the proper
+  // header succeeds (202, not 200, because submit endpoints return
+  // 202 Accepted on success per deploy doc line 66).
+  test("POST /api/playing-hall enforces CSRF under platform-user auth -- pins the documented X-CSRF-Token requirement on the hall-submission endpoint") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"hall-submit-csrf@example.com","password":"correct-horse-battery","displayName":"Tester"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the CSRF gate can be exercised")
+          val registerJson = jsonBody(register)
+          val ownerHeaders = authSessionHeaders(register, registerJson("csrfToken").str)
+
+          // POST /api/playing-hall WITHOUT X-CSRF-Token (cookie only)
+          // must 403. The cookie-only request is the canonical
+          // cross-origin attack shape -- SameSite=Lax passes the
+          // cookie on top-level form-POST navigation, so the CSRF
+          // gate is the actual defense against attacker-spawned
+          // hall jobs against a victim's session.
+          val cookieOnly = Map("Cookie" -> sessionCookie(register))
+          val withoutCsrf = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload, cookieOnly)
+          assertEquals(withoutCsrf.statusCode(), 403,
+            clue = s"POST /api/playing-hall WITHOUT X-CSRF-Token must return 403 -- without this CSRF gate a phishing page could spawn 15-minute hall jobs against any victim with an active session, consuming PBKDF2-cost budget, polluting Recent Runs localStorage, AND burning their RATE_LIMIT_SUBMITS_PER_MINUTE bucket; got: ${withoutCsrf.statusCode()}")
+          assert(jsonBody(withoutCsrf)("error").str.toLowerCase.contains("csrf"),
+            clue = s"CSRF rejection error message must mention 'csrf' so scripted clients can key on the failure mode (and audit logs grep for `request forbidden ... reason=csrf-missing-or-invalid`); got error: ${jsonBody(withoutCsrf)("error").str}")
+
+          // POST /api/playing-hall WITH the proper X-CSRF-Token
+          // succeeds (202 Accepted -- submit endpoints return 202
+          // not 200 per the deploy doc's HTTP-Endpoints section,
+          // since the worker hasn't started yet).
+          val withCsrf = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload, ownerHeaders)
+          assertEquals(withCsrf.statusCode(), 202,
+            clue = "POST /api/playing-hall WITH X-CSRF-Token must return 202 Accepted (the submit-success shape per deploy doc line 66) -- proves the 403 above came from the CSRF gate specifically, not from a different rejection path like auth-missing (which would 401) or rate-limit (which would 429)")
+        }
+      }
+    }
+  }
+
   test("playing hall cancellation returns 404 for unknown jobs") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>
