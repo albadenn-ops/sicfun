@@ -1296,6 +1296,149 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `auth.logout` audit log line format per deploy
+  // doc line 218: "Auth events emit structured log lines: ...
+  // auth.logout ... INFO level for success/expected events ... Each
+  // line carries remote= (on every auth.* event) plus -- on the local-
+  // auth events (auth.login.{success,failure}, auth.register.
+  // {success,failure}, auth.logout) and the post-callback
+  // auth.oidc.success -- an email= field"; BEFORE this commit there
+  // was ZERO test coverage of the SUCCESS-side audit log line formats
+  // (only auth.register.failure + auth.login.failure had partial
+  // presence assertions at lines ~6110 + ~6155). The auth.logout
+  // line is a clean single-fire target because: (a) logout is a
+  // SUCCESS-ONLY event (no failure path -- POST /api/auth/logout with
+  // a missing session is a 401 BEFORE reaching the audit log emission
+  // at AuthStack.scala line 210, AND with an invalid CSRF is a 403
+  // BEFORE reaching line 210; the only path through the emission
+  // point is a fully-validated successful logout), (b) the email
+  // source is the SESSION's canonical email (line 208:
+  // `authenticatedUser(exchange).map(_.email).getOrElse("-")`) so
+  // there's no submitted-vs-canonical complexity to navigate, (c) the
+  // existing logout cookie-clear test above already establishes the
+  // register+logout flow this test reuses; per-field regression
+  // vectors a refactor would silently introduce: (1) renaming the
+  // event prefix "auth.logout" to e.g. "auth.signout" or
+  // "auth.session.end" would silently break operator log-aggregation
+  // queries filtering by event type AND would silently invalidate
+  // the runbook's "high WARN rate from a known email= from many
+  // remote= sources may be a single-account-targeted credential-
+  // stuffing probe" triage step (because the operator's grep for
+  // "auth.logout" would return empty results, making the
+  // attacker-targeted-account triage path silently unavailable),
+  // (2) dropping the email= field would break the runbook's "all
+  // events for one user grep identically" property (deploy doc line
+  // 218: "Success lines log the canonical (normalized) email so all
+  // events for one user grep identically"), making it impossible
+  // to correlate a user's logout with their earlier login.success /
+  // register.success events for incident analysis (an operator
+  // investigating "did Alice sign out before her account was
+  // compromised at 3am" would have no way to find the answer if
+  // logout silently dropped email=), (3) dropping the remote= field
+  // would break the runbook's brute-force / credential-stuffing
+  // triage (the field is documented as "on every auth.* event" --
+  // dropping it silently removes the per-IP correlation between
+  // logout events and login attempts), (4) demoting from INFO to
+  // DEBUG would silently make the line invisible at default log
+  // levels (operators would have to flip log levels to see it,
+  // breaking the documented "INFO level for success/expected events"
+  // contract), (5) promoting to WARN would silently flood
+  // alerting (every logout is normal and expected; if logout fired
+  // at WARN every signed-in user signing out would generate noise
+  // alerts, eventually muted, masking real WARN-level events when
+  // they fire); the test captures stdout (NOT stderr) because
+  // logInfo writes to System.out per
+  // HandHistoryReviewServerRuntime.scala line 418 (`log("INFO",
+  // message, System.out)`) -- a refactor that flipped logInfo to
+  // System.err would also fail this test because the assertion
+  // captures stdout specifically. Assertion captures + restores
+  // System.out around the logout call ONLY (not the register call)
+  // so the baseline stdout capture doesn't accidentally include
+  // unrelated emissions from the register flow; the timing window
+  // is tight (one HTTP request) but big enough to capture the
+  // synchronous logInfo emission inside handleAuthLogout (line 210
+  // runs BEFORE the response body is built and returned, so by
+  // the time `logout.statusCode()` reads 200 the audit line is
+  // already written -- the synchronized stream.println in
+  // HandHistoryReviewServerRuntime.scala line 511-512 flushes
+  // because PrintStream(autoFlush=true) is used at line 6097 +
+  // analogous setOut here). Format check is structured:
+  // (i) "auth.logout" presence (event prefix),
+  // (ii) "email=logoutaudit@example.com" (the specific registered
+  //      email -- both that the field is present AND that the
+  //      value is the canonical email, NOT the displayName or a
+  //      userId or empty),
+  // (iii) "INFO" level (catches a refactor demoting to DEBUG or
+  //       promoting to WARN),
+  // (iv) "remote=" field presence (the brute-force triage
+  //      correlator),
+  // (v) "[hand-history-review]" service-tag presence (the log-
+  //      collation prefix from HandHistoryReviewServerRuntime.scala
+  //      line 512); same regression-pin pattern as the prior
+  // /api/health response-shape pins (b1339cd, etc.) -- documented
+  // operator-facing contracts get pinned in CI so refactors can't
+  // silently invalidate the deploy-doc + runbook operator-side
+  // guidance; this commit closes the first of the 5 success-side
+  // event formats (auth.logout); future fires can pin the other
+  // four (auth.login.success, auth.register.success,
+  // auth.oidc.start, auth.oidc.success).
+  test("POST /api/auth/logout emits the documented `auth.logout email=<canonical> remote=<peer>` INFO audit line per deploy doc line 218") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"logoutaudit@example.com","password":"correct-horse-battery","displayName":"AuditUser"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the logout audit-log probe can capture its emission")
+          val ownerHeaders = authSessionHeaders(register, jsonBody(register)("csrfToken").str)
+
+          // Capture stdout (NOT stderr) because logInfo writes to
+          // System.out per HandHistoryReviewServerRuntime.scala line
+          // 418 -- the auth.login.failure / auth.register.failure
+          // tests further down this file capture stderr because
+          // those use logWarn (System.err). Restore the original
+          // stdout in a finally block to avoid polluting the rest of
+          // the test suite if an assertion below fails.
+          val outBuf = new java.io.ByteArrayOutputStream()
+          val originalOut = System.out
+          System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+          try
+            val logout = postJson(s"$baseUri/api/auth/logout", "{}", ownerHeaders)
+            assertEquals(logout.statusCode(), 200,
+              clue = "logout must succeed (200) so handleAuthLogout reaches the line 210 logInfo emission point -- a 401/403 short-circuits before the audit line is written")
+          finally
+            System.setOut(originalOut)
+
+          val captured = outBuf.toString(StandardCharsets.UTF_8)
+          val logoutLine = captured.split('\n').iterator
+            .find(_.contains("auth.logout"))
+            .getOrElse(fail(s"no `auth.logout` line in stdout capture -- deploy doc line 218 documents this event as INFO-level fired on every successful logout; got captured stdout: ${captured.take(800)}"))
+
+          // (i) event prefix
+          assert(logoutLine.contains("auth.logout"),
+            clue = s"logout audit line must carry the literal `auth.logout` event prefix per deploy doc line 218's enumeration; a refactor renaming to e.g. `auth.signout` would silently break log-aggregation queries; got: $logoutLine")
+          // (ii) canonical email field
+          assert(logoutLine.contains("email=logoutaudit@example.com"),
+            clue = s"logout audit line must carry the registered canonical email in the `email=` field per deploy doc line 218 ('local-auth events including auth.logout carry email=' and 'success lines log the canonical (normalized) email so all events for one user grep identically'); a refactor dropping the field or substituting displayName / userId would silently break operator user-correlation workflows; got: $logoutLine")
+          // (iii) INFO level
+          assert(logoutLine.contains("[INFO]"),
+            clue = s"logout audit line must be INFO-level per deploy doc line 218 ('INFO level for success/expected events'); a refactor demoting to DEBUG would silently make the line invisible at default log levels, promoting to WARN would silently flood alerting; got: $logoutLine")
+          // (iv) remote= field
+          assert(logoutLine.contains("remote="),
+            clue = s"logout audit line must carry the `remote=` field per deploy doc line 218 ('remote= on every auth.* event'); without this field operators lose the per-IP correlation between logout events and earlier login.success / auth.oidc.success events for incident analysis; got: $logoutLine")
+          // (v) service-tag prefix (log-collation correlator)
+          assert(logoutLine.contains("[hand-history-review]"),
+            clue = s"logout audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded `[hand-history-review]` literal -- the tag matches the /api/health.service field (pinned by 505ba6b) so a log aggregator filtering by service tag gets the same identifier on log lines as on probe responses; got: $logoutLine")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
