@@ -3068,6 +3068,172 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `startup complete` banner log line format --
+  // a SEPARATE concern from the auth-event audit log chain
+  // (1c8777f through e43081b) which closed the 9-event runtime
+  // audit-log enumeration; this commit pins the BOOT-TIME banner
+  // that emits ONCE per process lifetime at HandHistoryReviewServer
+  // Runtime.scala line 349-350 immediately AFTER the HTTP server
+  // binds + starts accepting connections; the banner is documented
+  // in HAND_HISTORY_WEB_DEPLOYMENT.md as the operator-side boot-
+  // time diagnostic an operator grep's to confirm the server
+  // started with the EXACT configuration the deployment manifest
+  // intended (vs the values an environment-variable / argument /
+  // default could have silently substituted); BEFORE this commit
+  // there was ZERO test coverage of the startup banner -- a
+  // refactor that broke ANY of the ~17 documented field=value
+  // pairs would silently invalidate the operator's boot-time
+  // config-verification workflow; the banner emits at INFO level
+  // (logInfo at line 349 writes to System.out per
+  // HandHistoryReviewServerRuntime.scala line 418), with all
+  // fields as `key=value` pairs separated by SINGLE SPACES, and
+  // a documented %20-ESCAPE on path-like fields (modelSource,
+  // drainSignalFile, rateLimitClientIpSource) to prevent
+  // Windows-path-with-spaces from splitting the structured
+  // key=value format -- the inline comment at HandHistoryReview
+  // ServerRuntime.scala lines 334-338 documents the threat
+  // ("Windows path such as 'C:\\Program Files\\model' or a
+  // drain-signal file in a user home dir like 'C:\\Users\\Alex
+  // Smith\\drain.flag' does not split the structured key=value
+  // pairs"); the documented field set: startup complete +
+  // host + port + modelSource + maxUploadBytes + analysisTimeoutMs
+  // + playingHallTimeoutMs + maxConcurrentJobs + maxQueuedJobs +
+  // rateLimitSubmitsPerMinute + rateLimitStatusPerMinute +
+  // rateLimitAuthPerMinute + rateLimitClientIpSource +
+  // rateLimitTrustedProxyIps + drainSignalFile + authenticationMode
+  // + userAuthMaxUsers + userAuthStoredUsers (the last two emit
+  // "-" for non-platform-auth modes per lines 328 + 333); per-
+  // field regression vectors: (i) renaming the "startup complete"
+  // prefix (e.g. to "server started" or "boot complete") would
+  // silently break every operator script grep'ing for the banner
+  // -- the runbook's "confirm boot config" diagnostic depends on
+  // this exact wording, (ii) dropping any field=value pair would
+  // silently lose operator visibility into that config value AND
+  // would silently desync the banner from the /api/health response
+  // shape which echoes most of the same values, (iii) breaking
+  // the %20-escape on path-like fields would silently let
+  // Windows-with-spaces deployments split the banner into
+  // unparseable fragments that the operator's grep-based
+  // verification couldn't parse, (iv) demoting INFO to DEBUG
+  // would silently hide the banner at default log levels making
+  // the entire boot-time-diagnostic workflow invisible, (v)
+  // emitting the banner BEFORE the actual bind (the line 349
+  // emission runs AFTER the HTTP server binds per the code flow
+  // -- a refactor reordering this would silently let the banner
+  // appear before the server is accepting traffic, misleading
+  // operator readiness checks); test approach: wrap System.setOut
+  // AROUND the withServer call so the banner emission (which
+  // fires DURING withServer's HandHistoryReviewServer.startWithBackends
+  // invocation, BEFORE the run callback executes) lands in the
+  // captured stream; the test runs no actual HTTP requests --
+  // just spins up + tears down the server while capturing the
+  // boot-time emissions; format check covers (i) the "startup
+  // complete" prefix, (ii) the [INFO] level + [hand-history-review]
+  // service-tag prefix matching the audit-log chain's coupling,
+  // (iii) the well-known config values from withServer's default
+  // parameters: host=127.0.0.1, maxUploadBytes=512 (or the
+  // overridden value), analysisTimeoutMs=120000, playingHallTimeoutMs=
+  // 900000, maxConcurrentJobs=2, maxQueuedJobs=8, rateLimitSubmits
+  // PerMinute=6, etc., (iv) per-field PRESENCE checks for every
+  // documented field name (catches refactor that dropped a field
+  // even if the value happens to still be present elsewhere in
+  // the line), (v) the authenticationMode=none value (since
+  // withServer defaults to no platformAuth + no basicAuth),
+  // (vi) the userAuthMaxUsers=- + userAuthStoredUsers=- values
+  // (the "-" placeholder for non-platform-auth deployments per
+  // the inline comment at lines 328+333), (vii) the drainSignal
+  // File=- value (no drain signal configured in default withServer),
+  // (viii) modelSource=uniform%20fallback (the %20-escaped form
+  // of "uniform fallback" -- THIS pins the %20-escape contract
+  // on a SPACE-BEARING value the prior pins don't exercise);
+  // test pins the BOOT-TIME log line AS A WHOLE per the deploy
+  // doc's framing -- a future fire could add separate tests for
+  // specific edge cases (Windows-path %20-escape, platform-auth
+  // userAuth* fields with real values, drain-signal path %20-
+  // escape).
+  test("server startup emits the documented `startup complete` boot-time banner at INFO level with all ~17 documented field=value pairs per HAND_HISTORY_WEB_DEPLOYMENT.md's operator boot-time-diagnostic contract") {
+    withStaticSite { staticDir =>
+      // Capture stdout AROUND the withServer call so the banner
+      // emission at HandHistoryReviewServerRuntime.scala line 349
+      // (which fires DURING startWithBackends, BEFORE the run
+      // callback executes) lands in the captured stream. The
+      // withServer fixture's `server.close()` finally block runs
+      // BEFORE the outer finally restores System.out, so the
+      // shutdown banner ALSO lands in captured (we don't assert
+      // on the shutdown banner here -- a future fire could add a
+      // separate pin for that line at line 326).
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      try
+        withServer(staticDir) { _ =>
+          // No HTTP requests needed -- the banner emits at
+          // startup-time BEFORE this callback runs. The empty
+          // body just keeps the server alive long enough for
+          // the startup emission to flush. The 'server listening'
+          // line emits FIRST (HandHistoryReviewServer.scala line
+          // 74), then the 'startup complete' banner emits SECOND
+          // (HandHistoryReviewServerRuntime.scala line 349) --
+          // both are captured by our stdout wrap.
+          ()
+        }
+      finally
+        System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val bannerLine = captured.split('\n').iterator
+        .find(_.contains("startup complete"))
+        .getOrElse(fail(s"no `startup complete` line in captured stdout -- deploy doc + HandHistoryReviewServerRuntime.scala line 349 document this as the boot-time diagnostic banner; if missing, the logInfo emission was suppressed OR the line was renamed; got captured stdout: ${captured.take(2000)}"))
+
+      // (i) prefix
+      assert(bannerLine.contains("startup complete"),
+        clue = s"banner must carry the literal `startup complete` prefix per HandHistoryReviewServerRuntime.scala line 349's hardcoded literal -- a refactor renaming to e.g. `server started` / `boot complete` would silently break operator scripts grep'ing for the boot-time-diagnostic banner; got: $bannerLine")
+      // (ii) INFO level
+      assert(bannerLine.contains("[INFO]"),
+        clue = s"banner must be INFO-level (logInfo at line 349 writes to System.out per HandHistoryReviewServerRuntime.scala line 418); demote-to-DEBUG would silently hide the banner at default log levels, making the entire boot-time-diagnostic workflow invisible; got: $bannerLine")
+      // (iii) service-tag prefix (couples to /api/health.service from 505ba6b)
+      assert(bannerLine.contains("[hand-history-review]"),
+        clue = s"banner must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- matches /api/health.service (pinned by 505ba6b) so log aggregators see the same identifier on boot-time banners as on runtime audit lines AND on probe responses; got: $bannerLine")
+      // (iv-xx) per-field PRESENCE + key value checks. The
+      // withServer fixture defaults provide deterministic values
+      // for most fields.
+      assert(bannerLine.contains("host=127.0.0.1"),
+        clue = s"banner must carry host=127.0.0.1 (withServer default); a refactor reporting the requested-host value instead of the bound-host (which differs when port=0 is used because the binding resolves the host post-bind) would silently mismatch fleet correlation between this banner and /api/health.host (pinned by 505ba6b); got: $bannerLine")
+      assert(bannerLine.contains("port="),
+        clue = s"banner must carry port=<resolved-bound-port> -- withServer uses port=0 to get an ephemeral OS-assigned port, so the exact value varies per test run but the field name MUST be present; a refactor reporting config.port (always 0 here) instead of binding.port would silently emit port=0 in the banner while the actual server bound to a real ephemeral port; got: $bannerLine")
+      assert(bannerLine.contains("modelSource=uniform%20fallback"),
+        clue = s"banner must carry modelSource=uniform%20fallback (the %20-escaped form of 'uniform fallback' -- withServer default has no MODEL_DIR set); THIS is the unique %20-ESCAPE CONTRACT pin on the startup banner that catches a refactor dropping the .replace(\" \", \"%20\") at HandHistoryReviewServerRuntime.scala line 339, which would silently split the structured key=value format when modelSource contains a space-bearing value like a Windows path 'C:\\Program Files\\model'; the unescaped form 'uniform fallback' would also let the banner split because the space would be parsed as a field separator by downstream log parsers; got: $bannerLine")
+      assert(bannerLine.contains("maxUploadBytes=512"),
+        clue = s"banner must carry maxUploadBytes=512 (withServer default); a refactor that dropped the field OR changed the default would silently desync the banner from /api/health.maxUploadBytes; got: $bannerLine")
+      assert(bannerLine.contains("analysisTimeoutMs=120000"),
+        clue = s"banner must carry analysisTimeoutMs=120000 (withServer default = 2 minutes); got: $bannerLine")
+      assert(bannerLine.contains("playingHallTimeoutMs=900000"),
+        clue = s"banner must carry playingHallTimeoutMs=900000 (withServer default = 15 minutes per 61e49a8); got: $bannerLine")
+      assert(bannerLine.contains("maxConcurrentJobs=2"),
+        clue = s"banner must carry maxConcurrentJobs=2 (withServer default); got: $bannerLine")
+      assert(bannerLine.contains("maxQueuedJobs=8"),
+        clue = s"banner must carry maxQueuedJobs=8 (withServer default); got: $bannerLine")
+      assert(bannerLine.contains("rateLimitSubmitsPerMinute=6"),
+        clue = s"banner must carry rateLimitSubmitsPerMinute=6 (withServer default); got: $bannerLine")
+      assert(bannerLine.contains("rateLimitStatusPerMinute=240"),
+        clue = s"banner must carry rateLimitStatusPerMinute=240 (withServer default); got: $bannerLine")
+      assert(bannerLine.contains("rateLimitAuthPerMinute=10"),
+        clue = s"banner must carry rateLimitAuthPerMinute=10 (withServer default); got: $bannerLine")
+      assert(bannerLine.contains("rateLimitClientIpSource="),
+        clue = s"banner must carry the rateLimitClientIpSource= field -- the inline comment at HandHistoryReviewServerRuntime.scala lines 343-348 documents this as a %20-escape-bearing field (values like 'header:X-Real-IP via loopback-only' contain spaces); dropping the field would silently break operator visibility into the IP-resolution policy; got: $bannerLine")
+      assert(bannerLine.contains("rateLimitTrustedProxyIps="),
+        clue = s"banner must carry the rateLimitTrustedProxyIps= field; got: $bannerLine")
+      assert(bannerLine.contains("drainSignalFile=-"),
+        clue = s"banner must carry drainSignalFile=- (the documented \"-\" placeholder per HandHistoryReviewServerRuntime.scala line 342's getOrElse(\"-\") -- withServer default has no drain signal configured) -- a refactor that emitted an empty string or 'null' or omitted the field entirely would silently break the runbook's 'is drain-signal wired' boot-time check; got: $bannerLine")
+      assert(bannerLine.contains("authenticationMode=none"),
+        clue = s"banner must carry authenticationMode=none (withServer default has no platformAuth + no basicAuth) -- matches /api/health.authenticationMode emitted at runtime; a refactor that changed the boot-time mode-detection logic would silently desync the banner from runtime probes AND silently invalidate operator alerts that compare the two; got: $bannerLine")
+      assert(bannerLine.contains("userAuthMaxUsers=-"),
+        clue = s"banner must carry userAuthMaxUsers=- (the documented \"-\" placeholder per HandHistoryReviewServerRuntime.scala line 328's getOrElse(\"-\") for non-platform-auth deployments); a refactor emitting an empty value or 'null' would silently break the runbook's boot-time auth-config check; got: $bannerLine")
+      assert(bannerLine.contains("userAuthStoredUsers=-"),
+        clue = s"banner must carry userAuthStoredUsers=- (the documented \"-\" placeholder per HandHistoryReviewServerRuntime.scala line 333's getOrElse(\"-\") -- the inline comment at line 329-332 documents this as the boot-time count emission that lets operators verify the persistent store survived restart without hitting /api/health first); got: $bannerLine")
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
