@@ -3093,6 +3093,32 @@ class HandHistoryReviewServerTest extends FunSuite:
           assertEquals(anonymousAuth("authenticationMode").str, "users")
           assertEquals(anonymousAuth("authenticated").bool, false)
           assertEquals(anonymousAuth("providers").arr.toVector.map(_("id").str), Vector("local"))
+          // Pin the full local-provider entry shape per deploy doc
+          // line 101: each entry is `{id, displayName, kind, startPath}`
+          // where `kind` is `password` for the always-present `local`
+          // entry (`displayName: "Email and password"`, `startPath:
+          // null` -- email/password sign-in goes through the auth form
+          // rather than a separate route). The existing assertion on
+          // line 3095 only pinned the `id` field; the other three
+          // fields (displayName, kind, startPath) were untested, so
+          // a refactor that changed e.g. `displayName` to "Local
+          // password" or `kind` from "password" to "local" would
+          // silently break frontends keying on the documented values
+          // (the shipped frontend's auth-mode-rendering keys on
+          // `kind === "password"` to gate the email+password UI
+          // vs `kind === "oidc"` for the OIDC button). The startPath
+          // field MUST be null for the local provider (no separate
+          // start route) -- a future refactor that gave local-password
+          // a non-null startPath would confuse the frontend's
+          // routing logic which expects to handle local sign-in
+          // via the auth form.
+          val localProvider = anonymousAuth("providers").arr.head
+          assertEquals(localProvider("displayName").str, "Email and password",
+            clue = s"local provider's displayName must be the documented 'Email and password' string per deploy doc line 101 -- a refactor changing this would break the auth-mode-chooser UI's user-visible label without test failure; got: ${localProvider("displayName").str}")
+          assertEquals(localProvider("kind").str, "password",
+            clue = s"local provider's kind must be 'password' per deploy doc line 101 -- the shipped frontend's auth-mode rendering keys on `kind === 'password'` to gate the email+password form vs `kind === 'oidc'` for the OIDC button; a refactor changing this would silently break the auth-form rendering; got: ${localProvider("kind").str}")
+          assert(localProvider("startPath") == ujson.Null,
+            clue = s"local provider's startPath must be null per deploy doc line 101 (email/password sign-in goes through the auth form, NOT a separate start route); a refactor giving it a non-null startPath would confuse the frontend's routing logic that expects to handle local sign-in via the form; got: ${localProvider("startPath")}")
           assertEquals(get(s"$baseUri/").statusCode(), 200)
 
           val unauthorized = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
