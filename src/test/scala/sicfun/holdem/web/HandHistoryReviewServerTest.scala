@@ -797,6 +797,80 @@ class HandHistoryReviewServerTest extends FunSuite:
   // bd8e7f3 (session cookie Max-Age) -- documented security-
   // relevant constants get pinned so refactors can't silently
   // drift them.
+  // Pin the documented server-side session-record SLIDING behavior --
+  // the OTHER half of the two-layer record-slides-but-cookie-doesn't
+  // mechanic. b017951 pinned the cookie-side fixed-Max-Age (cookie
+  // does NOT slide on authenticated requests so the leaked-token-
+  // lifetime upper-bound calculation operators rely on stays bounded);
+  // this fire pins the SERVER-SIDE record-sliding (resolveSession
+  // DOES refresh the in-memory session's expiresAtEpochMs on every
+  // authenticated request, so a legitimate user who's actively using
+  // the app stays signed in beyond the ORIGINAL ttl window AS LONG AS
+  // they keep using it -- the deploy doc explicitly documents this as
+  // "ages off its sliding USER_AUTH_SESSION_TTL_MS window"). The two
+  // behaviors look contradictory in isolation but compose into the
+  // documented operator-relevant property: an attacker using curl /
+  // scripted clients bypasses cookie expiry AND keeps the server-side
+  // record alive indefinitely via sliding, so re-auth (NOT natural
+  // expiry) is the only reliable upper bound on leaked-token lifetime;
+  // a legitimate browser-bound user gets the cookie-fixed cap (their
+  // cookie WILL expire at loginTime + ttl regardless of activity).
+  // Test mechanics: use a SHORT sessionTtlMs (1000ms) so the test
+  // completes in ~1.3 seconds; the production default is 12h which is
+  // impractical to test directly; the sliding LOGIC is independent of
+  // the absolute TTL value so a short TTL is a faithful test (the
+  // PlatformUserAuth.SessionManager.resolveSession path does
+  // `if current.expiresAtEpochMs > nowMillis() then current.copy(
+  // expiresAtEpochMs = now + sessionTtlMs)` regardless of magnitude).
+  // Without sliding (the regression we're guarding against): the
+  // session would expire at T0 + 1000ms; making a request at T0 +
+  // 1200ms (after the second sleep) would surface authenticated=false
+  // because the record-lookup finds an expired entry. WITH sliding:
+  // the request at T0 + 600ms refreshes expiresAt to T0 + 1600ms, so
+  // the request at T0 + 1200ms (still within the refreshed window)
+  // succeeds with authenticated=true.
+  test("authenticated requests slide the server-side session expiry via resolveSession so an actively-using legitimate user stays signed in beyond the original TTL window") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        // Short TTL so the test completes quickly; the sliding logic
+        // is TTL-magnitude-independent so this is a faithful test.
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath, sessionTtlMs = 1000L))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"slider@example.com","password":"correct-horse-battery","displayName":"Slider"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed to mint the session record this test slides")
+          val cookie = sessionCookie(register)
+          val cookieHeader = Map("Cookie" -> cookie)
+
+          // Wait 600ms (60% of the 1000ms TTL). The record's
+          // original expiresAtEpochMs is registerTime + 1000ms, so
+          // a request now is well within the window.
+          Thread.sleep(600L)
+          val slideHit = getJsonWithHeaders(s"$baseUri/api/auth/me", cookieHeader)
+          assertEquals(slideHit("authenticated").bool, true,
+            clue = "first probe at 600ms (60% of TTL) must show authenticated=true -- the session record was minted at register-time + 1000ms so it's still valid; this request ALSO triggers the sliding refresh at SessionManager (current.copy(expiresAtEpochMs = now + sessionTtlMs)) which is what the next assertion depends on")
+
+          // Wait another 600ms. Total elapsed since register: 1200ms.
+          // Without sliding: record expired 200ms ago (T0 + 1000ms),
+          // probe would return authenticated=false. WITH sliding:
+          // the probe at T0 + 600ms refreshed expiresAt to T0 +
+          // 600ms + 1000ms = T0 + 1600ms, so the current request at
+          // T0 + 1200ms is within the refreshed window with 400ms
+          // headroom.
+          Thread.sleep(600L)
+          val postSlide = getJsonWithHeaders(s"$baseUri/api/auth/me", cookieHeader)
+          assertEquals(postSlide("authenticated").bool, true,
+            clue = "second probe at 1200ms (120% of ORIGINAL TTL, but only 60% past the slide-refresh) MUST show authenticated=true -- this is the entire sliding-behavior contract: an actively-using legitimate user stays signed in via record refresh on every authenticated request; if this assertion fires false, the sliding logic in SessionManager.resolveSession's `current.copy(expiresAtEpochMs = now + sessionTtlMs)` refresh path has regressed, which would silently start kicking users out at exactly loginTime + ttlMs regardless of activity -- a UX disaster for long-stay deployments AND a contradiction of the documented two-layer mechanic")
+        }
+      }
+    }
+  }
+
   // Pin the documented "session cookie Max-Age is FIXED at login time
   // and NOT refreshed by subsequent activity" behavior -- the security-
   // critical foundation of the leaked-token-lifetime upper-bound
