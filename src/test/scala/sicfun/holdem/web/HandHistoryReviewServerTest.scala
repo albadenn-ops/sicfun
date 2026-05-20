@@ -1439,6 +1439,174 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `auth.login.success` audit line format AND
+  // the canonical-vs-submitted-email normalization contract -- the
+  // SECOND of the 5 success-side auth-event formats deploy doc line
+  // 218 documents (auth.logout was closed by 1c8777f); this test
+  // strengthens the contract beyond the auth.logout pin by
+  // EXERCISING the documented "Success lines log the canonical
+  // (normalized: zero-width-character strip → trim → lowercase, all
+  // under Locale.ROOT) email so all events for one user grep
+  // identically; failure lines log the submitted email so brute-
+  // force probes are visible in the form the attacker typed"
+  // distinction; for the logout test (1c8777f), the email source is
+  // the session's stored canonical email so there's no submitted-
+  // vs-canonical complexity -- the auth.logout email field MUST be
+  // canonical because that's all the session has access to; for
+  // auth.login.success though, the request's submitted email could
+  // be in any case-form / whitespace form / zero-width-decorated
+  // form, AND the audit-log emission uses `result.user.email`
+  // (AuthStack.scala line 171) which is the canonical stored email
+  // from the database lookup -- so a refactor that "fixed
+  // consistency" by logging the SUBMITTED email instead (e.g.
+  // unifying success+failure to both log the submitted form, or
+  // accidentally swapping result.user.email for the parsed `email`
+  // variable from parseLoginRequest) would silently break the
+  // operator-correlation contract: events for one user would log
+  // under DIFFERENT canonical forms depending on how the user
+  // typed their email each session, defeating the deploy doc's
+  // "all events for one user grep identically" guarantee. The
+  // test exploits the case-mismatch path: register with
+  // "Alice@Example.COM" (mixed case + uppercase domain), login
+  // with "aLiCe@example.com" (different mixed case from register),
+  // canonical for BOTH is "alice@example.com", so the audit line
+  // MUST log `email=alice@example.com` -- if it logs
+  // "email=Alice@Example.COM" (the register-submitted form) or
+  // "email=aLiCe@example.com" (the login-submitted form) the
+  // refactor regression is caught. The test ALSO asserts the
+  // EXCLUSION condition: the line must NOT contain
+  // "email=aLiCe@example.com" -- without this exclusion check, a
+  // weaker assertion that only verifies presence of
+  // "alice@example.com" could pass on a regression that logged
+  // "aLiCe@example.com" alongside (since a substring match for
+  // "alice@example.com" would match within "aLiCe@example.com" if
+  // case-insensitive); the exact-bytes exclusion check forces the
+  // assertion to fail on the regression. Critical Subtlety: Scala
+  // string `.contains` is case-SENSITIVE, so checking
+  // `.contains("email=alice@example.com")` would NOT match a line
+  // containing `email=aLiCe@example.com` -- so the
+  // contains+!contains pair pins case-exact equality of the
+  // emitted email field; a refactor emitting any non-canonical
+  // form fails BOTH the positive contains (which requires the
+  // canonical alice@example.com exactly) AND the negative
+  // !contains (which forbids the aLiCe@example.com submitted
+  // form). Per-field regression vectors specific to login.success
+  // (in addition to the 5-tier format-check inherited from the
+  // logout pin pattern): (i) refactor swapping result.user.email
+  // for the parseLoginRequest's `email` parameter on line 165 (an
+  // easy refactor target -- both are String fields available in
+  // the same closure) would silently log the SUBMITTED form,
+  // breaking operator user-correlation; (ii) refactor unifying
+  // success + failure to both log submitted form (under a
+  // "consistency" rationale, since auth.login.failure correctly
+  // logs submitted) would silently break the documented
+  // distinction; (iii) refactor introducing a case-preserving
+  // canonical (e.g. "preserve display case for friendliness")
+  // would silently break operator grep workflows that match
+  // case-exactly; same multi-tier format-check pattern as 1c8777f
+  // auth.logout pin: event prefix + email field + INFO level +
+  // remote= field + service-tag prefix, with this commit's
+  // additional canonical-vs-submitted EXCLUSION check on the
+  // email field; future fires can close auth.register.success
+  // (same normalization contract, register-only case) and
+  // auth.oidc.start + auth.oidc.success (provider= field-shape
+  // pins).
+  test("POST /api/auth/login emits the documented `auth.login.success email=<canonical> remote=<peer>` INFO audit line with the canonical-normalized email (per deploy doc line 218's 'all events for one user grep identically' contract)") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Register with a mixed-case + uppercase-domain submission;
+          // PlatformUserAuth.normalizeEmail strips whitespace + lowercases
+          // (after zero-width strip) so the canonical form stored is
+          // alice@example.com. Run the registration OUTSIDE the stdout
+          // capture window below so the auth.register.success line
+          // emission doesn't pollute the captured stream this test
+          // wants to scrutinize for the login.success line specifically.
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"Alice@Example.COM","password":"correct-horse-battery","displayName":"Alice"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = s"registration with mixed-case + uppercase-domain email must succeed (the canonical form 'alice@example.com' should be stored, not the submitted 'Alice@Example.COM')")
+
+          // Sanity-check that the register response carries the
+          // canonical form -- this is the STORED form that
+          // auth.login.success should emit downstream. Without this
+          // check, a refactor that broke the registration-side
+          // normalization would silently make the login.success test
+          // pass with the WRONG canonical (it would still match the
+          // stored form, just not the documented canonical).
+          val registerJson = jsonBody(register)
+          val storedEmail = registerJson("user")("email").str
+          assertEquals(storedEmail, "alice@example.com",
+            clue = s"register response must carry the canonical-normalized email (lowercase, no leading/trailing whitespace) so the auth.login.success audit line will subsequently emit the SAME canonical form via result.user.email; got: $storedEmail")
+
+          // Now capture stdout around the LOGIN call only -- the
+          // auth.login.success emission at AuthStack.scala line 171
+          // is logInfo(...) which writes to System.out per
+          // HandHistoryReviewServerRuntime.scala line 418. The
+          // tight capture window (just the postJson call) keeps the
+          // captured stream small and free of unrelated emissions
+          // (the surrounding withServer / withUserStorePath fixtures
+          // log to stderr or to other streams, not to stdout-during-
+          // this-window).
+          val outBuf = new java.io.ByteArrayOutputStream()
+          val originalOut = System.out
+          System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+          try
+            // Login with a DIFFERENT mixed-case form than register
+            // (different uppercase letters, but normalizing to the
+            // same canonical alice@example.com). This isolates the
+            // canonical-vs-submitted distinction: if the audit line
+            // emitted the LOGIN-submitted form (aLiCe@example.com)
+            // it would NOT match the canonical alice@example.com,
+            // and the exclusion check below would fail.
+            val login = postJson(s"$baseUri/api/auth/login",
+              """{"email":"aLiCe@example.com","password":"correct-horse-battery"}""")
+            assertEquals(login.statusCode(), 200,
+              clue = s"login with case-mismatched form must succeed because PlatformUserAuth.loginLocal normalizes the submitted email before the database lookup -- if this returns 401 instead of 200, either the normalization is missing on the login path OR the case-folding is not Locale.ROOT-anchored, either of which breaks the documented 'sign in with the same email regardless of case' contract")
+          finally
+            System.setOut(originalOut)
+
+          val captured = outBuf.toString(StandardCharsets.UTF_8)
+          val loginLine = captured.split('\n').iterator
+            .find(_.contains("auth.login.success"))
+            .getOrElse(fail(s"no `auth.login.success` line in stdout capture -- deploy doc line 218 documents this event as INFO-level fired on every successful login; got captured stdout: ${captured.take(800)}"))
+
+          // (i) event prefix
+          assert(loginLine.contains("auth.login.success"),
+            clue = s"login audit line must carry the literal `auth.login.success` event prefix per deploy doc line 218's enumeration; a refactor renaming to e.g. `auth.signin.success` would silently break log-aggregation queries; got: $loginLine")
+          // (ii) CANONICAL email field (the load-bearing contract this
+          // test pins) -- a refactor that logged the submitted email
+          // (either register-form or login-form, both case-different
+          // from canonical) would fail this assertion
+          assert(loginLine.contains("email=alice@example.com"),
+            clue = s"login.success audit line MUST carry the canonical-normalized email `alice@example.com` per deploy doc line 218 ('Success lines log the canonical (normalized: zero-width-character strip → trim → lowercase, all under Locale.ROOT) email so all events for one user grep identically'); the user registered with `Alice@Example.COM` and logged in with `aLiCe@example.com` (both case-different submitted forms), so the audit line MUST emit the canonical form to allow operator user-correlation queries; a refactor logging the submitted form would silently break the 'one user, one canonical email' grep guarantee AND the runbook's brute-force triage workflow; got: $loginLine")
+          // (iii) EXCLUSION: must NOT contain the submitted form --
+          // pins the normalization invariant from the negative
+          // direction; without this, a refactor that emitted BOTH
+          // forms (e.g. "email=alice@example.com submittedEmail=aLiCe@example.com")
+          // would silently pass the positive contains check while
+          // still leaking the submitted form
+          assert(!loginLine.contains("aLiCe@example.com"),
+            clue = s"login.success audit line MUST NOT contain the login-submitted form `aLiCe@example.com` (case-mismatched from canonical) per the documented canonical-vs-submitted distinction -- a refactor that logged BOTH forms (canonical AND submitted side by side) or that swapped to logging the submitted form would silently break operator user-correlation since one user's events would log under multiple different email values depending on how they typed their input each session; got: $loginLine")
+          // (iv) INFO level
+          assert(loginLine.contains("[INFO]"),
+            clue = s"login.success audit line must be INFO-level per deploy doc line 218 ('INFO level for success/expected events'); a refactor demoting to DEBUG would silently make the line invisible at default log levels, promoting to WARN would silently flood alerting (every login normal); got: $loginLine")
+          // (v) remote= field
+          assert(loginLine.contains("remote="),
+            clue = s"login.success audit line must carry the `remote=` field per deploy doc line 218 ('remote= on every auth.* event'); without this field operators lose the per-IP correlation between successful logins and any preceding auth.login.failure attempts (the brute-force-detection workflow keys on counting failures-per-IP and then matching the eventual success to detect compromised-credential takeovers); got: $loginLine")
+          // (vi) service-tag prefix
+          assert(loginLine.contains("[hand-history-review]"),
+            clue = s"login.success audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- the tag matches the /api/health.service field (pinned by 505ba6b) so a log aggregator filtering by service tag gets the same identifier on log lines as on probe responses; got: $loginLine")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
