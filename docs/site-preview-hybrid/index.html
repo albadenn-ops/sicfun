@@ -869,9 +869,12 @@
             <div class="hall-progress-bar" role="progressbar" aria-label="Playing hall run in progress" aria-busy="true"><div class="hall-progress-bar-inner"></div></div>
             <div class="hall-progress-meta">
               <!-- aria-hidden="true" excludes the elapsed ticker from
-                   announcements. Currently this is defense-in-depth: as of
-                   2a1e02d, aria-live="polite" lives on the hall-status div
-                   (not the parent .hall-panel article), and hall-progress
+                   announcements. Currently this is defense-in-depth:
+                   aria-live="polite" lives on the hall-status div
+                   (grep this file for `id="hall-status" aria-live` to
+                   land on the live element -- it's a few rows down
+                   from this comment in the same hall-panel article),
+                   not the parent .hall-panel article, and hall-progress
                    is a SIBLING of hall-status -- so the elapsed ticker
                    isn't inside any aria-live region at all, and even
                    without aria-hidden the 1-second tickHallElapsed updates
