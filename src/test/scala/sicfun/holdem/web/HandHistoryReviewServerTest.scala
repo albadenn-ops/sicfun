@@ -2514,6 +2514,64 @@ class HandHistoryReviewServerTest extends FunSuite:
           clue = s"/api/ready must NOT echo `startedAtEpochMs` per deploy doc line 216 enumerating it as an /api/health-only field and line 217's '/api/ready ... field set is a strict subset of /api/health's' framing -- a refactor mirroring the process-restart timestamp into /api/ready (orchestrator-side probe, not operator-side dashboard) would silently widen the documented contract; got readyJson keys: ${readyJson.obj.keys.toVector.sorted.mkString(", ")}")
         assert(!readyJson.obj.contains("uptimeMs"),
           clue = s"/api/ready must NOT echo `uptimeMs` per deploy doc line 216 enumerating it as an /api/health-only field and line 217's '/api/ready ... field set is a strict subset of /api/health's' framing -- a refactor mirroring the uptime duration into /api/ready (orchestrator-side probe, not operator-side dashboard) would silently widen the documented contract; got readyJson keys: ${readyJson.obj.keys.toVector.sorted.mkString(", ")}")
+        // Pin the documented asymmetric scoping of the `ok` field --
+        // the deploy doc line 216 explicitly commits to "The JSON
+        // body opens with a hardcoded `ok: true` invariant (literal
+        // `Bool(true)` at `Readiness.scala`'s `renderHealth`; never
+        // `false` -- if the JVM were too sick to set the field the
+        // request would never return at all), so a monitor can key
+        // on `body.ok === true` as the always-up signal separately
+        // from the rich-state fields below"; the contract has TWO
+        // parts the test needs to enforce: (i) PRESENCE + value on
+        // /api/health (already pinned at line 2047 via
+        // `assertEquals(healthJson("ok").bool, true)`), AND (ii)
+        // ABSENCE from /api/ready (this assertion), because the
+        // documented design contrasts the two endpoints: /api/health
+        // emits `ok` as the always-up live-monitor invariant, while
+        // /api/ready emits `ready` (a DIFFERENT field name, with
+        // different semantics: "accepting-traffic" rather than
+        // "process is alive") -- a refactor mirroring `ok` into
+        // /api/ready as a "harmless additive change" would silently
+        // (a) confuse monitors that key on `body.ok === true` as
+        // the always-up signal -- those monitors would suddenly
+        // accept /api/ready responses as "live" even when /api/ready
+        // returns 503 (queue full / draining / timed-out worker),
+        // pivoting the monitor's semantic from "is the process
+        // alive" to "is the process alive AND accepting traffic"
+        // which is what `ready` already covers, (b) create field
+        // ambiguity between `ok` (always-up signal) and `ready`
+        // (accepting-traffic signal) on the same /api/ready
+        // response -- operator tooling would have two competing
+        // signals to choose from and the deploy doc's clean "key
+        // on ok for liveness, key on ready for acceptance" guidance
+        // would break, (c) silently widen the documented "/api/ready
+        // ... field set is a strict subset of /api/health's plus
+        // the renamed `reason`" framing from line 217 by adding a
+        // field that's NOT in the subset AND is NOT the renamed
+        // reason (it's a new always-true field that /api/ready
+        // already covers via `ready: true`); the drift vector is
+        // non-zero because (a) the two functions sit at adjacent
+        // lines (renderHealth at line 57, renderReadiness at line
+        // 116) in Readiness.scala so a "fields should be everywhere"
+        // refactor reflex could mirror the constant, AND (b) the
+        // `ok: true` literal at line 73 is the FIRST field
+        // renderHealth emits -- a maintainer copy-pasting the
+        // emission pattern from renderHealth to renderReadiness
+        // might accidentally include `ok: true` as the first
+        // field of renderReadiness too (the "I want a parallel
+        // shape" intuition is strong here because line 73's `ok`
+        // emission is structurally where `ready` lands at line
+        // 117 in renderReadiness -- they're SEMANTIC siblings in
+        // adjacent functions); same asymmetric-pin pattern as
+        // modelConfigured (4d15ca3 + 37f9465), the lifecycle pair
+        // startedAtEpochMs + uptimeMs (f50d7f9 -- pinned above at
+        // lines 2513+2515) -- /api/health-only fields get the pair
+        // (presence on health, absence from ready); with this
+        // assertion the deploy-doc-line-216 monitor-contract triple
+        // (ok presence + ready always-true + ok absence-from-ready)
+        // is FULLY pinned.
+        assert(!readyJson.obj.contains("ok"),
+          clue = s"/api/ready must NOT echo `ok` per deploy doc line 216 documenting it as /api/health's hardcoded always-up live-monitor invariant (literal Bool(true) at renderHealth line 73); /api/ready uses `ready` instead with different semantics (accepting-traffic, not just process-alive). A refactor mirroring `ok` into renderReadiness would confuse monitors keying on body.ok===true as the always-up signal AND create field ambiguity between `ok` (liveness) and `ready` (acceptance); got readyJson keys: ${readyJson.obj.keys.toVector.sorted.mkString(", ")}")
 
         val index = get(s"$baseUri/")
         assertEquals(index.statusCode(), 200)
