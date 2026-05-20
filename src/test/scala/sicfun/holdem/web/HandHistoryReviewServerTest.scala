@@ -2565,6 +2565,169 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `auth.oidc.failure reason=oversize_callback_param`
+  // audit line format -- closes the THIRD of 5 failure-side emission
+  // sites (line 335 in AuthStack.scala), after 342df03 closed line
+  // 397's missing_code_or_state and c8da491+b4b828f closed both
+  // branches of line 352's missing_state_cookie / state_cookie_
+  // mismatch conditional; line 335 fires when /callback receives a
+  // state OR code query parameter exceeding MaxOidcParamLength (256
+  // chars per AuthStack.scala line 512); the inline comment at
+  // lines 322-333 documents the security context: "Reject obviously-
+  // oversized state or code upfront. We issued `state` ourselves as
+  // 24 random bytes base64url-encoded (~32 chars); legitimate
+  // provider `code` values are typically under 200 chars. Anything
+  // orders of magnitude larger is an attacker probing the callback
+  // (potentially with a matching cookie planted via the sibling-
+  // subdomain vector in insecure-cookie mode) trying to amplify
+  // CPU/memory cost in the OidcStateStore lookup or the upstream
+  // POST body to the provider's token endpoint. 256 chars matches
+  // the cap on ?error= and is well above any legitimate value.
+  // Treat oversize as `missing_code_or_state` so the failure
+  // resembles a malformed request, not a state/cookie issue"; the
+  // operational distinction matters because line 332-333's
+  // documented "treat oversize as missing_code_or_state" comment
+  // actually does NOT happen at the audit-log layer -- the
+  // OPERATOR-VISIBLE reason value at line 335 IS the specific
+  // oversize_callback_param string (NOT missing_code_or_state),
+  // and only the USER-FACING redirect destination at line 336 uses
+  // missing_code_or_state for the URL fragment; the test pins the
+  // OPERATOR-VISIBLE reason value (oversize_callback_param) which
+  // is what dashboards / incident response key on, NOT the user-
+  // facing redirect value; this is a SUBTLE BUT IMPORTANT
+  // distinction worth pinning because a refactor that "consolidated
+  // the inconsistency" (e.g. emitting reason=missing_code_or_state
+  // in BOTH the audit log AND the redirect to match the comment's
+  // claim) would silently break the OPERATOR-side detection of
+  // oversize-callback DoS probes (the runbook's CPU/memory-
+  // exhaustion triage workflow distinguishes "user typo /
+  // legitimate truncation" from "oversize attack probe" based on
+  // THIS specific reason value); 8-tier format check at WARN level
+  // with the asymmetric-pair exclusion across all OTHER reason
+  // values pinned so far: (i) `auth.oidc.failure` event prefix,
+  // (ii) `provider=google`, (iii) `reason=oversize_callback_param`
+  // (the NEW specific-value pin), (iv-vi) triple EXCLUSION of
+  // alternative reasons missing_code_or_state, missing_state_
+  // cookie, state_cookie_mismatch -- catches a refactor that
+  // emitted the wrong reason value for THIS emission site (e.g.
+  // consolidating oversize with missing_code_or_state per the
+  // inline comment's misleading claim, or routing oversize to the
+  // state-cookie reason values), (vii) `[WARN]` level, (viii)
+  // `remote=` field, (ix) `!email=` ABSENCE, (x) `[hand-history-
+  // review]` service-tag prefix; test approach: GET /callback with
+  // a state param of 1000 chars (well above the 256-char cap, well
+  // above any reasonable cap-raise refactor's threshold) and a
+  // short code -- the test pins the AUDIT LOG FORMAT for the
+  // oversize path, NOT the specific cap value (a future fire could
+  // pin MaxOidcParamLength=256 specifically if needed; this test
+  // is robust to incidental cap raises because 1000 chars exceeds
+  // any reasonable defensive cap); the test reuses FakeOidcProvider
+  // (id="google") -- no cookie needed because the oversize check
+  // at line 334 happens BEFORE the cookie check at line 348, so a
+  // request with no cookie still triggers the oversize path; no
+  // /start needed for the same reason -- the state value doesn't
+  // need to be issued by the state-store since the oversize check
+  // short-circuits before line 355's finishOidc call; per-field
+  // regression vectors SPECIFIC to this emission that the prior 3
+  // failure-side pins don't catch: (i) the OPERATOR-vs-USER-facing
+  // reason distinction documented above -- a refactor unifying
+  // them would silently break operator triage; (ii) the OR-vs-AND
+  // logic at line 334's `rawState.length > MaxOidcParamLength ||
+  // rawCode.length > MaxOidcParamLength` -- a refactor changing OR
+  // to AND would silently let single-oversize values past (e.g. a
+  // 100KB state with a 50-char code would no longer trigger);
+  // pinning emission with ONLY state oversize (code is short)
+  // exercises the LEFT side of the OR; a future fire could add a
+  // mirror test with only code oversize to pin the RIGHT side of
+  // the OR; (iii) the cap-not-zero invariant -- if a refactor
+  // accidentally set MaxOidcParamLength to 0 or negative, EVERY
+  // callback would trigger oversize_callback_param and the
+  // legitimate path would never fire; this test doesn't directly
+  // catch that (it would still pass), but the c8da491 /
+  // b4b828f / b1213b6 tests would all fail because the legitimate
+  // callbacks they exercise would now hit oversize first; the
+  // cross-test interaction is the safety net for that regression
+  // class.
+  test("GET /api/auth/oidc/google/callback with state param exceeding MaxOidcParamLength emits the documented `auth.oidc.failure reason=oversize_callback_param` WARN audit line (DoS amplification mitigation per AuthStack.scala lines 322-335) -- closes the third of 5 failure-side emission sites") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture stderr around a /callback GET with a state value
+          // of 1000 chars (well above MaxOidcParamLength=256 per
+          // AuthStack.scala line 512); no cookie / no /start needed
+          // since the oversize check at line 334 short-circuits
+          // BEFORE the cookie check at line 348. The 1000-char
+          // length is chosen to be ROBUST TO INCIDENTAL CAP RAISES
+          // (a future refactor that raised the cap to 512 would
+          // still trigger this test's oversize path); the test
+          // pins the audit-log FORMAT for the oversize emission
+          // site, not the specific cap value -- the cap value is a
+          // separate concern that could be pinned in a different
+          // test if needed.
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          val oversizeState = "a" * 1000
+          val callback =
+            try get(s"$baseUri${provider.callbackPath}?state=$oversizeState&code=anyfakecode")
+            finally System.setErr(originalErr)
+          assertEquals(callback.statusCode(), 302,
+            clue = s"OIDC /callback with oversize state param must return 302 redirect to oidcFailureRedirect (per AuthStack.scala line 336); a non-302 means the handler exited via a different path which would emit a different reason= value; got: ${callback.statusCode()}")
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.oidc.failure"))
+            .getOrElse(fail(s"no `auth.oidc.failure` line in stderr capture -- expected the logWarn at AuthStack.scala line 335 to fire on the oversize state param; got captured stderr: ${captured.take(800)}"))
+
+          // (i) event prefix
+          assert(failureLine.contains("auth.oidc.failure"),
+            clue = s"OIDC failure audit line must carry the literal `auth.oidc.failure` event prefix per deploy doc line 218; got: $failureLine")
+          // (ii) provider=google (matches prior OIDC pins)
+          assert(failureLine.contains("provider=google"),
+            clue = s"OIDC failure audit line must carry provider=google matching the 976d7ad / b1213b6 / 342df03 / c8da491 / b4b828f pins; got: $failureLine")
+          // (iii) reason=oversize_callback_param (THE specific-value
+          // pin for THIS emission site -- the load-bearing contract
+          // distinguishing oversize-DoS-probe from legitimate
+          // missing-params)
+          assert(failureLine.contains("reason=oversize_callback_param"),
+            clue = s"OIDC failure audit line for the oversize-state path MUST carry the EXACT reason value `oversize_callback_param` per AuthStack.scala line 335's hardcoded string; a refactor renaming to e.g. `oversize_param` (shorter) / `oversize-callback-param` (hyphens) / `param_too_large`, or consolidating with missing_code_or_state per the inline comment at line 332-333's misleading 'Treat oversize as missing_code_or_state' framing (which describes the USER-facing redirect, NOT the operator-visible audit-log reason), would silently break the runbook's CPU/memory-exhaustion DoS-probe triage that distinguishes oversize-attack from legitimate-missing-params based on THIS exact reason value; got: $failureLine")
+          // (iv-vi) EXCLUSION of the 3 alternative reason values
+          // already pinned -- catches refactors that emitted the
+          // wrong reason for THIS emission site
+          assert(!failureLine.contains("reason=missing_code_or_state"),
+            clue = s"OIDC failure audit line for the oversize path MUST NOT carry reason=missing_code_or_state (the 342df03-pinned reason for the no-params path); the inline comment at AuthStack.scala line 332-333 says 'Treat oversize as missing_code_or_state' but that ONLY applies to the USER-facing redirect at line 336, NOT the operator-visible audit-log reason at line 335 -- a refactor that consolidated the two reason values per the comment's literal reading would silently break operator dashboards distinguishing oversize-DoS from missing-params triage; got: $failureLine")
+          assert(!failureLine.contains("reason=missing_state_cookie"),
+            clue = s"OIDC failure audit line for the oversize path MUST NOT carry reason=missing_state_cookie (the c8da491-pinned reason for the no-cookie path); the oversize check at line 334 short-circuits BEFORE the cookie check at line 348, so the conditional flow guarantees these two reasons cannot co-occur -- a refactor that reordered the checks would silently change which reason fires AND silently break the documented short-circuit-on-oversize defense; got: $failureLine")
+          assert(!failureLine.contains("reason=state_cookie_mismatch"),
+            clue = s"OIDC failure audit line for the oversize path MUST NOT carry reason=state_cookie_mismatch (the b4b828f-pinned reason for the covert-redirect signature); the oversize check at line 334 fires BEFORE the cookie comparison at line 350, so these two reasons cannot co-occur -- a refactor that emitted both would silently confuse intrusion-detection triage; got: $failureLine")
+          // (vii) WARN level
+          assert(failureLine.contains("[WARN]"),
+            clue = s"OIDC failure audit line must be WARN-level per AuthStack.scala line 335's logWarn call; demote-to-DEBUG silently hides DoS-probe attempts; got: $failureLine")
+          // (viii) remote= field
+          assert(failureLine.contains("remote="),
+            clue = s"OIDC failure audit line must carry remote= per deploy doc line 218; oversize-callback DoS probes typically come from a single IP probing different state lengths to find the cap -- per-IP correlation is critical for distinguishing legitimate truncation (one IP, one event) from probe activity (one IP, many events); got: $failureLine")
+          // (ix) !email= ABSENCE
+          assert(!failureLine.contains("email="),
+            clue = s"OIDC failure audit line must NOT carry email= per deploy doc line 218 ('auth.oidc.failure lines do NOT carry email='); the oversize-callback path may carry a tampered state cookie pointing at a victim's would-be session -- emitting email= would expose private data to log aggregation; got: $failureLine")
+          // (x) service-tag prefix
+          assert(failureLine.contains("[hand-history-review]"),
+            clue = s"OIDC failure audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- matches /api/health.service (505ba6b); got: $failureLine")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
