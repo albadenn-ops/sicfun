@@ -1201,6 +1201,59 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Close the body-cap triplet: /api/auth/profile is the third and
+  // final branch in the three-call-site readRequestBody(exchange,
+  // 16 * 1024) pattern that e2045b9 (/login) and 034b14c (/register)
+  // already covered. The three AuthStack.scala call sites (register
+  // line 104, login line 163, profile line 229) now ALL have
+  // dedicated body-cap regression tests, so an asymmetric refactor
+  // that touched only one branch is caught by CI on every branch.
+  // /profile is the lowest-priority of the three in pure security
+  // terms (it's authenticated, so no credential-stuffing vector
+  // applies; the PBKDF2 cost path doesn't fire on profile updates),
+  // but pinning it completes the documented "all three" claim from
+  // deploy doc line 100 ("All three platform-user auth POSTs
+  // (/register, /login, /profile) ALSO cap the request body at a
+  // hardcoded 16 KiB"). The /profile-specific risk a refactor would
+  // open: a future "extended-profile fields" feature might tempt a
+  // maintainer to widen ONLY profile's cap (the natural lazy fix:
+  // "the new fields might need more headroom") while leaving
+  // register + login at 16 KiB; the resulting MB-scale profile
+  // bodies would chew JSON-parse CPU on every profile update, and
+  // a signed-in user submitting an oversized body would tie up an
+  // executor thread on parsing rather than getting the immediate
+  // 413 the documented behavior promises -- a small DoS surface
+  // accessible only to signed-in users but still worth closing.
+  test("POST /api/auth/profile rejects bodies exceeding the hardcoded 16 KiB cap with 413 + the documented literal error message") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          // /profile requires an authenticated session + CSRF token,
+          // so register first to get those headers. (Register +
+          // login both share the same 16 KiB cap per e2045b9 /
+          // 034b14c, so the body-cap check fires the same way
+          // regardless of whether the caller is authenticated.)
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"profile-cap@example.com","password":"correct-horse-battery","displayName":"Tester"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the profile body-cap can be exercised against an authenticated session")
+          val ownerHeaders = authSessionHeaders(register, jsonBody(register)("csrfToken").str)
+
+          val oversizeBody = "x" * 16385
+          val response = postJson(s"$baseUri/api/auth/profile", oversizeBody, ownerHeaders)
+          assertEquals(response.statusCode(), 413,
+            clue = s"16385-byte body (cap+1) must 413 at the readRequestBody check (AuthStack.scala's `readRequestBody(exchange, 16 * 1024)` call site for /api/auth/profile, line ~229); a refactor that widened ONLY /profile (e.g. for a 'future extended-profile fields' feature) would silently open a signed-in-user DoS surface where oversized bodies chew JSON-parse CPU instead of getting the immediate 413 the documented contract promises; got: ${response.statusCode()}")
+          assert(response.body().contains("max upload size of 16384 bytes"),
+            s"413 body must contain the deploy-doc-documented literal message `request body exceeds max upload size of 16384 bytes` -- the same generic shared-across-call-sites error per e2045b9's pin commentary; Body was: ${response.body()}")
+        }
+      }
+    }
+  }
+
   // Parallel /register 16 KiB body-cap test mirroring the /login pin
   // immediately above. e2045b9 (the /login pin) explicitly acknowledged
   // "future fires can sweep the rest" of the three auth POSTs that
