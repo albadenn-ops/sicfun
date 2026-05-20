@@ -871,6 +871,93 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented "persistent account data ... survives the
+  // restart unchanged" contract from deploy doc line 235. Two nested
+  // withServer blocks sharing the same storePath simulate a graceful
+  // restart: server #1 registers a user, then closes (storePath stays
+  // on disk); server #2 opens against the SAME storePath and the
+  // user's credentials still resolve via /api/auth/login. The
+  // operationally relevant property: account data (email +
+  // PBKDF2 hash + profile fields + linked-provider identities)
+  // survives every restart shape -- planned NSSM stop/start cycles,
+  // SIGTERM-driven rolling deploys, unexpected JVM crashes (the
+  // user-store write path uses Files.move with ATOMIC_MOVE per
+  // deploy doc line 234, so even a hard-kill mid-write leaves
+  // either the previous-good or new-complete file but never a
+  // half-written corruption); without this contract, every restart
+  // would force every user to re-register, defeating the
+  // "platform-user auth" mode's entire point. f8eadfb / aadcc08
+  // pinned the EPHEMERAL session-record half of the persistence
+  // story (in-memory sessions lost on restart -- that's expected
+  // and documented); this fire pins the PERSISTENT half (the
+  // USER_STORE_PATH file -- this MUST survive). A refactor that
+  // accidentally stored credentials in-memory only (e.g., by
+  // removing the persist() call from registerLocal) would silently
+  // break this contract: tests using a single withServer block
+  // wouldn't catch it because the credentials would live in
+  // memory for the duration of the single block; only a two-server
+  // sequence forces the credentials through the disk round-trip.
+  // The cross-restart test ALSO incidentally exercises the JSON
+  // serialization-then-deserialization symmetry of the store
+  // format: writeStoredUser at PlatformUserAuth.scala line ~989
+  // emits the JSON shape, readStoredUser at line ~1001 reads it
+  // back; if either side drifted without the other, the second
+  // server would fail to parse the file with the documented
+  // "user store at <path> is unreadable" startup error (runbook
+  // section 5A line 335).
+  test("user-store credentials persist across server restart -- register on server 1, login on server 2 with the same storePath") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val authConfig = PlatformUserAuth.Config(storePath = storePath)
+        val testEmail = "durable@example.com"
+        val testPassword = "correct-horse-battery"
+
+        // Server #1: register a user. The withServer block opens a
+        // fresh JDK HttpServer + a fresh SessionManager (in-memory
+        // session state) + opens the storePath for read/write. At
+        // block-exit the server closes (HttpServer.stop, session
+        // map cleared) but the storePath JSON file persists on
+        // disk -- the ONLY survivor of the close.
+        withServer(staticDir, platformAuth = Some(authConfig)) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val register = postJson(s"$baseUri/api/auth/register",
+            s"""{"email":"$testEmail","password":"$testPassword","displayName":"Durable Tester"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration on server #1 must succeed before the cross-restart login can be exercised")
+        }
+        // Verify the disk artifact actually exists between the two
+        // server lifecycles -- the cross-restart contract depends on
+        // the file being there for server #2 to read.
+        assert(Files.exists(storePath),
+          s"user-store JSON file must exist at $storePath between server #1's close and server #2's open -- if the file is missing here, the persist() path didn't atomically-move the temp file into place (PlatformUserAuth's writeStore path at line ~960 uses Files.move(temp, target, ATOMIC_MOVE) -- a refactor breaking that would surface as this assertion failing)")
+
+        // Server #2: same storePath, different in-memory server.
+        // The login attempt forces the credential through the disk
+        // round-trip: readStoredUser at PlatformUserAuth.scala
+        // line ~1001 parses the JSON we wrote in server #1,
+        // reconstructs the LocalPasswordCredential including its
+        // saltBase64 + hashBase64 + iterations + keyLengthBits,
+        // and the verifyPassword path recomputes PBKDF2 with the
+        // submitted password against the stored salt+hash.
+        withServer(staticDir, platformAuth = Some(authConfig)) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val login = postJson(s"$baseUri/api/auth/login",
+            s"""{"email":"$testEmail","password":"$testPassword"}""")
+          assertEquals(login.statusCode(), 200,
+            clue = s"login on server #2 with the same credentials registered on server #1 MUST succeed -- this is the documented 'persistent account data ... survives the restart unchanged' contract from deploy doc line 235; if this assertion fires false, registration is silently in-memory-only (e.g. a refactor removed the persist() call from registerLocal), which defeats platform-user auth mode's entire point because every restart would force every user to re-register; ALSO covers the JSON serialization-deserialization symmetry across writeStoredUser + readStoredUser (a schema drift would surface as the second server failing to parse the file)")
+          // The login response carries the same auth-state shape as
+          // /api/auth/me -- verify the user identity round-tripped
+          // correctly through the disk persistence.
+          val loginJson = jsonBody(login)
+          assertEquals(loginJson("authenticated").bool, true,
+            clue = "login response must show authenticated=true after the credential round-trip")
+          assertEquals(loginJson("user")("email").str, testEmail,
+            clue = s"login response user.email must match the registered email after disk round-trip -- if mismatched, the storedUser deserialization is reading the wrong field; got: ${loginJson("user")("email").str}")
+        }
+      }
+    }
+  }
+
   // Pin the natural-expiry case -- the complement to f8eadfb's
   // sliding pin. f8eadfb proved that an actively-using session
   // stays alive past the original TTL window via resolveSession's
