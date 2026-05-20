@@ -2879,6 +2879,195 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `auth.oidc.failure reason=<finishOidc-error>`
+  // audit line format with the %20-ESCAPE CONTRACT for space-bearing
+  // error strings -- closes the FIFTH and FINAL emission site for
+  // auth.oidc.failure (line 363 in AuthStack.scala), after 342df03 +
+  // c8da491 + b4b828f + e17c21d + aa6426d closed lines 397 / 352-
+  // both-branches / 335 / 317; with this commit the auth.oidc.
+  // failure enumeration is FULLY CLOSED across all 5 emission sites
+  // AND the deploy doc line 218's 9-event enumeration is FULLY
+  // CLOSED for both the success-side (1c8777f + 49dcf46 + 3a6fea4 +
+  // 976d7ad + b1213b6) and the failure-side (342df03 + c8da491 +
+  // b4b828f + e17c21d + aa6426d + this commit) -- modulo the
+  // auth.oidc.start.failure event at line 258 which remains
+  // UNREACHABLE per the 342df03 routing-layer analysis (HttpServer
+  // contexts are only registered for known providers, so a request
+  // to an unknown provider's /start hits the default 404 handler
+  // before reaching handleOidcStart's logWarn at line 258); line
+  // 363 fires when finishOidc returns Left -- the documented Left
+  // values include "OIDC login state expired or is invalid" (state-
+  // store consume failed), "an account with that email already
+  // exists; sign in with its existing method" (the 44c9f9f email-
+  // collision defense), and "Google did not return a verified email
+  // address for this account" (the verified-email gate per the
+  // OIDC spec); the format at line 363 is
+  // `reason=${error.replace(" ", "%20")}` -- the `.replace(" ",
+  // "%20")` is the LOAD-BEARING %20-ESCAPE CONTRACT this commit
+  // pins, NOT exercised by ANY of the prior 5 auth.oidc.failure
+  // pins because their reason values are all space-FREE constants
+  // (missing_code_or_state / missing_state_cookie / state_cookie_
+  // mismatch / oversize_callback_param / provider-error:access_
+  // denied); the %20-escape is documented at AuthStack.scala lines
+  // 357-362's inline comment: "%20-escape -- finishOidc Left values
+  // include 'OIDC login state expired or is invalid', 'an account
+  // with that email already exists; sign in with its existing
+  // method', 'Google did not return a verified email address for
+  // this account', and friends -- all space-bearing. Same pattern
+  // as start.failure above" -- without the escape, the space in
+  // the error string would split the structured `key=value` log
+  // format (a hostile provider could in theory inject log-line-
+  // splitting characters; the escape closes that vector); the test
+  // exploits the FORGED-COOKIE path: construct a Cookie header
+  // with the documented sicfun_oidc_state cookie name carrying a
+  // state value that was NEVER issued by the OidcStateStore, then
+  // GET /callback?state=<same-value>&code=anycode -- line 348's
+  // extractCookieFromExchange finds the cookie, line 350's
+  // secureEquals comparison passes (cookie value == URL state
+  // value), line 355's finishOidc tries to consume the state from
+  // the state-store, the consume returns None because the state
+  // was never issued, finishOidc returns Left("OIDC login state
+  // expired or is invalid"), logWarn at line 363 fires with
+  // reason=OIDC%20login%20state%20expired%20or%20is%20invalid;
+  // per-field regression vectors SPECIFIC to this emission site
+  // that the prior 5 failure-side pins don't catch: (i) THE %20-
+  // ESCAPE CONTRACT itself -- a refactor that dropped the
+  // .replace(" ", "%20") at line 363 (e.g. "OIDC error codes
+  // shouldn't have spaces in modern implementations, the escape is
+  // dead code") would silently break the structured log-line
+  // contract because the finishOidc error strings DO contain
+  // spaces; a hostile provider that returned an exchangeCode
+  // response triggering a space-bearing finishOidc Left value
+  // could inject log-line-splitting characters into the audit
+  // stream -- the operator's downstream log parser (expecting
+  // key=value pairs) would silently misparse the line, dropping
+  // the remote= and reason= fields from operator triage; (ii) the
+  // SPECIFIC error string "OIDC login state expired or is invalid"
+  // -- a refactor renaming the finishOidc Left value (e.g. to
+  // "expired_state" matching the spec's error code shape) would
+  // silently break operator queries grep'ing for the documented
+  // exact-string match AND would silently invalidate the runbook's
+  // OIDC-state-expiration triage entry which keys on this exact
+  // wording; (iii) the finishOidc Left -> reason pipeline -- a
+  // refactor consolidating finishOidc Left values into a single
+  // generic "finishOidc_failed" reason would silently lose the
+  // operator-relevant detail about WHICH finishOidc path failed
+  // (state-expired vs email-collision vs no-verified-email each
+  // need different triage); 12-tier format check at WARN level
+  // extending the aa6426d pattern with the QUINTUPLE-EXCLUSION of
+  // ALL 5 previously-pinned alternative reasons: (i) `auth.oidc.
+  // failure` event prefix, (ii) `provider=google`, (iii) `reason=
+  // OIDC%20login%20state%20expired%20or%20is%20invalid` (NEW
+  // specific-value pin WITH the %20-escape contract verified
+  // directly), (iv-viii) QUINTUPLE EXCLUSION of missing_code_or_
+  // state / missing_state_cookie / state_cookie_mismatch /
+  // oversize_callback_param / provider-error -- catches a refactor
+  // emitting the wrong reason for THIS emission site, ESPECIALLY a
+  // refactor that incorrectly routed the finishOidc Left value
+  // through the provider-error: prefix (which would silently merge
+  // server-side state-store-empty errors with upstream-provider
+  // errors), (ix) `[WARN]` level, (x) `remote=` field, (xi)
+  // `!email=` ABSENCE, (xii) `[hand-history-review]` service-tag
+  // prefix; ADDITIONAL pin: the test asserts the line does NOT
+  // contain the unescaped space-bearing form "OIDC login state
+  // expired or is invalid" (without %20-escapes) -- catches a
+  // refactor dropping the escape entirely; this is the
+  // ESCAPE-CONTRACT-VERIFICATION pin that turns the %20-escape
+  // from an unexercised side-effect into a CI-enforced invariant.
+  test("GET /api/auth/oidc/google/callback with forged state cookie matching URL state but state not in store emits the documented `auth.oidc.failure reason=OIDC%20login%20state%20expired%20or%20is%20invalid` WARN audit line WITH %20-escaped spaces (per AuthStack.scala line 363's `.replace(\" \", \"%20\")` escape contract) -- closes the fifth and final auth.oidc.failure emission site") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture stderr around a /callback GET with a FORGED
+          // state cookie. The Cookie header uses the documented
+          // sicfun_oidc_state cookie name (insecure mode default
+          // per PlatformUserAuth.scala line 49's DefaultOidcState
+          // CookieName); the cookie value EQUALS the URL state
+          // value so the secureEquals check at AuthStack.scala
+          // line 350 passes; finishOidc at line 355 then attempts
+          // to consume the state from the OidcStateStore, which
+          // never issued it (no /start fired for this state value),
+          // returns Left("OIDC login state expired or is invalid"),
+          // logWarn at line 363 fires with the %20-escaped reason.
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          val forgedState = "never-issued-state-value-1234567890"
+          val callback =
+            try get(
+              s"$baseUri${provider.callbackPath}?state=$forgedState&code=anycode",
+              Map("Cookie" -> s"sicfun_oidc_state=$forgedState")
+            )
+            finally System.setErr(originalErr)
+          assertEquals(callback.statusCode(), 302,
+            clue = s"OIDC /callback with forged cookie+state must return 302 redirect to oidcFailureRedirect (per AuthStack.scala line 364); a non-302 means the handler exited via a different path which would emit a different reason= value; got: ${callback.statusCode()}")
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.oidc.failure"))
+            .getOrElse(fail(s"no `auth.oidc.failure` line in stderr capture -- expected the logWarn at AuthStack.scala line 363 to fire on the finishOidc-Left path when the state-store consume fails; got captured stderr: ${captured.take(800)}"))
+
+          // (i) event prefix
+          assert(failureLine.contains("auth.oidc.failure"),
+            clue = s"OIDC failure audit line must carry the literal `auth.oidc.failure` event prefix per deploy doc line 218; got: $failureLine")
+          // (ii) provider=google
+          assert(failureLine.contains("provider=google"),
+            clue = s"OIDC failure audit line must carry provider=google matching the prior 6 OIDC pins; got: $failureLine")
+          // (iii) reason=<%20-ESCAPED finishOidc Left value> -- the
+          // load-bearing pin for THIS emission site AND for the
+          // %20-escape contract that no prior pin exercises
+          assert(failureLine.contains("reason=OIDC%20login%20state%20expired%20or%20is%20invalid"),
+            clue = s"OIDC failure audit line for the state-not-in-store path MUST carry the EXACT %20-escaped reason value `OIDC%20login%20state%20expired%20or%20is%20invalid` per AuthStack.scala line 363's `.replace(\" \", \"%20\")` escape applied to the finishOidc Left value 'OIDC login state expired or is invalid'; the %20-escape is the LOAD-BEARING contract this pin uniquely catches -- a refactor dropping the escape would silently break the structured key=value log format when the finishOidc Left value contains spaces (which it DOES per AuthStack.scala lines 357-362's inline comment enumerating space-bearing values); a refactor renaming the finishOidc Left string would silently break operator queries grep'ing for the documented exact-string match; got: $failureLine")
+          // (iv) ESCAPE-CONTRACT VERIFICATION: must NOT contain the
+          // unescaped space-bearing form. This is the most
+          // important pin in this test -- without it, a refactor
+          // that emitted BOTH forms (escaped AND unescaped) or
+          // that dropped the escape would silently pass the
+          // positive %20-form contains check if the regression
+          // emitted the unescaped form alongside
+          assert(!failureLine.contains("OIDC login state expired or is invalid"),
+            clue = s"OIDC failure audit line MUST NOT contain the UNESCAPED form `OIDC login state expired or is invalid` (with literal spaces) -- the %20-escape contract at AuthStack.scala line 363 REQUIRES spaces be replaced with %20 BEFORE the log emission to prevent the structured key=value log format from being split by hostile error strings; a refactor that dropped the escape (e.g. 'OIDC error codes shouldn't contain spaces in modern implementations, dead code removed') would emit the unescaped form and pass the positive %20-form check ONLY IF the line ALSO contained the escaped form (which a refactor wouldn't); the !contains assertion here pins the escape contract from the negative direction -- if the line contains the unescaped form, the escape has been broken; got: $failureLine")
+          // (v-ix) QUINTUPLE EXCLUSION of all 5 previously-pinned
+          // alternative reasons -- catches a refactor emitting the
+          // wrong reason for THIS emission site
+          assert(!failureLine.contains("reason=missing_code_or_state"),
+            clue = s"OIDC failure audit line for the state-not-in-store path MUST NOT carry reason=missing_code_or_state (the 342df03-pinned no-params reason); the state+code params ARE present in this test, so the no-params check at line 320 short-circuits to the present-params branch -- a refactor that consolidated would silently merge state-expired with no-params; got: $failureLine")
+          assert(!failureLine.contains("reason=missing_state_cookie"),
+            clue = s"OIDC failure audit line for the state-not-in-store path MUST NOT carry reason=missing_state_cookie (the c8da491-pinned no-cookie reason); the test sends a cookie, so the cookie-presence check at line 350 passes; got: $failureLine")
+          assert(!failureLine.contains("reason=state_cookie_mismatch"),
+            clue = s"OIDC failure audit line for the state-not-in-store path MUST NOT carry reason=state_cookie_mismatch (the b4b828f-pinned covert-redirect reason); the test sends a cookie whose value MATCHES the URL state, so the secureEquals check at line 350 passes; the failure occurs LATER at line 355's finishOidc when the state-store has no record of the forged state value; got: $failureLine")
+          assert(!failureLine.contains("reason=oversize_callback_param"),
+            clue = s"OIDC failure audit line for the state-not-in-store path MUST NOT carry reason=oversize_callback_param (the e17c21d-pinned DoS-probe reason); the forged state value is well under MaxOidcParamLength=256, so the oversize check at line 334 passes; got: $failureLine")
+          assert(!failureLine.contains("reason=provider-error:"),
+            clue = s"OIDC failure audit line for the state-not-in-store path MUST NOT carry the `provider-error:` prefix (the aa6426d-pinned upstream-failure marker); the failure here is SERVER-side (our state-store doesn't have the forged state), NOT provider-side -- consolidating finishOidc Left values into the provider-error: prefix would silently merge server-side state-expired errors with upstream-provider failures, breaking the documented provider-vs-server distinction; got: $failureLine")
+          // (x) WARN level
+          assert(failureLine.contains("[WARN]"),
+            clue = s"OIDC failure audit line must be WARN-level per AuthStack.scala line 363's logWarn call; finishOidc-Left failures span legitimate operator concerns (state expiration is a routine timing issue from slow user flows) AND security signals (state replay attempts) -- WARN-level visibility lets operators triage both classes; demote-to-DEBUG hides both; got: $failureLine")
+          // (xi) remote= field
+          assert(failureLine.contains("remote="),
+            clue = s"OIDC failure audit line must carry remote= per deploy doc line 218; per-IP correlation distinguishes a single slow user (legitimate state-expiration after 10 min) from a state-replay attack (single IP retrying the same state value across multiple requests); got: $failureLine")
+          // (xii) !email= ABSENCE
+          assert(!failureLine.contains("email="),
+            clue = s"OIDC failure audit line must NOT carry email= per deploy doc line 218; the finishOidc-Left path may have ANY of the failure values -- state-expired (no user resolved yet), email-collision (user identified but flow blocked), or no-verified-email (user identified but rejected) -- and the ABSENCE policy applies uniformly regardless of which Left value fired; a refactor that started emitting email= 'when available' would create asymmetric coverage across the 3 sub-cases of finishOidc-Left; got: $failureLine")
+          // (xiii) service-tag prefix
+          assert(failureLine.contains("[hand-history-review]"),
+            clue = s"OIDC failure audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- matches /api/health.service (505ba6b); got: $failureLine")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
