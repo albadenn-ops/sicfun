@@ -2230,6 +2230,158 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `auth.oidc.failure reason=missing_state_cookie`
+  // audit line format -- closes the SECOND of 5 failure-side
+  // emission sites in AuthStack.scala (342df03 closed
+  // missing_code_or_state at line 397; this commit closes the line
+  // 352 emission's missing_state_cookie branch); line 352 has TWO
+  // possible reason values per the inline conditional `if
+  // cookieState.isEmpty then "missing_state_cookie" else
+  // "state_cookie_mismatch"` -- this commit pins the FIRST branch
+  // (no cookie at all); a future fire can close the SECOND branch
+  // (state_cookie_mismatch) which requires more setup (a real
+  // /start to issue a state, then mutate the cookie before
+  // /callback). The line 352 emission is SECURITY-CRITICAL per the
+  // inline comment at AuthStack.scala lines 340-347: "OAuth 2.0 BCP
+  // 'covert-redirect' / login-CSRF mitigation: the browser that
+  // arrives at /callback must carry the SAME state value that we
+  // Set-Cookie'd at /start. Without this check, an attacker who
+  // finished their own authorization could forward their
+  // ?state=X&code=ATTACKER_CODE to a victim, and our OidcStateStore
+  // (which only knows that X is a state WE issued) would happily
+  // exchange the code and bind the attacker's identity to the
+  // victim's browser session"; the two reason values distinguish
+  // OPERATIONAL incident-response paths: (a) missing_state_cookie =
+  // the user's browser sent the callback BUT the state cookie was
+  // never set (or was dropped by a Cookie-domain config issue, or
+  // by sibling-subdomain navigation in insecure mode where the
+  // attacker's redirect drops the cookie) -- typically a config /
+  // browser-behavior triage path, NOT primarily a security event;
+  // (b) state_cookie_mismatch = the cookie WAS set but doesn't
+  // match the URL state -- the classic covert-redirect signature,
+  // a security event the runbook explicitly handles; consolidating
+  // the two reasons to a single value would silently make this
+  // distinction invisible to operator triage, forcing them back to
+  // full request-trace logs to differentiate config-vs-attack;
+  // per-field regression vectors SPECIFIC to this emission site
+  // that the 342df03 missing_code_or_state pin doesn't catch: (i)
+  // the conditional structure at line 351 -- `if cookieState.isEmpty
+  // then "missing_state_cookie" else "state_cookie_mismatch"` -- a
+  // refactor that collapsed the conditional to a single reason
+  // string would silently break the documented two-path security
+  // triage; (ii) the SPECIFIC string "missing_state_cookie" (with
+  // underscores, lowercase, exactly that wording) MUST be the
+  // emitted reason value -- a refactor renaming to e.g.
+  // `no_state_cookie` / `missing-state-cookie` (hyphens) /
+  // `cookie_absent` would silently break operator dashboards
+  // filtering by reason=missing_state_cookie; 7-tier format check
+  // parallels the 342df03 missing_code_or_state pin at WARN level
+  // (System.err capture, not System.out): (i) `auth.oidc.failure`
+  // event prefix, (ii) `provider=google`, (iii)
+  // `reason=missing_state_cookie` (NEW specific-value pin for
+  // THIS emission site), (iv) `[WARN]` level, (v) `remote=` field,
+  // (vi) `!email=` ABSENCE check, (vii) `[hand-history-review]`
+  // service-tag prefix; ALSO an EXCLUSION pin against the
+  // ALTERNATIVE reason value `state_cookie_mismatch` -- the line
+  // 352 emission could fire EITHER value depending on the
+  // conditional branch, and asserting `!contains("state_cookie_
+  // mismatch")` confirms the test took the EXPECTED branch (no
+  // cookie at all, not cookie-present-but-mismatched); without
+  // this exclusion check, a refactor that swapped the conditional
+  // (e.g. always emitting state_cookie_mismatch even when cookie
+  // is missing) would silently pass the positive
+  // missing_state_cookie check if the regression emitted BOTH
+  // reasons in the line -- the exclusion catches that. Test
+  // approach: GET /callback?state=X&code=Y with NO cookie at all
+  // -- skips the /start step entirely (line 320's
+  // (Some(rawState), Some(rawCode)) match passes since both query
+  // params are present; line 334's oversize check passes for
+  // short values; line 348's extractCookieFromExchange returns
+  // empty since no cookie was sent; line 350's
+  // `cookieState.isEmpty` triggers true, missing_state_cookie
+  // reason emits at line 352); the test doesn't even need to
+  // /start because the state value isn't validated against the
+  // OidcStateStore at this point -- the cookie-presence check
+  // short-circuits BEFORE the state-store consume happens at
+  // line 355's finishOidc call.
+  test("GET /api/auth/oidc/google/callback with state+code params but NO state cookie emits the documented `auth.oidc.failure reason=missing_state_cookie` WARN audit line (security-critical OAuth 2.0 BCP covert-redirect mitigation per AuthStack.scala lines 340-352)") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture stderr around a /callback GET with state+code
+          // query params but NO cookie header. The handler at
+          // AuthStack.scala line 320's `(Some(rawState),
+          // Some(rawCode)) match` matches (both query params
+          // present); line 334's oversize check passes (short
+          // values); line 348's extractCookieFromExchange returns
+          // empty (no Cookie header sent); line 350's
+          // `cookieState.isEmpty || !cookieState.exists(...)`
+          // triggers the FIRST clause (empty), the conditional at
+          // line 351 emits reason="missing_state_cookie", and the
+          // logWarn at line 352 fires the audit line we capture.
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          val callback =
+            try get(s"$baseUri${provider.callbackPath}?state=anyfakestate&code=anyfakecode")
+            finally System.setErr(originalErr)
+          assertEquals(callback.statusCode(), 302,
+            clue = s"OIDC /callback with state+code but no cookie must return 302 redirect to the documented oidcFailureRedirect (per line 353); a non-302 status means the handler exited via a different path which would emit a different reason= value; got: ${callback.statusCode()}")
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.oidc.failure"))
+            .getOrElse(fail(s"no `auth.oidc.failure` line in stderr capture -- expected the logWarn at AuthStack.scala line 352 to fire on the missing-cookie path; got captured stderr: ${captured.take(800)}"))
+
+          // (i) event prefix
+          assert(failureLine.contains("auth.oidc.failure"),
+            clue = s"OIDC failure audit line must carry the literal `auth.oidc.failure` event prefix per deploy doc line 218's enumeration; got: $failureLine")
+          // (ii) provider=google (matches all OIDC pins)
+          assert(failureLine.contains("provider=google"),
+            clue = s"OIDC failure audit line must carry provider=google (lowercase id) matching the auth.oidc.start (976d7ad) + auth.oidc.success (b1213b6) + auth.oidc.failure-missing_code_or_state (342df03) pins; got: $failureLine")
+          // (iii) reason=missing_state_cookie (THE specific-value pin
+          // for THIS emission site / branch -- the load-bearing
+          // contract that distinguishes missing-cookie from
+          // mismatched-cookie at line 351's inline conditional)
+          assert(failureLine.contains("reason=missing_state_cookie"),
+            clue = s"OIDC failure audit line for the no-cookie path MUST carry the EXACT reason value `missing_state_cookie` per AuthStack.scala line 351's hardcoded `if cookieState.isEmpty then \"missing_state_cookie\"` conditional; a refactor renaming to e.g. `no_state_cookie` / `missing-state-cookie` (hyphens) / `cookie_absent` / consolidating with state_cookie_mismatch into a single `state_invalid` would silently break operator dashboards filtering by reason= AND break the runbook's documented two-path security triage (config-vs-attack distinction at the inline comment AuthStack.scala lines 340-352); got: $failureLine")
+          // (iv) EXCLUSION: must NOT contain the alternative reason
+          // string -- pins the conditional branch taken (cookie
+          // missing, not cookie-present-but-mismatched); without
+          // this exclusion check a refactor that always emitted
+          // state_cookie_mismatch (or BOTH reasons in the same
+          // line) would silently pass the positive
+          // missing_state_cookie check
+          assert(!failureLine.contains("state_cookie_mismatch"),
+            clue = s"OIDC failure audit line for the no-cookie path MUST NOT contain the alternative reason `state_cookie_mismatch` per AuthStack.scala line 351's `else \"state_cookie_mismatch\"` branch (the ELSE clause that fires when cookie IS present but doesn't match the URL state); a refactor that swapped the conditional or emitted BOTH reasons would silently make the missing-cookie vs cookie-mismatch distinction invisible to operator triage; got: $failureLine")
+          // (v) WARN level
+          assert(failureLine.contains("[WARN]"),
+            clue = s"OIDC failure audit line must be WARN-level per AuthStack.scala line 352's logWarn call -- matches the 342df03 missing_code_or_state pin AND the deploy doc line 218 'WARN for failures' framing; got: $failureLine")
+          // (vi) remote= field
+          assert(failureLine.contains("remote="),
+            clue = s"OIDC failure audit line must carry remote= field per deploy doc line 218; the per-IP correlation is critical for THIS specific failure path because covert-redirect attacks (the state_cookie_mismatch sibling case) typically come from attacker-controlled IPs and the runbook's security triage correlates these failures with subsequent successful OIDC sign-ins from the same IP; got: $failureLine")
+          // (vii) !email= ABSENCE
+          assert(!failureLine.contains("email="),
+            clue = s"OIDC failure audit line must NOT carry email= per deploy doc line 218 ('auth.oidc.failure lines do NOT carry email=') -- the callback may have a tampered state pointing at a victim user's would-be session; emitting email= would expose private data; got: $failureLine")
+          // (viii) service-tag prefix
+          assert(failureLine.contains("[hand-history-review]"),
+            clue = s"OIDC failure audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- matches /api/health.service (505ba6b); got: $failureLine")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
