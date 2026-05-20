@@ -2187,6 +2187,58 @@ class HandHistoryReviewServerTest extends FunSuite:
         // cross-check fleet membership).
         assertEquals(readyJson("service").str, "hand-history-review",
           clue = s"/api/ready must surface service='hand-history-review' per deploy doc line 217's documented fleet-correlation contract -- the matching /api/health pin enforces the same value, so this assertion closes the symmetric-pin pair against asymmetric drift between the two adjacent Readiness.scala functions (renderHealth line 57 + renderReadiness line 116, with TWO independent hardcoded string literals at lines 88 and 130); got: ${readyJson("service")}")
+        // Mirror of the health-response host + port pins above (lines
+        // ~2089-2090), completing the documented fleet-correlation
+        // triple (service / host / port) on /api/ready. Deploy doc line
+        // 217 explicitly enumerates "service/host/port" together as the
+        // fleet-correlation identifier set, but BEFORE this commit only
+        // /api/health had host + port pinned (lines ~2089-2090) while
+        // /api/ready had NONE of the triple covered. The 505ba6b commit
+        // added `service` symmetrically to both endpoints; this commit
+        // adds `host` + `port` to /api/ready so the SAME triple-coverage
+        // existing on /api/health now exists on /api/ready -- a load-
+        // balancer or service-mesh probe wired against /api/ready (the
+        // intended consumer per the doc: "the readiness endpoint for
+        // reverse proxies / service managers") gets the SAME bound-
+        // address verification path as a dashboard wired against
+        // /api/health. Why host + port matter on /api/ready specifically:
+        // (a) load-balancer pool membership reconciliation -- the LB's
+        // probe verifies the bound port matches the registered backend
+        // entry, and a refactor that emitted a stale boot-time port vs.
+        // the actually-bound port would silently break port-changing
+        // restart scenarios where the requested port was unavailable
+        // and the OS picked another (the deploy doc documents PORT=0
+        // explicitly as an ephemeral-port mode for testing, and
+        // production deployments that intentionally cycle ports for
+        // blue/green rollouts depend on the bound-port report being
+        // accurate); (b) service-mesh sidecar injection -- meshes like
+        // Linkerd / Istio key on the (host, port) tuple to populate
+        // their service-discovery database, and a mismatch silently
+        // routes traffic to a non-existent backend; (c) operator
+        // grep-the-readiness-response workflows -- "is this instance
+        // bound where I think it is" is a common runbook-step-zero
+        // diagnostic, and a refactor reporting the CONFIG host (e.g.
+        // 0.0.0.0 or the requested bind) instead of the RESOLVED host
+        // would silently lie to the operator about which interface
+        // the process is actually listening on. The bound-port-not-
+        // config-port subtlety: server.binding.port is the post-bind
+        // resolved port from the HTTP server's actual socket (handles
+        // the port=0 -> ephemeral allocation case correctly), while
+        // config.port would be the requested value (0 for ephemeral,
+        // never the resolved 49152-65535 ephemeral port the OS picked)
+        // -- a refactor swapping the field from boundPort.toDouble to
+        // config.port.toDouble would break every port=0 deployment by
+        // emitting the literal 0 instead of the real port. Coverage
+        // on /api/health (lines 2089-2090 use the same `server.binding`
+        // accessor pattern this assertion uses) already catches that
+        // refactor for the health side; this assertion extends it to
+        // the ready side, so a partial refactor touching only
+        // renderHealth or only renderReadiness would be caught by
+        // ONE of the two pins (whichever side was touched).
+        assertEquals(readyJson("host").str, server.binding.host,
+          clue = s"/api/ready must surface the same resolved bound-host as /api/health per deploy doc line 217's documented fleet-correlation triple -- a refactor reporting the config host (e.g. 0.0.0.0 / requested bind) instead of the resolved bound host would silently confuse operator diagnostic workflows; got: ${readyJson("host")}")
+        assertEquals(readyJson("port").num.toInt, server.binding.port,
+          clue = s"/api/ready must surface the same resolved bound-port as /api/health per deploy doc line 217's documented fleet-correlation triple -- a refactor reporting config.port instead of boundPort would silently break every port=0 ephemeral-bind deployment (config.port stays 0 while server.binding.port resolves to the OS-picked ephemeral 49152-65535 range); got: ${readyJson("port")}")
         assertEquals(readyJson("analysisTimeoutMs").num.toLong, 120000L)
         // Mirror of the health-response playingHallTimeoutMs pin above.
         // The /api/ready endpoint surfaces the same field (Readiness.scala
