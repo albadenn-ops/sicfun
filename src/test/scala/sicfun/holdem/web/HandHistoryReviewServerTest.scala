@@ -2382,6 +2382,189 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `auth.oidc.failure reason=state_cookie_mismatch`
+  // audit line format -- closes the SECOND branch of the line 352
+  // emission's two-reason conditional that c8da491 partially closed
+  // (c8da491 pinned the FIRST branch missing_state_cookie when no
+  // cookie was sent; this commit pins the SECOND branch when a
+  // cookie IS sent but doesn't match the URL state); together
+  // c8da491 + this commit complete the asymmetric pair on the line
+  // 352 emission, mirroring the asymmetric-pin pattern from
+  // 4d15ca3+37f9465 (modelConfigured presence + absence) and
+  // f50d7f9 (lifecycle pair) but applied to a BRANCH-OF-CONDITIONAL
+  // rather than a PRESENCE-OF-FIELD distinction. The
+  // state_cookie_mismatch branch is the SECURITY-CRITICAL signature
+  // per AuthStack.scala lines 340-347's inline comment: "OAuth 2.0
+  // BCP 'covert-redirect' / login-CSRF mitigation: the browser
+  // that arrives at /callback must carry the SAME state value that
+  // we Set-Cookie'd at /start. Without this check, an attacker who
+  // finished their own authorization could forward their
+  // ?state=X&code=ATTACKER_CODE to a victim, and our
+  // OidcStateStore (which only knows that X is a state WE issued)
+  // would happily exchange the code and bind the attacker's
+  // identity to the victim's browser session" -- so this specific
+  // reason value is what an operator's INTRUSION-DETECTION query
+  // grep'd for as the canonical "covert-redirect attempt detected"
+  // signal; a refactor that broke the state-vs-cookie comparison
+  // (e.g. accidentally swapping secureEquals for ==, which would
+  // leak comparison-timing) OR that collapsed the two branches
+  // would silently mute this detection. Why this fire after
+  // c8da491: the asymmetric pair completes the COVERT-REDIRECT
+  // DETECTION CONTRACT -- without both branches pinned, a refactor
+  // that emitted missing_state_cookie for BOTH the no-cookie AND
+  // cookie-mismatch cases (e.g. "consolidate for simplicity")
+  // would silently make the more-suspicious "cookie present but
+  // wrong value" case invisible as a separate triage signal AND
+  // would silently break the SecureEquals timing-safe comparison
+  // contract (the conditional structure at lines 350-351 forces
+  // both branches to evaluate, preserving constant-time-vs-
+  // sneakily-short-circuit safety even when refactored); the test
+  // approach uses a REAL /start to issue a legitimate state value
+  // and cookie, then submits /callback with a DIFFERENT state
+  // value in the URL while still carrying the original cookie --
+  // this exactly models the documented attack scenario where an
+  // attacker forwards a state value they obtained from their own
+  // authorization flow to a victim whose browser still has the
+  // victim's own state cookie; the resulting URL state vs cookie
+  // state mismatch triggers line 351's `else
+  // "state_cookie_mismatch"` branch; per-field regression vectors
+  // SPECIFIC to this emission that c8da491 doesn't catch: (i)
+  // refactor that swapped the secureEquals comparison for == at
+  // line 350 -- the secureEquals is a constant-time comparison
+  // that prevents timing-based state-value enumeration; a == swap
+  // would silently expose a timing oracle (the test doesn't
+  // directly check secureEquals usage, but pinning that mismatch
+  // emits the documented reason ensures the conditional STRUCTURE
+  // remains intact so the secureEquals call remains the gatekeeper),
+  // (ii) refactor swapping the conditional's TRUE/FALSE branches
+  // (e.g. "if cookieState.isEmpty then state_cookie_mismatch else
+  // missing_state_cookie" -- inverted) would silently swap the
+  // reason values, breaking BOTH operator triage paths simultaneously;
+  // pinning BOTH branches catches this swap immediately because
+  // the c8da491 missing_state_cookie test would fail (it would
+  // see state_cookie_mismatch) AND this test would fail (it would
+  // see missing_state_cookie); the EXCLUSION-of-alternative-branch
+  // pattern from c8da491 is mirrored here: assert
+  // `!contains("missing_state_cookie")` to pin that the cookie-
+  // present branch did NOT emit the no-cookie reason; 8-tier
+  // format check at WARN level with the new asymmetric-companion
+  // exclusion: (i) `auth.oidc.failure` event prefix, (ii)
+  // `provider=google`, (iii) `reason=state_cookie_mismatch` (the
+  // NEW specific-value pin for THIS branch), (iv) EXCLUSION of
+  // `missing_state_cookie` (the alternative branch's reason that
+  // c8da491 pins -- the same exclusion shape c8da491 uses for the
+  // opposite branch), (v) `[WARN]` level, (vi) `remote=` field
+  // (security-critical for this emission specifically because
+  // covert-redirect attempts come from attacker-controlled IPs
+  // and the runbook's SECURITY triage correlates these failures
+  // with subsequent successful sign-ins from the same IP), (vii)
+  // `!email=` ABSENCE, (viii) `[hand-history-review]` service-tag
+  // prefix; with this commit BOTH branches of the line 352
+  // emission are pinned via the asymmetric-pair pattern -- a
+  // refactor that breaks EITHER the missing-cookie path OR the
+  // cookie-mismatch path is caught by the corresponding test, AND
+  // a refactor that consolidates BOTH paths to a single reason
+  // value fails BOTH tests simultaneously.
+  test("GET /api/auth/oidc/google/callback with cookie present but URL state mismatched emits the documented `auth.oidc.failure reason=state_cookie_mismatch` WARN audit line (covert-redirect attempt signature per AuthStack.scala lines 340-352) -- closes the second branch of line 351's two-reason conditional that c8da491 partially closed") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Drive a real /start to issue a legitimate state cookie
+          // -- the c8da491 missing_state_cookie test skips this
+          // step because no cookie is needed; THIS test needs a
+          // cookie that doesn't match the URL state, so we issue
+          // a legitimate cookie first then use a DIFFERENT state
+          // value in the callback URL. The /start emits an
+          // auth.oidc.start INFO line per 976d7ad, but we capture
+          // stderr around the /callback only so that emission
+          // doesn't pollute the test's captured stream.
+          val start = get(s"$baseUri${provider.startPath}")
+          assertEquals(start.statusCode(), 302,
+            clue = "OIDC /start must return 302 to issue the state cookie this test then mismatches against the URL state")
+          val stateCookie = headerValue(start, "Set-Cookie")
+            .map(_.takeWhile(_ != ';'))
+            .getOrElse(fail("missing OIDC state cookie from /start -- the mismatch test requires a real cookie to mismatch AGAINST"))
+
+          // Capture stderr around the /callback GET. The callback
+          // carries the LEGITIMATE state cookie from /start but a
+          // DIFFERENT state value in the URL query -- exactly the
+          // covert-redirect attack scenario the deploy doc + the
+          // inline comment at AuthStack.scala lines 340-347
+          // describe (attacker forwards their state to the victim
+          // whose browser still holds the victim's cookie).
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          val callback =
+            try get(
+              s"$baseUri${provider.callbackPath}?state=attacker-supplied-state-value&code=anyfakecode",
+              Map("Cookie" -> stateCookie)
+            )
+            finally System.setErr(originalErr)
+          assertEquals(callback.statusCode(), 302,
+            clue = s"OIDC /callback with mismatched state must return 302 redirect to oidcFailureRedirect (per AuthStack.scala line 353); a non-302 means the handler exited via a different path which would emit a different reason= value; got: ${callback.statusCode()}")
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.oidc.failure"))
+            .getOrElse(fail(s"no `auth.oidc.failure` line in stderr capture -- expected the logWarn at AuthStack.scala line 352 to fire on the state-mismatch path; got captured stderr: ${captured.take(800)}"))
+
+          // (i) event prefix
+          assert(failureLine.contains("auth.oidc.failure"),
+            clue = s"OIDC failure audit line must carry the literal `auth.oidc.failure` event prefix per deploy doc line 218's enumeration; got: $failureLine")
+          // (ii) provider=google
+          assert(failureLine.contains("provider=google"),
+            clue = s"OIDC failure audit line must carry provider=google (lowercase id) matching the prior OIDC pins (976d7ad / b1213b6 / 342df03 / c8da491); got: $failureLine")
+          // (iii) reason=state_cookie_mismatch (the load-bearing
+          // per-emission-site contract for THIS branch -- the
+          // SECURITY-CRITICAL signature the runbook keys on for
+          // covert-redirect intrusion detection)
+          assert(failureLine.contains("reason=state_cookie_mismatch"),
+            clue = s"OIDC failure audit line for the mismatched-cookie path MUST carry the EXACT reason value `state_cookie_mismatch` per AuthStack.scala line 351's hardcoded `else \"state_cookie_mismatch\"` branch (the ELSE clause that fires when cookie IS present but doesn't match the URL state); this is the documented covert-redirect attack signature -- a refactor renaming to e.g. `cookie_state_mismatch` (reordered words), `state-cookie-mismatch` (hyphens), `forged_state`, or consolidating with missing_state_cookie into a single `state_invalid` would silently break the runbook's intrusion-detection triage AND silently mute the SECURITY signal the deploy doc's OAuth 2.0 BCP covert-redirect mitigation depends on for operator visibility; got: $failureLine")
+          // (iv) EXCLUSION of missing_state_cookie -- pins that
+          // the conditional branch taken was the cookie-PRESENT
+          // branch (else clause), NOT the cookie-absent branch
+          // (then clause from c8da491). The asymmetric-pair
+          // exclusion check: c8da491 asserts
+          // !contains("state_cookie_mismatch"), THIS asserts
+          // !contains("missing_state_cookie"). A refactor that
+          // swapped the two branches' reason strings (inverted
+          // conditional) would fail BOTH tests' exclusion checks
+          // simultaneously
+          assert(!failureLine.contains("missing_state_cookie"),
+            clue = s"OIDC failure audit line for the mismatched-cookie path MUST NOT contain the alternative reason `missing_state_cookie` per AuthStack.scala line 351's `if cookieState.isEmpty then \"missing_state_cookie\"` branch (the THEN clause that fires when no cookie is present); this exclusion pairs with c8da491's parallel exclusion on the no-cookie side, completing the asymmetric-pair coverage of line 352's two-reason conditional -- a refactor that swapped the branches' reason strings or emitted both would fail BOTH this test's exclusion AND c8da491's parallel exclusion simultaneously; got: $failureLine")
+          // (v) WARN level
+          assert(failureLine.contains("[WARN]"),
+            clue = s"OIDC failure audit line must be WARN-level per AuthStack.scala line 352's logWarn call; the SECURITY-CRITICAL state_cookie_mismatch reason value specifically demands WARN visibility because it's the documented covert-redirect intrusion signature (a refactor demoting to DEBUG would silently hide intrusion attempts; a refactor promoting to ERROR would silently page incident-response automation on every normal browser quirk that drops cookies, training operators to ignore the alert); got: $failureLine")
+          // (vi) remote= field (especially critical for this
+          // emission because covert-redirect attacks come from
+          // attacker-controlled IPs and the runbook's security
+          // triage correlates state_cookie_mismatch failures with
+          // subsequent successful OIDC sign-ins from the same IP)
+          assert(failureLine.contains("remote="),
+            clue = s"OIDC failure audit line must carry the `remote=` field -- especially critical for state_cookie_mismatch which is the documented covert-redirect signature where the runbook's intrusion-detection correlates this failure with subsequent successful sign-ins from the same attacker IP; without remote= the correlation breaks and successful attacks become invisible after the failed probe; got: $failureLine")
+          // (vii) !email= ABSENCE
+          assert(!failureLine.contains("email="),
+            clue = s"OIDC failure audit line must NOT carry email= per deploy doc line 218 -- additionally critical for state_cookie_mismatch because the callback's state cookie may have been planted via a sibling-subdomain attack pointing at a victim user; emitting email= would expose the victim user's identity to log aggregation (the attacker-controlled IP could probe for matches by initiating OIDC flows for different victim emails and observing which appear in the audit logs); got: $failureLine")
+          // (viii) service-tag prefix
+          assert(failureLine.contains("[hand-history-review]"),
+            clue = s"OIDC failure audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- matches /api/health.service (505ba6b); got: $failureLine")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
