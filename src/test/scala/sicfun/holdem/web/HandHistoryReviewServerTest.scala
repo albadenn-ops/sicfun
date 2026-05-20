@@ -3234,6 +3234,185 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `shutdown complete` companion banner log
+  // line format -- the SHUTDOWN HALF of the startup/shutdown
+  // banner pair the 7c47f88 startup pin established the FIRST
+  // half of; the shutdown banner emits at HandHistoryReviewServer
+  // Runtime.scala line 326's `logInfo(s"shutdown complete host=${
+  // binding.host} port=${binding.port}")` inside the shutdown
+  // hook's finally block, immediately AFTER the HTTP server's
+  // stop sequence completes (server.stop, then http executor
+  // shutdown, then analysis-timeout-executor drain, then analysis-
+  // executor drain) -- so when the banner emits, ALL request
+  // processing has ceased and operator-visible state is exactly
+  // "ready to terminate"; the banner is SIMPLER than the startup
+  // banner (just host + port, no config fields) because by the
+  // time shutdown fires the operator's interest is "did this
+  // instance shut down cleanly" not "what config was it running"
+  // -- the startup-side banner already captured the config
+  // values; per-field regression vectors that the startup pin
+  // (7c47f88) doesn't catch: (i) the "shutdown complete" prefix
+  // -- a refactor renaming to e.g. "server stopped" / "shutdown
+  // finished" / "exit complete" would silently break operator
+  // scripts that grep'd for "shutdown complete" as the cue for
+  // "instance terminated gracefully" (distinguished from "process
+  // killed" where the banner never emits because the shutdown
+  // hook didn't get to run); (ii) the host + port values MUST
+  // match the startup-side banner's values for the SAME process
+  // -- operators correlate process lifetimes by matching the
+  // startup banner's host=X port=Y with the SUBSEQUENT shutdown
+  // banner's host=X port=Y, so a refactor that emitted different
+  // host/port values at shutdown (e.g. config.host vs
+  // binding.host divergence) would silently break the operator's
+  // "did THIS process restart cleanly" diagnostic, (iii) the
+  // INFO level -- shutdown is a NORMAL lifecycle event, not an
+  // error; demote-to-DEBUG would hide it at default log levels
+  // (operators couldn't tell graceful-shutdown from
+  // forcefully-killed instances at all), promote-to-WARN would
+  // silently page alerting automation on every restart, (iv)
+  // emitting the banner BEFORE the executor drain finishes (a
+  // refactor reordering would silently let the banner appear
+  // while jobs were still running -- the inline comment at the
+  // shutdown sequence above the line 326 emission documents the
+  // ORDERING: http stop, then http executor shutdown, then
+  // analysis-timeout drain, then analysis drain, THEN banner --
+  // a reordering would silently invalidate the "banner means
+  // ready to terminate" semantic operators depend on); the
+  // shutdown banner's host+port also pairs with the startup
+  // banner's host+port AND with /api/health.host + /api/health.
+  // port (pinned by 505ba6b/b2a90fb) AND with /api/ready.host +
+  // /api/ready.port -- four-way correlation across boot-time
+  // banner + shutdown-time banner + runtime probes + log lines;
+  // test approach: extend the same stdout-capture pattern from
+  // 7c47f88 -- wrap System.setOut around withServer, which
+  // captures BOTH the startup banner (emitted inside
+  // startWithBackends BEFORE the run callback) AND the shutdown
+  // banner (emitted inside the finally block of withServer's
+  // server.close() call which fires AFTER the run callback);
+  // assert presence of BOTH banners + their respective field
+  // shapes; ALSO assert the SAME host+port values appear in
+  // both banners (the lifetime-correlation invariant the
+  // operator runbook keys on); 5-tier format check on the
+  // shutdown banner specifically: (i) "shutdown complete"
+  // prefix, (ii) "host=127.0.0.1" matching startup, (iii) "port="
+  // present (value varies because port=0 ephemeral), (iv) [INFO]
+  // level, (v) [hand-history-review] service-tag prefix; ALSO
+  // an INTER-BANNER assertion: extract host+port from BOTH
+  // banners and assert they match (the lifetime-correlation pin);
+  // ALSO the absence pin: shutdown banner does NOT carry the
+  // ~17 config fields the startup banner has (modelSource,
+  // maxUploadBytes, etc.) -- a refactor that "consolidated for
+  // consistency" would silently expand the shutdown banner's
+  // size + delay the line emission (each field expansion adds
+  // ms of formatting + log-write overhead, multiplied by 17
+  // fields it could noticeably slow the shutdown path -- the
+  // shutdown deadline is strict per the deadlineNanos at line
+  // 318); the absence assertion catches that consolidation; future
+  // fires can extend with: (a) banner-pair ORDERING assertion
+  // (startup banner appears BEFORE shutdown banner in captured
+  // stdout) -- the existing test implicitly relies on this
+  // because startup happens at withServer setup and shutdown at
+  // teardown, but pinning ordering would catch a refactor that
+  // emitted both at the same lifecycle point, (b) bind-error
+  // banner pin (HandHistoryReviewServerRuntime.scala line 358's
+  // "failed to start web server: <host>:<port> is unavailable"
+  // -- already covered by the existing bind-error test at line
+  // ~5xxx but not specifically for the BANNER FORMAT vs the
+  // error-message-returned-to-caller).
+  test("server shutdown emits the documented `shutdown complete host=<host> port=<port>` banner at INFO level matching the startup banner's host/port values (per HandHistoryReviewServerRuntime.scala line 326's hardcoded shutdown-hook emission)") {
+    withStaticSite { staticDir =>
+      // Capture stdout AROUND the withServer call so BOTH banners
+      // (startup at startWithBackends + shutdown at server.close())
+      // land in the captured stream. The 7c47f88 startup-banner
+      // test uses the same pattern but only asserts on startup;
+      // this test asserts on BOTH banners to verify the
+      // host+port correlation between them.
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      try
+        withServer(staticDir) { _ =>
+          // No HTTP requests needed -- both banners emit at
+          // server lifecycle transitions (startup + close), NOT
+          // during request processing. The empty body keeps the
+          // server alive between the two emissions.
+          ()
+        }
+      finally
+        System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val shutdownLine = captured.split('\n').iterator
+        .find(_.contains("shutdown complete"))
+        .getOrElse(fail(s"no `shutdown complete` line in captured stdout -- HandHistoryReviewServerRuntime.scala line 326 documents this as the shutdown-hook completion banner; if missing, either the logInfo emission was suppressed OR the shutdown sequence didn't reach the finally block at line 322-326 (a refactor that broke the shutdown hook chain would silently make the banner invisible); got captured stdout: ${captured.take(2000)}"))
+
+      // (i) prefix
+      assert(shutdownLine.contains("shutdown complete"),
+        clue = s"shutdown banner must carry the literal `shutdown complete` prefix per HandHistoryReviewServerRuntime.scala line 326's hardcoded literal -- a refactor renaming to e.g. `server stopped` / `shutdown finished` / `exit complete` would silently break operator scripts grep'ing for the graceful-termination signal; got: $shutdownLine")
+      // (ii) host (matching startup banner's withServer default)
+      assert(shutdownLine.contains("host=127.0.0.1"),
+        clue = s"shutdown banner must carry host=127.0.0.1 (withServer default) -- MUST match the startup banner's host= value for the SAME process; a refactor that emitted config.host instead of binding.host at shutdown would silently break operator process-lifetime correlation; got: $shutdownLine")
+      // (iii) port (value varies due to port=0 ephemeral, but
+      // field MUST be present AND MUST match startup banner)
+      assert(shutdownLine.contains("port="),
+        clue = s"shutdown banner must carry port=<resolved-bound-port> -- MUST match the startup banner's port= value (operators correlate process lifetimes by matching startup port=X with shutdown port=X); a refactor that emitted config.port (always 0 for ephemeral) instead of binding.port would silently always emit port=0 at shutdown while the actual server bound to a real ephemeral port; got: $shutdownLine")
+      // (iv) INFO level
+      assert(shutdownLine.contains("[INFO]"),
+        clue = s"shutdown banner must be INFO-level (logInfo at line 326 writes to System.out per HandHistoryReviewServerRuntime.scala line 418); demote-to-DEBUG would hide graceful-shutdown signal at default log levels making operators unable to tell clean-exit from kill-9, promote-to-WARN would silently page alerting on every normal restart; got: $shutdownLine")
+      // (v) service-tag prefix
+      assert(shutdownLine.contains("[hand-history-review]"),
+        clue = s"shutdown banner must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- matches /api/health.service (505ba6b) so log aggregators see the same identifier on startup + shutdown banners + runtime audit lines + probe responses (4-way correlation); got: $shutdownLine")
+
+      // INTER-BANNER assertion: the host+port values in BOTH
+      // banners MUST match. Find the startup banner in the same
+      // captured stream and extract its host+port values, then
+      // compare against the shutdown banner. This is the
+      // PROCESS-LIFETIME CORRELATION pin -- a refactor that
+      // emitted different host/port values at startup vs
+      // shutdown for the same process would silently break the
+      // operator's restart-detection diagnostic.
+      val startupLine = captured.split('\n').iterator
+        .find(_.contains("startup complete"))
+        .getOrElse(fail(s"no `startup complete` line in captured stdout for inter-banner correlation -- the 7c47f88 startup pin should have caught this earlier, but if the startup banner is missing here the test can't validate cross-banner host/port consistency; got captured stdout: ${captured.take(2000)}"))
+      // Extract `host=<value>` tokens from both lines. The host
+      // values are guaranteed not to contain spaces (IPs or
+      // hostnames, both space-free), so splitting on space then
+      // matching `host=` is safe. Strip trailing whitespace /
+      // carriage-returns from the extracted value (Windows
+      // line endings could leave \r on the last field of a
+      // line).
+      def extractField(line: String, fieldName: String): Option[String] =
+        line.split(' ').iterator
+          .find(_.startsWith(s"$fieldName="))
+          .map(_.drop(fieldName.length + 1).stripTrailing())
+      val startupHost = extractField(startupLine, "host").getOrElse(fail(s"startup banner missing host= field for cross-banner correlation; got: $startupLine"))
+      val shutdownHost = extractField(shutdownLine, "host").getOrElse(fail(s"shutdown banner missing host= field for cross-banner correlation; got: $shutdownLine"))
+      assertEquals(shutdownHost, startupHost,
+        clue = s"shutdown banner's host= value MUST match the startup banner's host= value for the same process -- operators correlate process lifetimes by matching startup host=X port=Y with the subsequent shutdown host=X port=Y; a divergence would silently break the runbook's restart-detection diagnostic; got startup host='$startupHost' vs shutdown host='$shutdownHost'")
+      val startupPort = extractField(startupLine, "port").getOrElse(fail(s"startup banner missing port= field for cross-banner correlation; got: $startupLine"))
+      val shutdownPort = extractField(shutdownLine, "port").getOrElse(fail(s"shutdown banner missing port= field for cross-banner correlation; got: $shutdownLine"))
+      assertEquals(shutdownPort, startupPort,
+        clue = s"shutdown banner's port= value MUST match the startup banner's port= value for the same process -- this is the critical bound-port-vs-config-port pin: both banners MUST source from binding.port (the resolved bound port post-ephemeral-allocation), NOT config.port (always 0 for port=0 deployments); a refactor that emitted config.port at shutdown would always show port=0 while startup correctly showed the resolved port, silently breaking process correlation for port=0 deployments AND blue/green deployments that cycle ports intentionally; got startup port='$startupPort' vs shutdown port='$shutdownPort' from\n  startup line: $startupLine\n  shutdown line: $shutdownLine")
+
+      // ABSENCE pin: shutdown banner does NOT carry the ~17
+      // config fields the startup banner has. A refactor that
+      // "consolidated for consistency" by expanding the shutdown
+      // banner to include modelSource / maxUploadBytes / etc.
+      // would silently slow the shutdown path (each field
+      // expansion adds formatting + log-write overhead, and
+      // the shutdown deadline at line 318 is strict). The
+      // operator workflow for shutdown is "did it shut down
+      // cleanly", not "what was the config" -- the latter is
+      // the startup banner's job.
+      assert(!shutdownLine.contains("modelSource="),
+        clue = s"shutdown banner must NOT carry modelSource= (a startup-banner-only field per HandHistoryReviewServerRuntime.scala line 350); a refactor expanding the shutdown banner to carry config fields would silently slow shutdown path AND duplicate operator-relevant information (the startup banner already captured the config; shutdown's job is signaling clean exit, not re-emitting config); got: $shutdownLine")
+      assert(!shutdownLine.contains("maxUploadBytes="),
+        clue = s"shutdown banner must NOT carry maxUploadBytes= (startup-banner-only field); got: $shutdownLine")
+      assert(!shutdownLine.contains("authenticationMode="),
+        clue = s"shutdown banner must NOT carry authenticationMode= (startup-banner-only field); got: $shutdownLine")
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
