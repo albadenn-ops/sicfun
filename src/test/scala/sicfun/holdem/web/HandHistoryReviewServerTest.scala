@@ -3284,6 +3284,38 @@ class HandHistoryReviewServerTest extends FunSuite:
           val registerJson = jsonBody(register)
           assertEquals(registerJson("authenticated").bool, true)
           assertEquals(registerJson("user")("email").str, "alice@example.com")
+          // Pin the user.userId field shape -- documented in deploy
+          // doc line 101 as part of the signed-in user view and at
+          // line 235 as the "per-account UUIDs (internal userId)" the
+          // store persists. Before this commit the field was entirely
+          // untested even though it's the operationally relevant
+          // account identifier: rate-limit client= log lines use
+          // `user:<userId>` when an authenticated principal is on the
+          // request (per the deploy doc's rate-limit log format
+          // documentation), audit-log correlation queries grep for
+          // userId, AND the JobQueue's per-user ownership check at
+          // /api/.../jobs/{id} uses userId to enforce the "404 if
+          // submitted by a different user" semantics. A refactor
+          // that dropped userId from the response would break (1)
+          // operator-side log-correlation, (2) rate-limit client-
+          // bucketing dashboards, (3) any scripted client that
+          // tracks per-user state across requests; a refactor that
+          // changed the format from UUID to something else (e.g.
+          // sequential integer, hash of email) would change the
+          // attack surface -- sequential integers leak account
+          // count to an attacker who can enumerate, hash-of-email
+          // exposes whether two known emails were registered, UUIDs
+          // are unguessable in both directions. Assertion uses a
+          // permissive regex (`[0-9a-f]{8}-...8-4-4-4-12...`) so the
+          // test passes for any UUID-shaped value (UUIDv4 is what
+          // the production code generates per
+          // PlatformUserAuth.scala's randomUUID().toString call,
+          // but the test allows any version since the bit-layout
+          // distinction doesn't affect the operator-facing
+          // properties).
+          val userId = registerJson("user")("userId").str
+          assert(userId.matches("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"),
+            clue = s"register response user.userId must be a UUID-shaped string (8-4-4-4-12 hex with dashes) per deploy doc line 101 + line 235's 'per-account UUIDs' framing -- the rate-limit `client=user:<userId>` log lines, audit-log correlation queries, and JobQueue per-user ownership checks all key on this format; a refactor changing it (e.g. to a sequential integer) would silently change the account-enumeration attack surface AND break operator-side log-grep workflows; got: '$userId'")
           // Pin the linkedProviders array shape for a local-password
           // user. Deploy doc line 101 explicitly documents the
           // linkedProviders field as "the linkedProviders array
