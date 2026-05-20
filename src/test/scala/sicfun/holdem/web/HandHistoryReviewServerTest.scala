@@ -2728,6 +2728,157 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `auth.oidc.failure reason=provider-error:<code>`
+  // audit line format -- closes the FOURTH of 5 failure-side
+  // emission sites (line 317 in AuthStack.scala), after 342df03 +
+  // c8da491 + b4b828f + e17c21d closed lines 397/352-both/335; line
+  // 317 fires when /callback receives `?error=<value>` query
+  // parameter -- the documented "user denied consent / expired
+  // code / provider returned error" path that's reachable WITHOUT
+  // any custom FakeOidcProvider mock (the existing FakeOidcProvider
+  // returns Right on exchangeCode, but THIS emission path never
+  // reaches exchangeCode -- the query.get("error") match at
+  // AuthStack.scala line 286 short-circuits the entire callback
+  // flow when ?error= is present, emitting the audit line and
+  // redirecting before any state/code/cookie validation runs); the
+  // operationally-unique feature of THIS emission is the
+  // `provider-error:` PREFIX on the reason value -- the line 317
+  // format is `reason=provider-error:<escaped-error-code>` where
+  // the prefix marks "the upstream OIDC provider rejected the
+  // flow" as DISTINCT from the server-side failure reasons
+  // (missing_code_or_state, missing_state_cookie, state_cookie_
+  // mismatch, oversize_callback_param -- all of which are OUR
+  // server's reasons); operators distinguishing "the provider had
+  // a problem" from "we had a problem" key on this prefix to route
+  // incident response correctly (provider problems → escalate to
+  // Google support, server problems → escalate internally); a
+  // refactor that dropped the `provider-error:` prefix (e.g.
+  // emitting just `reason=access_denied` to match the OIDC spec's
+  // error code shape) would silently merge the provider-side and
+  // server-side failure categories, forcing operators to manually
+  // disambiguate which side caused each failure; a refactor that
+  // changed the separator from `:` to `_` (`provider-error_access_
+  // denied`) would silently break operator queries grep'ing for
+  // the `provider-error:` prefix as an indicator that the error
+  // code is upstream-supplied (the colon distinguishes prefix from
+  // value cleanly); per-field regression vectors SPECIFIC to this
+  // emission site that the prior 4 failure-side pins don't catch:
+  // (i) the `provider-error:` literal prefix -- a refactor renaming
+  // to e.g. `upstream-error:` / `oidc-provider-error:` / dropping
+  // the prefix entirely would silently break the documented
+  // provider-vs-server distinction; (ii) the `%20`-escape contract
+  // -- AuthStack.scala line 317 applies `.replace(" ", "%20")` to
+  // the error string before logging, preventing a hostile provider
+  // returning `?error=foo bar` from splitting the structured
+  // key=value log fields (the inline comment at lines 311-316
+  // documents the threat); the test uses an OIDC standard error
+  // code (access_denied) without spaces, but the format pin
+  // ensures the prefix structure is intact -- a future fire could
+  // add a separate test exercising the %20-escape directly with a
+  // space-bearing error value; (iii) the capOidcErrorString length
+  // cap (256 chars per inline comment) -- the test uses a short
+  // standard code so this cap isn't exercised, but a future fire
+  // could pin the cap by submitting `?error=<huge>` and verifying
+  // the audit line is bounded; test approach: GET /callback?error=
+  // access_denied -- no cookie, no state, no code; line 286's
+  // `query.get("error") match` matches the Some(rawError) branch,
+  // capOidcErrorString caps the value (no-op for the short standard
+  // code), and logWarn at line 317 fires with reason=provider-
+  // error:access_denied; 10-tier format check at WARN level
+  // matching the e17c21d pattern with the QUADRUPLE-EXCLUSION of
+  // all 4 previously-pinned alternative reasons: (i) `auth.oidc.
+  // failure` event prefix, (ii) `provider=google`, (iii) `reason=
+  // provider-error:access_denied` (NEW specific-value pin INCLUDING
+  // the `provider-error:` prefix and the colon separator), (iv-vii)
+  // EXCLUSION of missing_code_or_state / missing_state_cookie /
+  // state_cookie_mismatch / oversize_callback_param (the 4 already-
+  // pinned alternative reasons from the OTHER 3 emission sites) --
+  // catches a refactor emitting the wrong reason for THIS emission
+  // site, ESPECIALLY a refactor consolidating provider-supplied
+  // errors with the server-side reasons, (viii) `[WARN]` level,
+  // (ix) `remote=` field, (x) `!email=` ABSENCE, (xi) `[hand-
+  // history-review]` service-tag prefix.
+  test("GET /api/auth/oidc/google/callback with ?error=access_denied emits the documented `auth.oidc.failure reason=provider-error:access_denied` WARN audit line carrying the `provider-error:` prefix that distinguishes upstream provider failures from server-side failures (per AuthStack.scala lines 285-317) -- closes the fourth of 5 failure-side emission sites") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture stderr around a /callback GET with ?error=access_denied
+          // -- no cookie, no state, no code. AuthStack.scala line
+          // 286's `query.get("error") match { case Some(rawError) =>`
+          // matches immediately, capOidcErrorString (line 310) caps
+          // the value (no-op for the short standard code
+          // "access_denied"), the audit-log emission at line 317
+          // fires with reason=provider-error:access_denied, and the
+          // user-facing redirect at line 318 fires. The whole flow
+          // SHORT-CIRCUITS before any state/code/cookie validation
+          // runs -- the `query.get("error")` branch is checked
+          // BEFORE the `(query.get("state"), query.get("code"))`
+          // match at line 320, AND before the cookie check at line
+          // 348 in the no-error branch.
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          val callback =
+            try get(s"$baseUri${provider.callbackPath}?error=access_denied")
+            finally System.setErr(originalErr)
+          assertEquals(callback.statusCode(), 302,
+            clue = s"OIDC /callback with ?error= must return 302 redirect to oidcFailureRedirect (per AuthStack.scala line 318); a non-302 means the handler exited via a different path which would emit a different reason= value; got: ${callback.statusCode()}")
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.oidc.failure"))
+            .getOrElse(fail(s"no `auth.oidc.failure` line in stderr capture -- expected the logWarn at AuthStack.scala line 317 to fire on the provider-supplied-error path; got captured stderr: ${captured.take(800)}"))
+
+          // (i) event prefix
+          assert(failureLine.contains("auth.oidc.failure"),
+            clue = s"OIDC failure audit line must carry the literal `auth.oidc.failure` event prefix per deploy doc line 218; got: $failureLine")
+          // (ii) provider=google
+          assert(failureLine.contains("provider=google"),
+            clue = s"OIDC failure audit line must carry provider=google matching the prior OIDC pins (976d7ad / b1213b6 / 342df03 / c8da491 / b4b828f / e17c21d); got: $failureLine")
+          // (iii) reason=provider-error:access_denied -- the
+          // load-bearing per-emission-site contract WITH the
+          // `provider-error:` prefix AND colon separator
+          assert(failureLine.contains("reason=provider-error:access_denied"),
+            clue = s"OIDC failure audit line for the provider-supplied-error path MUST carry the EXACT reason value `provider-error:access_denied` per AuthStack.scala line 317's hardcoded `reason=provider-error:` prefix concatenated with the capped+escaped provider error code; the `provider-error:` prefix is the documented marker distinguishing upstream provider failures from server-side failures (missing_state_cookie etc are SERVER reasons; provider-error:access_denied is the UPSTREAM reason); a refactor dropping the prefix (emitting just `reason=access_denied`) would silently merge provider-side and server-side failure categories forcing operators to manually disambiguate which side caused each failure, a refactor changing the separator from `:` to `_` would silently break operator queries grep'ing for the `provider-error:` prefix as the upstream-source indicator; got: $failureLine")
+          // (iv-vii) QUADRUPLE EXCLUSION of all 4 already-pinned
+          // alternative reasons -- catches a refactor emitting the
+          // wrong reason for THIS emission site
+          assert(!failureLine.contains("reason=missing_code_or_state"),
+            clue = s"OIDC failure audit line for the provider-error path MUST NOT carry reason=missing_code_or_state (the 342df03-pinned no-params reason); the ?error= branch at line 286 short-circuits BEFORE the missing-params check at line 320, so these two reasons cannot co-occur -- a refactor consolidating them would silently lose the upstream-vs-server-failure distinction; got: $failureLine")
+          assert(!failureLine.contains("reason=missing_state_cookie"),
+            clue = s"OIDC failure audit line for the provider-error path MUST NOT carry reason=missing_state_cookie (the c8da491-pinned no-cookie reason); the ?error= branch short-circuits BEFORE the cookie check at line 348; got: $failureLine")
+          assert(!failureLine.contains("reason=state_cookie_mismatch"),
+            clue = s"OIDC failure audit line for the provider-error path MUST NOT carry reason=state_cookie_mismatch (the b4b828f-pinned covert-redirect reason); the ?error= branch short-circuits BEFORE the cookie comparison at line 350; got: $failureLine")
+          assert(!failureLine.contains("reason=oversize_callback_param"),
+            clue = s"OIDC failure audit line for the provider-error path MUST NOT carry reason=oversize_callback_param (the e17c21d-pinned DoS-probe reason); the ?error= branch short-circuits BEFORE the oversize check at line 334, AND the test submits a short standard error code that wouldn't trigger oversize regardless; got: $failureLine")
+          // (viii) WARN level
+          assert(failureLine.contains("[WARN]"),
+            clue = s"OIDC failure audit line must be WARN-level per AuthStack.scala line 317's logWarn call; the provider-error path is an upstream failure (typically user-initiated cancel or provider transient issue), demote-to-DEBUG would hide it from triage AND make it impossible to detect bursts of provider-side failures (the runbook's 'unusual provider failure burst' triage entry keys on WARN-level visibility of these lines), promote-to-ERROR would silently page on every user clicking 'Cancel' on the Google consent screen; got: $failureLine")
+          // (ix) remote= field
+          assert(failureLine.contains("remote="),
+            clue = s"OIDC failure audit line must carry remote= per deploy doc line 218; per-IP correlation distinguishes a single user repeatedly cancelling consent (one IP, several events spaced minutes apart) from coordinated probe activity (one IP, many events in seconds) -- both surface as auth.oidc.failure provider-error events but only the latter is operationally interesting; got: $failureLine")
+          // (x) !email= ABSENCE
+          assert(!failureLine.contains("email="),
+            clue = s"OIDC failure audit line must NOT carry email= per deploy doc line 218 ('auth.oidc.failure lines do NOT carry email='); the provider-error path may not have any user identity at all (the user denied consent before the userinfo step) AND emitting email= here would suggest a specific user when the upstream failure is provider-side; got: $failureLine")
+          // (xi) service-tag prefix
+          assert(failureLine.contains("[hand-history-review]"),
+            clue = s"OIDC failure audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- matches /api/health.service (505ba6b); got: $failureLine")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
