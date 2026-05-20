@@ -2206,6 +2206,69 @@ class HandHistoryReviewServerTest extends FunSuite:
         // together.
         assertEquals(healthJson("modelConfigured").bool, false,
           clue = s"/api/health must surface modelConfigured=false when MODEL_DIR is unset, per the deploy doc's MODEL_DIR section that documents this boolean as the dashboard-alert alternative to the masked modelSource string; a refactor that dropped this field or flipped its default would silently break every dashboard keying on `modelConfigured == false` for unconfigured-instance alerts; got: ${healthJson("modelConfigured")}")
+        // Pin the documented `drainSignalConfigured` field that
+        // pairs with the already-pinned `drainSignalPresent` below to
+        // form the documented drain-signal pair (the WIRING-STATE
+        // half + the RUNTIME-STATE half). Deploy doc line 126's
+        // DRAIN_SIGNAL_FILE section explicitly documents the pair:
+        // "/api/health.drainSignalConfigured reflects whether the
+        // knob is set (independent of whether the file currently
+        // exists), so a dashboard can verify the deployment is wired
+        // for graceful rolling restarts at all"; the deploy doc
+        // contrasts the two halves: drainSignalConfigured says "is
+        // this deployment EVEN CAPABLE of pre-staged drain" (a
+        // configuration-time fact), drainSignalPresent says "is the
+        // drain CURRENTLY ACTIVE" (a runtime-state fact). The two
+        // are SEMANTICALLY ORTHOGONAL by design: a deployment can be
+        // (configured=true, present=false) which means "wired but not
+        // currently draining" (the normal state), (configured=true,
+        // present=true) which means "actively draining" (the drain-
+        // in-progress state), (configured=false, present=false) which
+        // means "not wired at all, relying on JVM shutdown hook only"
+        // (the unconfigured deployment), AND (configured=false,
+        // present=true) which is LOGICALLY IMPOSSIBLE (you can't
+        // have a file present at an unset path). Why each operational
+        // consumer cares: (a) operator runbook step 0 for graceful
+        // rolling restart: BEFORE typing `touch <DRAIN_SIGNAL_FILE>`,
+        // verify `drainSignalConfigured == true` -- the runbook's
+        // rolling-restart pattern doc says "this knob configured...
+        // graceful rolling restarts; without it... the only drain
+        // signal is the JVM shutdown hook itself -- which doesn't
+        // pre-stage the load balancer's stop-routing decision"; if
+        // the operator follows the runbook on an UNCONFIGURED
+        // deployment, the touch command no-ops and the SIGTERM races
+        // budget without pre-staging the LB; (b) capacity-planning
+        // dashboards: separate the "production deployments that use
+        // pre-staged drain (configured=true)" from "test deployments
+        // that don't (configured=false)" -- if a deployment that
+        // SHOULD be wired loses the configuration silently (env-var
+        // dropped, deployment manifest churn), the dashboard pivots
+        // those instances to the wrong category and the alerting
+        // misroutes; (c) deployment-stability dashboards: track
+        // (configured=true, present=true) instances over time to see
+        // "how often was each instance pre-stage drained" as a proxy
+        // for deployment-stability events (a fleet with 50 instances
+        // and 200 drain events in a week has high deployment
+        // velocity OR high recovery activity, both worth knowing).
+        // The TEST setup at line ~2041 does NOT configure
+        // DRAIN_SIGNAL_FILE (the default withServer does not set the
+        // drainSignalFile option), so drainSignalConfigured = false
+        // here, matching the drainSignalPresent = false on the line
+        // below. A refactor that flipped the default to `true` when
+        // DRAIN_SIGNAL_FILE is unset (e.g. "defaulting to true so
+        // operators don't have to think about wiring it") would
+        // silently break the documented "independent of whether the
+        // file currently exists" semantic by making the field always-
+        // true, AND would silently break dashboards keying on
+        // `drainSignalConfigured == false` for unconfigured-instance
+        // alerts; a refactor that dropped the field entirely (e.g.
+        // "drainSignalPresent already tells you the state") would
+        // silently break dashboards that distinguish "wired but not
+        // draining" from "not wired at all" -- the two states have
+        // the SAME drainSignalPresent (false) so the dashboard would
+        // lose its only signal.
+        assertEquals(healthJson("drainSignalConfigured").bool, false,
+          clue = s"/api/health must surface drainSignalConfigured=false when DRAIN_SIGNAL_FILE is unset, per deploy doc line 126's '/api/health.drainSignalConfigured reflects whether the knob is set (independent of whether the file currently exists)' framing -- a refactor that flipped the default to true or dropped the field entirely would silently break dashboards distinguishing 'wired but not draining' from 'not wired at all'; got: ${healthJson("drainSignalConfigured")}")
         assertEquals(healthJson("drainSignalPresent").bool, false)
         assertEquals(healthJson("maxUploadBytes").num.toInt, 64)
         assertEquals(healthJson("analysisTimeoutMs").num.toLong, 120000L)
@@ -2253,6 +2316,48 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(readyJson("reason").str, "accepting-traffic")
         assertEquals(readyJson("draining").bool, false)
         assertEquals(readyJson("acceptingAnalysisJobs").bool, true)
+        // Mirror of the health-response drain-signal pair above,
+        // closing the documented symmetric pin on /api/ready. Deploy
+        // doc line 217 enumerates "draining + acceptingAnalysisJobs +
+        // drainSignalConfigured + drainSignalPresent (so a probe can
+        // tell 'queue full' from 'operator-initiated drain' without a
+        // separate health check)" -- the doc EXPLICITLY frames the
+        // pair as load-balancer-relevant (the consumer that needs to
+        // distinguish queue-full-503 from operator-drain-503 to
+        // decide whether to retry the request against another
+        // instance or to back off entirely); BEFORE this commit
+        // BOTH drainSignal fields were missing from the /api/ready
+        // probe block here (drainSignalPresent appears in OTHER
+        // tests at lines ~4631 + ~4643 but those exercise the
+        // drain-signal-ACTIVE state in a separate scenario; the
+        // BASELINE 'drain not configured, drain not active' state
+        // was unpinned on /api/ready). The symmetric pin pair
+        // mirrors the established pattern from 505ba6b (service)
+        // and b2a90fb (host+port): same field, same value, both
+        // endpoints, two independent emitters in Readiness.scala
+        // (renderHealth lines 95+96, renderReadiness lines 139+140
+        // -- each has TWO independent Bool() literals, so a partial
+        // refactor touching one function's pair could leave the
+        // other's pair stale). Asymmetric-drift risk specific to
+        // this pair: a refactor consolidating the drain-signal
+        // boolean shape (e.g. switching from a separate
+        // configured+present pair to a single tri-state field like
+        // `drainSignalState: "unconfigured" | "wired" | "active"`)
+        // would silently break BOTH downstream consumers (operators
+        // expecting two booleans + dashboards built on bool-condition
+        // alert rules), AND a refactor renaming either field for
+        // style consistency (e.g. drainSignalConfigured ->
+        // drainConfigured) would silently break log-aggregation
+        // queries filtering by the documented field name. The pin
+        // pair on /api/ready catches all of these for the readiness
+        // side, the pair on /api/health (lines ~2207+) catches them
+        // for the health side -- together the 4 pins (2 fields × 2
+        // endpoints) form a SYMMETRIC quadrilateral that any single-
+        // function refactor breaks at least one corner of.
+        assertEquals(readyJson("drainSignalConfigured").bool, false,
+          clue = s"/api/ready must surface drainSignalConfigured=false when DRAIN_SIGNAL_FILE is unset per deploy doc line 217's '/api/ready ... drainSignalConfigured + drainSignalPresent' enumeration -- the matching /api/health pin enforces the same value, so this closes the symmetric pair against asymmetric drift between Readiness.scala's renderHealth (line 95) and renderReadiness (line 139) which each have independent Bool() literals; got: ${readyJson("drainSignalConfigured")}")
+        assertEquals(readyJson("drainSignalPresent").bool, false,
+          clue = s"/api/ready must surface drainSignalPresent=false when no drain file exists per deploy doc line 217 enumerating both halves of the drain-signal pair; the load-balancer-side consumer needs this field to distinguish 'queue full' from 'operator-initiated drain' (per the deploy doc framing) -- a refactor dropping it from renderReadiness would silently force every LB probe to fall back to /api/health for the same information; got: ${readyJson("drainSignalPresent")}")
         assertEquals(readyJson("authenticationEnabled").bool, false)
         assertEquals(readyJson("authenticationMode").str, "none")
         // Mirror of the health-response `service` pin above. Deploy doc
