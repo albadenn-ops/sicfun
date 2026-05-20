@@ -1522,6 +1522,68 @@ class HandHistoryReviewServerTest extends FunSuite:
   // params) and 5291216 / 9af8a38 / 2064190 (operator-visible defensive
   // contracts) -- documented body-cap behavior gets pinned so refactors
   // can't silently regress it.
+  // Pin the documented /api/auth/login "extra displayName field is
+  // silently ignored" behavior. Deploy doc line 100 explicitly says:
+  // "POST /api/auth/login body is {email, password} (a displayName on
+  // a login request is silently ignored -- the field is only consumed
+  // by register, and updates after sign-in go through POST
+  // /api/auth/profile)". This is a real contract because either
+  // direction of deviation matters: (1) a refactor that started
+  // CONSUMING displayName from login (e.g. "update displayName on
+  // every sign-in for convenience") would silently let attackers
+  // overwrite the user's display name on any sign-in attempt --
+  // imagine a phishing page that captures credentials AND submits
+  // a hostile displayName, the legitimate user signs in normally
+  // but their displayName silently changes to whatever the phishing
+  // page wanted; (2) a refactor that REJECTED unknown fields with
+  // 400 (a "strict API" choice) would silently break scripted
+  // clients that send displayName for compatibility (the documented
+  // "silently ignored" framing means clients SHOULD be safe sending
+  // it, and they will rely on that). The new test exercises the
+  // documented "silently ignored" path: register with one
+  // displayName, login with the same credentials AND a different
+  // displayName in the body, assert (a) login succeeds with 200,
+  // (b) the response's user.displayName is the ORIGINAL value from
+  // register-time (not the value submitted with login), proving
+  // the extra field had zero effect on stored state.
+  test("POST /api/auth/login silently ignores extra displayName field per deploy doc -- login succeeds and the stored displayName remains unchanged from register-time") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Step 1: register with the original displayName "Alice".
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"silent@example.com","password":"correct-horse-battery","displayName":"Alice"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the login-with-extra-field test can run")
+          assertEquals(jsonBody(register)("user")("displayName").str, "Alice",
+            clue = "register response must reflect the submitted displayName 'Alice' -- this is the baseline the post-login assertion compares against")
+
+          // Step 2: login with the same credentials BUT a different
+          // displayName in the body (the "extra field" the deploy
+          // doc says is silently ignored).
+          val login = postJson(s"$baseUri/api/auth/login",
+            """{"email":"silent@example.com","password":"correct-horse-battery","displayName":"BobImposter"}""")
+          assertEquals(login.statusCode(), 200,
+            clue = "login with an extra displayName field must SUCCEED (200) per deploy doc line 100's 'silently ignored' contract -- a refactor that REJECTED unknown fields with 400 (a 'strict API' choice) would silently break scripted clients that send displayName for compatibility")
+
+          // Step 3: assert the response's user.displayName is the
+          // ORIGINAL value (Alice), NOT the value submitted with
+          // login (BobImposter). This is the actual "silently
+          // ignored" contract: the field had zero effect on stored
+          // state.
+          val loginJson = jsonBody(login)
+          assertEquals(loginJson("user")("displayName").str, "Alice",
+            clue = "login response's user.displayName must be the ORIGINAL register-time value 'Alice', NOT the 'BobImposter' value submitted in the login body -- a refactor that started CONSUMING displayName from login would let a phishing page that captures credentials AND submits a hostile displayName silently rewrite the legitimate user's display name on any sign-in attempt (the user signs in normally but their displayName changes to whatever the attacker wanted, with no operator-visible signal that anything happened)")
+        }
+      }
+    }
+  }
+
   test("POST /api/auth/login rejects bodies exceeding the hardcoded 16 KiB cap with 413 + the documented literal error message") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
