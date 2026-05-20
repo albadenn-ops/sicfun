@@ -1303,7 +1303,7 @@ async function submitAuth(path, includeDisplayName) {
     // upload form's `form.addEventListener("submit", ...)` handler
     // above (grep this file for `fileInput.focus()` to land on all
     // three). Line / SHA references intentionally omitted: the
-    // anchor previously cited "near line 226 (commit de7d982)" but
+    // anchor previously cited "near line 226 (a specific commit)" but
     // line 226 has since drifted to a completely unrelated function
     // (showBootError) -- symbol-name references survive that rot.
     if (!email && authEmail) {
@@ -1533,8 +1533,10 @@ async function logout() {
     // browser moves focus to document.body. A keyboard / screen-reader
     // user would then have to Tab through skip-link + brand + nav
     // links before reaching the now-visible sign-in form -- a real
-    // "where did focus go?" disruption matching the pattern Remove-on-
-    // recent-runs fixed in 6ba388b. Move focus to authEmail, the first
+    // "where did focus go?" disruption matching the pattern the
+    // Remove-on-recent-runs handler later in this file already
+    // closes (grep for `hallRecentList` Remove-button focus
+    // restoration). Move focus to authEmail, the first
     // interactive element on the now-visible auth form, so they can
     // continue working without the Tab re-entry penalty. authEmail is
     // always rendered post-logout in platform-user mode (basic-auth
@@ -2627,7 +2629,8 @@ function formatPercent(value) {
 
 function formatFileSize(bytes) {
   // Routes through the same coerceNumber helper as the format* group
-  // above (added af13670). The earlier `Number(bytes) || 0` short-circuit
+  // above (grep for `function coerceNumber` in this file). The earlier
+  // `Number(bytes) || 0` short-circuit
   // caught NaN (falsy → falls back to 0), but Infinity is truthy + non-
   // zero and would have leaked through as `"Infinity MB"`. In practice
   // bytes comes from the File API's `file.size` which is always a
@@ -3147,7 +3150,8 @@ function renderRecentRuns() {
     // is what the server actually emitted; Number coerces a missing /
     // null value to NaN which Number.isFinite then catches, falling
     // back to 0. Same partial-vs-no-data distinction the hall-status
-    // panel badge got in 594e7de, applied to the historical record.
+    // panel badge applies (grep `renderHallStatus` for the parallel
+    // handsPlayed-coerce path), applied to the historical record.
     const cancelCaptured = Number(entry.summary && entry.summary.handsPlayed);
     const cancelCapturedHands = Number.isFinite(cancelCaptured) && cancelCaptured > 0 ? cancelCaptured : 0;
     const metaLine = cancelled
@@ -3382,9 +3386,13 @@ function finishHallProgress() {
   // button lives inside this card), the browser would drop focus to
   // document.body once the region becomes display:none. A keyboard /
   // screen-reader user would then have to Tab from the very top of
-  // the page to reach anything useful. Match the logout-focus-restore
-  // pattern from 948fccc: check if we own the active focus before
-  // hiding, and if so move it to the hall submit button -- the
+  // the page to reach anything useful. Match the logout's
+  // `authEmail.focus()` focus-restore pattern (grep this file for
+  // `authEmail.focus()` to land on the post-logout call site, which
+  // applies the same "did we own the focus that's about to disappear"
+  // gate before moving focus to the next sensible target): check if
+  // we own the active focus before hiding, and if so move it to the
+  // hall submit button -- the
   // natural next action after a cancelled or completed run. By this
   // point setHallSubmitting(false) has already run from the parent
   // finally block, so the submit button is enabled and a sensible
