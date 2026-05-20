@@ -3764,6 +3764,118 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented startedAtEpochMs + completedAtEpochMs lifecycle
+  // fields on terminal poll responses. Deploy doc line 77 documents
+  // the GET /api/analyze-hand-history/jobs/{id} response shape:
+  // "Returns 200 with status=queued / running / completed / failed,
+  // the universal fields jobId / statusUrl / submittedAtEpochMs /
+  // startedAtEpochMs / completedAtEpochMs (the latter two are null
+  // until the worker reaches each transition)". The 94150cb fire
+  // pinned the 202 body's jobId / submittedAtEpochMs / pollAfterMs;
+  // this fire pins the two GET-poll-only timing fields plus the
+  // SUBMIT-TIME-LE-STARTED-TIME-LE-COMPLETED-TIME ordering invariant
+  // operators chart against. Why this matters operationally:
+  // dashboards correlating fleet-wide submit→complete latency
+  // (the deploy doc explicitly suggests "chart submit→start latency,
+  // completion-rate, timeout-rate, and queue depth from the audit
+  // log alone") key on the values produced by completedAt -
+  // submittedAt; a refactor that swapped the orderings (e.g.
+  // assigned completedAtEpochMs at submit time and startedAtEpochMs
+  // at worker-completion time) would silently chart negative
+  // latencies AND defeat the alerting rules that compare these
+  // values. New test submits to /api/analyze-hand-history via a
+  // BlockingBackend (lets us control worker timing deterministically),
+  // captures a wall-clock window around the submission for the
+  // submittedAtEpochMs assertion (same pattern as 94150cb), waits
+  // for the backend to start + releases it + awaits the terminal
+  // state, then asserts: (1) both startedAtEpochMs + completedAtEpochMs
+  // are NON-NULL in the terminal state (documented "null until
+  // transition" contract -- both transitions HAVE happened by the
+  // time the response surfaces "completed"), (2) submittedAt <=
+  // startedAt <= completedAt (the ordering operators chart against),
+  // and (3) all three values are within a reasonable wall-clock
+  // window of the test's measurements (catches a refactor that
+  // accidentally produced epoch-millis from a different time source
+  // like Date.now() vs System.currentTimeMillis() at different
+  // points). Same per-endpoint asymmetric-drift pattern as 94150cb
+  // -- covers both /api/analyze-hand-history and /api/playing-hall
+  // since the lifecycle-field contract is documented as identical
+  // across the two endpoints.
+  test("terminal poll response carries non-null startedAtEpochMs + completedAtEpochMs with submitted <= started <= completed ordering on both submission endpoints") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      val playingHallBackend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, backend = backend, playingHallBackend = playingHallBackend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // /api/analyze-hand-history lifecycle test.
+        val analyzeStart = System.currentTimeMillis()
+        val analyzeSubmit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(analyzeSubmit.statusCode(), 202)
+        val analyzeStatusUri = s"$baseUri${jsonBody(analyzeSubmit)("statusUrl").str}"
+        assert(backend.started.await(3, TimeUnit.SECONDS), "analyze backend never started")
+        backend.release.countDown()
+        val analyzeTerminal = awaitTerminalJob(analyzeStatusUri)
+        val analyzeEnd = System.currentTimeMillis()
+
+        assertEquals(analyzeTerminal("status").str, "completed",
+          clue = "analyze backend must reach terminal completed state for the lifecycle-field assertions to apply")
+        // Non-null contract: the documented "null until the worker
+        // reaches each transition" means BOTH transitions have
+        // happened by the time the response surfaces "completed",
+        // so both fields MUST be non-null in this branch.
+        assert(analyzeTerminal("startedAtEpochMs") != ujson.Null,
+          s"analyze terminal-state startedAtEpochMs must be non-null per deploy doc line 77 -- a refactor that left it null on the terminal response would silently break dashboards charting submit→start latency (the documented operator metric); got: ${analyzeTerminal("startedAtEpochMs")}")
+        assert(analyzeTerminal("completedAtEpochMs") != ujson.Null,
+          s"analyze terminal-state completedAtEpochMs must be non-null per deploy doc line 77 -- a refactor that left it null on the terminal response would silently break submit→complete latency dashboards AND the JobQueue's durationMs computation in the `job completed` log line (line ~322 emits the diff completedAt minus startedAt as durationMs=); got: ${analyzeTerminal("completedAtEpochMs")}")
+
+        // Ordering invariant: submitted <= started <= completed.
+        // Operators chart submit→start (queue-wait latency) and
+        // start→complete (worker-run latency) using these values;
+        // a refactor that swapped any of the three values across
+        // assignment sites would silently produce negative-latency
+        // numbers and break alerting.
+        val analyzeSubmitted = analyzeTerminal("submittedAtEpochMs").num.toLong
+        val analyzeStarted = analyzeTerminal("startedAtEpochMs").num.toLong
+        val analyzeCompleted = analyzeTerminal("completedAtEpochMs").num.toLong
+        assert(analyzeSubmitted <= analyzeStarted,
+          s"analyze terminal-state must have submittedAt <= startedAt -- queue-wait latency = startedAt - submittedAt cannot be negative; got submitted=$analyzeSubmitted started=$analyzeStarted (diff=${analyzeStarted - analyzeSubmitted})")
+        assert(analyzeStarted <= analyzeCompleted,
+          s"analyze terminal-state must have startedAt <= completedAt -- worker-run latency = completedAt - startedAt cannot be negative; got started=$analyzeStarted completed=$analyzeCompleted (diff=${analyzeCompleted - analyzeStarted})")
+        // All three values within the wall-clock window of the test
+        // (with 100ms slack for clock skew / GC pauses).
+        assert(analyzeSubmitted >= analyzeStart - 100 && analyzeCompleted <= analyzeEnd + 100,
+          s"analyze lifecycle epoch-millis must fall within [${analyzeStart - 100}, ${analyzeEnd + 100}] window of the test's wall-clock around the submission/terminal cycle -- a value outside the window would suggest the server is using a different clock source than System.currentTimeMillis() (e.g. accidentally using Date.now() from a different process or a stale cache); got submitted=$analyzeSubmitted completed=$analyzeCompleted")
+
+        // /api/playing-hall lifecycle test (mirror of analyze).
+        val hallStart = System.currentTimeMillis()
+        val hallSubmit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(hallSubmit.statusCode(), 202)
+        val hallStatusUri = s"$baseUri${jsonBody(hallSubmit)("statusUrl").str}"
+        assert(playingHallBackend.started.await(3, TimeUnit.SECONDS), "hall backend never started")
+        playingHallBackend.release.countDown()
+        val hallTerminal = awaitTerminalJob(hallStatusUri)
+        val hallEnd = System.currentTimeMillis()
+
+        assertEquals(hallTerminal("status").str, "completed",
+          clue = "hall backend must reach terminal completed state")
+        assert(hallTerminal("startedAtEpochMs") != ujson.Null,
+          s"hall terminal-state startedAtEpochMs must be non-null (symmetric with analyze); got: ${hallTerminal("startedAtEpochMs")}")
+        assert(hallTerminal("completedAtEpochMs") != ujson.Null,
+          s"hall terminal-state completedAtEpochMs must be non-null (symmetric with analyze); got: ${hallTerminal("completedAtEpochMs")}")
+        val hallSubmitted = hallTerminal("submittedAtEpochMs").num.toLong
+        val hallStarted = hallTerminal("startedAtEpochMs").num.toLong
+        val hallCompleted = hallTerminal("completedAtEpochMs").num.toLong
+        assert(hallSubmitted <= hallStarted,
+          s"hall must have submittedAt <= startedAt; got submitted=$hallSubmitted started=$hallStarted")
+        assert(hallStarted <= hallCompleted,
+          s"hall must have startedAt <= completedAt; got started=$hallStarted completed=$hallCompleted")
+        assert(hallSubmitted >= hallStart - 100 && hallCompleted <= hallEnd + 100,
+          s"hall lifecycle epoch-millis must fall within [${hallStart - 100}, ${hallEnd + 100}] wall-clock window; got submitted=$hallSubmitted completed=$hallCompleted")
+      }
+    }
+  }
+
   // Pin the three unpinned fields in the documented 202 submission
   // body shape: jobId, submittedAtEpochMs, pollAfterMs. Deploy doc
   // line 66 documents the full 5-field body shape ("jobId, status
