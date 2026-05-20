@@ -3688,9 +3688,23 @@ class HandHistoryReviewServerTest extends FunSuite:
             // Unknown-state case now needs the state cookie to clear the
             // covert-redirect check FIRST so the underlying "state expired or
             // invalid" finishOidc error is what surfaces in the redirect.
+            // Tighten the expected substring from the original loose "OIDC"
+            // (which would match ANY auth_error response since they all
+            // mention OIDC) to the full documented finishOidc Left value
+            // URL-encoded: a refactor that changed the wording to e.g.
+            // "OIDC state not found" or "Login state expired" would pass
+            // the loose "OIDC" check but silently miss the frontend's
+            // OIDC_ERROR_MESSAGES exact-match lookup at site.js line 1597
+            // ("OIDC login state expired or is invalid": "Your sign-in
+            // took too long or was already completed in another tab.
+            // Please try again."), making the user see the raw fallback
+            // text instead of the friendly translation; URL-encoded form
+            // matches the documented serialization (urlEncode replaces +
+            // with %20). Same exact-string pinning rationale as 44c9f9f's
+            // "already%20exists" assertion for the email-collision Left.
             ("?state=this-state-was-never-issued&code=xyz",
               Map("Cookie" -> "sicfun_oidc_state=this-state-was-never-issued"),
-              "OIDC")
+              "OIDC%20login%20state%20expired%20or%20is%20invalid")
           )
           for (query, headers, expectedSubstring) <- cases do
             val resp = get(s"$baseUri${provider.callbackPath}$query", headers)
