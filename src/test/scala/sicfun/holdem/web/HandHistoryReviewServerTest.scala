@@ -870,6 +870,86 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented logout cookie-clear behavior. handleAuthLogout
+  // calls service.revokeSession(cookieHeader(exchange)) and emits the
+  // returned `clearedCookie` value as a Set-Cookie header on the 200
+  // response (see AuthStack.scala's handleAuthLogout at line ~197).
+  // The clearedCookie shape (PlatformUserAuth's clearSessionCookieHeader
+  // at line ~1335) is `sicfun_session=; Path=/; Max-Age=0; HttpOnly;
+  // SameSite=Lax` (with `Secure` added in secure mode and a __Host-
+  // prefix on the cookie name) -- the empty value + Max-Age=0 are the
+  // RFC 6265 sec 4.1.2.2 "delete this cookie" wire form that browsers
+  // honor by removing the cookie from their store.
+  // Operationally relevant for shared-computer / kiosk deployments:
+  // a user signing out at a kiosk expects the next person sitting
+  // down to NOT see their session cookie in their browser. Without
+  // the cookie-clear, the next user would have the stale cookie
+  // sitting in their browser; the server-side record IS revoked so
+  // the cookie wouldn't resolve to a session (any request would
+  // surface as anonymous + 401 on protected routes), but the cookie
+  // bytes would still be there until the original Max-Age expires
+  // (default 12h FIXED at login time), AND a deployment with future
+  // refactoring that added server-side session resurrection (e.g.
+  // session-store-on-disk recovery after a restart) would silently
+  // create a security hole if the cookie clear was simultaneously
+  // dropped. Pinning the clear cookie in the logout response
+  // catches the regression where a refactor removed the Set-Cookie
+  // emission (or set Max-Age to a non-zero value, or used the wrong
+  // cookie name in the clear so the browser keeps the old one
+  // alongside the new clear-attempted one). The existing logout
+  // test at the "user auth supports local registration ..." block
+  // (line ~2712) only checks the 200 status + body.authenticated=false;
+  // this test adds the cookie-clear assertion to that gap.
+  // Same regression-pin pattern as b017951 (no-Set-Cookie on
+  // follow-up requests), bd8e7f3 (session cookie Max-Age=43200
+  // at login), 72358a3 (secure-mode session cookie symmetric).
+  test("POST /api/auth/logout response clears the session cookie with Max-Age=0 so kiosk / shared-computer sign-outs don't leave the cookie in the next user's browser") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"signoff@example.com","password":"correct-horse-battery","displayName":"SignOff"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the logout cookie-clear can be checked")
+          val ownerHeaders = authSessionHeaders(register, jsonBody(register)("csrfToken").str)
+
+          val logout = postJson(s"$baseUri/api/auth/logout", "{}", ownerHeaders)
+          assertEquals(logout.statusCode(), 200,
+            clue = "logout must succeed (200) so the documented post-signout state-clear emits the cookie-clear header alongside the JSON body")
+
+          val setCookie = headerValue(logout, "Set-Cookie")
+            .getOrElse(fail("logout response must include Set-Cookie header (carrying the cookie-clear wire form per PlatformUserAuth.clearSessionCookieHeader); without it, browsers don't delete the existing session cookie and shared-computer sign-outs leak the cookie to the next user"))
+
+          // The cookie-clear wire form per RFC 6265 sec 4.1.2.2: empty
+          // value + Max-Age=0. Both halves are necessary -- empty value
+          // alone with a positive Max-Age would set an empty-string
+          // cookie that the browser stores and sends on future
+          // requests (defeating the clear); Max-Age=0 alone with a
+          // non-empty value would still tell the browser to delete
+          // but would leak the value bytes in the immediate response
+          // header (less critical but documentationally inconsistent).
+          // Insecure-mode cookie name is plain `sicfun_session`; the
+          // secure-mode `__Host-sicfun_session` prefix is tested in the
+          // secure-mode session-cookie test (72358a3).
+          assert(setCookie.startsWith("sicfun_session="),
+            s"logout cookie-clear must use plain `sicfun_session=` prefix in insecure mode (Test config has no cookieSecure override); got: $setCookie")
+          assert(setCookie.contains("Max-Age=0"),
+            s"logout cookie-clear must contain Max-Age=0 (RFC 6265 sec 4.1.2.2 'delete this cookie' wire form) so browsers actually remove the cookie from their store; without Max-Age=0 the cookie persists until its original Max-Age expires (default 12h FIXED at login), leaving stale session cookies in shared-computer browsers for the next user; got: $setCookie")
+          // Verify the empty-value half: between `sicfun_session=` and
+          // the next `;` there should be nothing (no leaked value).
+          val valuePortion = setCookie.takeWhile(_ != ';').drop("sicfun_session=".length)
+          assertEquals(valuePortion, "",
+            clue = s"logout cookie-clear must carry an empty value (not the old session token bytes) so the browser overwrites with a non-resolvable form; got cookie value: '$valuePortion' in $setCookie")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
