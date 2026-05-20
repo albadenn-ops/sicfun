@@ -2054,6 +2054,43 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(healthJson("host").str, server.binding.host)
         assertEquals(healthJson("port").num.toInt, server.binding.port)
         assertEquals(healthJson("modelSource").str, "uniform fallback")
+        // Pin the documented `modelConfigured` boolean field that the
+        // deploy doc explicitly names as the operator-tooling
+        // alternative to the masked `modelSource` string. The deploy
+        // doc's section on MODEL_DIR documents both fields side-by-side:
+        // `modelSource` carries the masked form ("uniform fallback" /
+        // "configured artifact dir") so dashboards can flag the
+        // unconfigured case via a string compare WITHOUT tying alert
+        // rules to the operator's filesystem layout, AND `modelConfigured`
+        // carries the same information as a `bool == false` alert
+        // condition for dashboards that prefer boolean alerting over
+        // string compares -- the doc says "a parallel boolean field
+        // `modelConfigured` ... ships in the same /api/health response
+        // so a dashboard preferring a `bool == false` alert condition
+        // over a string compare can use either". The TWO fields are
+        // semantically redundant by design (they encode the same
+        // "is MODEL_DIR set?" question with different types), and the
+        // deploy doc commits to keeping them in sync; a refactor that
+        // dropped `modelConfigured` because "modelSource already says
+        // it" would silently break every dashboard wired with the
+        // bool == false alert rule -- the dashboards would lose ALL
+        // signal (a missing JSON field reads as null on most query
+        // engines, which is neither true nor false, so the alert rule
+        // matches neither branch). The `/api/health`-only scoping (per
+        // the deploy doc: "modelConfigured is /api/health-only and is
+        // NOT echoed by /api/ready") is intentional and unverified
+        // here -- the assertion below covers presence in /api/health;
+        // a future fire can add the absence-from-/api/ready
+        // companion if asymmetric-drift coverage becomes important.
+        // Value is `false` because the test's withServer config does
+        // NOT set modelDir, matching the "uniform fallback" branch
+        // above; a refactor changing the default for `modelConfigured`
+        // when modelDir is unset (e.g. defaulting to `true` because
+        // the analyze fallback IS technically a model) would silently
+        // break the deploy-doc invariant that the two fields move
+        // together.
+        assertEquals(healthJson("modelConfigured").bool, false,
+          clue = s"/api/health must surface modelConfigured=false when MODEL_DIR is unset, per the deploy doc's MODEL_DIR section that documents this boolean as the dashboard-alert alternative to the masked modelSource string; a refactor that dropped this field or flipped its default would silently break every dashboard keying on `modelConfigured == false` for unconfigured-instance alerts; got: ${healthJson("modelConfigured")}")
         assertEquals(healthJson("drainSignalPresent").bool, false)
         assertEquals(healthJson("maxUploadBytes").num.toInt, 64)
         assertEquals(healthJson("analysisTimeoutMs").num.toLong, 120000L)
