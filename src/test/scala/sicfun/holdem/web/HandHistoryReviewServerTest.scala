@@ -3927,6 +3927,63 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin CSRF enforcement on POST /api/analyze-hand-history --
+  // continuing the CSRF-sweep: e6e0961 closed /profile, eef3779
+  // closed /playing-hall POST, this commit closes the analyze-submit
+  // companion. The analyze + hall submit endpoints share the same
+  // CSRF gate shape, so pinning both as a pair (not just one) catches
+  // an asymmetric refactor that touched only one branch -- e.g. a
+  // hypothetical "let's loosen analyze CSRF for the embedded-iframe
+  // use case nobody asked for" change would silently re-open the
+  // analyze-submit CSRF hole while the eef3779 hall-POST pin kept
+  // passing. The analyze-CSRF attack shape differs from hall in
+  // duration but not in compounding harms: a cross-origin
+  // attacker spawning analyze jobs against the victim's session
+  // still burns the same RATE_LIMIT_SUBMITS_PER_MINUTE bucket
+  // (analyze and hall SHARE the submit bucket per deploy doc's
+  // bucket description), eats CPU on the analyze worker pool,
+  // and pollutes the victim's job-history retention window;
+  // the 2-min default ANALYSIS_TIMEOUT_MS (per deploy doc line 364)
+  // means each attacker-spawned job ties up resources for a
+  // shorter window than hall, but still impactful in a
+  // submit-storm scenario. With both submit-endpoint CSRF tests in
+  // place, two of the four originally-uncovered routes remain
+  // (POST /api/auth/logout and... actually, only logout: this
+  // commit closes analyze, so just /logout remains for a final
+  // future fire to close the full quintuplet).
+  test("POST /api/analyze-hand-history enforces CSRF under platform-user auth -- pins the documented X-CSRF-Token requirement on the analyze-submission endpoint, paired with eef3779's /playing-hall CSRF pin") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"analyze-submit-csrf@example.com","password":"correct-horse-battery","displayName":"Tester"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the CSRF gate can be exercised")
+          val registerJson = jsonBody(register)
+          val ownerHeaders = authSessionHeaders(register, registerJson("csrfToken").str)
+
+          // POST WITHOUT X-CSRF-Token (cookie-only, canonical
+          // cross-origin attack shape) must 403.
+          val cookieOnly = Map("Cookie" -> sessionCookie(register))
+          val withoutCsrf = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, cookieOnly)
+          assertEquals(withoutCsrf.statusCode(), 403,
+            clue = s"POST /api/analyze-hand-history WITHOUT X-CSRF-Token must return 403 -- without this gate a cross-origin attacker could spawn analyze jobs against any victim with an active session, burning the SHARED RATE_LIMIT_SUBMITS_PER_MINUTE bucket (analyze and hall share the submit bucket) and tying up worker pool slots; got: ${withoutCsrf.statusCode()}")
+          assert(jsonBody(withoutCsrf)("error").str.toLowerCase.contains("csrf"),
+            clue = s"CSRF rejection error message must mention 'csrf' (audit log greps for `request forbidden ... reason=csrf-missing-or-invalid`); got error: ${jsonBody(withoutCsrf)("error").str}")
+
+          // WITH X-CSRF-Token: 202 Accepted (submit-success shape).
+          val withCsrf = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, ownerHeaders)
+          assertEquals(withCsrf.statusCode(), 202,
+            clue = "POST /api/analyze-hand-history WITH X-CSRF-Token must return 202 Accepted (the documented submit-success shape) -- proves the 403 above came from the CSRF gate specifically, not auth-missing (401) or rate-limit (429) or queue-full (503)")
+        }
+      }
+    }
+  }
+
   // Pin CSRF enforcement on POST /api/playing-hall -- continuing the
   // CSRF-triplet sweep started by e6e0961 (which closed the /profile
   // branch). This commit closes the second of the 4 originally-
