@@ -2151,6 +2151,46 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(readyJson("rateLimitAuthPerMinute").num.toInt, 10)
         assertEquals(readyJson("rateLimitClientIpSource").str, "remote-address")
         assertEquals(readyJson("timedOutWorkersInFlight").num.toInt, 0)
+        // Pin the documented asymmetric scoping of `modelConfigured`:
+        // the deploy doc EXPLICITLY commits to "/api/health-only and
+        // is NOT echoed by /api/ready" -- the boolean field surfaces
+        // on /api/health for dashboard alerting on misconfigured
+        // instances (pinned at line ~2057 by the modelConfigured
+        // health pin), but /api/ready intentionally OMITS it because
+        // /api/ready is the load-balancer / orchestrator probe whose
+        // contract is narrower (just "is this instance ready to
+        // accept traffic"), and the model-configuration question is
+        // an OPERATOR-side concern (dashboards / alerts), not an
+        // orchestrator-side concern (LB membership / pod readiness).
+        // Without this absence pin, a refactor that "mirrored" the
+        // field into /api/ready as a harmless additive change would
+        // silently break the deploy-doc invariant -- and the change
+        // would NOT be detected by the existing modelConfigured
+        // health pin (that pin only asserts presence on /api/health,
+        // it says nothing about /api/ready). The drift vector is
+        // non-zero because the natural refactor reflex on a "field
+        // should be everywhere" intuition is to mirror, and a
+        // maintainer reading Readiness.scala's two adjacent
+        // renderHealth / renderReadiness functions (lines 57 and
+        // 116 in the source) might assume the divergence is a bug
+        // and "fix" it. The assertion uses `.obj.contains("modelConfigured")`
+        // against the underlying mutable.LinkedHashMap rather than
+        // `.isNull` (which is the documented form for fields that
+        // are present-but-null on basic-auth / no-auth modes like
+        // userAuthMaxUsers per line 579's `assert(health("userAuthMaxUsers").isNull)`)
+        // -- the two are semantically different: present-but-null
+        // means the key is in the JSON with a null value (the
+        // frontend can iterate the response, find the key, and act
+        // on the explicit null), while ABSENT means the key isn't
+        // there at all (the frontend would get `undefined` on a
+        // property access). The deploy doc says NOT ECHOED which
+        // is the absence case, not the null case -- mirroring it
+        // as `null` would also be a refactor regression because
+        // a `bool == false` dashboard query (the documented
+        // alerting pattern for the health field) would FAIL on a
+        // null value on most query engines.
+        assert(!readyJson.obj.contains("modelConfigured"),
+          clue = s"/api/ready must NOT echo `modelConfigured` per the deploy doc's explicit '/api/health-only and is NOT echoed by /api/ready' framing -- the field is documented as an operator-side dashboard signal (not an orchestrator-side readiness signal), and a refactor that mirrored it into /api/ready as a harmless additive change would silently widen the documented contract; if this test fails, either the deploy doc needs an update to allow the mirror OR the renderReadiness function should be reverted to drop the field; got readyJson keys: ${readyJson.obj.keys.toVector.sorted.mkString(", ")}")
 
         val index = get(s"$baseUri/")
         assertEquals(index.statusCode(), 200)
