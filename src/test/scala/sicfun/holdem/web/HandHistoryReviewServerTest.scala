@@ -3472,7 +3472,27 @@ class HandHistoryReviewServerTest extends FunSuite:
           assertEquals(me("authenticated").bool, true)
           assertEquals(me("user")("email").str, "oidc@example.com")
           assertEquals(me("user")("displayName").str, "OIDC User")
-          assert(me("user")("linkedProviders").arr.toVector.map(_.str).contains("google"))
+          // Tighten the linkedProviders assertion from the original
+          // loose `.contains("google")` to an exact-equality check
+          // against Vector("google"). The loose check would pass even
+          // if a refactor accidentally added extra entries (e.g. if
+          // the email-collision defense weakened to allow OIDC+local
+          // dual-linking, the array might become ["google", "local"]
+          // -- the contains check would still pass, hiding the
+          // documented "mutually exclusive on a given account"
+          // contract violation pinned by 44c9f9f's email-collision
+          // test). The equality form matches the local-password
+          // companion pin in 132b9be (which uses exactly the same
+          // shape `assertEquals(linkedProviders, Vector("local"))`
+          // for the local-side branch) -- pinning both branches with
+          // equality now means a refactor that altered the
+          // mutually-exclusive invariant would fail BOTH tests
+          // (linkedProviders array contents on local-only-user fire
+          // AND OIDC-only-user fire), forcing the maintainer to
+          // acknowledge the change explicitly.
+          val oidcLinkedProviders = me("user")("linkedProviders").arr.toVector.map(_.str)
+          assertEquals(oidcLinkedProviders, Vector("google"),
+            clue = s"OIDC-signed-in user's linkedProviders must equal exactly ['google'] per deploy doc line 101's 'mutually exclusive on a given account' contract -- a refactor that allowed dual-linking (e.g. linkedProviders=['google','local']) would silently violate the email-collision defense (pinned by 44c9f9f) AND break the runbook's 'Forgotten-password support triage' (section 5A line 339) which assumes operators can identify OIDC-only vs local-password accounts via this field; got: $oidcLinkedProviders")
         }
       }
     }
