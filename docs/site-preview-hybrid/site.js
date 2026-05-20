@@ -1070,7 +1070,9 @@ function updateUploadAvailability() {
   });
   if (submitButton) {
     // Same in-flight-pinning preservation as the hallSubmitButton block
-    // below (c6587e6 + 7eb3251). analyzeInFlight is set true by
+    // below (the pair of earlier fixes that closed the concurrent-
+    // submit race + the validateHallForm-vs-poll-phase clobber).
+    // analyzeInFlight is set true by
     // setSubmitting(true) at submit-handler entry and stays true until
     // the handler's finally block runs setSubmitting(false). If
     // updateUploadAvailability fires in between (auth probe completion,
@@ -1128,7 +1130,7 @@ function updateUploadAvailability() {
     // run), and the text resets from "Running Hall..." to "Run
     // Playing Hall" -- both signals telling the user the run is over
     // when it isn't, AND opening the same concurrent-submit race
-    // 7eb3251 fixed in validateHallForm. Skip the in-flight case so
+    // an earlier fix to validateHallForm closed. Skip the in-flight case so
     // setHallSubmitting's pinning survives auth-state churn at every
     // stage (POST window + poll window). The submit-handler's finally
     // block will overwrite this freshly once both flags clear.
@@ -1758,7 +1760,9 @@ function jsonHeaders(includeCsrf) {
 // closure, no DELETE-cancel path that would need a shared identifier).
 // Instead, setSubmitting writes this flag so updateUploadAvailability
 // can decide whether to clobber the button's mid-flight pinning -- the
-// same fix shape c6587e6 applied to the hall path. False at module
+// same fix shape as the hall path's parallel in-flight-preservation
+// guard above (which keys on `hallActiveJobId !== null ||
+// hallSubmittingPending`). False at module
 // init, flipped true by setSubmitting(true) at submit-handler entry,
 // flipped back to false by setSubmitting(false) in the handler's
 // finally block. Module-level scope (not nested in the submit handler
@@ -1781,7 +1785,7 @@ function setSubmitting(isSubmitting) {
 
 // In-flight flag for the hall submit POST window. hallActiveJobId
 // (set by startHallElapsed once the server returns body.jobId, read by
-// validateHallForm + updateUploadAvailability per 7eb3251 / c6587e6)
+// validateHallForm + updateUploadAvailability as the in-flight signal)
 // is the in-flight signal during the POLL phase, but it's NULL during
 // the 100ms-2s POST round-trip that sits BETWEEN setHallSubmitting(true)
 // and startHallElapsed. A user typing into a hall form field during
