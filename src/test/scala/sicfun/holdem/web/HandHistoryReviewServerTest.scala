@@ -1905,6 +1905,182 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `auth.oidc.success` audit line format -- the
+  // LAST of the 5 SUCCESS-side auth-event formats deploy doc line
+  // 218 documents (1c8777f auth.logout, 49dcf46 auth.login.success,
+  // 3a6fea4 auth.register.success, 976d7ad auth.oidc.start were the
+  // first four); this commit closes the final success-side audit
+  // event AND the OIDC pair coverage (auth.oidc.start +
+  // auth.oidc.success). The auth.oidc.success event is operationally
+  // unique among the 5 events because it carries BOTH the
+  // `provider=` field (like auth.oidc.start) AND the `email=` field
+  // (like the local-auth events) -- per deploy doc line 218: "on
+  // the local-auth events ... and the post-callback
+  // auth.oidc.success -- an email= field"; this is the ONLY event
+  // type that carries BOTH fields, making it the CROSS-CORRELATION
+  // anchor between the per-IP brute-force triage (which keys on
+  // remote= + provider= for OIDC events) and the per-user incident
+  // analysis (which keys on email= across login/register/logout/
+  // oidc.success events). The OIDC success line closes the runbook's
+  // "users start, never finish" triage signature from the OPPOSITE
+  // direction the auth.oidc.start pin (976d7ad) closes it: start
+  // pins the COUNTER-INCREMENT-LOG-LINE pair, success pins the
+  // COUNTER-DECREMENT-LOG-LINE pair, so the runbook's "stream of
+  // auth.oidc.success / auth.oidc.failure log lines" half of the
+  // signature ("counting up steadily ... WITHOUT a corresponding
+  // stream of ...") is now fully test-pinned -- a refactor breaking
+  // EITHER the start emission OR the success emission would
+  // silently invalidate the triage from a different angle, and the
+  // two pins together catch both regressions; per-field regression
+  // vectors SPECIFIC to auth.oidc.success that the other 4 success-
+  // side pins don't catch: (i) refactor swapping the field order
+  // (e.g. "email=<x> provider=<y> remote=<z>" instead of
+  // "provider=<y> email=<x> remote=<z>") -- the deploy doc doesn't
+  // commit to field order explicitly but operator parsing tools
+  // built on `awk '/auth\.oidc\.success/{ print $3 }'` style
+  // positional access WOULD silently break; the test doesn't pin
+  // exact field order to avoid over-constraining (per the JSON-
+  // shape pinning convention this branch follows, ordering is a
+  // weaker contract than presence), so this regression is
+  // intentionally NOT caught here -- a future fire could add an
+  // exact-position assertion if operator tooling becomes order-
+  // dependent, (ii) refactor swapping `result.user.email` for the
+  // raw OidcIdentity.email returned by exchangeCode (at AuthStack.
+  // scala line 382, both fields are accessible via result.user vs
+  // the exchangeCode return value) would silently emit the
+  // PRE-NORMALIZATION userinfo email instead of the post-
+  // normalization canonical -- the FakeOidcProvider in this test
+  // returns already-canonical "oidc@example.com" so this regression
+  // wouldn't be caught here; a future fire COULD add a
+  // MixedCaseOidcProvider whose exchangeCode returns
+  // "OIDC@Example.COM" to exercise the canonical-from-userinfo
+  // contract specifically (deploy doc line 218 commits to canonical
+  // normalization for ALL success lines including auth.oidc.success
+  // -- the same pipeline applies), (iii) refactor consolidating
+  // login.success + oidc.success behind a single helper using the
+  // wrong field set (e.g. omitting provider= because login.success
+  // doesn't have it) would silently break operator queries that
+  // filter by provider= for OIDC-specific incident analysis -- the
+  // 6-tier format check here AND the parallel check on
+  // auth.oidc.start (976d7ad) together force any consolidation
+  // refactor to handle BOTH the with-email AND without-email
+  // shapes correctly; 6-tier format check: (i) `auth.oidc.success`
+  // event prefix, (ii) `provider=google` (lowercase id matching
+  // auth.oidc.start's pin -- so a refactor that broke the id
+  // resolution would fail BOTH OIDC pins simultaneously), (iii)
+  // `email=oidc@example.com` field PRESENCE (the OPPOSITE of
+  // auth.oidc.start's `!email=` ABSENCE check -- this event is the
+  // FIRST OIDC event in the flow that has a resolved user identity,
+  // and the email= field is what closes the loop from "OIDC start
+  // hasn't yielded an email yet" to "OIDC callback completed, user
+  // identified"), (iv) `[INFO]` level (catches demote-to-DEBUG),
+  // (v) `remote=` field (per "remote= on every auth.* event"), (vi)
+  // `[hand-history-review]` service-tag prefix; test reuses
+  // FakeOidcProvider which returns email="oidc@example.com" (already
+  // canonical) at line ~7486 -- the existing /start + /callback
+  // round-trip from the userAuthPendingOidcFlows test at line ~712
+  // is the template the new test follows; capture stdout AROUND
+  // THE /CALLBACK GET ONLY, NOT around /start (the /start emission
+  // would pollute the captured stream with auth.oidc.start, which
+  // would still pass the auth.oidc.success.find but would
+  // unnecessarily expose the test to flaky failure if the parsing
+  // logic ever changed); after this commit ALL 5 success-side
+  // audit-event formats are pinned: auth.logout (1c8777f), auth.
+  // login.success (49dcf46), auth.register.success (3a6fea4), auth.
+  // oidc.start (976d7ad), auth.oidc.success (this commit) -- the
+  // deploy doc line 218 enumeration is FULLY closed for the
+  // success side; remaining FAILURE-side gaps for future fires:
+  // auth.oidc.start.failure (single emission, simple format),
+  // auth.oidc.failure (5 emission sites at AuthStack.scala lines
+  // 317/335/352/363/397 each with different reason= values worth
+  // pinning individually for asymmetric-drift -- a refactor
+  // consolidating the failure reasons could silently lose
+  // operator-relevant detail).
+  test("GET /api/auth/oidc/google/callback emits the documented `auth.oidc.success provider=<id> email=<canonical> remote=<peer>` INFO audit line carrying BOTH provider= AND email= fields (per deploy doc line 218's 'on the local-auth events ... and the post-callback auth.oidc.success -- an email= field' contract)") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Drive /start OUTSIDE the capture window so its
+          // auth.oidc.start emission doesn't pollute the captured
+          // stream (which should contain only the auth.oidc.success
+          // emission from /callback). The /start event is pinned in
+          // its own test at line ~1849 (976d7ad) so the round-trip
+          // here doesn't need to re-pin it; running /start OUTSIDE
+          // the capture keeps the captured stream small and focused
+          // on the success-side emission.
+          val start = get(s"$baseUri${provider.startPath}")
+          assertEquals(start.statusCode(), 302,
+            clue = "OIDC /start must return 302 for the subsequent callback to consume the state cookie")
+          val redirect = headerValue(start, "Location").getOrElse(fail("missing OIDC redirect Location header"))
+          val state = queryParam(redirect, "state").getOrElse(fail("missing OIDC state query parameter"))
+          val stateCookie = headerValue(start, "Set-Cookie")
+            .map(_.takeWhile(_ != ';'))
+            .getOrElse(fail("missing OIDC state cookie"))
+
+          // Capture stdout around the /callback GET only. logInfo
+          // writes to System.out per HandHistoryReviewServerRuntime.
+          // scala line 418, so the auth.oidc.success emission at
+          // AuthStack.scala line 382 lands in System.out. The
+          // /callback returns 302 (Redirect to the documented OIDC
+          // success URL); the logInfo runs synchronously BEFORE the
+          // redirect response is built, so by the time the GET
+          // returns the audit line is already flushed.
+          val outBuf = new java.io.ByteArrayOutputStream()
+          val originalOut = System.out
+          System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+          val callback =
+            try get(
+              s"$baseUri${provider.callbackPath}?state=$state&code=test-success-code",
+              Map("Cookie" -> stateCookie)
+            )
+            finally System.setOut(originalOut)
+          assertEquals(callback.statusCode(), 302,
+            clue = s"callback must succeed with valid state + cookie + code -- a non-302 status means the handler exited via an error path (likely emitting auth.oidc.failure instead of auth.oidc.success) which would suppress the success-side audit line this test pins; got: ${callback.statusCode()}")
+
+          val captured = outBuf.toString(StandardCharsets.UTF_8)
+          val successLine = captured.split('\n').iterator
+            .find(_.contains("auth.oidc.success"))
+            .getOrElse(fail(s"no `auth.oidc.success` line in stdout capture -- deploy doc line 218 documents this event as INFO-level fired on every successful OIDC callback completion; if missing, either the logInfo at AuthStack.scala line 382 was suppressed (silent regression invalidating the runbook 'users start, never finish' triage closure) OR the success path didn't run (callback short-circuited to auth.oidc.failure -- check the test setup for stale state-cookie / code-verifier mismatches); got captured stdout: ${captured.take(800)}"))
+
+          // (i) event prefix
+          assert(successLine.contains("auth.oidc.success"),
+            clue = s"OIDC success audit line must carry the literal `auth.oidc.success` event prefix per deploy doc line 218's enumeration; a refactor renaming to e.g. `auth.oidc.complete` would silently break the runbook's 'users start, never finish' triage closure (operator counts auth.oidc.start lines minus auth.oidc.success+failure lines as 'pending'); got: $successLine")
+          // (ii) provider=google (lowercase id, matching auth.oidc.start's pin)
+          assert(successLine.contains("provider=google"),
+            clue = s"OIDC success audit line must carry the provider's `id` (lowercase `google`) in the `provider=` field, matching the auth.oidc.start pin at line ~1849 (976d7ad) so a refactor breaking the id-resolution helper would fail BOTH OIDC pins simultaneously; multi-provider deployments depend on this field to distinguish Google-flow successes from a future second IdP's successes per deploy doc line 218's explicit framing; got: $successLine")
+          // (iii) email= field PRESENCE (opposite of auth.oidc.start's
+          // !email= absence check) -- the load-bearing contract that
+          // makes auth.oidc.success the cross-correlation anchor
+          // between per-IP and per-user triage; FakeOidcProvider
+          // returns email="oidc@example.com" so the audit line MUST
+          // contain that canonical value
+          assert(successLine.contains("email=oidc@example.com"),
+            clue = s"OIDC success audit line MUST carry the `email=` field with the canonical user email from the userinfo response per deploy doc line 218 ('on the local-auth events ... AND the post-callback auth.oidc.success -- an email= field'); the FakeOidcProvider returns email='oidc@example.com' so the audit line must reflect that; a refactor that omitted email= (e.g. 'for consistency with auth.oidc.start which doesn't have email=') would silently break per-user incident analysis (operators couldn't grep auth.oidc.success lines to see WHO completed an OIDC sign-in from a suspicious IP), AND would break the documented contrast between auth.oidc.start (no email) and auth.oidc.success (has email) which is the key signal that the OIDC flow has actually resolved a user identity; got: $successLine")
+          // (iv) INFO level
+          assert(successLine.contains("[INFO]"),
+            clue = s"OIDC success audit line must be INFO-level per deploy doc line 218 ('INFO level for success/expected events'); a refactor demoting to DEBUG would silently invalidate the runbook triage (lines hidden at default log levels), promoting to WARN would silently flood alerting on normal sign-ins; got: $successLine")
+          // (v) remote= field
+          assert(successLine.contains("remote="),
+            clue = s"OIDC success audit line must carry the `remote=` field per deploy doc line 218 ('remote= on every auth.* event'); without this field the per-IP brute-force triage workflow loses its OIDC-side signal (operators counting OIDC failures-per-IP could spot probe behavior, but without remote= on the success side they can't tell when the probe ESCALATED to a successful credential acquisition); got: $successLine")
+          // (vi) service-tag prefix
+          assert(successLine.contains("[hand-history-review]"),
+            clue = s"OIDC success audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- matches /api/health.service (505ba6b) so log aggregators see the same identifier on log lines and probe responses; got: $successLine")
+        }
+      }
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
