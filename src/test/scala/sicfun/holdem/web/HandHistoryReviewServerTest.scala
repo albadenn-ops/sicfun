@@ -2051,6 +2051,38 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(healthJson("acceptingAnalysisJobs").bool, true)
         assertEquals(healthJson("authenticationEnabled").bool, false)
         assertEquals(healthJson("authenticationMode").str, "none")
+        // Pin the documented stable `service` identifier "hand-history-review"
+        // that the deploy doc names as part of the fleet-correlation triple
+        // (service / host / port) operators use to identify which sicfun
+        // instance emitted a given /api/health or /api/ready response in a
+        // multi-service / multi-instance deployment. Deploy doc line 216
+        // documents the /api/health emission ("plus `service`/`host`/`port`/
+        // `startedAtEpochMs`/`uptimeMs` for fleet correlation") and line 217
+        // documents the matching /api/ready emission ("and `service`/`host`/
+        // `port` for fleet correlation"); the SAME literal value
+        // "hand-history-review" ships from both endpoints. A refactor changing
+        // the constant (e.g. renaming to "sicfun-web" or "hand-history-server"
+        // for style consistency with a future second service) would silently
+        // break (a) log-aggregation systems that filter by `service` field
+        // for multi-service deployments, (b) dashboard alerting rules keyed
+        // on a specific service name, (c) operator runbooks that grep
+        // probe-response JSON for the service identifier to confirm "this
+        // log line came from THIS service vs another sicfun module", AND
+        // (d) the documented "service/host/port for fleet correlation"
+        // contract -- a tool wired against the field name would still get
+        // SOMETHING (just the new name), so the failure mode is silent
+        // pivot of every downstream correlation query to "no longer
+        // matches the documented identifier" rather than a hard break.
+        // The matching pin in the /api/ready block below verifies the
+        // SYMMETRIC contract (both endpoints emit the same value); the
+        // two-endpoint pin pattern catches the asymmetric-drift case where
+        // one endpoint's constant gets renamed while the other doesn't
+        // (e.g. a partial refactor that touches renderHealth but misses
+        // renderReadiness in Readiness.scala -- the two functions sit in
+        // the same file at lines 57 and 116, so it's easy to update one
+        // and forget the other).
+        assertEquals(healthJson("service").str, "hand-history-review",
+          clue = s"/api/health must surface service='hand-history-review' per deploy doc line 216's documented fleet-correlation contract -- a refactor renaming the constant would silently break log-aggregation filters, dashboard alerts keyed on service name, and operator runbooks that grep responses for the identifier; got: ${healthJson("service")}")
         assertEquals(healthJson("host").str, server.binding.host)
         assertEquals(healthJson("port").num.toInt, server.binding.port)
         assertEquals(healthJson("modelSource").str, "uniform fallback")
@@ -2140,6 +2172,21 @@ class HandHistoryReviewServerTest extends FunSuite:
         assertEquals(readyJson("acceptingAnalysisJobs").bool, true)
         assertEquals(readyJson("authenticationEnabled").bool, false)
         assertEquals(readyJson("authenticationMode").str, "none")
+        // Mirror of the health-response `service` pin above. Deploy doc
+        // line 217's "/api/ready ... `service`/`host`/`port` for fleet
+        // correlation" framing commits to emitting the SAME stable
+        // identifier on /api/ready as /api/health does. The symmetric
+        // pin pair catches the asymmetric-drift case where one
+        // endpoint's constant gets renamed while the other doesn't
+        // (Readiness.scala has TWO separate hardcoded string literals
+        // -- one at line 88 for renderHealth, one at line 130 for
+        // renderReadiness -- so a partial refactor that touched only
+        // one function would leave the two response shapes
+        // disagreeing on the service identifier, which would silently
+        // confuse any operator tooling that probes BOTH endpoints to
+        // cross-check fleet membership).
+        assertEquals(readyJson("service").str, "hand-history-review",
+          clue = s"/api/ready must surface service='hand-history-review' per deploy doc line 217's documented fleet-correlation contract -- the matching /api/health pin enforces the same value, so this assertion closes the symmetric-pin pair against asymmetric drift between the two adjacent Readiness.scala functions (renderHealth line 57 + renderReadiness line 116, with TWO independent hardcoded string literals at lines 88 and 130); got: ${readyJson("service")}")
         assertEquals(readyJson("analysisTimeoutMs").num.toLong, 120000L)
         // Mirror of the health-response playingHallTimeoutMs pin above.
         // The /api/ready endpoint surfaces the same field (Readiness.scala
