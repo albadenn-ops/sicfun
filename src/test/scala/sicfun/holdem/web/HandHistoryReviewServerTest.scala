@@ -3927,6 +3927,77 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin CSRF enforcement on POST /api/auth/logout -- closes the FINAL
+  // route in the five-route CSRF-protected enumeration per deploy doc
+  // line 103. Coverage status after this commit: DELETE
+  // /api/playing-hall/jobs/{id} (existing line ~3810), POST
+  // /api/auth/profile (e6e0961), POST /api/playing-hall (eef3779),
+  // POST /api/analyze-hand-history (26bf0d7), POST /api/auth/logout
+  // (this commit) -- all five state-changing routes that the deploy
+  // doc enumerates as CSRF-protected now have dedicated rejection
+  // tests, so a future refactor cannot silently drop the CSRF gate
+  // on ANY of them without a CI signal; the logout-CSRF attack shape
+  // is the least severe of the five (lower than profile-tampering,
+  // hall-spawn, analyze-spawn, hall-cancel) but still operationally
+  // disruptive: a cross-origin attacker who can hit the route gets
+  // to forcibly sign the victim out, which (1) interrupts whatever
+  // analyze / hall poll loop the victim's tab was watching (the
+  // next /api/auth/me probe surfaces the session-missing state and
+  // applyAuthState's hide-result-panels logic clears the victim's
+  // in-progress results from view per the 7ddb281 documentation),
+  // (2) burns the victim's RATE_LIMIT_AUTH_PER_MINUTE bucket if the
+  // attacker hits logout repeatedly to chain re-sign-in cycles
+  // (each logout triggers a re-auth attempt that hits the auth
+  // bucket capped at 10/min/IP per the deploy doc), and (3) on a
+  // SHARED-NAT deployment, the auth-bucket exhaustion would block
+  // unrelated NAT-mates from signing in for the rest of the
+  // 60-second window; success path returns 200 (not 202, not 201)
+  // because logout is neither a submission nor a creation -- it's a
+  // session-state transition that completes synchronously, see
+  // AuthStack.scala's handleAuthLogout at line 197 returning
+  // JsonResponse(200, service.authenticationState(None), ...).
+  test("POST /api/auth/logout enforces CSRF under platform-user auth -- closes the final route in the documented five-route CSRF-protected enumeration") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"logout-csrf@example.com","password":"correct-horse-battery","displayName":"Tester"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the logout-CSRF gate can be exercised")
+          val registerJson = jsonBody(register)
+          val ownerHeaders = authSessionHeaders(register, registerJson("csrfToken").str)
+
+          // POST WITHOUT X-CSRF-Token (cookie-only, canonical cross-
+          // origin attack shape) must 403. Logout-CSRF lets an
+          // attacker forcibly sign the victim out via a phishing
+          // page form that auto-POSTs to /api/auth/logout on
+          // top-level navigation (SameSite=Lax passes cookies on
+          // top-level form POSTs, so the CSRF gate is the actual
+          // defense).
+          val cookieOnly = Map("Cookie" -> sessionCookie(register))
+          val withoutCsrf = postJson(s"$baseUri/api/auth/logout", "{}", cookieOnly)
+          assertEquals(withoutCsrf.statusCode(), 403,
+            clue = s"POST /api/auth/logout WITHOUT X-CSRF-Token must return 403 -- without this gate a cross-origin attacker could forcibly sign out any victim with an active session, interrupting their analyze/hall poll loops AND burning their RATE_LIMIT_AUTH_PER_MINUTE bucket if hit repeatedly (chains re-sign-in cycles against the 10/min/IP cap); got: ${withoutCsrf.statusCode()}")
+          assert(jsonBody(withoutCsrf)("error").str.toLowerCase.contains("csrf"),
+            clue = s"CSRF rejection error message must mention 'csrf' (audit log greps for `request forbidden ... reason=csrf-missing-or-invalid`); got error: ${jsonBody(withoutCsrf)("error").str}")
+
+          // WITH the proper X-CSRF-Token: 200 (NOT 202, NOT 201).
+          // Logout is neither a submission nor a creation -- it's a
+          // session-state transition that completes synchronously,
+          // see AuthStack.scala's handleAuthLogout returning
+          // JsonResponse(200, ...) at line 211.
+          val withCsrf = postJson(s"$baseUri/api/auth/logout", "{}", ownerHeaders)
+          assertEquals(withCsrf.statusCode(), 200,
+            clue = "POST /api/auth/logout WITH X-CSRF-Token must return 200 -- logout is a synchronous session-state transition, not a submission (which would 202) or a creation (which would 201); proves the 403 above came from the CSRF gate specifically rather than auth-missing (401) or some unrelated rejection")
+        }
+      }
+    }
+  }
+
   // Pin CSRF enforcement on POST /api/analyze-hand-history --
   // continuing the CSRF-sweep: e6e0961 closed /profile, eef3779
   // closed /playing-hall POST, this commit closes the analyze-submit
