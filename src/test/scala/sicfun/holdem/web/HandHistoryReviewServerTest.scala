@@ -3857,6 +3857,76 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin CSRF enforcement on POST /api/auth/profile -- before this
+  // commit, only the playing-hall DELETE had a CSRF test (the block
+  // immediately above); the OTHER four state-changing routes that
+  // the deploy doc line 103 names as CSRF-protected (POST
+  // /api/auth/logout, POST /api/auth/profile, POST
+  // /api/analyze-hand-history, POST /api/playing-hall) had no
+  // dedicated CSRF-rejection coverage. The /profile route is the
+  // highest-priority of the four uncovered because a refactor that
+  // dropped its CSRF gate would let a cross-origin attacker
+  // weaponize the route for victim-harassment (changing
+  // displayName to something offensive, swapping the user's
+  // heroName so it stops matching the hand-history file's player
+  // name and silently breaks analyze runs, etc.) provided the
+  // attacker can get the victim's browser to issue the request
+  // while a session cookie is live (SameSite=Lax blocks the
+  // simple cross-site form POST but not all variants -- POST
+  // form submissions FROM a top-level navigation initiated by
+  // user click DO send Lax cookies, so a phishing page with a
+  // form that auto-posts to /api/auth/profile on Enter could
+  // hit). New test follows the same shape as the hall-DELETE
+  // CSRF test above (which is the documented reference pattern):
+  // register a user, attempt POST /api/auth/profile WITHOUT the
+  // X-CSRF-Token header (cookie only) and assert 403 + "csrf" in
+  // the error message, then send the proper request WITH X-CSRF-
+  // Token and assert it succeeds (200). The remaining three
+  // routes (/api/auth/logout, /api/analyze-hand-history,
+  // /api/playing-hall POST) are left for future fires to keep
+  // this commit focused on one branch -- same "future fires can
+  // sweep the rest" pattern as e2045b9 / 034b14c's body-cap
+  // triplet.
+  test("POST /api/auth/profile enforces CSRF under platform-user auth -- pins the documented X-CSRF-Token requirement so a refactor can't silently open the route to cross-origin victim-harassment") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"profile-csrf@example.com","password":"correct-horse-battery","displayName":"Tester"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the CSRF gate can be exercised")
+          val registerJson = jsonBody(register)
+          val ownerHeaders = authSessionHeaders(register, registerJson("csrfToken").str)
+          val profileBody = """{"displayName":"Updated Name","heroName":"newhero","preferredSite":"pokerstars","timeZone":"UTC"}"""
+
+          // POST /api/auth/profile WITHOUT X-CSRF-Token (cookie only)
+          // must 403 with "csrf" in the error message. The cookie-
+          // only request is the canonical cross-origin attack shape
+          // -- SameSite=Lax does pass the session cookie on
+          // top-level form POSTs, so CSRF gate is the actual defense.
+          val cookieOnly = Map("Cookie" -> sessionCookie(register))
+          val withoutCsrf = postJson(s"$baseUri/api/auth/profile", profileBody, cookieOnly)
+          assertEquals(withoutCsrf.statusCode(), 403,
+            clue = s"POST /api/auth/profile WITHOUT X-CSRF-Token must return 403 -- without this CSRF gate a phishing page could change displayName/heroName/preferredSite/timeZone on behalf of any victim with an active session; got: ${withoutCsrf.statusCode()}")
+          assert(jsonBody(withoutCsrf)("error").str.toLowerCase.contains("csrf"),
+            clue = s"CSRF rejection error message must mention 'csrf' so scripted clients can key on the failure mode (and audit logs grep for the documented `request forbidden ... reason=csrf-missing-or-invalid` shape); got error: ${jsonBody(withoutCsrf)("error").str}")
+
+          // POST /api/auth/profile WITH the proper X-CSRF-Token header
+          // succeeds. This sanity-check ensures the test is exercising
+          // the CSRF gate specifically, not some other 403 path (e.g.
+          // a missing-session path that would 401-not-403).
+          val withCsrf = postJson(s"$baseUri/api/auth/profile", profileBody, ownerHeaders)
+          assertEquals(withCsrf.statusCode(), 200,
+            clue = "POST /api/auth/profile WITH X-CSRF-Token must succeed (200) -- proves the 403 above came from the CSRF gate specifically, not a different rejection path")
+        }
+      }
+    }
+  }
+
   test("playing hall cancellation returns 404 for unknown jobs") {
     withStaticSite { staticDir =>
       withServer(staticDir) { server =>
