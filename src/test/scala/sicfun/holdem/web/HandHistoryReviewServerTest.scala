@@ -3764,6 +3764,120 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the three unpinned fields in the documented 202 submission
+  // body shape: jobId, submittedAtEpochMs, pollAfterMs. Deploy doc
+  // line 66 documents the full 5-field body shape ("jobId, status
+  // (always the literal string \"queued\" on a fresh 202), statusUrl,
+  // submittedAtEpochMs, pollAfterMs"); existing tests cover `status`
+  // ("queued" at line 3777) and `statusUrl` (extensively, including
+  // the Location-equals-statusUrl pair-test 8728be9 immediately
+  // below); this commit closes the remaining three:
+  //   - `jobId`: the documented field every poll/cancel/status
+  //     subsequent request keys on; a refactor that dropped it
+  //     would force clients to parse statusUrl to extract the id,
+  //     a fragile workaround that breaks if statusUrl format
+  //     changes;
+  //   - `submittedAtEpochMs`: server-side wall-clock at submission;
+  //     consumed by dashboards correlating submit-time across the
+  //     fleet (a dashboard charting submit→complete latency keys on
+  //     the SAME field that completedAtEpochMs - submittedAtEpochMs
+  //     produces -- if submittedAtEpochMs disappeared from the 202,
+  //     the dashboard would silently chart 0 for newly-submitted
+  //     jobs until they reached terminal state and got the field
+  //     from the GET poll response instead);
+  //   - `pollAfterMs`: server-suggested initial poll delay the
+  //     frontend's pollAnalysisJob / pollPlayingHallJob use as
+  //     their first sleep duration (site.js lines 396 + 549 read
+  //     body.pollAfterMs and pass it through normalizePollAfterMs);
+  //     if this field disappeared, the frontend's normalizePollAfterMs
+  //     fallback would fire, which uses a different default cadence
+  //     than the server intended.
+  // Same regression-pin pattern as 8728be9 (Location-header pair):
+  // covers both /api/analyze-hand-history AND /api/playing-hall in
+  // one test body because the 202 body shape is documented to be
+  // identical across both submission endpoints, and a refactor
+  // touching one branch likely touches both -- per-endpoint
+  // assertions catch the asymmetric-drift case.
+  test("submission 202 body carries jobId + submittedAtEpochMs + pollAfterMs fields on both /api/analyze-hand-history and /api/playing-hall") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      val playingHallBackend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, backend = backend, playingHallBackend = playingHallBackend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Capture wall-clock before the submission so we can assert
+        // submittedAtEpochMs falls in the expected [before, after]
+        // window. The server uses System.currentTimeMillis() so the
+        // values must be on the same clock.
+        val before = System.currentTimeMillis()
+        val analyzeResp = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        val after = System.currentTimeMillis()
+        assertEquals(analyzeResp.statusCode(), 202,
+          clue = "analyze submission must return 202 Accepted")
+        val analyzeBody = jsonBody(analyzeResp)
+
+        // jobId: documented string field every poll/cancel/status
+        // request keys on. Must be present + non-empty.
+        val analyzeJobId = analyzeBody("jobId").str
+        assert(analyzeJobId.nonEmpty,
+          s"analyze 202 body.jobId must be a non-empty string per deploy doc line 66 -- a refactor that dropped it would force clients to parse statusUrl to extract the id, a fragile workaround that breaks if statusUrl format changes; got: '$analyzeJobId'")
+
+        // submittedAtEpochMs: server wall-clock at submission.
+        // Must be a finite positive long, and within the
+        // [before-100ms, after+100ms] window of the local-clock
+        // measurement around the request (the 100ms slack absorbs
+        // network + JVM scheduling jitter on test runners). Casting
+        // through .num.toLong because ujson stores numbers as Double
+        // and the value can legitimately exceed Int.MaxValue (epoch
+        // millis are post-2038 already in Long).
+        val analyzeSubmitted = analyzeBody("submittedAtEpochMs").num.toLong
+        assert(analyzeSubmitted >= before - 100 && analyzeSubmitted <= after + 100,
+          s"analyze 202 body.submittedAtEpochMs must fall within the [before-100ms, after+100ms] window of the local-clock measurement around the request; got submitted=$analyzeSubmitted, window=[$before-100, $after+100]")
+
+        // pollAfterMs: server-suggested initial poll delay. The
+        // frontend reads this and passes it to pollAnalysisJob's
+        // first sleep (site.js line 396 -> body.pollAfterMs).
+        // Must be a positive integer; the exact value isn't pinned
+        // because it's a server-side cadence knob, but it MUST be
+        // > 0 so the frontend doesn't busy-poll.
+        val analyzePollAfterMs = analyzeBody("pollAfterMs").num.toLong
+        assert(analyzePollAfterMs > 0L,
+          s"analyze 202 body.pollAfterMs must be > 0 -- the frontend uses this as the initial sleep duration in pollAnalysisJob (site.js line 396); a refactor that emitted 0 (or missing field) would silently turn the frontend's poll loop into a busy-spin against the server; got: $analyzePollAfterMs")
+
+        backend.release.countDown()
+
+        // Same three fields on /api/playing-hall.
+        val before2 = System.currentTimeMillis()
+        val hallResp = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        val after2 = System.currentTimeMillis()
+        assertEquals(hallResp.statusCode(), 202,
+          clue = "hall submission must return 202 Accepted")
+        val hallBody = jsonBody(hallResp)
+
+        val hallJobId = hallBody("jobId").str
+        assert(hallJobId.nonEmpty,
+          s"hall 202 body.jobId must be a non-empty string (symmetric with analyze); got: '$hallJobId'")
+        // jobIds for analyze + hall must be DISTINCT (each gets a
+        // fresh id) -- a refactor that returned a shared/reused id
+        // across job stores would silently let a GET against the
+        // hall's status URL resolve to the analyze job and vice
+        // versa.
+        assert(analyzeJobId != hallJobId,
+          s"analyze and hall jobIds must be distinct so per-job-store status URLs don't cross-resolve; got analyzeJobId=$analyzeJobId hallJobId=$hallJobId")
+
+        val hallSubmitted = hallBody("submittedAtEpochMs").num.toLong
+        assert(hallSubmitted >= before2 - 100 && hallSubmitted <= after2 + 100,
+          s"hall 202 body.submittedAtEpochMs must fall within the [before-100ms, after+100ms] window around the request; got submitted=$hallSubmitted, window=[$before2-100, $after2+100]")
+
+        val hallPollAfterMs = hallBody("pollAfterMs").num.toLong
+        assert(hallPollAfterMs > 0L,
+          s"hall 202 body.pollAfterMs must be > 0 (symmetric with analyze, used by pollPlayingHallJob at site.js line 549); got: $hallPollAfterMs")
+
+        playingHallBackend.release.countDown()
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
