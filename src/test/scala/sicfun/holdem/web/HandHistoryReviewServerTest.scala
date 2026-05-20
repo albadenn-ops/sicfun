@@ -3413,6 +3413,170 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented intermediate `shutdown requested` banner
+  // AND the 3-banner-ordering invariant (startup BEFORE shutdown
+  // requested BEFORE shutdown complete) -- closes the THIRD and
+  // FINAL server-lifecycle banner per HandHistoryReviewServerRuntime.
+  // scala lines 308-309 (the prior two halves were closed by
+  // 7c47f88 startup-complete + f6ee18b shutdown-complete); the
+  // intermediate banner emits at line 309's `logInfo(s"shutdown
+  // requested host=${binding.host} port=${binding.port}
+  // activeHttpRequests=$activeRequestCount queuedJobs=${...}
+  // runningJobs=${...} httpDrainSeconds=$httpDrainSeconds")` --
+  // fires at the VERY START of the shutdown sequence (BEFORE the
+  // executor shutdown calls at lines 311-312, BEFORE the server.
+  // stop at line 321, BEFORE the drain awaits at lines 323-325)
+  // so the captured snapshot of activeHttpRequests / queuedJobs /
+  // runningJobs is the LOAD STATE AT THE MOMENT SHUTDOWN WAS
+  // REQUESTED -- the operator-relevant diagnostic for "what was
+  // running when this instance was asked to shut down" workflows
+  // (e.g. capacity planning for rolling restarts: if every
+  // shutdown banner shows queuedJobs=8 the deployment is
+  // chronically over-saturated and the shutdown grace budget
+  // probably can't drain it cleanly); a refactor that moved the
+  // logInfo to AFTER the drain calls would silently change the
+  // semantic from "load when requested" to "load when drained"
+  // (typically all zeros after a normal drain) -- silently
+  // breaking the operator's saturation triage; per-field
+  // regression vectors SPECIFIC to this banner that the other 2
+  // server-lifecycle banners don't catch: (i) the activeHttpRequests
+  // / queuedJobs / runningJobs / httpDrainSeconds FIELD SET is
+  // UNIQUE to this banner -- a refactor that consolidated the 3
+  // server-lifecycle banners (startup / requested / complete) to
+  // share a common helper would likely break this banner's
+  // load-state fields, AND a refactor renaming any of the 4 load-
+  // state fields (e.g. queuedJobs -> queuedJobCount for noun-
+  // consistency) would silently break operator dashboards keyed
+  // on the field names; (ii) the httpDrainSeconds value is
+  // OPERATIONALLY MEANINGFUL -- per the inline comment at
+  // HandHistoryReviewServerRuntime.scala line 305-307, the value
+  // is 0 when activeHttpRequests is 0 (no drain needed) and
+  // shutdownDelaySeconds(config.shutdownGraceMs) otherwise; a
+  // refactor that always emitted 0 (ignoring activeRequestCount)
+  // would silently break operator visibility into "is this
+  // shutdown actually waiting for in-flight requests"; (iii) the
+  // 3-banner ORDERING invariant -- startup MUST appear BEFORE
+  // shutdown requested MUST appear BEFORE shutdown complete in
+  // the log stream; a refactor that emitted the banners in a
+  // different order (e.g. emitted shutdown complete BEFORE
+  // shutdown requested due to a finally-block reordering) would
+  // silently break operator scripts that parse the log stream
+  // chronologically AND would silently invalidate the runbook's
+  // assumption that "shutdown requested" is the FIRST signal
+  // that a shutdown sequence has started; 9-tier format check
+  // matching the startup/shutdown pattern + 3-banner ORDERING
+  // assertion: (i) "shutdown requested" prefix (catches rename
+  // to e.g. "shutdown starting" / "shutdown initiated"), (ii)
+  // host=127.0.0.1 (matches startup AND shutdown-complete --
+  // cross-banner consistency for the same process), (iii)
+  // port= field presence, (iv) activeHttpRequests=0 (specific
+  // value -- for a quiet test with no concurrent requests this
+  // is 0; a refactor changing the source field to a wrong
+  // counter would silently emit a non-zero value), (v)
+  // queuedJobs=0 (specific value), (vi) runningJobs=0 (specific
+  // value), (vii) httpDrainSeconds=0 (specific value -- 0
+  // because activeHttpRequests is 0 per the conditional at
+  // lines 305-307; a refactor that always emitted
+  // shutdownDelaySeconds(config.shutdownGraceMs) regardless of
+  // active count would silently emit a non-zero value here),
+  // (viii) [INFO] level, (ix) [hand-history-review] service-tag
+  // prefix; PLUS the 3-banner ORDERING assertion via index
+  // comparison in the captured stdout stream; future fires can
+  // extend with: (a) non-zero load-state pin (start a Blocking
+  // Backend job, trigger shutdown while it's running, verify
+  // runningJobs=1 in the requested banner), (b) per-mode banner
+  // variants (authenticationMode=basic and =users emit different
+  // userAuth* field values in the STARTUP banner -- the
+  // requested + complete banners don't carry those fields).
+  test("server shutdown emits the documented `shutdown requested` intermediate banner with load-state fields BEFORE the `shutdown complete` final banner -- pins the 3-banner server-lifecycle ordering (startup → requested → complete) per HandHistoryReviewServerRuntime.scala lines 308-309 + 326") {
+    withStaticSite { staticDir =>
+      // Same stdout-capture pattern as 7c47f88 + f6ee18b but
+      // looking for the intermediate `shutdown requested` banner
+      // at line 309 in addition to the existing startup + complete
+      // banners. The intermediate banner fires at the VERY START
+      // of the shutdown sequence -- BEFORE executor shutdown,
+      // BEFORE server.stop, BEFORE the drain awaits -- so for a
+      // quiet test the load-state counters are all 0.
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      try
+        withServer(staticDir) { _ =>
+          // No HTTP requests -- the test pins the BANNER format
+          // on a quiet shutdown (activeHttpRequests=0,
+          // queuedJobs=0, runningJobs=0, httpDrainSeconds=0). A
+          // future fire can add a non-zero-load test variant by
+          // starting a BlockingBackend job and triggering
+          // shutdown while it's running.
+          ()
+        }
+      finally
+        System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val lines = captured.split('\n').toVector
+
+      val requestedLineIdx = lines.indexWhere(_.contains("shutdown requested"))
+      val requestedLine =
+        if requestedLineIdx >= 0 then lines(requestedLineIdx)
+        else fail(s"no `shutdown requested` line in captured stdout -- HandHistoryReviewServerRuntime.scala line 309 documents this as the intermediate banner emitted at the VERY START of the shutdown sequence (BEFORE executor shutdown, BEFORE server.stop); if missing, the logInfo at line 308-309 was suppressed OR the shutdown function entered via a different path; got captured stdout: ${captured.take(2000)}")
+
+      // (i) prefix
+      assert(requestedLine.contains("shutdown requested"),
+        clue = s"intermediate banner must carry the literal `shutdown requested` prefix per HandHistoryReviewServerRuntime.scala line 309's hardcoded literal -- a refactor renaming to e.g. `shutdown starting` / `shutdown initiated` / `shutdown began` would silently break operator scripts that parse the log stream for the SHUTDOWN-SEQUENCE-STARTED signal (distinguished from the SHUTDOWN-SEQUENCE-COMPLETED signal which is the `shutdown complete` line); got: $requestedLine")
+      // (ii) host (matches startup + complete banners)
+      assert(requestedLine.contains("host=127.0.0.1"),
+        clue = s"intermediate banner must carry host=127.0.0.1 (withServer default) MATCHING the startup + complete banners for the SAME process -- a refactor that emitted config.host instead of binding.host here would silently break cross-banner process correlation; got: $requestedLine")
+      // (iii) port field presence (matches startup + complete)
+      assert(requestedLine.contains("port="),
+        clue = s"intermediate banner must carry port=<resolved-bound-port> MATCHING the startup + complete banners; got: $requestedLine")
+      // (iv) activeHttpRequests=0 (load-state field UNIQUE to this banner)
+      assert(requestedLine.contains("activeHttpRequests=0"),
+        clue = s"intermediate banner must carry activeHttpRequests=0 (quiet test, no concurrent requests at shutdown moment) -- this is the LOAD-STATE SNAPSHOT field unique to this banner that operators use to diagnose 'what was running when shutdown was triggered'; a refactor that emitted a wrong counter (e.g. lifetime-cumulative requests instead of current-active) would silently emit a non-zero value here AND silently break operator saturation-triage workflows; got: $requestedLine")
+      // (v) queuedJobs=0 (load-state field)
+      assert(requestedLine.contains("queuedJobs=0"),
+        clue = s"intermediate banner must carry queuedJobs=0 (quiet test, no pending jobs at shutdown moment) -- pairs with activeHttpRequests + runningJobs as the 3-counter load snapshot; a refactor renaming the field (e.g. queuedJobCount) or emitting a wrong source would silently break operator dashboards; got: $requestedLine")
+      // (vi) runningJobs=0 (load-state field)
+      assert(requestedLine.contains("runningJobs=0"),
+        clue = s"intermediate banner must carry runningJobs=0 (quiet test, no jobs executing at shutdown moment); got: $requestedLine")
+      // (vii) httpDrainSeconds=0 (THE conditional field per the
+      // inline comment at lines 305-307: 0 when activeHttp
+      // Requests is 0, shutdownDelaySeconds(config.shutdownGraceMs)
+      // otherwise -- a refactor that always emitted the non-zero
+      // path would silently emit a non-zero value here)
+      assert(requestedLine.contains("httpDrainSeconds=0"),
+        clue = s"intermediate banner must carry httpDrainSeconds=0 because activeHttpRequests=0 per the conditional at HandHistoryReviewServerRuntime.scala lines 305-307 (`if activeRequestCount > 0 then shutdownDelaySeconds(config.shutdownGraceMs) else 0`); a refactor that always emitted shutdownDelaySeconds regardless of active count would silently break operator visibility into 'is this shutdown actually waiting for in-flight requests' (the value tells operators how long the http server will wait for in-flight requests before forcing close); got: $requestedLine")
+      // (viii) INFO level
+      assert(requestedLine.contains("[INFO]"),
+        clue = s"intermediate banner must be INFO-level (logInfo at line 308 writes to System.out per HandHistoryReviewServerRuntime.scala line 418); demote-to-DEBUG would hide the shutdown-sequence-started signal at default log levels, promote-to-WARN would silently page on every normal restart; got: $requestedLine")
+      // (ix) service-tag prefix (couples to /api/health.service from 505ba6b)
+      assert(requestedLine.contains("[hand-history-review]"),
+        clue = s"intermediate banner must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- couples to /api/health.service (505ba6b) so log aggregators see the same identifier across all 3 server-lifecycle banners + runtime audit lines + probe responses (the 5-way correlation now spans startup + requested + complete + audit + probe); got: $requestedLine")
+
+      // 3-BANNER ORDERING invariant: startup MUST appear BEFORE
+      // shutdown requested MUST appear BEFORE shutdown complete
+      // in the captured stream. The ordering is essential for
+      // operator log-parsing scripts that key on the lifecycle
+      // sequence -- a refactor that reordered the emissions
+      // (e.g. emitted shutdown complete BEFORE shutdown
+      // requested due to a finally-block reordering) would
+      // silently break the lifecycle-sequence semantic AND
+      // silently invalidate the runbook's assumption that
+      // "shutdown requested" is the FIRST signal that a
+      // shutdown sequence has started.
+      val startupLineIdx = lines.indexWhere(_.contains("startup complete"))
+      assert(startupLineIdx >= 0,
+        clue = s"startup banner missing from captured stream -- the 7c47f88 startup pin should catch this independently, but this test's ordering check needs the startup banner present too; got captured: ${captured.take(2000)}")
+      val completeLineIdx = lines.indexWhere(_.contains("shutdown complete"))
+      assert(completeLineIdx >= 0,
+        clue = s"shutdown-complete banner missing from captured stream -- the f6ee18b shutdown-complete pin should catch this independently, but this test's ordering check needs the complete banner present too; got captured: ${captured.take(2000)}")
+      assert(startupLineIdx < requestedLineIdx,
+        clue = s"startup banner MUST appear BEFORE shutdown-requested banner in captured stream -- the lifecycle sequence is startup (during startWithBackends) → shutdown requested (start of shutdown sequence) → shutdown complete (end of shutdown sequence); a refactor that emitted the banners in a wrong order would silently break operator log-parsing scripts; got startupIdx=$startupLineIdx requestedIdx=$requestedLineIdx in captured: ${captured.take(2000)}")
+      assert(requestedLineIdx < completeLineIdx,
+        clue = s"shutdown-requested banner MUST appear BEFORE shutdown-complete banner in captured stream -- the runbook's shutdown-progress diagnostic assumes `requested` is the FIRST shutdown signal (start of sequence) and `complete` is the LAST (end of sequence); a refactor that emitted complete BEFORE requested (e.g. due to a finally-block reordering at lines 322-326) would silently invalidate the runbook's assumption; got requestedIdx=$requestedLineIdx completeIdx=$completeLineIdx in captured: ${captured.take(2000)}")
+    }
+  }
+
   test("registration stores PBKDF2 credential with documented parameters (210k iterations, 256-bit key, 128-bit salt) per deploy doc + runbook + NIST SP 800-132 §5.1 compliance claim") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
