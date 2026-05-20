@@ -1201,6 +1201,47 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Parallel /register 16 KiB body-cap test mirroring the /login pin
+  // immediately above. e2045b9 (the /login pin) explicitly acknowledged
+  // "future fires can sweep the rest" of the three auth POSTs that
+  // share the same `readRequestBody(exchange, 16 * 1024)` pattern at
+  // AuthStack.scala lines 104 (register), 163 (login), 229 (profile)
+  // -- this commit closes the /register branch. Per-handler call-site
+  // symmetry from the e2045b9 comment block: a refactor that changed
+  // ONE of the three handlers (e.g. widened only /register's cap to
+  // MAX_UPLOAD_BYTES to support "future extended-profile registration"
+  // while leaving /login + /profile at 16 KiB) would silently expand
+  // the credential-stuffing attack surface specifically on /register
+  // WITHOUT breaking the existing /login pin; the parallel-branch
+  // coverage catches per-handler drift. /register is the highest-
+  // priority of the two remaining branches because (1) it's the
+  // primary credential-stuffing attack target alongside /login, and
+  // (2) the disk-fill defense via USER_AUTH_MAX_USERS (capped at
+  // 100k stored users per fb18e2c's pin) is layered ON TOP OF the
+  // 16 KiB body cap -- if a refactor widened the body cap to MB-
+  // scale, the per-request CPU cost of registration would multiply
+  // (PBKDF2-HMAC-SHA256 at 210k iterations per 097bc64 + 7c8956b
+  // is already expensive; adding parsing of MB-scale JSON before
+  // the cap fires would amplify the cost meaningfully).
+  test("POST /api/auth/register rejects bodies exceeding the hardcoded 16 KiB cap with 413 + the documented literal error message") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val oversizeBody = "x" * 16385
+          val response = postJson(s"$baseUri/api/auth/register", oversizeBody)
+          assertEquals(response.statusCode(), 413,
+            clue = s"16385-byte body (cap+1) must 413 at the readRequestBody check (AuthStack.scala's `readRequestBody(exchange, 16 * 1024)` call site for /api/auth/register); a refactor that widened ONLY the register cap (without touching login + profile) would silently expand the credential-stuffing-via-PBKDF2-CPU-cost attack surface specifically on register while passing the parallel /login pin, so this per-handler-branch coverage catches that drift")
+          assert(response.body().contains("max upload size of 16384 bytes"),
+            s"413 body must contain the same deploy-doc-documented literal message as /login (the message is generic across all readRequestBody call sites by design, no per-endpoint differentiation); Body was: ${response.body()}")
+        }
+      }
+    }
+  }
+
   // Footgun without the zero-width filter in normalizeEmail (see
   // PlatformUserAuth.scala): some paste sources (text editors saving as
   // UTF-8 with BOM, clipboard pipelines that inject zero-width chars)
