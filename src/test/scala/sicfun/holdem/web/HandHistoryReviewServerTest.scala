@@ -460,6 +460,95 @@ class HandHistoryReviewServerTest extends FunSuite:
   // 097bc64 (PBKDF2 parameters), a0fd8b3 (displayName auto-fill) --
   // documented defaults with operator-relevant reasoning get pinned
   // so drift can't go silent.
+  // Pin the documented /api/auth/me degenerate-shape response under
+  // no-auth + basic-auth modes. Deploy doc line 101 explicitly says:
+  // "Under basic-auth and no-auth modes /api/auth/me returns a
+  // degenerate form of the same seven-field shape, NOT a four-field
+  // subset: authenticationEnabled (true under basic auth ... false
+  // under no-auth), authenticationMode (basic or none accordingly),
+  // authenticated: false (no platform-user session concept),
+  // allowLocalRegistration: false (the register endpoint is 404
+  // outside platform-user mode anyway), providers: [], user: null,
+  // csrfToken: null. The same field set means a frontend can key on
+  // authenticationMode to switch UI modes (gating the local
+  // register/login forms behind mode === 'users' only, showing a
+  // generic 'managed by upstream' panel for 'basic', and an open-
+  // access panel for 'none') from a single probe of the same
+  // endpoint -- the shipped frontend does exactly that." Before this
+  // commit, the /api/auth/me degenerate shape was untested across
+  // both branches (no-auth + basic-auth). Existing tests cover
+  // /api/health under both modes but NOT /api/auth/me, even though
+  // /api/auth/me is the endpoint the shipped frontend's
+  // refreshAuthState boot-time probe hits to decide which UI mode
+  // to render -- a refactor that returned a four-field subset (e.g.
+  // dropping `providers: []` because "there are no providers in
+  // basic-auth mode anyway, the field is redundant") would silently
+  // break the shipped frontend's mode-detection logic which expects
+  // the same seven-field shape across all modes (the deploy doc
+  // explicitly tags this "same field set" property as the WHY
+  // behind the same-shape-degenerate-not-subset choice). Test pins
+  // BOTH branches in one test body because they share the same
+  // hardcoded fall-through path at AuthStack.scala line 68-77
+  // (handleAuthMe's `case None =>` branch builds the same Obj for
+  // both basic-auth and no-auth modes, just with different
+  // authenticationEnabled + authenticationMode values).
+  test("/api/auth/me returns the documented degenerate seven-field shape under both no-auth and basic-auth modes") {
+    // No-auth mode: server without basic-auth or platform-user config.
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val noAuth = getJson(s"$baseUri/api/auth/me")
+        // Seven fields per deploy doc line 101. Document each
+        // expected value with the documented rationale so a future
+        // maintainer hitting a failure understands what changed.
+        assertEquals(noAuth("authenticationEnabled").bool, false,
+          clue = "no-auth mode: authenticationEnabled must be false -- the server doesn't enforce any Authorization header gate, so the field surfaces the absence of auth")
+        assertEquals(noAuth("authenticationMode").str, "none",
+          clue = "no-auth mode: authenticationMode must be 'none' -- the shipped frontend keys on this exact string to render the open-access panel")
+        assertEquals(noAuth("authenticated").bool, false,
+          clue = "no-auth mode: authenticated must be false -- no platform-user session concept exists in this mode")
+        assertEquals(noAuth("allowLocalRegistration").bool, false,
+          clue = "no-auth mode: allowLocalRegistration must be false -- the register endpoint is 404 outside platform-user mode anyway, so the frontend's Register-button gate stays disabled")
+        assertEquals(noAuth("providers").arr.length, 0,
+          clue = "no-auth mode: providers must be an empty array (not absent, not null) -- the frontend's `providers.map(...)` iteration depends on the array shape being present even when empty")
+        assert(noAuth("user") == ujson.Null,
+          clue = s"no-auth mode: user must be null -- no platform-user session to surface; got: ${noAuth("user")}")
+        assert(noAuth("csrfToken") == ujson.Null,
+          clue = s"no-auth mode: csrfToken must be null -- there's no CSRF gate to issue tokens for; the frontend's authSessionHeaders helper expects null here and skips X-CSRF-Token header injection; got: ${noAuth("csrfToken")}")
+      }
+    }
+
+    // Basic-auth mode: server with BasicAuthConfig but no
+    // platform-user auth. Basic-auth enforces the Authorization
+    // header so authenticationEnabled flips to true even though
+    // the platform-user session concept doesn't apply.
+    withStaticSite { staticDir =>
+      val basicAuth = HandHistoryReviewServer.BasicAuthConfig(username = "op", password = "secret")
+      withServer(staticDir, basicAuth = Some(basicAuth)) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        // /api/auth/me is open by design (AuthRequirement.Optional)
+        // so basic-auth doesn't block it -- we can probe anonymously.
+        val basic = getJson(s"$baseUri/api/auth/me")
+        assertEquals(basic("authenticationEnabled").bool, true,
+          clue = "basic-auth mode: authenticationEnabled must be true -- basic-auth DOES enforce an Authorization header even though the platform-user paths are off")
+        assertEquals(basic("authenticationMode").str, "basic",
+          clue = "basic-auth mode: authenticationMode must be 'basic' -- the shipped frontend keys on this exact string to render the 'managed by upstream' panel")
+        // The remaining 5 fields are the same as no-auth (no
+        // platform-user session concept regardless of basic-auth):
+        assertEquals(basic("authenticated").bool, false,
+          clue = "basic-auth mode: authenticated must be false (no platform-user session concept)")
+        assertEquals(basic("allowLocalRegistration").bool, false,
+          clue = "basic-auth mode: allowLocalRegistration must be false")
+        assertEquals(basic("providers").arr.length, 0,
+          clue = "basic-auth mode: providers must be an empty array")
+        assert(basic("user") == ujson.Null,
+          clue = s"basic-auth mode: user must be null; got: ${basic("user")}")
+        assert(basic("csrfToken") == ujson.Null,
+          clue = s"basic-auth mode: csrfToken must be null -- the CSRF gate is platform-user-specific; got: ${basic("csrfToken")}")
+      }
+    }
+  }
+
   test("/api/health surfaces userAuthMaxUsers = 100000 default when no maxUsers override is set") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
