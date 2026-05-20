@@ -2085,6 +2085,89 @@ class HandHistoryReviewServerTest extends FunSuite:
           clue = s"/api/health must surface service='hand-history-review' per deploy doc line 216's documented fleet-correlation contract -- a refactor renaming the constant would silently break log-aggregation filters, dashboard alerts keyed on service name, and operator runbooks that grep responses for the identifier; got: ${healthJson("service")}")
         assertEquals(healthJson("host").str, server.binding.host)
         assertEquals(healthJson("port").num.toInt, server.binding.port)
+        // Pin the documented server-lifecycle fields `startedAtEpochMs`
+        // + `uptimeMs` -- the last two fields of the deploy doc line
+        // 216 enumeration "service/host/port/startedAtEpochMs/uptimeMs
+        // for fleet correlation"; 505ba6b + b2a90fb closed the
+        // service/host/port triple on both endpoints, this assertion
+        // block closes the server-lifecycle pair on /api/health (the
+        // companion ABSENCE pins for /api/ready follow the
+        // modelConfigured 4d15ca3+37f9465 asymmetric pattern at the
+        // end of the /api/ready block below since the deploy doc
+        // scopes BOTH fields to /api/health-only). Why these two
+        // fields matter operationally: (a) startedAtEpochMs is the
+        // OPERATOR-VISIBLE process-restart timestamp -- the canonical
+        // way to distinguish "did this instance restart since I last
+        // looked" from "process is still alive but stuck" (a stuck
+        // process has the SAME startedAtEpochMs across probes;
+        // a restarted one has a strictly-greater value), used by
+        // runbook section X's restart-detection triage step AND by
+        // dashboards plotting "deploys per day" (each unique
+        // startedAtEpochMs value seen across probe samples corresponds
+        // to one process lifetime), (b) uptimeMs gives the same
+        // information as a relative duration (no need to do
+        // arithmetic against current wall clock) -- used by alerting
+        // for "uptime < N seconds" conditions that fire on
+        // unexpected restarts, AND by capacity dashboards plotting
+        // "average uptime per instance" as a proxy for deployment
+        // stability; the TWO fields are SEMANTICALLY REDUNDANT by
+        // design (uptimeMs = now - startedAtEpochMs at response-
+        // build time, both shipped on the same response) but each
+        // serves a different consumer pattern: absolute-timestamp
+        // consumers prefer startedAtEpochMs (epoch ms is the most
+        // portable timestamp format), duration consumers prefer
+        // uptimeMs (saves the dashboard math + handles clock-skew
+        // between probe-receive and dashboard-eval gracefully).
+        // Assertion structure: capture `nowMs` adjacent to the
+        // assertions so the slack window between probe-receive and
+        // assertion-eval is small (the response was built moments
+        // ago, so the COVARIANT invariant
+        // `startedAtEpochMs + uptimeMs ≈ nowMs` should hold to
+        // within a few seconds tolerance for JVM scheduling + GC
+        // pauses); per-field checks: (1) startedAtEpochMs > 0 catches
+        // an uninitialized-default refactor that emitted 0 / negative
+        // / unset, (2) startedAtEpochMs <= nowMs catches a
+        // wrong-baseline refactor that picked e.g. an Instant.MAX
+        // sentinel or a clock-future value, (3) uptimeMs >= 0
+        // catches the negative-uptime case (startedAtEpochMs after
+        // now, which is logically impossible but could arise from
+        // a clock-skew bug), (4) the COVARIANT invariant
+        // `|startedAtEpochMs + uptimeMs - nowMs| <= 5000ms` pins
+        // the two fields' SHARED baseline -- a refactor changing
+        // one field's reference point without updating the other
+        // (e.g. startedAtEpochMs from process-start to deploy-time,
+        // uptimeMs staying tied to process-start) would silently
+        // break the covariance, AND a refactor wedging either to
+        // a constant would also fail this pin since the constant
+        // would not track the actual elapsed wall clock.
+        val nowMsBeforeHealthLifecycleCheck = System.currentTimeMillis()
+        val healthStartedAt = healthJson("startedAtEpochMs").num.toLong
+        val healthUptime = healthJson("uptimeMs").num.toLong
+        assert(healthStartedAt > 0L,
+          clue = s"/api/health startedAtEpochMs must be a positive epoch-ms timestamp per deploy doc line 216's fleet-correlation enumeration -- a refactor emitting 0 / negative / unset would silently break operator-visible process-restart detection (runbook restart-triage step keys on this field to distinguish 'instance restarted' from 'still alive but stuck'); got: $healthStartedAt")
+        assert(healthStartedAt <= nowMsBeforeHealthLifecycleCheck,
+          clue = s"/api/health startedAtEpochMs must not be in the future relative to the test's nowMs -- a refactor picking the wrong baseline (e.g. Instant.MAX sentinel, a future deploy-time, or a clock-skewed source) would silently break dashboards plotting 'deploys per day' from unique startedAtEpochMs samples; got: $healthStartedAt vs nowMs=$nowMsBeforeHealthLifecycleCheck")
+        assert(healthUptime >= 0L,
+          clue = s"/api/health uptimeMs must be non-negative -- a refactor computing uptime from a future startedAtEpochMs (clock-skew bug) would silently produce negative values and break uptime-based alerting on 'uptime < N seconds' conditions; got: $healthUptime")
+        // COVARIANT invariant: startedAtEpochMs + uptimeMs should
+        // approximate nowMs (within 5s slack for JVM scheduling + GC
+        // pauses between the response being built and the test
+        // reading nowMs). This is the strongest invariant in this
+        // block because it forces BOTH fields to be derived from
+        // the SAME baseline -- a refactor changing one field's
+        // reference point without updating the other would silently
+        // break the covariance, AND a refactor wedging either to a
+        // constant would also fail (the constant would not track
+        // the actual elapsed wall clock). The 5000ms slack is
+        // generous but tight enough to catch real divergence
+        // (a baseline drift of even 30 seconds would fail this);
+        // a refactor that swapped uptimeMs's baseline from
+        // process-start to e.g. last-config-reload would typically
+        // drift by minutes-to-hours and fail this assertion loudly.
+        val combinedHealthLifecycle = healthStartedAt + healthUptime
+        val healthLifecycleDelta = math.abs(combinedHealthLifecycle - nowMsBeforeHealthLifecycleCheck)
+        assert(healthLifecycleDelta <= 5000L,
+          clue = s"/api/health startedAtEpochMs + uptimeMs must approximate the current wall clock (covariant baseline invariant) -- a refactor changing one field's reference point (e.g. startedAtEpochMs from process-start to deploy-time, uptimeMs staying tied to process-start) would silently break the covariance; 5000ms slack allows for JVM scheduling + GC pauses; got startedAtEpochMs=$healthStartedAt + uptimeMs=$healthUptime = $combinedHealthLifecycle vs nowMs=$nowMsBeforeHealthLifecycleCheck (delta=$healthLifecycleDelta ms)")
         assertEquals(healthJson("modelSource").str, "uniform fallback")
         // Pin the documented `modelConfigured` boolean field that the
         // deploy doc explicitly names as the operator-tooling
@@ -2290,6 +2373,42 @@ class HandHistoryReviewServerTest extends FunSuite:
         // null value on most query engines.
         assert(!readyJson.obj.contains("modelConfigured"),
           clue = s"/api/ready must NOT echo `modelConfigured` per the deploy doc's explicit '/api/health-only and is NOT echoed by /api/ready' framing -- the field is documented as an operator-side dashboard signal (not an orchestrator-side readiness signal), and a refactor that mirrored it into /api/ready as a harmless additive change would silently widen the documented contract; if this test fails, either the deploy doc needs an update to allow the mirror OR the renderReadiness function should be reverted to drop the field; got readyJson keys: ${readyJson.obj.keys.toVector.sorted.mkString(", ")}")
+        // Pin the documented asymmetric scoping of the server-
+        // lifecycle pair (startedAtEpochMs + uptimeMs): deploy doc
+        // line 216 enumerates them on /api/health-only ("plus
+        // service/host/port/startedAtEpochMs/uptimeMs for fleet
+        // correlation"), while line 217's /api/ready enumeration
+        // includes only service/host/port (the deploy doc EXPLICITLY
+        // contrasts the two endpoints by listing different field
+        // sets, with line 217 noting "the field set is a strict
+        // subset of /api/health's plus the renamed `reason`"). The
+        // /api/ready endpoint is the LB / orchestrator probe whose
+        // contract is "is this instance ready to accept traffic" --
+        // process-lifecycle metadata (when did this process start,
+        // how long has it been up) is operator-side concern, not
+        // orchestrator-side. Without these absence pins, a refactor
+        // that "mirrored" the lifecycle pair into /api/ready as a
+        // "harmless additive change" would silently widen the
+        // documented "/api/health-only" contract; the drift vector
+        // is non-zero because (a) Readiness.scala's renderHealth +
+        // renderReadiness functions sit in the same file at adjacent
+        // lines (57 + 116), so a maintainer might "fix" the
+        // divergence as a perceived bug, (b) the natural code-review
+        // reflex on a "fields should be everywhere" intuition is to
+        // mirror, (c) additive changes feel safe even when they're
+        // contract-widening. The matching presence pins on
+        // /api/health (lines ~2089-2113 above) catch the OPPOSITE
+        // drift (the field gets dropped from /api/health); together
+        // the four pins (2 fields × 2 endpoints, all with their
+        // documented presence/absence shape) form an asymmetric-
+        // scoping invariant: a refactor that broke either direction
+        // (drop from /api/health, mirror to /api/ready) fails one
+        // of the pins. Same asymmetric-pin pattern as 4d15ca3 +
+        // 37f9465 for the modelConfigured pair.
+        assert(!readyJson.obj.contains("startedAtEpochMs"),
+          clue = s"/api/ready must NOT echo `startedAtEpochMs` per deploy doc line 216 enumerating it as an /api/health-only field and line 217's '/api/ready ... field set is a strict subset of /api/health's' framing -- a refactor mirroring the process-restart timestamp into /api/ready (orchestrator-side probe, not operator-side dashboard) would silently widen the documented contract; got readyJson keys: ${readyJson.obj.keys.toVector.sorted.mkString(", ")}")
+        assert(!readyJson.obj.contains("uptimeMs"),
+          clue = s"/api/ready must NOT echo `uptimeMs` per deploy doc line 216 enumerating it as an /api/health-only field and line 217's '/api/ready ... field set is a strict subset of /api/health's' framing -- a refactor mirroring the uptime duration into /api/ready (orchestrator-side probe, not operator-side dashboard) would silently widen the documented contract; got readyJson keys: ${readyJson.obj.keys.toVector.sorted.mkString(", ")}")
 
         val index = get(s"$baseUri/")
         assertEquals(index.statusCode(), 200)
