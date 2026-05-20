@@ -3300,6 +3300,42 @@ class HandHistoryReviewServerTest extends FunSuite:
           assertEquals(anonymousAuth("authenticationMode").str, "users")
           assertEquals(anonymousAuth("allowLocalRegistration").bool, false)
           assertEquals(anonymousAuth("providers").arr.toVector.map(_("id").str), Vector("local", "google"))
+          // Pin the full Google-OIDC provider entry shape per deploy
+          // doc line 101's 4-field enumeration -- mirror of e1e7afa's
+          // local-provider pin but for the OIDC branch. For an OIDC
+          // provider, the documented shape is `{id, displayName, kind,
+          // startPath}` where kind="oidc" (vs local's "password") and
+          // startPath is the `/api/auth/oidc/<id>/start` route the
+          // frontend's "Continue with Google" anchor targets (vs
+          // local's null startPath); displayName comes from the
+          // provider config (FakeOidcProvider in tests uses "Google";
+          // a real deployment's GoogleOidcProvider also uses "Google"
+          // per its `override val displayName` at PlatformUserAuth.scala
+          // line 222). The pair of pins (e1e7afa local + this commit
+          // OIDC) covers BOTH branches of the providers-array shape so
+          // a refactor that changed the OIDC entry's kind to e.g.
+          // "openid-connect" or "social" -- intuitive renames that
+          // would silently break the frontend's `kind === "oidc"` UI-
+          // gating logic -- would now fail the test; a refactor that
+          // gave the OIDC provider a null startPath would similarly
+          // break the frontend (the "Continue with Google" anchor's
+          // href is taken directly from startPath, so a null value
+          // makes the anchor link nowhere). The id ordering matters
+          // too: local FIRST then OIDC per the deploy doc's
+          // "Array order is fixed and deterministic: the local entry
+          // comes FIRST, followed by each configured OIDC provider in
+          // the order they were declared at startup"; that's already
+          // pinned by the `Vector("local", "google")` check above, but
+          // the entry-shape pin closes the per-entry-field coverage.
+          val googleProvider = anonymousAuth("providers").arr(1)
+          assertEquals(googleProvider("id").str, "google",
+            clue = s"OIDC provider id must be 'google' (the FakeOidcProvider's `override val id = \"google\"` matches the production GoogleOidcProvider's same override); a refactor changing the id would break every cross-reference that keys on it (frontend routes, log lines, dashboard alerting); got: ${googleProvider("id").str}")
+          assertEquals(googleProvider("displayName").str, "Google",
+            clue = s"OIDC provider displayName must be 'Google' (taken from the provider's config; both FakeOidcProvider and GoogleOidcProvider expose `displayName = \"Google\"`); changing it would change the user-visible 'Continue with X' button label without test failure; got: ${googleProvider("displayName").str}")
+          assertEquals(googleProvider("kind").str, "oidc",
+            clue = s"OIDC provider kind must be 'oidc' per deploy doc line 101's `kind` enum (`password` for local, `oidc` for OIDC) -- the shipped frontend's auth-mode rendering keys on `kind === 'oidc'` to render the 'Continue with Google' button vs `kind === 'password'` for the email+password form; a refactor renaming this to 'openid-connect' or 'social' would silently break the UI gating without compile error; got: ${googleProvider("kind").str}")
+          assertEquals(googleProvider("startPath").str, "/api/auth/oidc/google/start",
+            clue = s"OIDC provider startPath must be '/api/auth/oidc/google/start' (the documented route the frontend's anchor targets to begin the OIDC flow); a refactor changing the path component would silently break the 'Continue with Google' link AND likely break the GOOGLE_OIDC_REDIRECT_URI matching since the configured redirect URI must end with `/api/auth/oidc/google/callback` which mirrors the start path; got: ${googleProvider("startPath").str}")
 
           val start = get(s"$baseUri${provider.startPath}")
           assertEquals(start.statusCode(), 302)
