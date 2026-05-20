@@ -871,6 +871,82 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the natural-expiry case -- the complement to f8eadfb's
+  // sliding pin. f8eadfb proved that an actively-using session
+  // stays alive past the original TTL window via resolveSession's
+  // refresh; this fire proves the OPPOSITE direction: a session
+  // that gets NO intermediate requests times out at exactly
+  // registerTime + sessionTtlMs, AND a subsequent request with the
+  // (now-stale) cookie surfaces authenticated=false. The pair of
+  // tests (f8eadfb + this commit) lock in the full sliding-TTL
+  // contract: ACTIVE use refreshes, IDLE use expires; without the
+  // active-refresh half, users would get kicked out at the original
+  // TTL regardless of activity (regression caught by f8eadfb);
+  // without the idle-expiry half, sessions would live forever once
+  // minted (regression caught by THIS test). PlatformUserAuth's
+  // resolveSession at line ~835 implements both branches in one
+  // conditional: `if current.expiresAtEpochMs > nowMillis() then
+  // current.copy(...refresh...) else null` -- a refactor that
+  // accidentally inverted the comparison or removed the else-null
+  // branch would let expired sessions resolve indefinitely, which
+  // is a real security hole (a session token stolen days ago
+  // could still be used months later because the record never
+  // expired). The default 12h TTL means this branch fires rarely
+  // in production, so a regression here would go undetected unless
+  // CI exercises it explicitly. Test mechanics mirror f8eadfb:
+  // short TTL (1000ms) for fast test execution, but DIFFERENT
+  // flow -- register, wait WITHOUT any intermediate requests, then
+  // probe and assert authenticated=false. The "no intermediate
+  // requests" is the key behavioral difference vs f8eadfb's sliding
+  // test (which DID make a mid-window request to trigger the slide).
+  test("session record naturally expires when idle past sessionTtlMs -- subsequent requests surface authenticated=false") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        // Same short TTL as f8eadfb's sliding test (1000ms) so the
+        // test completes quickly; logic is TTL-magnitude-independent.
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath, sessionTtlMs = 1000L))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"expirer@example.com","password":"correct-horse-battery","displayName":"Expirer"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed to mint the session record that we then let expire idle")
+          val cookieHeader = Map("Cookie" -> sessionCookie(register))
+
+          // Wait 1200ms (120% of TTL). With NO intermediate requests,
+          // the session record at register-time + 1000ms is now
+          // expired by 200ms. The 200ms cushion is large enough to
+          // absorb test-runner clock jitter (typical Thread.sleep
+          // precision on JVM is ~10-50ms) while small enough to
+          // not bloat the test runtime.
+          Thread.sleep(1200L)
+
+          // Probe /api/auth/me with the (now-stale) session cookie.
+          // resolveSession at SessionManager line ~835 reads the
+          // record, sees expiresAtEpochMs <= now, returns null
+          // (treated as "no session" by the calling site), AND the
+          // lazy-purge path at line ~872 (`if entry.getValue.
+          // expiresAtEpochMs <= now then` remove-from-map) cleans
+          // the expired entry so memory doesn't grow unbounded
+          // across idle sessions. The /api/auth/me response
+          // surfaces authenticated=false because there's no
+          // resolvable session attached to the request.
+          val expiredProbe = getJsonWithHeaders(s"$baseUri/api/auth/me", cookieHeader)
+          assertEquals(expiredProbe("authenticated").bool, false,
+            clue = "after 120% of TTL with NO intermediate requests, the session record must be expired and /api/auth/me must surface authenticated=false -- without this, expired sessions would resolve indefinitely (a real security hole: a stolen session token could be used months after the original sign-in because the record never expires); the resolveSession logic at PlatformUserAuth.SessionManager line ~835 implements this via `if current.expiresAtEpochMs > nowMillis() then refresh else null` -- a refactor that inverted the comparison or removed the else-null branch would let this assertion fire false, signaling the security regression")
+          // The `user` field should be null (no authenticated user
+          // session was found) -- matches the documented degenerate-
+          // shape post-expiry response.
+          assert(expiredProbe("user") == ujson.Null,
+            clue = s"expired-session /api/auth/me response must carry user=null per the documented degenerate-shape contract; got user=${expiredProbe("user")}")
+        }
+      }
+    }
+  }
+
   // Pin the documented "session cookie Max-Age is FIXED at login time
   // and NOT refreshed by subsequent activity" behavior -- the security-
   // critical foundation of the leaked-token-lifetime upper-bound
