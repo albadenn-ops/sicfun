@@ -3234,6 +3234,130 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `startup complete` banner under platform-
+  // user authentication mode -- the platform-mode-variant
+  // complement to 7c47f88's no-auth-mode (none) variant; 7c47f88
+  // pinned the banner's userAuth* fields as the "-" placeholder
+  // (the no-auth-mode default per HandHistoryReviewServerRuntime.
+  // scala lines 328 + 333's getOrElse("-")) and authenticationMode=
+  // none; THIS commit pins the OPPOSITE direction: when
+  // platformAuth is configured, the banner emits authenticationMode=
+  // users (NOT "none") AND userAuthMaxUsers=<configured-max> (NOT
+  // "-") AND userAuthStoredUsers=<count> (NOT "-"); together the
+  // two tests pin the per-auth-mode banner-shape divergence the
+  // deploy doc's boot-time-diagnostic contract depends on for
+  // operators to verify "the deployment is wired for the correct
+  // auth mode" at boot time; per-field regression vectors that
+  // 7c47f88's no-auth pin doesn't catch: (i) authenticationMode=
+  // users -- the specific string "users" (not "platform-user-auth"
+  // or "platform" or "user-auth") that the inline auth-mode
+  // detection at HandHistoryReviewServerRuntime.scala's
+  // `authenticationMode` helper returns; a refactor renaming the
+  // mode identifier (e.g. for "naming consistency" with future
+  // OIDC-only or magic-link modes) would silently break operator
+  // dashboards filtering by authenticationMode=users for
+  // platform-auth deployments AND would silently desync from
+  // /api/health.authenticationMode (pinned by b1339cd + sibling
+  // tests) which uses the SAME value, (ii) userAuthMaxUsers=
+  // 100000 -- the SPECIFIC default value (matches fb18e2c's
+  // health-side pin); a refactor changing the default (e.g.
+  // bumping to 250000 because "modern deployments need more
+  // headroom") would silently desync the banner from /api/health
+  // dashboards AND silently break operator capacity-planning
+  // queries that key on the documented 100k default, (iii)
+  // userAuthStoredUsers=0 -- the count at FRESH BOOT before any
+  // users register; emits the integer 0 (NOT the string "-"
+  // which is the no-auth placeholder); the inline comment at
+  // HandHistoryReviewServerRuntime.scala lines 329-332 EXPLICITLY
+  // documents this as the boot-time count emission for "operators
+  // verify the persistent store survived restart" -- a fresh
+  // store reads back 0 users, a restarted store reads back >0
+  // users if the deploy persisted; a refactor that emitted "-"
+  // when platformAuth was configured but storedUserCount returned
+  // 0 (a common "fix Option<Int> -> 0 vs - confusion" refactor
+  // would conflate the two) would silently mask the
+  // restart-survival diagnostic -- operators couldn't tell
+  // "fresh-boot, 0 users" from "store missing, 0 users" if both
+  // emitted "-"; the test uses a FRESH userStorePath (no prior
+  // registrations) so the expected count is exactly 0; same
+  // stdout-capture pattern as 7c47f88; future fires can extend
+  // with: (a) restart-with-stored-users variant -- register N
+  // users via /api/auth/register, close the server, reopen with
+  // the same storePath, verify the SECOND startup banner emits
+  // userAuthStoredUsers=N (pins the BOOT-TIME-COUNT-LOAD
+  // contract at HandHistoryReviewServerRuntime.scala lines
+  // 329-332 directly), (b) basic-auth-mode variant (a similar
+  // pin for authenticationMode=basic which is the third auth
+  // mode -- pairs with no-auth + users to cover all 3 modes).
+  test("server startup under platform-user authentication emits the documented banner with authenticationMode=users + userAuthMaxUsers=100000 + userAuthStoredUsers=0 -- per-mode variant of the 7c47f88 no-auth startup banner pin") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        // Same stdout-capture pattern as 7c47f88 but with
+        // platformAuth configured -- the banner's authentication
+        // Mode + userAuth* fields flip from the no-auth defaults
+        // to the platform-mode values.
+        val outBuf = new java.io.ByteArrayOutputStream()
+        val originalOut = System.out
+        System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+        try
+          withServer(
+            staticDir,
+            platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+          ) { _ =>
+            // No HTTP requests -- the banner emits at startup
+            // BEFORE the callback runs. A fresh storePath means
+            // 0 registered users at boot time, so the expected
+            // userAuthStoredUsers value is exactly 0.
+            ()
+          }
+        finally
+          System.setOut(originalOut)
+
+        val captured = outBuf.toString(StandardCharsets.UTF_8)
+        val bannerLine = captured.split('\n').iterator
+          .find(_.contains("startup complete"))
+          .getOrElse(fail(s"no `startup complete` line in captured stdout for the platform-user-auth variant -- the 7c47f88 startup pin should catch the absence independently in the no-auth case, but this test verifies the platform-auth case has the same banner emission; if missing, the platform-auth branch suppressed the banner OR the banner shape differs across modes; got captured stdout: ${captured.take(2000)}"))
+
+        // (i) prefix (matches the 7c47f88 no-auth banner -- the
+        // prefix is per-mode-invariant, only the field values
+        // flip)
+        assert(bannerLine.contains("startup complete"),
+          clue = s"platform-auth startup banner must carry the SAME `startup complete` prefix as the no-auth variant -- the prefix is mode-invariant per HandHistoryReviewServerRuntime.scala line 349's hardcoded literal; a refactor that emitted a different prefix per mode (e.g. `startup complete (platform-auth)` for distinguishability) would silently break operator scripts that grep one prefix across all deployments; got: $bannerLine")
+        // (ii) authenticationMode=users (per-mode VARIANT --
+        // catches a refactor renaming the mode identifier OR
+        // accidentally emitting "none" when platformAuth IS
+        // configured)
+        assert(bannerLine.contains("authenticationMode=users"),
+          clue = s"platform-auth startup banner MUST carry authenticationMode=users (NOT \"none\" which is the no-auth-mode value pinned by 7c47f88, NOT \"platform\" or \"platform-user-auth\" or \"users-auth\" which a refactor might rename to for naming consistency); the specific string \"users\" matches /api/health.authenticationMode (pinned by b1339cd + sibling tests under platform-mode); a refactor renaming would silently break operator dashboards filtering by authenticationMode=users AND silently desync the banner from runtime probes; got: $bannerLine")
+        // (iii) userAuthMaxUsers=100000 (per-mode VARIANT --
+        // catches a refactor changing the default OR conflating
+        // the "-" placeholder with a 0 emission)
+        assert(bannerLine.contains("userAuthMaxUsers=100000"),
+          clue = s"platform-auth startup banner MUST carry userAuthMaxUsers=100000 (the documented default per PlatformUserAuth.scala line 81's `maxUsers: Int = 100_000` AND fb18e2c's matching /api/health pin) -- NOT \"-\" (the no-auth-mode placeholder pinned by 7c47f88); a refactor changing the default would silently desync the banner from /api/health AND silently break operator capacity-planning queries keyed on the documented 100k default, a refactor that emitted \"-\" when platformAuth IS configured (a common Option<Int>-vs-placeholder confusion refactor) would silently mask the per-mode banner-shape divergence; got: $bannerLine")
+        // (iv) userAuthStoredUsers=0 (per-mode VARIANT -- the
+        // FRESH-BOOT count, distinct from the \"-\" no-auth
+        // placeholder; the inline comment at HandHistoryReview
+        // ServerRuntime.scala lines 329-332 documents this as
+        // the boot-time count emission for restart-survival
+        // verification)
+        assert(bannerLine.contains("userAuthStoredUsers=0"),
+          clue = s"platform-auth startup banner MUST carry userAuthStoredUsers=0 at FRESH BOOT (a brand-new storePath has zero registered users per the test's withUserStorePath fixture) -- NOT \"-\" (the no-auth-mode placeholder pinned by 7c47f88) AND NOT some other integer; the inline comment at HandHistoryReviewServerRuntime.scala lines 329-332 EXPLICITLY documents this field as the boot-time count emission for 'operators verify the persistent store survived restart without hitting /api/health first' -- a refactor that emitted \"-\" when platformAuth was configured (conflating no-auth-placeholder with platform-fresh-boot-count) would silently mask the restart-survival diagnostic (operators couldn't distinguish 'fresh boot, 0 users' from 'store missing, no count available'); got: $bannerLine")
+        // (v) host/port/INFO/service-tag prefix match the no-auth
+        // variant -- the cross-cutting fields don't depend on
+        // auth mode (catches a refactor that accidentally
+        // gated the cross-cutting fields on auth mode)
+        assert(bannerLine.contains("host=127.0.0.1"),
+          clue = s"platform-auth startup banner must carry host=127.0.0.1 matching the no-auth variant -- host is auth-mode-invariant; got: $bannerLine")
+        assert(bannerLine.contains("port="),
+          clue = s"platform-auth startup banner must carry port=<resolved-port> matching the no-auth variant; got: $bannerLine")
+        assert(bannerLine.contains("[INFO]"),
+          clue = s"platform-auth startup banner must be INFO-level matching the no-auth variant; got: $bannerLine")
+        assert(bannerLine.contains("[hand-history-review]"),
+          clue = s"platform-auth startup banner must carry the [hand-history-review] service-tag prefix matching the no-auth variant -- the service-tag is mode-invariant (the SAME service emits banners across all auth modes); got: $bannerLine")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
