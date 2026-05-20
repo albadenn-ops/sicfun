@@ -3222,6 +3222,30 @@ class HandHistoryReviewServerTest extends FunSuite:
           val registerJson = jsonBody(register)
           assertEquals(registerJson("authenticated").bool, true)
           assertEquals(registerJson("user")("email").str, "alice@example.com")
+          // Pin the linkedProviders array shape for a local-password
+          // user. Deploy doc line 101 explicitly documents the
+          // linkedProviders field as "the linkedProviders array
+          // naming all provider ids linked to the account
+          // (alphabetically sorted, distinct -- includes the literal
+          // `local` value for a password-registered user, plus any
+          // OIDC provider id like `google` for an OIDC-linked user;
+          // the two are mutually exclusive on a given account because
+          // the local-vs-OIDC email-collision rule above blocks
+          // mixing)". Before this commit only the OIDC-side branch
+          // was tested (at line ~3451 via `.contains("google")`); the
+          // local-password branch was untested even though it's the
+          // more-commonly-exercised path in non-OIDC deployments.
+          // The 24a703b OIDC providers-list pin (which establishes
+          // the available-providers contract) is complementary to
+          // this linkedProviders pin (which establishes the
+          // per-account-actually-linked contract); a refactor
+          // changing the local-side mark from "local" to e.g.
+          // "password" would silently break frontend logic that
+          // keys on linkedProviders to differentiate "user can sign
+          // in via password" vs "user must sign in via OIDC".
+          val linkedProviders = registerJson("user")("linkedProviders").arr.toVector.map(_.str)
+          assertEquals(linkedProviders, Vector("local"),
+            clue = s"freshly-registered local-password user's linkedProviders must equal exactly ['local'] per deploy doc line 101 -- a refactor that emitted a different mark (e.g. 'password', 'email-password', or empty array) would silently break the frontend's provider-routing logic AND the runbook's 'Forgotten-password support triage' (section 5A line 339) which assumes operators can spot password-only accounts via this field. Note: equality check (not contains) because the deploy doc says the array must include 'local' AND be distinct + alphabetically sorted -- for a fresh local-password user with no OIDC links, the only correct value is exactly ['local']; got: $linkedProviders")
 
           // Lock in the session cookie's wire-format attributes so a future refactor
           // of sessionCookieHeader can't silently drop the protections.
