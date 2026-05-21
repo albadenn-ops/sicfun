@@ -12766,6 +12766,172 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the 3-WAY CROSS-CHECK between (1) rateLimitClient
+  // IpSource function output, (2) startup banner field at
+  // HandHistoryReviewServerRuntime.scala line 350 (%20-
+  // escaped form), AND (3) /api/health readiness JSON
+  // field at Readiness.scala line 103 (RAW form, no
+  // escape) -- the BANNER-READINESS-FUNCTION 3-WAY pin
+  // extends 45ca6ef's 2-way banner-function pattern to
+  // cover ALL 3 consumers of the rateLimitClientIpSource
+  // function in a single test, catching divergence where
+  // ANY of the 3 consumers desyncs from the function's
+  // truth (the banner has its OWN refactor risk via
+  // %20-escape drops, AND the readiness JSON has its OWN
+  // refactor risk via JSON field rename / hardcoded value);
+  // NINTH per-emission-site SHAPE pin overall extending
+  // the CROSS-CHECK sub-family from 3ed4da7 (emission s-
+  // string vs classifier startsWith) + 45ca6ef (banner
+  // vs function) to a 3-WAY coupling; the 3-way cross-
+  // check is OPERATIONALLY CRITICAL because the
+  // rateLimitClientIpSource value flows into TWO operator-
+  // facing surfaces simultaneously: (a) STARTUP-TIME audit
+  // (the banner at line 350 is what operators see in the
+  // process-start log), (b) RUNTIME audit (the /api/health
+  // endpoint at lines 103/146 is what dashboards + health
+  // checks render to operators on the live UI); a divergence
+  // between (a) and (b) would silently let operators see
+  // CONTRADICTORY config in two surfaces (the banner says
+  // one thing, the dashboard says another), undermining
+  // trust in BOTH surfaces -- the operator can no longer
+  // determine which surface is correct; the .replace(" ",
+  // "%20") asymmetry between the banner (escaped) and the
+  // readiness (raw) is INTENTIONAL: the banner is a
+  // STRUCTURED LOG LINE where spaces would split key=value
+  // pairs (necessitating the URL-style escape), while the
+  // readiness is JSON-quoted so spaces are SAFE WITHIN
+  // QUOTED VALUES; a refactor consolidating to a single
+  // escape form (e.g. applying %20 in the readiness JSON
+  // too "for consistency with the banner") would silently
+  // break dashboards that render the readiness field as-
+  // is (the user would see ugly %20 sequences instead of
+  // natural spaces); per-format regression vectors uniquely
+  // caught: (i) refactor renaming the readiness JSON field
+  // (e.g. `rateLimitClientIpSource` -> `clientIpSource` to
+  // match the runbook's shorter form) would silently
+  // break dashboards keying on the documented field name,
+  // (ii) refactor hardcoding the readiness JSON value
+  // (e.g. inlining `header:X-Real-IP via loopback-only` as
+  // a literal during a config-as-code refactor) would
+  // silently desync from actual rate-limiter behavior,
+  // (iii) refactor applying %20-escape to the readiness
+  // JSON value would silently make dashboards render
+  // `header:X-Real-IP%20via%20loopback-or-allowlisted-
+  // proxy` instead of the natural-language form, (iv)
+  // refactor dropping the banner's %20-escape would
+  // silently let the banner's structured log line break
+  // on the rateLimitClientIpSource spaces (3ed4da7's pin
+  // would also catch this BUT the 3-way pin reveals the
+  // ASYMMETRY between the two consumers via the explicit
+  // assertion); test approach extends 45ca6ef: configure
+  // the server with the SAME proxy-allowlist mode
+  // (`Some("X-Real-IP") + Set("10.0.0.1")` -- 3 spaces in
+  // the template), capture stdout for the banner AND
+  // query /api/health for the readiness JSON, compute
+  // the function's RAW output directly, assert all 3
+  // consumers agree under the documented escape
+  // transformations; 6-tier check: (i) function output
+  // equals the documented literal `header:X-Real-IP via
+  // loopback-or-allowlisted-proxy` (RAW form, 3 spaces),
+  // (ii) readiness JSON field EQUALS function output
+  // VERBATIM (no escape -- JSON quoting handles spaces),
+  // (iii) banner field EQUALS function output WITH .replace
+  // (" ", "%20") (escaped form -- the URL-style escape
+  // protects structured log parseability), (iv) banner
+  // field EQUALS readiness JSON field with .replace(" ",
+  // "%20") applied to the readiness side (the 3-way
+  // CONSISTENCY assertion: banner can be derived from
+  // readiness via the escape), (v) NEGATIVE assertion:
+  // readiness MUST contain raw spaces (the raw form is
+  // what JSON quoting wraps -- if readiness contained
+  // %20, dashboards would render ugly URL-encoded text),
+  // (vi) NEGATIVE assertion: banner MUST NOT contain raw
+  // spaces (the %20-escape MUST be applied -- a regression
+  // would break structured log parsing on the field +
+  // ALL downstream key=value pairs).
+  test("readiness JSON's `rateLimitClientIpSource` field at /api/health (Readiness.scala line 103) MUST equal rateLimitClientIpSource(config) VERBATIM (raw form, no %20 escape) AND the banner's `rateLimitClientIpSource=<value>` field MUST equal the same with %20 escape -- the 3-WAY CROSS-CHECK (function ↔ banner ↔ readiness) catches drift between ANY of the 3 consumers of the same source function") {
+    withStaticSite { staticDir =>
+      // Same config as 45ca6ef -- proxy-allowlist mode for
+      // the most-complex template with 3 spaces exercising
+      // the escape asymmetry between banner + readiness
+      val testHeader = "X-Real-IP"
+      val testProxies = Set("10.0.0.1")
+      val expectedRawFunctionOutput = "header:X-Real-IP via loopback-or-allowlisted-proxy"
+
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      val healthBody =
+        try
+          withServer(
+            staticDir,
+            rateLimitClientIpHeader = Some(testHeader),
+            rateLimitTrustedProxyIps = testProxies
+          ) { server =>
+            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+            getJson(s"$baseUri/api/health")
+          }
+        finally
+          System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val bannerLine = captured.split('\n').iterator
+        .find(_.contains("startup complete"))
+        .getOrElse(fail(s"no `startup complete` line in captured stdout -- the 3-way cross-check pin needs the banner line to inspect; got captured stdout: ${captured.take(800)}"))
+
+      // Extract banner field (escaped form)
+      val bannerFieldToken = bannerLine.split(' ').iterator
+        .find(_.startsWith("rateLimitClientIpSource="))
+        .getOrElse(fail(s"no `rateLimitClientIpSource=` token in startup banner; got banner: $bannerLine"))
+      val bannerFieldValue = bannerFieldToken.drop("rateLimitClientIpSource=".length).stripTrailing()
+
+      // Extract readiness JSON field (raw form)
+      val readinessFieldValue = healthBody("rateLimitClientIpSource").str
+
+      // Compute the function's raw output directly
+      val functionOutput = RateLimit.rateLimitClientIpSource(Some(testHeader), testProxies)
+
+      // (i) function output equals the documented literal
+      assertEquals(functionOutput, expectedRawFunctionOutput,
+        clue = s"rateLimitClientIpSource(Some(\"X-Real-IP\"), Set(\"10.0.0.1\")) MUST equal `$expectedRawFunctionOutput` (the documented proxy-allowlist mode template per RateLimit.scala line 107) -- pinning the raw form ANCHORS the 3-way comparison; got: `$functionOutput`")
+
+      // (ii) readiness JSON field EQUALS function output
+      // VERBATIM (no escape -- JSON quoting handles spaces)
+      assertEquals(readinessFieldValue, functionOutput,
+        clue = s"readiness JSON's `rateLimitClientIpSource` field at /api/health MUST equal the function output VERBATIM (raw form, no %20 escape) per Readiness.scala line 103's `Str(rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps))` -- the JSON form does NOT apply the .replace escape because JSON quoting handles spaces safely (the HandHistoryReviewServerRuntime.scala line 345-346 inline comment documents this: 'The JSON form in /api/health doesn't need this escape (JSON quoting handles spaces); only the log line does.'); a refactor applying %20 to the readiness JSON would silently make dashboards render ugly URL-encoded text; a refactor hardcoding the value would silently desync from actual rate-limiter behavior; got readiness=`$readinessFieldValue`, function=`$functionOutput`")
+
+      // (iii) banner field EQUALS function output WITH the
+      // %20-escape applied (already covered by 45ca6ef BUT
+      // the explicit assertion here makes the 3-way contract
+      // self-contained)
+      assertEquals(bannerFieldValue, functionOutput.replace(" ", "%20"),
+        clue = s"banner's `rateLimitClientIpSource=<value>` field MUST equal function output WITH .replace(\" \", \"%20\") applied per HandHistoryReviewServerRuntime.scala line 348's `.replace(\" \", \"%20\")` -- the structured log line needs URL-style escape to keep key=value parseability intact; got banner=`$bannerFieldValue`, expected=`${functionOutput.replace(" ", "%20")}`")
+
+      // (iv) 3-way CONSISTENCY: banner field EQUALS readiness
+      // JSON field WITH .replace(" ", "%20") applied to the
+      // readiness side -- the CORE ASSERTION of this pin
+      // (the banner can be derived from readiness via the
+      // documented escape, and vice versa via removing the
+      // escape)
+      assertEquals(bannerFieldValue, readinessFieldValue.replace(" ", "%20"),
+        clue = s"3-way CONSISTENCY assertion: banner field MUST EQUAL readiness JSON field WITH the documented .replace(\" \", \"%20\") escape applied -- catches a refactor where the banner + readiness diverge from the SAME function but in DIFFERENT ways (e.g. banner correctly applies %20 but readiness was hardcoded to an old config value, or readiness correctly tracks the function but banner was switched to a different config source); the 3-way assertion catches consumer-level drift that neither the (function, banner) pair nor the (function, readiness) pair alone would catch; got banner=`$bannerFieldValue`, readiness-escaped=`${readinessFieldValue.replace(" ", "%20")}`")
+
+      // (v) NEGATIVE: readiness MUST contain raw spaces (the
+      // raw form is what JSON quoting wraps -- if readiness
+      // contained %20, dashboards would render ugly URL-
+      // encoded text)
+      assert(readinessFieldValue.contains(" "),
+        clue = s"readiness JSON field MUST contain RAW SPACES for the proxy-allowlist mode template (the documented form `header:X-Real-IP via loopback-or-allowlisted-proxy` has 3 spaces) -- a refactor that applied %20 to the readiness JSON would silently produce a value WITHOUT spaces (replaced with %20), and dashboards rendering the value would show ugly URL-encoded text instead of natural-language form; got readiness=`$readinessFieldValue`")
+
+      // (vi) NEGATIVE: banner MUST NOT contain raw spaces
+      // (already covered by 45ca6ef BUT the explicit
+      // assertion here closes the 3-way contract with the
+      // OPPOSITE invariant of (v))
+      assert(!bannerFieldValue.contains(" "),
+        clue = s"banner field MUST NOT contain RAW SPACES (the %20 escape MUST be applied -- a regression would break structured log parsing on the field AND all downstream key=value pairs after it); got banner=`$bannerFieldValue`")
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
