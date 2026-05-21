@@ -15342,6 +15342,138 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented OPTIONS-PREFLIGHT response shape for
+  // the SUBMIT endpoints (POST /api/analyze-hand-history +
+  // POST /api/playing-hall) at HandHistoryReviewServerApi
+  // .scala lines 80 (analyze submit) + 124 (hall submit) --
+  // the FIELD-SET-CARDINALITY pin for SUBMIT-endpoint
+  // OPTIONS responses with the documented SYMMETRIC contract
+  // (BOTH endpoints emit IDENTICAL 1-field body {allow:
+  // "POST, OPTIONS"} + identical Allow header); 22671ec
+  // pinned the OPTIONS shape for STATUS endpoints
+  // (analyze + hall jobs/<id> with the asymmetric DELETE
+  // capability on hall), but the SUBMIT endpoints' OPTIONS
+  // were uncovered for body shape (only the analyze submit
+  // Allow header was pinned at line 9391's existing test
+  // but NOT the body shape OR the hall submit OPTIONS at
+  // all); TWENTY-EIGHTH per-emission-site SHAPE pin overall
+  // extending the OPTIONS-preflight coverage from
+  // STATUS-endpoint asymmetric (22671ec) to SUBMIT-endpoint
+  // symmetric (THIS commit); the SUBMIT-endpoint OPTIONS
+  // shape is OPERATIONALLY CRITICAL because: (a) the
+  // CORS-preflight gate FOR SUBMISSIONS is what unblocks
+  // file uploads from a browser-based frontend -- if the
+  // OPTIONS response misses Allow or has wrong methods,
+  // browsers refuse to send the actual POST, breaking the
+  // upload flow entirely, (b) the SYMMETRY between analyze
+  // + hall submits is INTENTIONAL: both endpoints are
+  // submission endpoints + share the documented "only POST
+  // accepted" contract, a refactor adding a method to ONE
+  // submit endpoint but not the OTHER would silently
+  // break the symmetric design, (c) the documented method
+  // set is INTENTIONALLY MINIMAL ({POST, OPTIONS} only) --
+  // additional methods like GET (e.g. for "get the latest
+  // submission" introspection) would silently widen the
+  // attack surface; per-format regression vectors uniquely
+  // caught: (i) refactor ADDING methods to either submit
+  // endpoint (e.g. GET for introspection, DELETE for
+  // bulk-cancel) would silently widen the contract and
+  // break the documented symmetry, (ii) refactor diverging
+  // analyze vs hall submit endpoints would silently break
+  // the symmetric design, (iii) refactor RENAMING the body
+  // field `allow` would silently break body-reading CORS
+  // clients (same regression as 22671ec but on the submit
+  // side); test approach: send OPTIONS to BOTH submission
+  // endpoint roots (/api/analyze-hand-history + /api/
+  // playing-hall), verify (a) status 200, (b) body has
+  // exactly 1 field {allow}, (c) body.allow EQUALS Allow
+  // header (body-header CROSS-CHECK), (d) body.allow ==
+  // "POST, OPTIONS" (documented minimal set), (e)
+  // analyzeBody EQUALS hallBody (documented SYMMETRY --
+  // catches refactor diverging the two endpoints).
+  test("OPTIONS-preflight responses on SUBMIT endpoints /api/analyze-hand-history + /api/playing-hall MUST emit the documented 1-field body {allow: 'POST, OPTIONS'} per HandHistoryReviewServerApi.scala lines 80 + 124's optionsResponse('POST') emission AND the two endpoints MUST emit IDENTICAL responses (SYMMETRIC contract complementing 22671ec's STATUS-endpoint ASYMMETRIC pin)") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Helper to send OPTIONS via the standard HTTP client
+        def sendOptions(path: String) =
+          httpClient.send(
+            HttpRequest.newBuilder()
+              .uri(URI.create(s"$baseUri$path"))
+              .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+              .build(),
+            HttpResponse.BodyHandlers.ofString()
+          )
+
+        // (A) OPTIONS on analyze submit endpoint
+        val analyzeOptions = sendOptions("/api/analyze-hand-history")
+        assertEquals(analyzeOptions.statusCode(), 200,
+          clue = "OPTIONS preflight on /api/analyze-hand-history MUST return 200 per HandHistoryReviewServerApi.scala line 80's `optionsResponse(\"POST\")` -> JsonResponse(status=200, ...)")
+        val analyzeBody = ujson.read(analyzeOptions.body())
+        val analyzeBodyFields = analyzeBody.obj.keys.toSet
+
+        // (i) analyze body CARDINALITY
+        assertEquals(analyzeBodyFields, Set("allow"),
+          clue = s"analyze submit OPTIONS body MUST have exactly 1 field `allow` per HandHistoryReviewServerApi.scala line 57's optionsResponse helper Obj-with-allow-field emission (consumed via line 80's optionsResponse call); got actual=${analyzeBodyFields.toVector.sorted.mkString(", ")}")
+
+        // (ii) analyze body-header CROSS-CHECK
+        val analyzeHeaderAllow = headerValue(analyzeOptions, "Allow")
+          .getOrElse(fail("analyze submit OPTIONS response MUST include Allow header per line 58's emission"))
+        assertEquals(analyzeBody("allow").str, analyzeHeaderAllow,
+          clue = s"analyze submit OPTIONS body.allow MUST EQUAL Allow header value (body-header CROSS-CHECK mirroring 22671ec's status-endpoint pattern); got body=${analyzeBody("allow").str}, header=$analyzeHeaderAllow")
+
+        // (iii) analyze body-allow VALUE
+        assertEquals(analyzeBody("allow").str, "POST, OPTIONS",
+          clue = s"analyze submit OPTIONS body.allow MUST be exactly `POST, OPTIONS` per line 80's optionsResponse with POST argument + line 54's allowValue helper appending `, OPTIONS` -- a refactor ADDING methods (e.g. GET for introspection, DELETE for bulk-cancel) would silently widen the contract; got: ${analyzeBody("allow").str}")
+
+        // (B) OPTIONS on hall submit endpoint
+        val hallOptions = sendOptions("/api/playing-hall")
+        assertEquals(hallOptions.statusCode(), 200,
+          clue = "OPTIONS preflight on /api/playing-hall MUST return 200 (symmetric with analyze submit)")
+        val hallBody = ujson.read(hallOptions.body())
+        val hallBodyFields = hallBody.obj.keys.toSet
+
+        // (iv) hall body CARDINALITY
+        assertEquals(hallBodyFields, Set("allow"),
+          clue = s"hall submit OPTIONS body MUST have exactly 1 field `allow` (symmetric with analyze submit); got actual=${hallBodyFields.toVector.sorted.mkString(", ")}")
+
+        // (v) hall body-header CROSS-CHECK
+        val hallHeaderAllow = headerValue(hallOptions, "Allow")
+          .getOrElse(fail("hall submit OPTIONS response MUST include Allow header"))
+        assertEquals(hallBody("allow").str, hallHeaderAllow,
+          clue = s"hall submit OPTIONS body.allow MUST EQUAL Allow header value; got body=${hallBody("allow").str}, header=$hallHeaderAllow")
+
+        // (vi) hall body-allow VALUE
+        assertEquals(hallBody("allow").str, "POST, OPTIONS",
+          clue = s"hall submit OPTIONS body.allow MUST be exactly `POST, OPTIONS` per line 124's optionsResponse with POST argument -- symmetric with analyze submit; got: ${hallBody("allow").str}")
+
+        // (vii) SYMMETRIC CONTRACT: analyzeBody EQUALS
+        // hallBody (the SUBMIT endpoints' OPTIONS responses
+        // MUST be IDENTICAL -- the CORE assertion for THIS
+        // pin distinguishing it from 22671ec's
+        // ASYMMETRIC-status-endpoints contract)
+        assertEquals(analyzeBody, hallBody,
+          clue = s"analyze + hall submit OPTIONS bodies MUST be IDENTICAL per the documented SYMMETRIC contract for submission endpoints (both endpoints emit optionsResponse(\"POST\") at lines 80 + 124, producing the SAME body) -- this is the SUBMIT-endpoint complement to 22671ec's STATUS-endpoint ASYMMETRIC contract (status endpoints have DELETE on hall only); a refactor adding a method to ONE submit endpoint but not the other would silently break the documented symmetric design, breaking CORS-aware clients that reuse the same OPTIONS-discovery code for both endpoints; got analyze=$analyzeBody, hall=$hallBody")
+        // ALSO header equality (defense-in-depth):
+        assertEquals(analyzeHeaderAllow, hallHeaderAllow,
+          clue = s"analyze + hall submit OPTIONS Allow HEADERS MUST be IDENTICAL (symmetric with body equality); got analyze=$analyzeHeaderAllow, hall=$hallHeaderAllow")
+
+        // (viii) CROSS-FAMILY CROSS-CHECK: SUBMIT endpoints
+        // OPTIONS do NOT contain GET/HEAD/DELETE (the STATUS-
+        // endpoint methods); this catches a refactor that
+        // accidentally swapped the optionsResponse arguments
+        // between submit (POST) and status (GET, HEAD,
+        // [DELETE]) endpoints
+        val analyzeSubmitMethods = analyzeBody("allow").str.split(",").map(_.trim).toSet
+        assert(!analyzeSubmitMethods.contains("GET"),
+          clue = s"analyze submit OPTIONS MUST NOT contain GET (submit endpoints are POST-only; a refactor swapping the optionsResponse arguments between submit + status endpoints would silently break the documented design); got: ${analyzeSubmitMethods.toVector.sorted.mkString(", ")}")
+        assert(!analyzeSubmitMethods.contains("DELETE"),
+          clue = s"analyze submit OPTIONS MUST NOT contain DELETE (DELETE is the status-endpoint hall-only capability per 3322984/22671ec); got: ${analyzeSubmitMethods.toVector.sorted.mkString(", ")}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
