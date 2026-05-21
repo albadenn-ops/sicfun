@@ -18680,6 +18680,207 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented status-poll MESSAGE-TEXT VALUES SET
+  // contract at JobQueue.scala lines 395 + 403 + 701 + 709 --
+  // the MESSAGE-VALUES-SET pin consolidates the 4 documented
+  // non-terminal-state message texts emitted across BOTH
+  // submission endpoints (analyze + hall) x BOTH non-terminal
+  // states (Queued + Running) into a single CLOSED-SET
+  // assertion. FIFTY-THIRD per-emission-site SHAPE pin overall;
+  // existing per-state per-endpoint pins (016d138 analyze
+  // Queued + 65b46f6 analyze Running + 92e3ea2 hall Running +
+  // c0dffd5 hall Queued) verify the individual message strings
+  // in isolation, but the CONSOLIDATED VALUES SET shape --
+  // which verifies CARDINALITY + DISAMBIGUATION + CROSS-STATE
+  // + CROSS-ENDPOINT invariants in a single test -- is unpinned;
+  // the MESSAGE-VALUES-SET contract is OPERATIONALLY CRITICAL
+  // because: (a) operator dashboards + user-facing UI render
+  // distinct visual states based on these 4 message strings --
+  // a refactor that COLLAPSES two messages (e.g., uses "Queued"
+  // for both analyze and hall) would silently break the
+  // endpoint-disambiguation contract that lets dashboards
+  // partition the queue-wait metric by job type, (b) the
+  // documented design intentionally uses DISTINCT messages on
+  // analyze vs hall (4 distinct strings, not 2 shared) to
+  // support per-endpoint operator analytics -- a refactor that
+  // SWAPS analyze and hall messages would silently flip the
+  // dashboard partitioning, (c) the 4 message strings are the
+  // SOURCE OF TRUTH for the user-visible queue+running phase
+  // labels -- a refactor that adds a 5th message variant (e.g.,
+  // splitting Running into "Analyzing flop" vs "Analyzing
+  // turn") without updating documentation would silently widen
+  // the contract; per-format regression vectors uniquely
+  // caught (NOT caught by the individual per-state per-endpoint
+  // pins): (i) refactor that uses the SAME message text on
+  // analyze + hall (e.g., both Queued states emit "Queued")
+  // would silently violate the documented endpoint-
+  // disambiguation invariant -- the individual pins would PASS
+  // independently (each asserting its expected text) but the
+  // SET cardinality would silently drop from 4 to 2 or 3,
+  // (ii) refactor that COLLAPSES Queued + Running into a single
+  // message (e.g., "Processing") would silently violate the
+  // state-disambiguation contract -- the individual pins would
+  // PASS but the SET cardinality would drop, (iii) refactor
+  // that adds a 5th message variant would NOT be caught by
+  // individual pins (which only assert ==) but WOULD be caught
+  // by the CLOSED-SET assertion, (iv) refactor that
+  // accidentally swaps the analyze + hall Queued messages
+  // (e.g., analyze emits "Queued for playing hall" + hall
+  // emits "Queued for analysis") -- the individual pins
+  // WOULD catch the per-endpoint-specific assertion BUT the
+  // CROSS-STATE DISAMBIGUATION CLOSED-SET catches the SAME
+  // failure with a different diagnostic angle, providing
+  // defense-in-depth via the SET-cardinality signal; test
+  // approach: spin up a single server with BlockingBackend
+  // (analyze) + BlockingPlayingHallBackend (hall) at
+  // maxConcurrentJobs=1, submit 4 jobs (analyze1 + analyze2
+  // + hall1 + hall2) such that analyze1+hall1 reach Running
+  // state and analyze2+hall2 stay Queued, poll all 4 to capture
+  // the message texts, then assert the SET cardinality +
+  // VALUES + CROSS-STATE + CROSS-ENDPOINT disambiguations.
+  test("status-poll non-terminal-state message-text CLOSED SET contract: the 4 documented message strings emitted across (Queued + Running) x (analyze + hall) MUST form a SET of EXACTLY 4 distinct values {`Queued for analysis`, `Analysis in progress`, `Queued for playing hall`, `Playing hall run in progress`} per JobQueue.scala lines 395 + 403 + 701 + 709 -- the CONSOLIDATED VALUES SET pin closes the gap left by the per-state per-endpoint pins which verify INDIVIDUAL strings but not the SET cardinality / disambiguation invariants") {
+    withStaticSite { staticDir =>
+      val analyzeBackend = new BlockingBackend(Right(sampleAnalysisResult))
+      val hallBackend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      // maxConcurrentJobs=2 because analyze + hall share the
+      // SAME analysisExecutor thread pool (per
+      // HandHistoryReviewServerRuntime.scala lines 52 + 58
+      // both passing the same executor reference) -- 2 slots
+      // lets analyze1 + hall1 both reach Running while
+      // analyze2 + hall2 stay Queued
+      withServer(staticDir, backend = analyzeBackend, playingHallBackend = hallBackend,
+                 maxConcurrentJobs = 2) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        try
+          // (1) Submit analyze1 -> Running (BlockingBackend
+          // blocks it indefinitely until released)
+          val analyze1 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(analyze1.statusCode(), 202,
+            clue = "analyze1 submission MUST return 202 to enter the Running state")
+          assert(analyzeBackend.started.await(3, TimeUnit.SECONDS),
+            "analyze BlockingBackend never started -- the analyze1 job MUST enter the analyze call to saturate the worker pool BEFORE submitting analyze2")
+          val analyze1StatusUri = s"$baseUri${jsonBody(analyze1)("statusUrl").str}"
+
+          // (2) Submit hall1 -> Running (BlockingPlayingHallBackend
+          // blocks it indefinitely until released)
+          val hall1 = postJson(s"$baseUri/api/playing-hall", validUploadPayload)
+          assertEquals(hall1.statusCode(), 202,
+            clue = "hall1 submission MUST return 202 to enter the Running state")
+          assert(hallBackend.started.await(3, TimeUnit.SECONDS),
+            "hall BlockingPlayingHallBackend never started -- the hall1 job MUST enter the playing-hall call to saturate the worker pool BEFORE submitting hall2")
+          val hall1StatusUri = s"$baseUri${jsonBody(hall1)("statusUrl").str}"
+
+          // (3) Submit analyze2 -> Queued (analyze worker pool
+          // saturated by analyze1)
+          val analyze2 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(analyze2.statusCode(), 202,
+            clue = "analyze2 submission MUST return 202 -- gets Queued because analyze1 saturates the analyze worker pool at maxConcurrentJobs=1")
+          val analyze2StatusUri = s"$baseUri${jsonBody(analyze2)("statusUrl").str}"
+
+          // (4) Submit hall2 -> Queued (hall worker pool
+          // saturated by hall1)
+          val hall2 = postJson(s"$baseUri/api/playing-hall", validUploadPayload)
+          assertEquals(hall2.statusCode(), 202,
+            clue = "hall2 submission MUST return 202 -- gets Queued because hall1 saturates the hall worker pool at maxConcurrentJobs=1")
+          val hall2StatusUri = s"$baseUri${jsonBody(hall2)("statusUrl").str}"
+
+          // (5) Poll all 4 jobs to capture message texts
+          val analyze1Body = getJson(analyze1StatusUri)
+          val hall1Body = getJson(hall1StatusUri)
+          val analyze2Body = getJson(analyze2StatusUri)
+          val hall2Body = getJson(hall2StatusUri)
+
+          // Sanity-check the state phases first to confirm
+          // the test setup is correct
+          assertEquals(analyze1Body("status").str, "running",
+            clue = "analyze1 MUST be in Running state to capture the Running message text")
+          assertEquals(hall1Body("status").str, "running",
+            clue = "hall1 MUST be in Running state to capture the hall Running message text")
+          assertEquals(analyze2Body("status").str, "queued",
+            clue = "analyze2 MUST be in Queued state to capture the Queued message text")
+          assertEquals(hall2Body("status").str, "queued",
+            clue = "hall2 MUST be in Queued state to capture the hall Queued message text")
+
+          // (6) CAPTURE message texts
+          val analyzeQueuedMsg = analyze2Body("message").str
+          val analyzeRunningMsg = analyze1Body("message").str
+          val hallQueuedMsg = hall2Body("message").str
+          val hallRunningMsg = hall1Body("message").str
+
+          // (7) VALUES SET assertion: SET cardinality MUST be 4
+          // (no duplicates -- catches a refactor that uses the
+          // SAME message text on multiple states/endpoints)
+          val messageSet = Set(analyzeQueuedMsg, analyzeRunningMsg, hallQueuedMsg, hallRunningMsg)
+          assertEquals(messageSet.size, 4,
+            clue = s"the 4 message texts emitted across (Queued + Running) x (analyze + hall) MUST form a SET of EXACTLY 4 distinct values per JobQueue.scala lines 395 + 403 + 701 + 709 -- a refactor that COLLAPSES any two messages into the same text would silently violate the documented disambiguation contract that operator dashboards depend on; got SET cardinality: ${messageSet.size}, values: $messageSet")
+
+          // (8) SET EQUALITY: the 4 message strings MUST match
+          // the documented closed-set exactly (catches a
+          // refactor that REPHRASES any of the 4 strings while
+          // preserving cardinality)
+          val expectedSet = Set(
+            "Queued for analysis",
+            "Analysis in progress",
+            "Queued for playing hall",
+            "Playing hall run in progress"
+          )
+          assertEquals(messageSet, expectedSet,
+            clue = s"the 4 status-poll message texts MUST be EXACTLY the documented closed-set per JobQueue.scala lines 395 + 403 + 701 + 709 -- a refactor rephrasing any message (e.g. to 'Awaiting analysis' or 'Processing in the hall') would silently change user-visible text without UI review + break operator dashboards that grep for the documented strings; got=$messageSet, expected=$expectedSet, missing=${expectedSet -- messageSet}, extra=${messageSet -- expectedSet}")
+
+          // (9) CROSS-STATE DISAMBIGUATION: Queued vs Running
+          // messages MUST differ on each endpoint (catches a
+          // refactor that uses the same text for both states)
+          assertNotEquals(analyzeQueuedMsg, analyzeRunningMsg,
+            clue = s"analyze Queued message MUST differ from analyze Running message per the documented state-disambiguation contract -- a refactor using the same text for both states would silently break the frontend's spinner-vs-queue-position rendering distinction; Queued=$analyzeQueuedMsg, Running=$analyzeRunningMsg")
+          assertNotEquals(hallQueuedMsg, hallRunningMsg,
+            clue = s"hall Queued message MUST differ from hall Running message per the documented state-disambiguation contract; Queued=$hallQueuedMsg, Running=$hallRunningMsg")
+
+          // (10) CROSS-ENDPOINT DISAMBIGUATION: analyze vs hall
+          // messages MUST differ on each state (catches a
+          // refactor that uses the same text across endpoints)
+          assertNotEquals(analyzeQueuedMsg, hallQueuedMsg,
+            clue = s"analyze Queued message MUST differ from hall Queued message per the documented endpoint-disambiguation contract -- a refactor using the same text across endpoints would silently break dashboards partitioning the queue-wait metric by job type; analyze=$analyzeQueuedMsg, hall=$hallQueuedMsg")
+          assertNotEquals(analyzeRunningMsg, hallRunningMsg,
+            clue = s"analyze Running message MUST differ from hall Running message per the documented endpoint-disambiguation contract; analyze=$analyzeRunningMsg, hall=$hallRunningMsg")
+
+          // (11) STRUCTURAL SHAPE: analyze messages contain the
+          // word "analysis" (case-insensitive) and hall messages
+          // contain the word "hall" (catches a confusion swap
+          // where the analyze message gets the hall token + vice
+          // versa)
+          assert(analyzeQueuedMsg.toLowerCase.contains("analysis"),
+            clue = s"analyze Queued message MUST contain the word `analysis` per the documented endpoint-discriminator token -- a refactor that swaps analyze + hall message tokens would silently flip the dashboard partitioning; got: $analyzeQueuedMsg")
+          assert(analyzeRunningMsg.toLowerCase.contains("analysis"),
+            clue = s"analyze Running message MUST contain the word `analysis`; got: $analyzeRunningMsg")
+          assert(hallQueuedMsg.toLowerCase.contains("hall"),
+            clue = s"hall Queued message MUST contain the word `hall` per the documented endpoint-discriminator token; got: $hallQueuedMsg")
+          assert(hallRunningMsg.toLowerCase.contains("hall"),
+            clue = s"hall Running message MUST contain the word `hall`; got: $hallRunningMsg")
+
+          // (12) STATE-DISCRIMINATOR TOKENS: Queued messages
+          // start with "Queued" (catches state-token drift);
+          // Running messages contain a progress-indicator token
+          // ("progress" or "Analysis" without "Queued for"
+          // prefix) per the documented running-state semantics
+          assert(analyzeQueuedMsg.startsWith("Queued"),
+            clue = s"analyze Queued message MUST start with `Queued` per the documented state-discriminator token; got: $analyzeQueuedMsg")
+          assert(hallQueuedMsg.startsWith("Queued"),
+            clue = s"hall Queued message MUST start with `Queued`; got: $hallQueuedMsg")
+          assert(!analyzeRunningMsg.startsWith("Queued"),
+            clue = s"analyze Running message MUST NOT start with `Queued` (state-token drift catch); got: $analyzeRunningMsg")
+          assert(!hallRunningMsg.startsWith("Queued"),
+            clue = s"hall Running message MUST NOT start with `Queued` (state-token drift catch); got: $hallRunningMsg")
+        finally
+          // Release both blocking backends so the server can
+          // shut down cleanly (otherwise withServer's shutdown
+          // grace would wait for the blocking workers to finish)
+          analyzeBackend.release.countDown()
+          hallBackend.release.countDown()
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
