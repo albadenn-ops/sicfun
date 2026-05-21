@@ -17629,6 +17629,107 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented If-None-Match W/-PREFIX NORMALIZATION
+  // contract at StaticAssetsHandler.scala lines 122-129 --
+  // the WEAK-COMPARISON pin verifies the documented RFC 7232
+  // sec 2.3.2 weak-comparison semantics where the server
+  // accepts a CDN-stripped bare opaque-tag (without `W/`
+  // prefix) as equivalent to the server's emitted weak
+  // ETag (with `W/` prefix); the documented inline comment
+  // at lines 117-124 explains the CDN-resilience rationale:
+  // a misbehaving CDN/proxy could strip the W/ in transit,
+  // and direct string equality would silently fail
+  // revalidation forcing a full-body re-fetch on every
+  // poll -- the line 128 stripWeakPrefix normalization is
+  // the documented defense; FORTY-SIXTH per-emission-site
+  // SHAPE pin overall; the W/-prefix normalization is
+  // OPERATIONALLY CRITICAL because: (a) the documented
+  // CDN-resilience design ensures revalidation works
+  // correctly even when conservative caching proxies strip
+  // the W/ marker -- a refactor removing the normalization
+  // would silently disable revalidation through such
+  // proxies, forcing operators to either disable
+  // the proxy OR pay the full-body-re-fetch cost on every
+  // page load, (b) RFC 7232 sec 2.3.2 MANDATES weak
+  // comparison for If-None-Match -- a refactor switching
+  // to direct equality would silently violate the RFC + the
+  // documented sec 2.3.2 quote in the inline comment;
+  // per-format regression vectors uniquely caught (NOT
+  // caught by 4a49db1 which pins the EMITTED ETag format
+  // OR the existing line 10044 test that uses the verbatim
+  // server-emitted form): (i) refactor dropping the line
+  // 128 stripWeakPrefix call on the server-emitted ETag
+  // would silently break revalidation for clients that
+  // echo back the bare form, (ii) refactor dropping the
+  // line 129 stripWeakPrefix call on the client-submitted
+  // ETag would silently break revalidation for clients
+  // that submit the bare form (the documented CDN-strip
+  // scenario), (iii) refactor switching from weak
+  // comparison to strong comparison would silently break
+  // ALL revalidation across the gzip/uncompressed variant
+  // boundary AND break the CDN-resilience contract; test
+  // approach: GET /index.html → 200 with ETag `W/"..."`,
+  // strip the W/ prefix to get the bare form, GET
+  // /index.html with If-None-Match: <bare-form> → 304
+  // (the documented W/-normalization match).
+  test("static handler If-None-Match WEAK COMPARISON accepts the CDN-stripped bare opaque-tag (without `W/` prefix) as equivalent to the server's weak ETag per StaticAssetsHandler.scala lines 122-129's documented RFC 7232 sec 2.3.2 weak-comparison + CDN-resilience contract -- complements 4a49db1's emitted-ETag format pin + the existing line 10044 verbatim-match test by pinning the W/-stripped form match") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Get the server's emitted ETag (W/-prefixed)
+        val firstResp = get(s"$baseUri/index.html")
+        assertEquals(firstResp.statusCode(), 200,
+          clue = "first GET MUST return 200")
+        val emittedEtag = headerValue(firstResp, "ETag")
+          .getOrElse(fail("server MUST emit ETag on the first response"))
+        assert(emittedEtag.startsWith("W/"),
+          clue = s"server-emitted ETag MUST start with W/ (the weak-ETag prefix per 4a49db1's format pin); got: $emittedEtag")
+
+        // Strip the W/ prefix to simulate a CDN that strips
+        // the marker in transit (the documented scenario)
+        val cdnStrippedEtag = emittedEtag.stripPrefix("W/")
+        assert(!cdnStrippedEtag.startsWith("W/"),
+          clue = s"sanity check: the stripped ETag should NOT start with W/; got: $cdnStrippedEtag")
+        assert(cdnStrippedEtag.startsWith("\"") && cdnStrippedEtag.endsWith("\""),
+          clue = s"the stripped ETag should still be quoted (just without the W/ prefix); got: $cdnStrippedEtag")
+
+        // (i) GET with If-None-Match: <CDN-stripped-bare-form>
+        // → 304 (the documented W/-normalization match)
+        val cdnRevalidate = get(s"$baseUri/index.html", Map("If-None-Match" -> cdnStrippedEtag))
+        assertEquals(cdnRevalidate.statusCode(), 304,
+          clue = s"GET with If-None-Match: <CDN-stripped-bare-form> MUST return 304 Not Modified per StaticAssetsHandler.scala lines 128-129's stripWeakPrefix normalization -- the documented defense against CDN-strip behavior; if this assertion fails, the normalization has been silently broken + clients behind a stripping CDN would force full-body re-fetches on every poll; got status: ${cdnRevalidate.statusCode()}, body length: ${cdnRevalidate.body().length}")
+
+        // (ii) the 304 response MUST be body-less per RFC
+        // 7232 sec 4.1 (304 MUST NOT include a message-body)
+        assertEquals(cdnRevalidate.body(), "",
+          clue = s"304 response MUST be body-less per RFC 7232 sec 4.1; got body length: ${cdnRevalidate.body().length}")
+
+        // (iii) the 304 response MUST include the ETag
+        // header per RFC 7232 sec 4.1 (304 SHOULD generate
+        // the same headers that would have been sent on a
+        // 200 OK)
+        assertEquals(headerValue(cdnRevalidate, "ETag"), Some(emittedEtag),
+          clue = s"304 response MUST include the ETag header (matching the original W/-prefixed emitted ETag, NOT the CDN-stripped form) per RFC 7232 sec 4.1; got: ${headerValue(cdnRevalidate, "ETag")}")
+
+        // (iv) SYMMETRIC CHECK: GET with If-None-Match:
+        // <verbatim-W/-prefixed-form> ALSO returns 304 (the
+        // existing line 10044 test path -- verify both
+        // forms work via the normalization)
+        val verbatimRevalidate = get(s"$baseUri/index.html", Map("If-None-Match" -> emittedEtag))
+        assertEquals(verbatimRevalidate.statusCode(), 304,
+          clue = "verbatim W/-prefixed form MUST ALSO return 304 (both forms work via the normalization)")
+
+        // (v) NEGATIVE: GET with If-None-Match: <stale-etag>
+        // returns 200 (no match → full response)
+        val staleEtag = "W/\"99999-1\""
+        val noMatchResp = get(s"$baseUri/index.html", Map("If-None-Match" -> staleEtag))
+        assertEquals(noMatchResp.statusCode(), 200,
+          clue = s"GET with stale If-None-Match MUST return 200 with full body (no match → full response); got: ${noMatchResp.statusCode()}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
