@@ -18316,6 +18316,194 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented HEAD RESPONSE SHAPE contract at
+  // StaticAssetsHandler.scala lines 144-152 -- the HEAD-SHAPE
+  // pin verifies the documented "advertise same variant headers
+  // as GET" contract per RFC 7231 sec 4.3.2 ("HEAD describes
+  // the GET response") + the subtle `wouldCompressIfGet` vs
+  // `willCompress` distinction at lines 84-88 where the
+  // Content-Encoding emission on HEAD is gated on the documented
+  // `wouldCompressIfGet` flag (compressible AND acceptsGzip)
+  // NOT the `willCompress` flag (which adds `isGet` to the
+  // conjunction and would always be false for HEAD). FIFTY-FIRST
+  // per-emission-site SHAPE pin overall; existing coverage at
+  // line 9571 verifies HEAD vs GET equality on ETag +
+  // Content-Encoding for compressible HTML (gzip + plain
+  // variants), but THREE specific dimensions are unpinned:
+  // (1) Content-Type IS set on HEAD per line 145 set-call,
+  // (2) HEAD on NON-compressible types -- the conditional
+  // `wouldCompressIfGet` evaluates false for non-compressible
+  // (line 84 isCompressibleType returns false), so HEAD on
+  // non-compressible + Accept-Encoding: gzip must NOT emit
+  // Content-Encoding (catches a refactor that conditions
+  // Content-Encoding on Accept-Encoding alone, ignoring
+  // compressibility), (3) the `wouldCompressIfGet` vs
+  // `willCompress` distinction -- HEAD on compressible + gzip
+  // gets Content-Encoding: gzip even though willCompress is
+  // false (because willCompress is gated on isGet at line 88);
+  // the HEAD-SHAPE contract is OPERATIONALLY CRITICAL because:
+  // (a) RFC 7231 sec 4.3.2 mandates "the server MUST NOT send
+  // a message body in the response" but the response MUST
+  // include the same "metadata fields" as GET -- a refactor
+  // dropping Content-Type from HEAD would silently break HEAD-
+  // based cache validation since caches couldn't determine the
+  // body shape that GET would return, (b) client caches that
+  // VALIDATE via HEAD then FETCH via GET need consistent
+  // headers -- if HEAD reports no Content-Encoding but the
+  // subsequent GET returns Content-Encoding: gzip, the client
+  // cache would invalidate and re-fetch unnecessarily (the
+  // documented "advertise same variant headers" contract at
+  // the lines 84-88 inline comment + the line 149 inline
+  // comment is the explicit defense), (c) the
+  // `wouldCompressIfGet` vs `willCompress` distinction is the
+  // SUBTLE correctness contract -- a refactor that uses
+  // `willCompress` for the HEAD Content-Encoding gate (instead
+  // of `wouldCompressIfGet`) would silently emit incorrect
+  // headers on HEAD: Content-Encoding would NEVER be set on
+  // HEAD because `willCompress` is gated on `isGet` at line 88
+  // and `isGet` is false for HEAD; per-format regression vectors
+  // uniquely caught (NOT caught by the existing line 9571
+  // test): (i) refactor dropping the line 145 Content-Type
+  // set-call would silently break HEAD-based cache validation
+  // by leaving HEAD responses without the body-shape descriptor,
+  // (ii) refactor switching the Content-Encoding gate from
+  // `wouldCompressIfGet` to `willCompress` would silently
+  // emit incorrect HEAD headers (Content-Encoding always
+  // absent on HEAD), (iii) refactor switching from
+  // `wouldCompressIfGet` to `acceptsGzip` (dropping the
+  // compressibility check) would silently emit Content-Encoding:
+  // gzip on HEAD for non-compressible types when Accept-Encoding:
+  // gzip is present, (iv) refactor that omits the line 152
+  // `sendResponseHeaders(200, -1L)` and instead sends a body
+  // (e.g. via writeBytes) would silently violate RFC 7231 sec
+  // 4.3.2's no-message-body rule; test approach: create a static
+  // dir with BOTH compressible (HTML) AND non-compressible
+  // (logo.png) files, then issue 4 HEAD requests covering the
+  // 2x2 matrix of (compressible/non-compressible) x (Accept-
+  // Encoding: gzip / no-Accept-Encoding), verifying the
+  // documented header shapes + body emptiness + status 200 on
+  // all variants.
+  test("static handler HEAD response SHAPE: Content-Type IS set on HEAD per line 145, Content-Encoding gated on `wouldCompressIfGet` (NOT `willCompress`) per lines 84-88 + 149-151 documented advertising-contract, NON-compressible types never emit Content-Encoding regardless of Accept-Encoding, and body is empty per RFC 7231 sec 4.3.2 -- complements the existing line 9571 HEAD vs GET equality test by closing the Content-Type presence + non-compressible + wouldCompressIfGet-vs-willCompress dimensions") {
+    withStaticSite { staticDir =>
+      // Create a non-compressible asset (PNG -- image/png is
+      // not in the WebResponses.scala line 84-89 compressible
+      // list).
+      java.nio.file.Files.write(
+        staticDir.resolve("logo.png"),
+        Array[Byte](0x89.toByte, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+      )
+
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        def head(path: String, headers: Map[String, String] = Map.empty): HttpResponse[String] =
+          val builder = HttpRequest.newBuilder(URI.create(s"$baseUri$path"))
+            .method("HEAD", HttpRequest.BodyPublishers.noBody())
+          headers.foreach { case (k, v) => builder.header(k, v) }
+          httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+
+        // (1) HEAD on COMPRESSIBLE + Accept-Encoding: gzip ->
+        // Content-Type set + Content-Encoding: gzip set
+        // (wouldCompressIfGet=true via line 84 isCompressible AND
+        // line 78 acceptsGzip) + body empty
+        val headCompressibleGz = head("/index.html",
+          Map("Accept-Encoding" -> "gzip"))
+        assertEquals(headCompressibleGz.statusCode(), 200,
+          clue = "HEAD on compressible + Accept-Encoding: gzip MUST return 200")
+        assertEquals(headCompressibleGz.body(), "",
+          clue = s"HEAD response body MUST be empty per RFC 7231 sec 4.3.2; got body length: ${headCompressibleGz.body().length}")
+        assertEquals(headerValue(headCompressibleGz, "Content-Type"), Some("text/html; charset=utf-8"),
+          clue = s"HEAD on compressible MUST emit Content-Type per StaticAssetsHandler.scala line 145 (the body-shape descriptor that caches need to interpret the eventual GET response); got: ${headerValue(headCompressibleGz, "Content-Type")}")
+        assertEquals(headerValue(headCompressibleGz, "Content-Encoding"), Some("gzip"),
+          clue = s"HEAD on compressible + Accept-Encoding: gzip MUST emit Content-Encoding: gzip per StaticAssetsHandler.scala lines 150-151's `wouldCompressIfGet` gate -- a refactor switching to `willCompress` (which is gated on isGet at line 88) would silently emit NO Content-Encoding on HEAD because isGet is false for HEAD, breaking HEAD-then-GET cache validation; got: ${headerValue(headCompressibleGz, "Content-Encoding")}")
+
+        // (2) HEAD on COMPRESSIBLE without Accept-Encoding ->
+        // Content-Type set + Content-Encoding NOT set
+        // (wouldCompressIfGet=false because acceptsGzip=false) +
+        // body empty
+        val headCompressiblePlain = head("/index.html")
+        assertEquals(headCompressiblePlain.statusCode(), 200,
+          clue = "HEAD on compressible without Accept-Encoding MUST return 200")
+        assertEquals(headCompressiblePlain.body(), "",
+          clue = s"HEAD body MUST be empty per RFC 7231 sec 4.3.2; got: ${headCompressiblePlain.body().length}")
+        assertEquals(headerValue(headCompressiblePlain, "Content-Type"), Some("text/html; charset=utf-8"),
+          clue = s"HEAD on compressible (no-gzip path) MUST still emit Content-Type per line 145 -- Content-Type set-call is UNCONDITIONAL on the HEAD branch; got: ${headerValue(headCompressiblePlain, "Content-Type")}")
+        assertEquals(headerValue(headCompressiblePlain, "Content-Encoding"), None,
+          clue = s"HEAD on compressible without Accept-Encoding MUST NOT emit Content-Encoding per the line 150 `wouldCompressIfGet` gate (acceptsGzip=false -> wouldCompressIfGet=false); got: ${headerValue(headCompressiblePlain, "Content-Encoding")}")
+
+        // (3) HEAD on NON-COMPRESSIBLE + Accept-Encoding: gzip ->
+        // Content-Type set + Content-Encoding NOT set despite the
+        // gzip-accepting client (wouldCompressIfGet=false because
+        // compressible=false at line 84). THIS IS THE UNIQUE
+        // SIGNAL OF THIS PIN: a refactor that conditions
+        // Content-Encoding on Accept-Encoding alone (ignoring
+        // compressibility) would silently emit incorrect headers
+        // here.
+        val headNonCompressibleGz = head("/logo.png",
+          Map("Accept-Encoding" -> "gzip"))
+        assertEquals(headNonCompressibleGz.statusCode(), 200,
+          clue = "HEAD on non-compressible + Accept-Encoding: gzip MUST return 200")
+        assertEquals(headNonCompressibleGz.body(), "",
+          clue = s"HEAD body MUST be empty per RFC 7231 sec 4.3.2; got: ${headNonCompressibleGz.body().length}")
+        assertEquals(headerValue(headNonCompressibleGz, "Content-Type"), Some("image/png"),
+          clue = s"HEAD on non-compressible MUST emit Content-Type per line 145 (unconditional on the HEAD branch); got: ${headerValue(headNonCompressibleGz, "Content-Type")}")
+        assertEquals(headerValue(headNonCompressibleGz, "Content-Encoding"), None,
+          clue = s"HEAD on NON-COMPRESSIBLE + Accept-Encoding: gzip MUST NOT emit Content-Encoding per the line 150 `wouldCompressIfGet` gate (compressible=false at line 84 -> wouldCompressIfGet=false REGARDLESS of acceptsGzip); a refactor that gates Content-Encoding on acceptsGzip alone (dropping the compressibility check) would silently emit Content-Encoding: gzip on HEAD for non-compressible types when client accepts gzip, misleading subsequent GET clients; got: ${headerValue(headNonCompressibleGz, "Content-Encoding")}")
+
+        // (4) HEAD on NON-COMPRESSIBLE without Accept-Encoding ->
+        // Content-Type set + Content-Encoding NOT set + body empty
+        val headNonCompressiblePlain = head("/logo.png")
+        assertEquals(headNonCompressiblePlain.statusCode(), 200,
+          clue = "HEAD on non-compressible without Accept-Encoding MUST return 200")
+        assertEquals(headNonCompressiblePlain.body(), "",
+          clue = s"HEAD body MUST be empty per RFC 7231 sec 4.3.2; got: ${headNonCompressiblePlain.body().length}")
+        assertEquals(headerValue(headNonCompressiblePlain, "Content-Type"), Some("image/png"),
+          clue = s"HEAD on non-compressible without Accept-Encoding MUST emit Content-Type per line 145; got: ${headerValue(headNonCompressiblePlain, "Content-Type")}")
+        assertEquals(headerValue(headNonCompressiblePlain, "Content-Encoding"), None,
+          clue = s"HEAD on non-compressible without Accept-Encoding MUST NOT emit Content-Encoding; got: ${headerValue(headNonCompressiblePlain, "Content-Encoding")}")
+
+        // (5) CROSS-CHECK with GET: HEAD variant headers
+        // (Content-Type, Content-Encoding) MATCH the GET variant
+        // headers exactly for the same request shape -- the
+        // documented "HEAD describes GET" contract per RFC 7231
+        // sec 4.3.2
+        val getCompressibleGz = get(s"$baseUri/index.html",
+          Map("Accept-Encoding" -> "gzip"))
+        assertEquals(headerValue(headCompressibleGz, "Content-Type"),
+                     headerValue(getCompressibleGz, "Content-Type"),
+          clue = s"HEAD Content-Type MUST equal GET Content-Type for the same request shape (compressible + gzip) per RFC 7231 sec 4.3.2 -- catches a refactor that diverges the Content-Type emission between HEAD and GET branches; HEAD=${headerValue(headCompressibleGz, "Content-Type")}, GET=${headerValue(getCompressibleGz, "Content-Type")}")
+        assertEquals(headerValue(headCompressibleGz, "Content-Encoding"),
+                     headerValue(getCompressibleGz, "Content-Encoding"),
+          clue = s"HEAD Content-Encoding MUST equal GET Content-Encoding for the same request shape (compressible + gzip) per RFC 7231 sec 4.3.2 -- catches a refactor that uses `willCompress` for HEAD instead of `wouldCompressIfGet`, which would silently produce Content-Encoding: gzip on GET but None on HEAD, invalidating client cache entries on HEAD-then-GET workflows; HEAD=${headerValue(headCompressibleGz, "Content-Encoding")}, GET=${headerValue(getCompressibleGz, "Content-Encoding")}")
+
+        // (6) wouldCompressIfGet vs willCompress DOCUMENTED
+        // DISTINCTION: the test in (1) + (5) PROVES that HEAD
+        // emits Content-Encoding: gzip even though `willCompress`
+        // would be false for HEAD (willCompress is gated on
+        // isGet at line 88). A refactor switching the HEAD gate
+        // from `wouldCompressIfGet` to `willCompress` would
+        // BREAK (1) above. This 6th tier is the EXPLICIT
+        // DOCUMENTATION of the contract semantics via the
+        // distinct test cases above -- captured here for
+        // discoverability.
+        assertEquals(headerValue(headCompressibleGz, "Content-Encoding"), Some("gzip"),
+          clue = "DOCUMENTATION SENTINEL: this assertion is the wouldCompressIfGet-vs-willCompress correctness gate -- if it fails, the HEAD path is using `willCompress` (gated on isGet=false for HEAD) instead of `wouldCompressIfGet`, silently emitting NO Content-Encoding on HEAD for the compressible+gzip variant")
+
+        // (7) HEAD variant ETag carries the -gz suffix when
+        // wouldCompressIfGet=true (preserved from the GET path's
+        // line 93 etag template) -- catches a refactor that
+        // diverges the ETag generation between HEAD and GET
+        // branches (the ETag is set at line 98 BEFORE the HEAD
+        // branch decision, so it carries the wouldCompressIfGet
+        // suffix correctly)
+        val headEtag = headerValue(headCompressibleGz, "ETag")
+          .getOrElse(fail("HEAD on compressible+gzip MUST emit ETag per the line 98 set-call before the HEAD branch"))
+        assert(headEtag.endsWith("-gz\""),
+          clue = s"HEAD ETag MUST carry the -gz suffix when wouldCompressIfGet=true per the documented gzip-variant disambiguation at StaticAssetsHandler.scala line 93; a refactor that drops the suffix on HEAD ETags would silently break the variant-disambiguation contract; got: $headEtag")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
