@@ -15616,6 +15616,138 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented STATUS-POLL-RESPONSE FIELD-SET-SHAPE
+  // for the PLAYING-HALL COMPLETED terminal state at
+  // JobQueue.scala lines 715-719 -- the hall-side mirror of
+  // b3c343f's analyze COMPLETED pin verifying the documented
+  // SYMMETRY between the analyze + hall status-poll
+  // COMPLETED shapes (both endpoints emit the SAME 8-field
+  // closed set via the SHARED baseStatus helper at line 426
+  // + same final-fields {durationMs, result}); the
+  // analyze-side 5-state closure (b3c343f COMPLETED +
+  // df98f1f FAILED + 188fe91 CANCELLED + 016d138 QUEUED +
+  // 65b46f6 RUNNING) is fully pinned, but the hall-side
+  // has ONLY 188fe91 CANCELLED pinned -- the other 4
+  // hall states (QUEUED + RUNNING + COMPLETED + FAILED)
+  // were uncovered (the playing-hall renderStatus at lines
+  // 697-730 mirrors the analyze renderStatus at lines
+  // 391-423 with the documented playing-hall-specific
+  // additions: CANCELLED has the conditional result field
+  // at line 729 per the 188fe91 documented behavior);
+  // THIRTIETH per-emission-site SHAPE pin overall +
+  // beginning of the HALL-SIDE 5-STATE MIRROR effort to
+  // close the playing-hall side of the documented 5-state
+  // closure; the hall-COMPLETED shape is OPERATIONALLY
+  // CRITICAL because: (a) the frontend at site.js renders
+  // hall results with the SAME completion UI as analyze
+  // results -- a refactor diverging the hall COMPLETED
+  // shape from the analyze COMPLETED shape would silently
+  // break the frontend's shared-rendering code, (b) the
+  // documented SYMMETRY between analyze + hall is the
+  // architectural contract that lets the frontend reuse
+  // parsing logic across both endpoints, (c) the
+  // playing-hall result field carries the simulation
+  // output (multi-table results, position-by-position
+  // EV deltas) which dashboards render via the same
+  // result-display component as analyze results -- a
+  // shape divergence would silently break dashboard
+  // rendering on the hall side; per-format regression
+  // vectors uniquely caught (NOT caught by b3c343f's
+  // analyze pin): (i) refactor consolidating the analyze +
+  // hall renderStatus into ONE shared function but
+  // accidentally introducing hall-specific fields would
+  // silently break the symmetric design, (ii) refactor
+  // diverging the hall COMPLETED shape from the analyze
+  // COMPLETED shape (e.g. adding a `hallSummary` field
+  // only on hall) would silently widen the contract, (iii)
+  // refactor changing the result field type on the hall
+  // side (e.g. wrapping in an envelope) would silently
+  // break the symmetric design; test approach mirrors
+  // b3c343f exactly but uses /api/playing-hall +
+  // immediatePlayingHallBackend(Right(samplePlayingHallResult))
+  // for the COMPLETED state.
+  test("status-poll response body for /api/playing-hall/jobs/<id> in the COMPLETED state MUST emit EXACTLY the documented 8-field closed set {jobId, status, statusUrl, submittedAtEpochMs, startedAtEpochMs, completedAtEpochMs, durationMs, result} per JobQueue.scala lines 715-719 -- the hall-side mirror of b3c343f's analyze COMPLETED pin verifying the documented SYMMETRY between the two endpoints' COMPLETED shapes; beginning of the HALL-SIDE 5-STATE MIRROR closing the hall side of the 5-state closure (188fe91 CANCELLED was already pinned)") {
+    withStaticSite { staticDir =>
+      withServer(staticDir, playingHallBackend = immediatePlayingHallBackend(Right(samplePlayingHallResult))) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Submit + poll to terminal completion
+        val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(submit.statusCode(), 202,
+          clue = "playing-hall submission must return 202 for the hall-COMPLETED-state pin to inspect")
+        val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+        val terminal = awaitTerminalJob(statusUri)
+        assertEquals(terminal("status").str, "completed",
+          clue = "the immediatePlayingHallBackend(Right(...)) configuration must reach the COMPLETED terminal state for this pin to inspect the documented 8-field shape")
+
+        val completedFields = terminal.obj.keys.toSet
+
+        // The documented 8-field closed set per JobQueue.scala
+        // lines 715-719 (mirrors the analyze COMPLETED state
+        // at lines 409-413 -- the SYMMETRY contract)
+        val expectedFields = Set(
+          "jobId",
+          "status",
+          "statusUrl",
+          "submittedAtEpochMs",
+          "startedAtEpochMs",
+          "completedAtEpochMs",
+          "durationMs",
+          "result"
+        )
+
+        // (i) CARDINALITY
+        assertEquals(completedFields.size, expectedFields.size,
+          clue = s"hall status-poll response for COMPLETED state MUST have exactly ${expectedFields.size} fields per JobQueue.scala lines 715-719; got actual=${completedFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- completedFields).toVector.sorted.mkString(", ")}, extra=${(completedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(completedFields, expectedFields,
+          clue = s"hall status-poll response field NAME SET for COMPLETED state MUST equal exactly the documented 8-field closed set per JobQueue.scala lines 715-719 -- the SAME closed set as the analyze COMPLETED state at lines 409-413 (b3c343f); a refactor diverging the hall shape from the analyze shape would silently break the documented SYMMETRY contract; got actual=${completedFields.toVector.sorted.mkString(", ")}; expected=${expectedFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- completedFields).toVector.sorted.mkString(", ")}; extra=${(completedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) ABSENCE: pollAfterMs MUST NOT be present
+        // (terminal-state purity catch matching b3c343f)
+        assert(!completedFields.contains("pollAfterMs"),
+          clue = s"hall status-poll response for COMPLETED state MUST NOT contain `pollAfterMs` (terminal-state purity matching b3c343f's analyze-side pattern); got: ${completedFields.toVector.sorted.mkString(", ")}")
+
+        // (iv) ABSENCE: errorStatus + error MUST NOT be
+        // present (those fields are Failed-state-only per
+        // JobQueue.scala lines 722-724)
+        assert(!completedFields.contains("errorStatus"),
+          clue = s"hall status-poll response for COMPLETED state MUST NOT contain `errorStatus` (Failed-state-only per JobQueue.scala line 723); got: ${completedFields.toVector.sorted.mkString(", ")}")
+        assert(!completedFields.contains("error"),
+          clue = s"hall status-poll response for COMPLETED state MUST NOT contain `error` (Failed-state-only per JobQueue.scala line 724); got: ${completedFields.toVector.sorted.mkString(", ")}")
+
+        // (v) PRESENCE: durationMs (the precomputed field
+        // -- mirrors b3c343f's explicit assertion)
+        assert(completedFields.contains("durationMs"),
+          clue = s"hall status-poll response for COMPLETED state MUST contain `durationMs` per JobQueue.scala line 717's INTENTIONAL precomputation (mirrors analyze line 411); got: ${completedFields.toVector.sorted.mkString(", ")}")
+
+        // (vi) SYMMETRY ASSERTION: the hall COMPLETED shape
+        // MUST EQUAL the analyze COMPLETED shape (the
+        // documented architectural symmetry per the
+        // shared baseStatus helper). This is the CORE
+        // SYMMETRIC-MIRROR assertion distinguishing this
+        // pin from b3c343f. Submit an analyze job too,
+        // get its COMPLETED shape, and compare field sets.
+        // (Note: the VALUES differ -- analyze result =
+        // sampleAnalysisResult, hall result =
+        // samplePlayingHallResult -- but the SHAPES match.)
+        val analyzeBackend = immediateBackend(Right(sampleAnalysisResult))
+        val analyzeCompletedFields = withServer(staticDir, backend = analyzeBackend) { analyzeServer =>
+          val analyzeBase = s"http://${analyzeServer.binding.host}:${analyzeServer.binding.port}"
+          val analyzeSubmit = postJson(s"$analyzeBase/api/analyze-hand-history", validUploadPayload)
+          assertEquals(analyzeSubmit.statusCode(), 202)
+          val analyzeStatusUri = s"$analyzeBase${jsonBody(analyzeSubmit)("statusUrl").str}"
+          val analyzeTerminal = awaitTerminalJob(analyzeStatusUri)
+          assertEquals(analyzeTerminal("status").str, "completed")
+          analyzeTerminal.obj.keys.toSet
+        }
+        assertEquals(completedFields, analyzeCompletedFields,
+          clue = s"hall COMPLETED field set MUST EQUAL analyze COMPLETED field set per the documented architectural symmetry between the two endpoints' renderStatus functions (JobQueue.scala lines 409-413 analyze vs 715-719 hall use the SAME baseStatus helper + SAME final-fields {durationMs, result}); a refactor consolidating to a shared renderStatus function but introducing endpoint-specific fields would silently break the SYMMETRY contract that lets the frontend reuse parsing logic across both endpoints; got hall=${completedFields.toVector.sorted.mkString(", ")}, analyze=${analyzeCompletedFields.toVector.sorted.mkString(", ")}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
