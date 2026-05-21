@@ -6818,6 +6818,139 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented sanitizeLogMessage TAB (horizontal-tab)
+  // escape rule END-TO-END -- the SANITIZATION-INVARIANT pin
+  // covering the THIRD of the 5 explicit escape rules
+  // documented at HandHistoryReviewServerRuntime.scala lines
+  // 488-492; the family now covers: (4db713d) newline 0x0A,
+  // (a696f57) CR 0x0D, (THIS commit) TAB 0x09; tab is
+  // OPERATIONALLY RELEVANT because the structured log line
+  // format `key=value key=value...` uses SPACE as the
+  // key-value separator at HandHistoryReviewServerRuntime.scala
+  // line 512's emitted template -- a raw tab in a field value
+  // could confuse log aggregator parsers that tokenize on
+  // \s+ (any whitespace) instead of strict space-only; an
+  // attacker submitting an email containing a tab character
+  // could create a field value that LOOKS like one value to
+  // a strict-space parser but TWO values to a whitespace
+  // parser -- e.g. `email=alice\tbob@example.com remote=...`
+  // appears as `email=alice` + `bob@example.com` + `remote=...`
+  // to a whitespace-tokenizing parser, breaking the
+  // operator's key=value structure; the documented threat is
+  // RELATED to but distinct from the CR/LF cases: CR/LF
+  // splits PHYSICAL log lines, while tab splits LOGICAL
+  // key=value tokens within a line; both are forms of LOG
+  // INJECTION; the sanitizeLogMessage helper at line 492's
+  // `replace("\t", "\\t")` catches the tab + escapes to `\t`
+  // (literal backslash-t); this commit's END-TO-END test
+  // verifies the sanitization applies at the log() emission
+  // layer by: (1) configuring platformAuth, (2) submitting
+  // POST /api/auth/login with email containing a literal \t
+  // character (valid JSON escape sequence that ujson parses
+  // to a string with an embedded tab byte = 0x09), (3) the
+  // login fails validation + emits auth.login.failure logWarn
+  // with the user-submitted email in the email= field, (4)
+  // the log() helper's sanitizeLogMessage wrapping at line
+  // 512 catches the tab + escapes it to `\t` (the 2-character
+  // backslash-t sequence) via the line 492 escape rule, (5)
+  // the captured stderr SHOULD contain the escaped form
+  // `email=alice\tbob@example.com` (with literal backslash-t,
+  // NOT a physical tab character); per-format regression
+  // vectors: (i) refactor dropping the line 492 tab escape
+  // (e.g. "tab is whitespace, no harm in passing through")
+  // would silently let user-controlled tabs through and
+  // enable log-injection attacks on whitespace-tokenizing
+  // parsers, (ii) refactor changing the tab escape format
+  // (e.g. \t -> %09 uri-style escape) would silently break
+  // log aggregator parsers that expect the documented
+  // \<char> backslash-escape form, (iii) refactor consolidating
+  // the 3 escapes into a generic "whitespace" replace (e.g.
+  // .replace("\\s+".r, " ")) would silently collapse multiple
+  // whitespace forms into a single space, losing the original
+  // field value content + breaking forensics; this test's
+  // emission via the auth.login.failure path exercises the
+  // END-TO-END sanitization specifically on a USER-CONTROLLED
+  // field that the formatSubmittedEmailForLog helper does NOT
+  // itself escape (only spaces -> %20); 4-tier format check:
+  // (i) the auth.login.failure line exists in captured stderr,
+  // (ii) the line contains BOTH halves of the email (alice +
+  // bob@example.com), (iii) the email field contains the
+  // ESCAPED form `alice\tbob@example.com` (literal backslash
+  // followed by literal 't'), (iv) EXCLUSION of raw 0x09 tab
+  // byte in the line (no stripSuffix needed -- tab is not
+  // part of the platform line.separator on any common OS, so
+  // any 0x09 byte in the captured line is necessarily a
+  // sanitization failure).
+  test("log() helper's sanitizeLogMessage wrapping at HandHistoryReviewServerRuntime.scala line 512 escapes user-controlled TAB (horizontal-tab) bytes end-to-end via the line 492 escape rule -- the SANITIZATION-INVARIANT pin for the THIRD escape rule; tab injection inside a field value would split the key=value structure for whitespace-tokenizing log aggregator parsers (a LOGICAL-token form of LOG INJECTION distinct from CR/LF's PHYSICAL-line splitting)") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture stderr around the malicious login attempt.
+          // The submitted email contains a JSON escape \t which
+          // parses to an embedded tab character (1 byte = 0x09).
+          // The login fails validation + emits
+          // auth.login.failure logWarn at AuthStack.scala line
+          // 192 with formatSubmittedEmailForLog'd submitted
+          // email in the email= field; formatSubmittedEmailForLog
+          // ONLY escapes spaces, NOT control characters; the tab
+          // flows into the message s-string, then log() at line
+          // 512 calls sanitizeLogMessage which catches the tab +
+          // escapes to \t via line 492's replace rule.
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          try
+            val rejected = postJson(s"$baseUri/api/auth/login",
+              """{"email":"alice\tbob@example.com","password":"some-password"}""")
+            assertEquals(rejected.statusCode(), 401,
+              clue = "malformed-email login MUST return 401 (the email fails validateEmail's regex check because tab is not in the [A-Za-z0-9_.+-] local-part character class; loginLocal returns Left -> 401)")
+          finally
+            System.setErr(originalErr)
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.login.failure"))
+            .getOrElse(fail(s"no `auth.login.failure` line in captured stderr; got: ${captured.take(800)}"))
+
+          // (i) the auth.login.failure line exists
+          assert(failureLine.contains("auth.login.failure"),
+            clue = s"auth.login.failure line must be present (the rejected login path at AuthStack.scala line 192 emits this on every invalid-credentials rejection); got: $failureLine")
+
+          // (ii) the line contains BOTH halves of the email --
+          // tab doesn't split physical lines, but if a refactor
+          // converted tab to a different whitespace form that
+          // truncated the field, the second half could be lost.
+          assert(failureLine.contains("alice") && failureLine.contains("bob@example.com"),
+            clue = s"auth.login.failure line MUST contain BOTH halves of the email (alice + bob@example.com) -- a refactor that converted tab to a truncating-form (e.g. cut the field at the first whitespace) would silently drop the second half; got: $failureLine; full captured stream: ${captured.take(1500)}")
+
+          // (iii) the email contains the ESCAPED form with
+          // literal backslash-t
+          assert(failureLine.contains("alice\\tbob@example.com"),
+            clue = s"auth.login.failure line MUST carry the escaped form `alice\\\\tbob@example.com` (literal backslash followed by literal 't') per HandHistoryReviewServerRuntime.scala line 492's `replace(\"\\\\t\", \"\\\\\\\\t\")` escape rule; the raw 0x09 tab byte in the submitted email gets caught by sanitizeLogMessage AT THE LOG LAYER (NOT at formatSubmittedEmailForLog which only escapes spaces); a refactor dropping the line 492 tab escape would silently let the tab through, enabling LOG INJECTION attacks on whitespace-tokenizing log aggregator parsers that split key=value tokens on any whitespace; got: $failureLine")
+
+          // (iv) EXCLUSION: the line must NOT contain a raw tab
+          // byte. Unlike the CR case, tab is NOT part of the
+          // platform line.separator on any common OS (Windows
+          // uses CRLF, Unix uses LF, classic Mac used CR), so
+          // no stripSuffix workaround is needed -- any 0x09
+          // byte in the captured line is necessarily a
+          // sanitization failure. Use Char.toString conversion
+          // of the raw 0x09 byte to avoid Scala 3 multi-line-
+          // string-in-test parse issues (same defensive idiom
+          // as 4db713d/a696f57).
+          val rawTabByte: String = '\t'.toString
+          assert(!failureLine.contains(rawTabByte),
+            clue = s"auth.login.failure line MUST NOT contain a raw 0x09 tab byte -- catches a refactor that escaped tab to a DIFFERENT visible form (e.g. %09) but still allowed raw tab bytes through in some field positions, OR a refactor that converted tab to a different whitespace form (e.g. tab -> single space, losing the original byte); got line: $failureLine")
+        }
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
