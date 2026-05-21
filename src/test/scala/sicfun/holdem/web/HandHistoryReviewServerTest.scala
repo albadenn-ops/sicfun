@@ -3815,6 +3815,169 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `job completed` JobQueue audit log line
+  // format -- a NEW CATEGORY of operator-facing log line that
+  // sits between the SERVER-LIFECYCLE banners (startup/requested/
+  // complete, pinned by the 7c47f88 + f6ee18b + 35a2dd9 +
+  // 1c87e04 + f0e7066 + ded9bc6 + e46ed2c chain) and the AUTH-
+  // EVENT audit lines (pinned by the 11-commit 1c8777f through
+  // e43081b chain); the "job completed" line emits at
+  // JobQueue.scala line 310-312 INSIDE the worker's finally
+  // block when an analysis job successfully reaches the
+  // Completed terminal state -- so this line is per-JOB (not
+  // per-process like the lifecycle banners, not per-auth-event
+  // like the audit log chain) and operators count these lines
+  // to compute throughput / latency / fleet-wide completion-
+  // rate dashboards documented in the deploy doc; the format at
+  // line 311 is `s"job completed jobId=$jobId durationMs=${
+  // completedAt - startedAt} queuedJobs=${executor.getQueue.
+  // size()} runningJobs=${executor.getActiveCount()}"` -- four
+  // fields each with specific operator-relevance: (a) jobId
+  // matches the 202 response's jobId so operators correlating
+  // analyze-submission log lines with their completion log
+  // lines key on this field (the deploy doc's "audit log alone"
+  // throughput chart depends on this correlation), (b)
+  // durationMs is completedAt-startedAt which is the WORKER
+  // RUN LATENCY (not queue wait, not submit-to-complete), (c)
+  // queuedJobs is the QUEUE SIZE AT JOB COMPLETION (a saturation
+  // indicator -- if queuedJobs is non-zero across many
+  // completions, the deployment is under-provisioned), (d)
+  // runningJobs is the CONCURRENT WORKER COUNT AT JOB
+  // COMPLETION (a parallelism utilization indicator); BEFORE
+  // this commit there was ZERO test coverage of the JobQueue
+  // audit log lines AT ALL -- not the "job completed" INFO
+  // line, not the "job failed" WARN line at line 321-323, not
+  // any of the queue-saturation rejection lines at line 177 or
+  // the timeout lines at line 191 / 219 / 224; this commit
+  // closes the FIRST and most common of those (job completed
+  // -- fires on every successful analyze); future fires can
+  // close the others; per-field regression vectors that the
+  // server-lifecycle banner pins + auth-event audit pins don't
+  // catch: (i) renaming "job completed" to e.g. "analyze
+  // completed" / "job done" / "job finished" would silently
+  // break operator log-aggregation queries filtering by event
+  // type for throughput dashboards, (ii) dropping the jobId
+  // field would silently break the submission-to-completion
+  // correlation that operators rely on for incident analysis
+  // ("when did Alice's submitted job finish?"), (iii) emitting
+  // durationMs as a wrong value (e.g. completedAt-submittedAt
+  // instead of completedAt-startedAt -- which mistakenly
+  // includes queue wait in worker latency) would silently
+  // skew operator latency charts toward "worker is slow" when
+  // the actual problem is "queue is deep", (iv) emitting
+  // queuedJobs / runningJobs as STALE values (cached at
+  // submission instead of completion) would silently break
+  // the SATURATION SIGNAL operators rely on -- the line
+  // claims "queue size AT COMPLETION", and a stale value
+  // would mislead, (v) demote-to-DEBUG would silently hide the
+  // line from default log levels making throughput dashboards
+  // empty, promote-to-WARN would silently flood alerting on
+  // every successful job; test approach: capture stdout around
+  // an analyze submission, submit /api/analyze-hand-history
+  // with the default immediate backend (returns instantly with
+  // Right(sampleAnalysisResult) so the completedAt-startedAt
+  // is bounded), poll until terminal, then assert the captured
+  // stream contains the "job completed" line with the matching
+  // jobId from the 202 response AND non-negative durationMs
+  // AND queuedJobs=0 (no other jobs queued) AND runningJobs
+  // bounded; 7-tier format check: (i) `job completed` event
+  // prefix (catches rename), (ii) `jobId=<UUID from 202
+  // response>` matching the submission (catches drop OR
+  // wrong-source refactor), (iii) `durationMs=` field presence
+  // with non-negative integer value (catches wrong-source
+  // refactor that emitted negative or non-integer), (iv)
+  // `queuedJobs=0` (specific value -- the immediate backend
+  // completes synchronously so no queue backlog, a refactor
+  // that emitted a stale submission-time value would emit a
+  // different number), (v) `runningJobs=` field presence
+  // (the exact value depends on timing -- could be 0 if the
+  // executor already cleared by the time the log emits, or
+  // 1 if the running counter is decremented after the log
+  // line), so we pin presence not value, (vi) `[INFO]` level
+  // (catches demote/promote), (vii) `[hand-history-review]`
+  // service-tag prefix (couples to /api/health.service from
+  // 505ba6b -- 7-way correlation now spans startup banner +
+  // requested banner + complete banner + auth-event audit
+  // lines + job-completed audit line + probe responses +
+  // shutdown banner).
+  test("submitted analyze job emits the documented `job completed jobId=<id> durationMs=<ms> queuedJobs=<n> runningJobs=<n>` INFO audit log line at the worker's terminal-state transition (per JobQueue.scala line 310-312) -- closes the first of the JobQueue audit log lines (alongside the SERVER-LIFECYCLE banners + AUTH-EVENT audit lines)") {
+    withStaticSite { staticDir =>
+      // Capture stdout around the analyze submit + terminal-
+      // poll cycle. The default backend (immediateBackend) returns
+      // Right(sampleAnalysisResult) synchronously, so by the time
+      // awaitTerminalJob returns "completed", the JobQueue worker
+      // has already emitted the "job completed" line.
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      val submitJobId =
+        try
+          withServer(staticDir) { server =>
+            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+            val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+            assertEquals(submit.statusCode(), 202,
+              clue = "analyze submission must return 202 before the JobQueue worker can reach the job-completed emission point")
+            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+            val capturedJobId = jsonBody(submit)("jobId").str
+            // Poll until terminal -- the worker's logInfo at
+            // JobQueue.scala line 310-312 fires inside the
+            // finally block AFTER the Completed state is
+            // installed but BEFORE the polling client sees
+            // status="completed", so by the time
+            // awaitTerminalJob returns, the log line is on
+            // stdout.
+            val terminal = awaitTerminalJob(statusUri)
+            assertEquals(terminal("status").str, "completed",
+              clue = "analyze must reach 'completed' terminal state for the job-completed log line to have fired")
+            capturedJobId
+          }
+        finally
+          System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val completedLine = captured.split('\n').iterator
+        .find(_.contains("job completed"))
+        .getOrElse(fail(s"no `job completed` line in captured stdout -- JobQueue.scala line 310-312 documents this as the INFO-level line fired on every successful job terminal transition; if missing, either the logInfo emission was suppressed OR the worker exited via a different path (check awaitTerminalJob status); got captured stdout: ${captured.take(2000)}"))
+
+      // (i) event prefix
+      assert(completedLine.contains("job completed"),
+        clue = s"job-completed audit line must carry the literal `job completed` event prefix per JobQueue.scala line 311's hardcoded literal -- a refactor renaming to e.g. `analyze completed` / `job done` / `job finished` would silently break operator log-aggregation queries filtering by event type for throughput dashboards; got: $completedLine")
+      // (ii) jobId matching the 202 submission response
+      assert(completedLine.contains(s"jobId=$submitJobId"),
+        clue = s"job-completed audit line must carry the SAME jobId='$submitJobId' that the 202 submission response returned -- this is the submission-to-completion correlation operators rely on for 'when did this specific job finish' incident analysis; a refactor that emitted a different identifier (e.g. internal sequence number, retry-resilient hash, or an entirely fresh UUID per emission) would silently break the correlation; got: $completedLine")
+      // (iii) durationMs field with non-negative integer value
+      assert(completedLine.contains("durationMs="),
+        clue = s"job-completed audit line must carry the durationMs= field -- the WORKER-RUN-LATENCY metric (completedAt - startedAt, per line 311) operators chart against; got: $completedLine")
+      // Extract durationMs value and assert non-negative (the
+      // immediate backend completes ~instantly so durationMs is
+      // very small but MUST be a non-negative integer)
+      val durationMsToken = completedLine.split(' ').iterator
+        .find(_.startsWith("durationMs="))
+        .getOrElse(fail(s"durationMs= token extraction failed despite contains check passing; got: $completedLine"))
+      val durationMsValue = durationMsToken.drop("durationMs=".length).stripTrailing()
+      val durationMs = durationMsValue.toLongOption.getOrElse(fail(s"durationMs= value '$durationMsValue' is not parseable as Long -- a refactor emitting a non-integer (e.g. ISO duration string, float, or formatted '1.2s') would silently break dashboards expecting integer ms values; got: $completedLine"))
+      assert(durationMs >= 0L,
+        clue = s"durationMs MUST be non-negative (the immediate backend completes ~instantly so the value is small but never negative) -- a refactor that swapped the subtraction order (startedAt - completedAt instead of completedAt - startedAt) would silently emit a negative number, silently breaking latency dashboards that assume positive values; got durationMs=$durationMs in line: $completedLine")
+      // (iv) queuedJobs=0 (immediate backend completes
+      // synchronously, so no other jobs are queued at the
+      // moment this job completes)
+      assert(completedLine.contains("queuedJobs=0"),
+        clue = s"job-completed audit line must carry queuedJobs=0 (the saturation snapshot at completion time -- no other jobs are queued for this single-job test); a refactor that emitted a stale submission-time value or a wrong-source counter would silently emit a different number AND silently break operator saturation dashboards that key on this field; got: $completedLine")
+      // (v) runningJobs field presence (value depends on
+      // timing -- the executor might have already decremented
+      // the active count by the time the log emits, so we pin
+      // PRESENCE not value)
+      assert(completedLine.contains("runningJobs="),
+        clue = s"job-completed audit line must carry the runningJobs= field -- the CONCURRENT-WORKER-COUNT snapshot at completion time; we pin presence not specific value because the timing depends on when the executor decrements the active count relative to the log emission (the executor.getActiveCount() at line 311 could return 0 if the worker is already considered 'done' or 1 if still considered 'active' -- both are valid); a refactor that dropped the field entirely would silently break operator parallelism-utilization dashboards; got: $completedLine")
+      // (vi) INFO level
+      assert(completedLine.contains("[INFO]"),
+        clue = s"job-completed audit line must be INFO-level per JobQueue.scala line 310's logInfo call (writes to System.out per HandHistoryReviewServerRuntime.scala line 418); demote-to-DEBUG would silently hide the line from default log levels making throughput dashboards empty, promote-to-WARN would silently flood alerting on every successful job; got: $completedLine")
+      // (vii) service-tag prefix
+      assert(completedLine.contains("[hand-history-review]"),
+        clue = s"job-completed audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- couples to /api/health.service (505ba6b) so log aggregators see the same identifier across the 7-way correlation: startup banner + requested banner + complete banner + auth-event audit lines + this job-completed audit line + probe responses + shutdown banner; got: $completedLine")
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
