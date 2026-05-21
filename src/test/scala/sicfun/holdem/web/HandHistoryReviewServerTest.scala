@@ -16672,6 +16672,141 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/auth/login + /api/auth/register
+  // response SHAPE-INVARIANCE with /api/auth/me per AuthStack
+  // .scala lines 400-415's loginJsonResponse helper -- both
+  // login (line 195 status 200) + register (line 126 status
+  // 201) return JsonResponse(status, service.authenticationState
+  // (Some(authenticated)), ...) which is the SAME 7-field
+  // shape as /api/auth/me's platform-auth-mode body (4f74798)
+  // but with authenticated=true + user populated;
+  // THIRTY-EIGHTH per-emission-site SHAPE pin overall
+  // extending the /api/auth/me SHAPE-INVARIANCE family to
+  // the AUTH STATE-CHANGE response shapes; the documented
+  // SHAPE-INVARIANCE between /api/auth/me + /api/auth/login
+  // + /api/auth/register is the ARCHITECTURAL CONTRACT that
+  // lets the frontend at site.js use ONE auth-state parser
+  // for ALL three responses -- the login response IS the
+  // post-login /api/auth/me response, saving an extra round
+  // trip; the auth state-change SHAPE-INVARIANCE is
+  // OPERATIONALLY CRITICAL because: (a) after sign-in, the
+  // frontend reads the SAME 7-field shape it would have
+  // gotten by polling /api/auth/me -- a refactor diverging
+  // these shapes would silently force a post-login refetch,
+  // (b) the documented design eliminates a race condition
+  // where the frontend's auth state could be stale between
+  // sign-in + the next /api/auth/me poll, (c) the
+  // authenticated state (user + csrfToken populated) is
+  // available IMMEDIATELY after login -- a refactor
+  // returning a different shape would silently break the
+  // frontend's immediate-render-after-sign-in logic; per-
+  // format regression vectors uniquely caught (NOT caught
+  // by 6346c2b + 4f74798 + a928b43): (i) refactor changing
+  // the login response shape independently of /api/auth/me
+  // would silently break the documented architectural
+  // contract, (ii) refactor returning a SUBSET of the
+  // /api/auth/me fields (e.g. just user + csrfToken)
+  // would silently force frontend refetch of auth state,
+  // (iii) refactor returning a SUPERSET (e.g. adding
+  // sessionExpiresAtMs only on login) would silently
+  // widen the contract beyond /api/auth/me; test
+  // approach: configure platform-auth + register a user
+  // (the register endpoint returns 201 with the SAME
+  // shape per line 126's loginJsonResponse call), parse
+  // the register response body + assert it has the
+  // documented 7-field set + the authenticated=true
+  // values + user populated + csrfToken populated;
+  // separately login the same user, verify the SAME
+  // shape on the 200 response.
+  test("/api/auth/register + /api/auth/login response bodies MUST emit the SAME 7-field shape as /api/auth/me per AuthStack.scala lines 400-415's loginJsonResponse helper -- the AUTH STATE-CHANGE SHAPE-INVARIANCE pin extends 6346c2b/4f74798/a928b43's /api/auth/me coverage to the post-sign-in responses, verifying the documented architectural contract that the frontend uses ONE auth-state parser for ALL three response types") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // (A) Register a user -- the response body should be
+          // SHAPE-IDENTICAL to /api/auth/me's platform-auth-mode
+          // body, but with authenticated=true + user populated
+          val registerResp = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"shape-invariance@example.com","password":"correct-horse-battery","displayName":"Tester"}"""
+          )
+          assertEquals(registerResp.statusCode(), 201,
+            clue = "register must return 201 per AuthStack.scala line 126's `loginJsonResponse(service, result, status = 201)`")
+          val registerBody = jsonBody(registerResp)
+          val registerFields = registerBody.obj.keys.toSet
+
+          val expectedFields = Set(
+            "authenticationEnabled",
+            "authenticationMode",
+            "authenticated",
+            "allowLocalRegistration",
+            "providers",
+            "user",
+            "csrfToken"
+          )
+
+          // (i) REGISTER CARDINALITY: same 7-field set as
+          // /api/auth/me
+          assertEquals(registerFields, expectedFields,
+            clue = s"register 201 response body MUST emit the SAME 7-field set as /api/auth/me per the documented SHAPE-INVARIANCE -- both flow through PlatformUserAuth.scala line 332's authenticationState helper via AuthStack.scala line 413's `service.authenticationState(Some(authenticated))`; a refactor diverging these shapes would silently force a post-register refetch of /api/auth/me; got register=${registerFields.toVector.sorted.mkString(", ")}, expected=${expectedFields.toVector.sorted.mkString(", ")}")
+
+          // (ii) REGISTER VALUES: authenticated=true (the
+          // distinguishing value vs the no-session /api/auth/me)
+          assertEquals(registerBody("authenticated").bool, true,
+            clue = s"register response: authenticated MUST be true (the just-registered user is signed in via the cookie returned with the response); got: ${registerBody("authenticated").bool}")
+
+          // (iii) REGISTER user field populated (NOT null)
+          assert(registerBody("user").objOpt.nonEmpty,
+            clue = s"register response: user field MUST be an Obj (NOT null) -- the just-registered user's profile is populated per PlatformUserAuth.scala line 339's `currentUser.map(user => writeUserView(user.profile))`; got: ${registerBody("user")}")
+
+          // (iv) REGISTER csrfToken populated (NOT null)
+          assert(registerBody("csrfToken").strOpt.exists(_.nonEmpty),
+            clue = s"register response: csrfToken MUST be a non-empty string -- the just-registered user has a fresh CSRF token per line 340; got: ${registerBody("csrfToken")}")
+
+          // (B) Login the SAME user -- the response should
+          // ALSO be SHAPE-IDENTICAL, with authenticated=true
+          val loginResp = postJson(
+            s"$baseUri/api/auth/login",
+            """{"email":"shape-invariance@example.com","password":"correct-horse-battery"}"""
+          )
+          assertEquals(loginResp.statusCode(), 200,
+            clue = "login must return 200 per AuthStack.scala line 195's `loginJsonResponse(service, result, status = 200)`")
+          val loginBody = jsonBody(loginResp)
+          val loginFields = loginBody.obj.keys.toSet
+
+          // (v) LOGIN CARDINALITY: same 7-field set as
+          // /api/auth/me + register
+          assertEquals(loginFields, expectedFields,
+            clue = s"login 200 response body MUST emit the SAME 7-field set as register + /api/auth/me per the documented SHAPE-INVARIANCE; got login=${loginFields.toVector.sorted.mkString(", ")}, expected=${expectedFields.toVector.sorted.mkString(", ")}")
+
+          // (vi) LOGIN VALUES: authenticated=true
+          assertEquals(loginBody("authenticated").bool, true,
+            clue = s"login response: authenticated MUST be true; got: ${loginBody("authenticated").bool}")
+
+          // (vii) CROSS-RESPONSE SHAPE-INVARIANCE: login +
+          // register MUST emit IDENTICAL field SETS (the CORE
+          // SHAPE-INVARIANCE assertion -- a refactor diverging
+          // the two responses would silently force the frontend
+          // to have per-endpoint parsing logic)
+          assertEquals(loginFields, registerFields,
+            clue = s"login + register response field SETS MUST be IDENTICAL per the documented SHAPE-INVARIANCE (both flow through the SAME loginJsonResponse helper at lines 400-415); a refactor making them diverge would silently force per-endpoint frontend parsing; got login=${loginFields.toVector.sorted.mkString(", ")}, register=${registerFields.toVector.sorted.mkString(", ")}")
+
+          // (viii) CROSS-ENDPOINT SHAPE-INVARIANCE with
+          // /api/auth/me: login response field set EQUALS
+          // /api/auth/me response field set (the documented
+          // architectural contract that lets the frontend
+          // use ONE parser for both)
+          val sessionHeaders = authSessionHeaders(loginResp, loginBody("csrfToken").str)
+          val meResp = getJsonWithHeaders(s"$baseUri/api/auth/me", sessionHeaders)
+          val meFields = meResp.obj.keys.toSet
+          assertEquals(loginFields, meFields,
+            clue = s"login response field set MUST EQUAL /api/auth/me response field set per the documented SHAPE-INVARIANCE (both flow through PlatformUserAuth.scala line 332's authenticationState helper) -- the frontend uses ONE parser for both responses; got login=${loginFields.toVector.sorted.mkString(", ")}, me=${meFields.toVector.sorted.mkString(", ")}")
+        }
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
