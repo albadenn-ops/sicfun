@@ -17400,6 +17400,124 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented STATIC-HANDLER CACHE-CONTROL TIER
+  // closed-set contract at StaticAssetsHandler.scala lines
+  // 94-96 -- the CACHE-CONTROL-TIER pin consolidates the
+  // 3 documented Cache-Control values into a single
+  // closed-set assertion covering ALL static-response
+  // paths: (a) /vendor/* assets → `public, max-age=
+  // 31536000` (1-year cache for immutable third-party
+  // assets), (b) NON-vendor static GET → `public,
+  // max-age=0, must-revalidate` (allow browser caching
+  // but force revalidation per request), (c) static
+  // 404 → `no-store` (the applySecurityHeaders default
+  // for not-found responses, consistent with JsonHandler
+  // 1a93823 + 5a46898); existing separate tests at lines
+  // 9686/9699/9517/10030/10048/10248 pin individual
+  // values, but a CLOSED-SET assertion that the static
+  // handler emits ONLY these 3 documented values across
+  // ALL its paths is not pinned yet -- a refactor
+  // introducing a 4th tier (e.g. `private, max-age=300`
+  // for user-specific assets) or changing the per-path
+  // mapping would silently widen the contract while
+  // leaving individual pins green; FORTY-FOURTH per-
+  // emission-site SHAPE pin overall; the CACHE-CONTROL-
+  // TIER contract is OPERATIONALLY CRITICAL because: (a)
+  // the 3-tier hierarchy reflects documented operational
+  // semantics (vendor = immutable + aggressive cache;
+  // HTML = mutable + revalidate; 404 = transient + don't
+  // cache) -- a refactor consolidating tiers would
+  // silently change cache behavior for entire path
+  // categories, (b) operator monitoring dashboards
+  // verify cache hit rates per path category --
+  // diverging Cache-Control values silently desync the
+  // documented expectations, (c) the documented design
+  // separates STATIC asset caching (3 tiers) from JSON
+  // API caching (always no-store) -- a refactor
+  // collapsing the boundary would silently allow caching
+  // of sensitive JSON responses; per-format regression
+  // vectors uniquely caught: (i) refactor introducing a
+  // 4th Cache-Control tier on the static handler would
+  // silently widen the closed set, (ii) refactor
+  // swapping the per-path mapping (e.g. /vendor/* gets
+  // no-store, HTML gets 1-year cache) would silently
+  // break operator-visible cache behavior + dashboard
+  // expectations, (iii) refactor making the HTML/vendor
+  // distinction conditional on something other than the
+  // path prefix would silently break the documented
+  // path-based-tier-selection logic; test approach:
+  // create a /vendor/foo.js + use the existing
+  // index.html, hit 3 paths (/vendor/foo.js + /index.html
+  // + /missing.html), collect Cache-Control values into
+  // a SET, assert the SET equals exactly the documented
+  // 3-tier closed set.
+  test("static handler Cache-Control values MUST equal exactly the documented 3-tier closed set {public max-age=31536000, public max-age=0 must-revalidate, no-store} per StaticAssetsHandler.scala lines 94-96 + the applySecurityHeaders default for 404 -- the CACHE-CONTROL-TIER pin consolidates the per-tier individual tests into a single closed-set assertion catching 4th-tier-introduction + per-path-mapping-swap refactors") {
+    withStaticSite { staticDir =>
+      Files.createDirectories(staticDir.resolve("vendor"))
+      Files.writeString(staticDir.resolve("vendor").resolve("lib.js"), "x", StandardCharsets.UTF_8)
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Hit all 3 documented tier paths
+        val vendorResp = get(s"$baseUri/vendor/lib.js")
+        assertEquals(vendorResp.statusCode(), 200,
+          clue = "vendor asset MUST return 200 to inspect its Cache-Control")
+        val vendorCacheControl = headerValue(vendorResp, "Cache-Control")
+          .getOrElse(fail("vendor response MUST have Cache-Control header"))
+
+        val htmlResp = get(s"$baseUri/index.html")
+        assertEquals(htmlResp.statusCode(), 200,
+          clue = "index.html MUST return 200")
+        val htmlCacheControl = headerValue(htmlResp, "Cache-Control")
+          .getOrElse(fail("HTML response MUST have Cache-Control header"))
+
+        val notFoundResp = get(s"$baseUri/missing-file.html")
+        assertEquals(notFoundResp.statusCode(), 404,
+          clue = "non-existent file MUST return 404")
+        val notFoundCacheControl = headerValue(notFoundResp, "Cache-Control")
+          .getOrElse(fail("404 response MUST have Cache-Control header"))
+
+        // (i) Per-tier VALUE assertions (mirror existing
+        // individual tests for defense-in-depth)
+        assertEquals(vendorCacheControl, "public, max-age=31536000",
+          clue = s"vendor asset Cache-Control MUST equal `public, max-age=31536000` per StaticAssetsHandler.scala line 95's documented 1-year cache for vendor assets (these are immutable third-party libraries that don't change between releases); a refactor changing the value would silently affect cache hit rates for ALL vendor assets; got: $vendorCacheControl")
+        assertEquals(htmlCacheControl, "public, max-age=0, must-revalidate",
+          clue = s"HTML asset Cache-Control MUST equal `public, max-age=0, must-revalidate` per StaticAssetsHandler.scala line 96's documented HTML/CSS/JS cache policy (allow browser cache but force revalidation per request); a refactor changing the value would silently affect HTML page caching behavior; got: $htmlCacheControl")
+        assertEquals(notFoundCacheControl, "no-store",
+          clue = s"404 Cache-Control MUST equal `no-store` per the applySecurityHeaders default (the static handler's 200 path overrides Cache-Control but the 404 path uses the default); got: $notFoundCacheControl")
+
+        // (ii) CLOSED-SET assertion: the static handler
+        // emits EXACTLY 3 distinct Cache-Control values
+        // across these paths (the CORE TIER closure)
+        val cacheControlValues = Set(vendorCacheControl, htmlCacheControl, notFoundCacheControl)
+        val expectedTiers = Set(
+          "public, max-age=31536000",
+          "public, max-age=0, must-revalidate",
+          "no-store"
+        )
+        assertEquals(cacheControlValues, expectedTiers,
+          clue = s"static handler Cache-Control values across the 3 documented path categories MUST equal exactly the closed set {`public, max-age=31536000`, `public, max-age=0, must-revalidate`, `no-store`} per StaticAssetsHandler.scala lines 94-96 + the applySecurityHeaders default for 404 -- a refactor introducing a 4th tier (e.g. `private, max-age=300` for user-specific assets) would silently widen the closed set; a refactor swapping the per-path mapping (e.g. /vendor/* gets no-store, HTML gets 1-year cache) would silently break operator-visible cache behavior + dashboard expectations; got: ${cacheControlValues.toVector.sorted.mkString(", ")}, expected: ${expectedTiers.toVector.sorted.mkString(", ")}")
+        assertEquals(cacheControlValues.size, 3,
+          clue = s"static handler MUST emit 3 DISTINCT Cache-Control values across the 3 documented path categories -- if 2 or more categories collapse to the same value, the documented tier distinction has been silently lost; got distinct count: ${cacheControlValues.size}")
+
+        // (iii) CROSS-HANDLER CONSISTENCY: static 404
+        // Cache-Control EQUALS JsonHandler Cache-Control
+        // (both inherit the applySecurityHeaders default)
+        val jsonResp = get(s"$baseUri/api/health")
+        assertEquals(notFoundCacheControl, headerValue(jsonResp, "Cache-Control").getOrElse(""),
+          clue = s"static 404 Cache-Control MUST EQUAL JsonHandler Cache-Control -- both inherit the applySecurityHeaders default at WebResponses.scala line 115 (the static handler's 200 path overrides for vendor + HTML, but the 404 path doesn't override, so it gets the default no-store matching JsonHandler); got static-404=$notFoundCacheControl, json=${headerValue(jsonResp, "Cache-Control").getOrElse("")}")
+
+        // (iv) BOUNDARY assertion: NONE of the static-200
+        // tiers (vendor + HTML) match the applySecurityHeaders
+        // default no-store -- they're explicitly overridden
+        assertNotEquals(vendorCacheControl, "no-store",
+          clue = "vendor Cache-Control MUST NOT be no-store -- the static handler explicitly overrides for /vendor/* assets to enable aggressive caching; a refactor dropping the override would silently force browsers to re-fetch large vendor libraries on every request")
+        assertNotEquals(htmlCacheControl, "no-store",
+          clue = "HTML Cache-Control MUST NOT be no-store -- the static handler explicitly overrides for HTML to allow caching with revalidation; a refactor dropping the override would silently force browsers to re-fetch HTML on every navigation, degrading performance significantly")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
