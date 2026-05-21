@@ -3681,6 +3681,140 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `startup complete` banner under platform-
+  // user authentication with a CUSTOM userAuthMaxUsers value
+  // (non-default) -- closes the CONFIGURED-VS-DEFAULT-PROPAGATION
+  // dimension complement to the 1c87e04 platform-auth pin (which
+  // pinned the 100000 default) and the ded9bc6 boot-time-count-
+  // load pin (which exercised the count flowing through, but
+  // with the default cap); together with 1c87e04 this commit
+  // forms an asymmetric pin pair: 1c87e04 verifies the
+  // hardcoded-default value (100000) flows through correctly,
+  // THIS commit verifies a CONFIGURED value (NOT 100000) flows
+  // through correctly -- catches a refactor that hardcoded the
+  // banner's userAuthMaxUsers to 100000 (e.g. "the deploy doc
+  // says 100k is the default, just emit it directly for
+  // simplicity") which would silently break operator capacity-
+  // planning queries on deployments that intentionally
+  // configured a non-default cap; the deploy doc line 349 (per
+  // fb18e2c) documents "USER_AUTH_MAX_USERS (default 100000)"
+  // implying the cap is OPERATOR-CONFIGURABLE -- a deployment
+  // that needs higher capacity (say, a community-poker
+  // deployment expecting 50k users with headroom for growth)
+  // would set USER_AUTH_MAX_USERS=200000, and operators must
+  // see the configured value in the banner to verify the cap
+  // was applied; per-field regression vectors that 1c87e04 +
+  // ded9bc6 don't catch: (i) a refactor that hardcoded 100000
+  // in the banner emission (line 328's `config.platformAuth.
+  // map(_.maxUsers.toString).getOrElse("-")` could be
+  // accidentally simplified to `if config.platformAuth.nonEmpty
+  // then "100000" else "-"` in a "remove indirection" refactor)
+  // would silently emit 100000 here even when a custom value
+  // was configured -- operators looking at the banner would
+  // see the default value and wrongly assume the custom override
+  // didn't take effect, (ii) a refactor that read the wrong
+  // field name (e.g. `_.maxUsers` typo'd to `_.maxConcurrentJobs`
+  // or `_.maxQueuedJobs`) would silently emit a value from a
+  // different config knob -- the test pins the SPECIFIC custom
+  // value 5000 so a wrong-field-read would emit some other
+  // integer that doesn't equal 5000, (iii) a refactor that
+  // applied a derived transformation (e.g. `_.maxUsers / 10`
+  // for some misguided "user-friendly" rounding) would silently
+  // emit a transformed value -- the exact-equality test catches
+  // this; test approach: same stdout-capture pattern as
+  // 7c47f88/1c87e04/f0e7066/ded9bc6 with the platformAuth.Config
+  // carrying a CUSTOM maxUsers = 5000 (deliberately chosen as a
+  // non-default value distinct from the 100000 default AND
+  // distinct from any other commonly-defaulted integer in the
+  // banner like maxUploadBytes=512 / analysisTimeoutMs=120000 /
+  // playingHallTimeoutMs=900000 / maxConcurrentJobs=2 /
+  // maxQueuedJobs=8 / etc. so a wrong-field-read regression
+  // emits a value that doesn't match any other field, making
+  // the failure mode easy to diagnose); 6-tier format check:
+  // (i) "startup complete" prefix (sanity), (ii) authentication
+  // Mode=users (matches 1c87e04 -- mode flag correctly
+  // identifies platform-auth), (iii) userAuthMaxUsers=5000 (THE
+  // load-bearing pin -- the configured custom value propagates
+  // to the banner), (iv) EXCLUSION of userAuthMaxUsers=100000
+  // (the default value -- catches a hardcoded-default
+  // regression), (v) userAuthStoredUsers=0 (fresh boot, no
+  // users yet -- cross-check that the count field still works
+  // independently of the cap-override), (vi) [INFO] level +
+  // service-tag (mode-invariant); pin completes the per-config-
+  // dimension coverage for the platform-auth banner shape
+  // alongside the auth-mode pins (none/users/basic) + boot-
+  // count-load pin -- 5-commit family now covers (a) all 3
+  // auth modes, (b) baseline + restart-survival count
+  // lifecycle, (c) default + custom cap propagation.
+  test("startup banner under platform-user authentication with CUSTOM userAuthMaxUsers=5000 propagates the configured non-default cap value -- pins the CONFIG-OVERRIDE-PROPAGATION contract complementing 1c87e04's default-value pin (catches a refactor hardcoding the banner emission to the default 100000)") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        // Same stdout-capture pattern as 1c87e04 + ded9bc6 but
+        // with maxUsers explicitly set to 5000 (a non-default
+        // value chosen to be distinct from EVERY OTHER integer
+        // in the banner: maxUploadBytes=512, analysisTimeoutMs=
+        // 120000, playingHallTimeoutMs=900000, maxConcurrentJobs=
+        // 2, maxQueuedJobs=8, rateLimit*=6/240/10, 100000 the
+        // default cap -- 5000 doesn't match any of these so a
+        // wrong-field-read regression emits a non-matching
+        // value, making the failure mode easy to diagnose).
+        val outBuf = new java.io.ByteArrayOutputStream()
+        val originalOut = System.out
+        System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+        try
+          withServer(
+            staticDir,
+            platformAuth = Some(PlatformUserAuth.Config(
+              storePath = storePath,
+              maxUsers = 5000
+            ))
+          ) { _ =>
+            ()
+          }
+        finally
+          System.setOut(originalOut)
+
+        val captured = outBuf.toString(StandardCharsets.UTF_8)
+        val bannerLine = captured.split('\n').iterator
+          .find(_.contains("startup complete"))
+          .getOrElse(fail(s"no `startup complete` line in captured stdout for the custom-maxUsers variant; got: ${captured.take(2000)}"))
+
+        // (i) prefix (sanity, matches 1c87e04)
+        assert(bannerLine.contains("startup complete"),
+          clue = s"banner must carry the mode-invariant `startup complete` prefix; got: $bannerLine")
+        // (ii) authenticationMode=users (matches 1c87e04 -- the
+        // mode-detection helper correctly identifies platform-
+        // auth regardless of the maxUsers value)
+        assert(bannerLine.contains("authenticationMode=users"),
+          clue = s"banner must carry authenticationMode=users matching 1c87e04 -- the mode flag is independent of the cap value, a non-default maxUsers config doesn't change the auth-mode identification; got: $bannerLine")
+        // (iii) userAuthMaxUsers=5000 (THE load-bearing pin --
+        // the configured custom value propagates to the banner)
+        assert(bannerLine.contains("userAuthMaxUsers=5000"),
+          clue = s"banner MUST carry the configured CUSTOM userAuthMaxUsers=5000 (NOT the 100000 default pinned by 1c87e04, NOT any other integer that might come from a wrong-field-read regression) -- this is the CONFIG-OVERRIDE-PROPAGATION pin that proves the configured value flows from PlatformUserAuth.Config.maxUsers through HandHistoryReviewServerRuntime.scala line 328's `config.platformAuth.map(_.maxUsers.toString).getOrElse(\"-\")` to the banner emission at line 350; a refactor hardcoding the banner to 100000 (e.g. 'simplify the indirection') would silently emit 100000 here even though the test configured 5000 -- operators would see the default value and wrongly conclude their custom cap didn't apply, AND silently break dashboards keyed on the configured cap for capacity-planning queries; got: $bannerLine")
+        // (iv) EXCLUSION of userAuthMaxUsers=100000 (the default
+        // value pinned by 1c87e04 -- catches a hardcoded-default
+        // refactor that would emit BOTH values OR emit the
+        // default value instead of the custom)
+        assert(!bannerLine.contains("userAuthMaxUsers=100000"),
+          clue = s"banner MUST NOT contain userAuthMaxUsers=100000 (the 1c87e04 default value) when the test explicitly configured maxUsers=5000 -- a refactor that hardcoded the default OR emitted BOTH the configured value AND the default would silently pass the positive userAuthMaxUsers=5000 check while still leaking the wrong information; the EXCLUSION pin catches this; got: $bannerLine")
+        // (v) userAuthStoredUsers=0 (fresh boot, no users yet --
+        // cross-check that the count field works independently
+        // of the cap-override; a refactor that conflated
+        // maxUsers with storedUserCount would silently emit
+        // 5000 for both fields, which the EXCLUSION on
+        // userAuthMaxUsers=100000 doesn't catch but the
+        // positive userAuthStoredUsers=0 pin does)
+        assert(bannerLine.contains("userAuthStoredUsers=0"),
+          clue = s"banner must carry userAuthStoredUsers=0 (fresh boot, no registered users) -- cross-checks that the STORE count field works independently of the CAP config field; a refactor that conflated maxUsers with storedUserCount would silently emit 5000 for both, breaking operator dashboards distinguishing capacity-headroom from current-utilization; got: $bannerLine")
+        // (vi) mode-invariant cross-checks (INFO + service-tag)
+        assert(bannerLine.contains("[INFO]"),
+          clue = s"banner must be INFO-level matching all prior auth-mode variants; got: $bannerLine")
+        assert(bannerLine.contains("[hand-history-review]"),
+          clue = s"banner must carry the [hand-history-review] service-tag prefix matching all prior banner pins; got: $bannerLine")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
