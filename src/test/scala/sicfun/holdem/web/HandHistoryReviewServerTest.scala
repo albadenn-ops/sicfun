@@ -12347,6 +12347,139 @@ class HandHistoryReviewServerTest extends FunSuite:
       clue = "classifyAnalysisError on a CAPITALIZED-PREFIX message MUST return 400 (NOT 504) per Scala's String.startsWith case-sensitive semantics -- the documented prefix at line 764 is the lowercase form `analysis timed out after` matching what line 297's wrapping emits; a refactor making the match case-insensitive (e.g. `.toLowerCase.startsWith(...)`) would silently accept variants that the documented wrapping never emits, increasing the surface for mis-classification of operator-typed test messages; got: ${classifyAnalysisError(\"Analysis timed out after 100ms\")}")
   }
 
+  // Pin the documented rateLimitClientIpSource FUNCTION at
+  // RateLimit.scala lines 101-111 -- the CLIENT-IP-SOURCE-
+  // INVARIANT pin verifies the closed set of 3 documented
+  // format templates AND the branch logic that selects
+  // between them based on the (trustedClientIpHeader,
+  // trustedProxyIps) input pair; SIXTH per-emission-site
+  // SHAPE pin overall extending the FUNCTION-INVARIANT
+  // sub-family from 9f42256 (classify*Error 3-status
+  // closure) to a SECOND function with a more complex
+  // closed set (string-template formats vs raw integer
+  // status codes); the rateLimitClientIpSource function is
+  // OPERATIONALLY CRITICAL because: (a) its return value
+  // flows into the STARTUP BANNER log line at HandHistory
+  // ReviewServerRuntime.scala line 348 (the `client-ip-
+  // source=<value>` field operators read at startup to
+  // confirm proxy configuration), (b) it ALSO flows into
+  // the /api/readiness JSON response at Readiness.scala
+  // lines 103/146 (the `rateLimitClientIpSource` field
+  // frontend health-check displays render to operators on
+  // the dashboard), (c) the 3 documented formats encode
+  // operationally-meaningful distinctions: (i) `header:
+  // <name> via loopback-or-allowlisted-proxy` = the
+  // operator configured a trusted-proxy ALLOWLIST so the
+  // header can be trusted from non-loopback peers (the
+  // FULL trust mode used by production deployments behind
+  // a reverse proxy), (ii) `header:<name> via loopback-
+  // only` = the operator configured a header BUT did NOT
+  // configure an allowlist, so the header is only trusted
+  // when the peer is loopback (the SAFER fallback for
+  // local development), (iii) `remote-address` = no header
+  // configured, the server uses the direct TCP peer
+  // address (the SIMPLEST mode for single-tenant
+  // deployments without proxies); the operator's choice
+  // between these 3 modes has SECURITY IMPLICATIONS (a
+  // misconfigured trusted-proxy allowlist would let
+  // attackers spoof their IP via the trusted header) and
+  // the documented format strings let operators audit
+  // the configuration at startup AND via the readiness
+  // endpoint; per-format regression vectors this pin
+  // catches: (i) refactor renaming any of the 3 documented
+  // template strings (e.g. `remote-address` -> `peer-
+  // address` for naming clarity) would silently desync the
+  // log + readiness field from operator audit workflows,
+  // (ii) refactor reordering the branches (e.g. checking
+  // None before Some(header)) would not change behavior
+  // BUT a refactor SWAPPING the priority (e.g. None +
+  // non-empty trustedProxyIps returning the trusted-proxy
+  // template) would silently change the meaning of the
+  // emitted value, (iii) refactor consolidating the 2
+  // Some(header) branches into a single template (dropping
+  // the `via loopback-or-allowlisted-proxy` vs `via
+  // loopback-only` distinction) would silently hide the
+  // SECURITY-RELEVANT distinction between full-trust and
+  // safer-fallback modes from the operator, (iv) refactor
+  // making the header NAME parameter URL-encoded (e.g.
+  // emitting `header:X%2DReal%2DIP` instead of `header:X-
+  // Real-IP`) would silently break operator grep workflows
+  // expecting the bare header name; test approach mirrors
+  // 9f42256: import the function from RateLimit, call it
+  // with each of the documented (Option, Set) input pairs,
+  // assert the returned string matches the documented
+  // template EXACTLY, additionally assert the priority
+  // logic via tier (iv)'s None + non-empty Set case (which
+  // SHOULD still return remote-address because None takes
+  // priority -- a refactor that swapped priorities would
+  // silently change the meaning of this case), and assert
+  // the closed-set cardinality via the set-of-3 collection.
+  test("rateLimitClientIpSource at RateLimit.scala lines 101-111 MUST emit exactly the 3 documented format templates -- `header:<name> via loopback-or-allowlisted-proxy` (proxy mode) / `header:<name> via loopback-only` (loopback-restricted mode) / `remote-address` (no-header mode) -- based on the (trustedClientIpHeader, trustedProxyIps) input pair; the CLIENT-IP-SOURCE-INVARIANT pin verifies branch logic + format strings + the closed set of 3 templates") {
+    import RateLimit.rateLimitClientIpSource
+
+    // (i) Some(header) + non-empty trustedProxyIps ->
+    // proxy-allowlist mode template (the FULL TRUST mode
+    // used by production deployments behind a reverse
+    // proxy)
+    assertEquals(
+      rateLimitClientIpSource(Some("X-Real-IP"), Set("10.0.0.1")),
+      "header:X-Real-IP via loopback-or-allowlisted-proxy",
+      clue = "rateLimitClientIpSource(Some(header), non-empty trustedProxyIps) MUST emit `header:<name> via loopback-or-allowlisted-proxy` per RateLimit.scala line 107 -- this is the FULL TRUST mode signaling the operator configured an allowlist so the header can be trusted from non-loopback peers; a refactor renaming this template (e.g. `via allowlisted-proxy` shortening, or `via proxy` further shortening) would silently desync from operator audit workflows + runbook documentation that key on the exact `loopback-or-allowlisted-proxy` form")
+
+    // (ii) Some(header) + empty trustedProxyIps ->
+    // loopback-only mode template (the SAFER fallback for
+    // local development)
+    assertEquals(
+      rateLimitClientIpSource(Some("X-Real-IP"), Set.empty),
+      "header:X-Real-IP via loopback-only",
+      clue = "rateLimitClientIpSource(Some(header), empty trustedProxyIps) MUST emit `header:<name> via loopback-only` per RateLimit.scala line 109 -- this is the SAFER FALLBACK mode signaling the operator configured a header BUT did NOT configure an allowlist, so the header is only trusted when the peer is loopback; the distinction from the proxy-allowlist mode is SECURITY-RELEVANT (a misconfigured allowlist would let attackers spoof their IP via the trusted header), so the operator-visible audit log MUST distinguish the two modes via the `via <suffix>` field; a refactor consolidating to a single template would silently hide the security-relevant distinction")
+
+    // (iii) None -> remote-address (no-header mode)
+    assertEquals(
+      rateLimitClientIpSource(None, Set.empty),
+      "remote-address",
+      clue = "rateLimitClientIpSource(None, empty trustedProxyIps) MUST emit the bare `remote-address` constant per RateLimit.scala line 111 -- this is the SIMPLEST mode for single-tenant deployments without proxies; the bare-string form (no prefix) distinguishes it from the header modes which all have a `header:<name>` prefix; a refactor adding a prefix (e.g. `direct:remote-address`) would silently break operator grep workflows expecting bare-string form")
+
+    // (iv) PRIORITY catch: None + NON-EMPTY trustedProxyIps
+    // -> STILL `remote-address` (None takes priority over
+    // trustedProxyIps)
+    assertEquals(
+      rateLimitClientIpSource(None, Set("10.0.0.1")),
+      "remote-address",
+      clue = "rateLimitClientIpSource(None, non-empty trustedProxyIps) MUST emit `remote-address` because None takes priority over trustedProxyIps per RateLimit.scala lines 105-111's pattern match ordering -- the trustedClientIpHeader Option is matched FIRST + the trustedProxyIps Set is consulted ONLY inside the Some branch; a refactor swapping priorities (e.g. checking trustedProxyIps first) would silently change the meaning of this input pair: an operator could configure trustedProxyIps WITHOUT a header (perhaps preparing for a future header rollout) and the current logic correctly emits `remote-address` indicating no header is in use; a swapped-priority refactor would silently emit a header-format template even though no header is configured")
+
+    // (v) ClientIpSourceRemoteAddress constant matches the
+    // documented `remote-address` literal -- the function
+    // references this constant at line 111 so the constant
+    // value itself is part of the contract
+    assertEquals(
+      RateLimit.ClientIpSourceRemoteAddress,
+      "remote-address",
+      clue = "RateLimit.ClientIpSourceRemoteAddress MUST be the literal `remote-address` per RateLimit.scala line 12 -- the constant is exported as part of the public surface (referenced by rateLimitClientIpSource AND potentially by other consumers); a refactor renaming the constant value would silently desync from operator audit workflows + readiness endpoint consumers")
+
+    // (vi) header NAME parameter flows through VERBATIM
+    // (not URL-encoded, not lowercased) -- catches a
+    // refactor making the function URL-encode the header
+    // name for "safety" which would silently break
+    // operator grep workflows expecting the bare name
+    assertEquals(
+      rateLimitClientIpSource(Some("CF-Connecting-IP"), Set("10.0.0.1")),
+      "header:CF-Connecting-IP via loopback-or-allowlisted-proxy",
+      clue = "rateLimitClientIpSource MUST pass the header NAME parameter through VERBATIM -- a refactor making the function URL-encode the name (e.g. emitting `header:CF%2DConnecting%2DIP` instead of `header:CF-Connecting-IP`) OR lowercase it (e.g. `header:cf-connecting-ip`) would silently break operator grep workflows expecting the bare original-case name; the contract is the raw header name appears literally in the emitted string")
+
+    // (vii) the SET of all 3 documented templates is
+    // exactly 3 distinct strings (closed-set assertion
+    // catches refactors that extend the set with new modes
+    // OR narrow it by consolidating two templates into one)
+    val allTemplates = Set(
+      rateLimitClientIpSource(Some("h"), Set("ip")),
+      rateLimitClientIpSource(Some("h"), Set.empty),
+      rateLimitClientIpSource(None, Set.empty)
+    )
+    assertEquals(allTemplates.size, 3,
+      clue = s"rateLimitClientIpSource MUST emit exactly 3 distinct format templates across its 3 branches -- a refactor consolidating the 2 Some(header) branches into a single template would silently lose the security-relevant distinction between full-trust + safer-fallback modes; a refactor extending the set with a new mode (e.g. `header:<name> via trusted-cidr-block` for CIDR-based allowlists) without updating documentation would silently change the operator-visible audit taxonomy; got: $allTemplates")
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
