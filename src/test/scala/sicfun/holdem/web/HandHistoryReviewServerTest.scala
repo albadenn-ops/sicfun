@@ -5847,6 +5847,146 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented TIMEOUT-PATH variant of the `job failed`
+  // audit log line: errorStatus=504 (NOT 400 like 6b59ce4's
+  // backend-Left variant) AND error=analysis%20timed%20out%20
+  // after%20<N>ms (the SPECIFIC timeoutFailure string format
+  // documented at JobQueue.scala line 388); 6b59ce4 pinned the
+  // SAME emission site (line 321-323) but exercised the
+  // classifyAnalysisError DEFAULT branch (400) via a backend
+  // Left; THIS commit exercises the TIMEOUT branch (504) via
+  // an analysisTimeoutMs trigger + BlockingBackend that never
+  // releases; together the two commits pin BOTH of the
+  // classifier's two FAILURE-branch values (400 vs 504), with
+  // the THIRD branch (500 for "analysis failed:" prefix) still
+  // unpinned but reachable only via a NonFatal exception in
+  // the analyze backend; the TIMEOUT path is OPERATIONALLY
+  // CRITICAL because it's the documented signal for "this job
+  // hung past the configured wall-clock cap" -- the runbook's
+  // analysis-stuck triage entry filters by errorStatus=504 to
+  // distinguish timeout-stuck from backend-error-failed jobs
+  // (different operator responses: timeout means
+  // analysisTimeoutMs cap is too low OR the backend is
+  // genuinely slow, while errorStatus=400 means the input was
+  // malformed and the operator should investigate the
+  // submission); the %20-escape on "analysis timed out after
+  // 100ms" is the LOAD-BEARING contract this pin uniquely
+  // verifies because 6b59ce4's backend-Left value
+  // "invalid hand history format with spaces" exercises the
+  // escape on a DIFFERENT category of error string (user-
+  // controlled vs server-generated); a refactor that
+  // accidentally dropped the escape ONLY on the timeoutFailure
+  // path (e.g. "the timeout message is server-generated and
+  // doesn't need escaping") would silently break the log-line
+  // format for timeout events while keeping backend-Left
+  // events correctly escaped; per-field regression vectors
+  // SPECIFIC to the timeout path that 6b59ce4's pin doesn't
+  // catch: (i) errorStatus=504 (the TIMEOUT classifier branch
+  // -- catches a refactor that broke classifyAnalysisError's
+  // line 765's `if error.startsWith("analysis timed out after")
+  // then 504` check), (ii) the EXACT timeout-message format
+  // `analysis timed out after <N>ms` at JobQueue.scala line
+  // 388 -- catches a refactor renaming to e.g. "analysis
+  // exceeded N ms" / "analysis took longer than Nms" which
+  // would silently break (a) the classifyAnalysisError prefix
+  // match at line 765 (the classifier returns 504 ONLY when
+  // the error starts with "analysis timed out after" -- a
+  // rename would silently demote timeout errors to the 400
+  // default branch), AND (b) operator dashboards filtering by
+  // the documented exact wording, (iii) the analysisTimeoutMs
+  // value embedded in the error message (the test uses 100ms
+  // so the expected wire form is "analysis timed out after
+  // 100ms" with the 100 literal); a refactor that emitted a
+  // different time unit (e.g. seconds, milliseconds-with-comma
+  // separator) would silently confuse operators about the
+  // actual timeout-cap value; 7-tier format check at WARN
+  // level extending 6b59ce4's pattern: (i) `job failed`
+  // prefix (same as 6b59ce4), (ii) jobId matching the 202
+  // response, (iii) errorStatus=504 (NOT 400 -- the TIMEOUT-
+  // distinctive value), (iv) error=analysis%20timed%20out%20
+  // after%20100ms (THE LOAD-BEARING timeout-message + %20-
+  // escape pin), (v) EXCLUSION of the unescaped form
+  // "analysis timed out after 100ms" (catches the escape-
+  // dropped refactor -- same shape as 6b59ce4's ESCAPE-
+  // CONTRACT VERIFICATION), (vi) [WARN] level, (vii) [hand-
+  // history-review] service-tag.
+  test("analyze worker that times out emits the documented `job failed ... errorStatus=504 error=analysis%20timed%20out%20after%20<N>ms` WARN audit log line per JobQueue.scala line 321-323 -- the TIMEOUT-PATH variant of 6b59ce4's backend-Left pin (exercises classifyAnalysisError's 504 branch vs 6b59ce4's 400 default branch)") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      withServer(
+        staticDir,
+        backend = backend,
+        maxConcurrentJobs = 1,
+        maxQueuedJobs = 1,
+        analysisTimeoutMs = 100L
+      ) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Capture stderr around the submit + terminal-poll
+        // cycle. The job will be terminated by the timeout
+        // (the BlockingBackend never releases) so the worker
+        // emits the "job failed" line at JobQueue.scala line
+        // 321-323 with the timeoutFailure-generated Failed
+        // state.
+        val errBuf = new java.io.ByteArrayOutputStream()
+        val originalErr = System.err
+        System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+        val submitJobId =
+          try
+            val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+            assertEquals(submit.statusCode(), 202,
+              clue = "submission must return 202 before the worker can be timed out")
+            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+            val capturedJobId = jsonBody(submit)("jobId").str
+            assert(backend.started.await(3, TimeUnit.SECONDS),
+              "backend never started -- the test depends on the worker reaching the analyze call so the timeout interrupts it")
+            // Wait for terminal state (failed-by-timeout). The
+            // worker will be interrupted after 100ms and the
+            // job will transition to Failed with the
+            // timeoutFailure error.
+            val terminal = awaitTerminalJob(statusUri)
+            assertEquals(terminal("status").str, "failed",
+              clue = "worker must reach 'failed' terminal state via the timeout path")
+            assertEquals(terminal("errorStatus").num.toInt, 504,
+              clue = "terminal-state errorStatus must be 504 (classifyAnalysisError's timeout branch) -- this is the HTTP-response-shape pin matching the existing line ~11170 test, complementing this commit's audit-log-shape pin")
+            capturedJobId
+          finally
+            System.setErr(originalErr)
+
+        // Release backend latch to allow clean teardown
+        backend.release.countDown()
+
+        val captured = errBuf.toString(StandardCharsets.UTF_8)
+        val failedLine = captured.split('\n').iterator
+          .find(line => line.contains("job failed") && line.contains(s"jobId=$submitJobId"))
+          .getOrElse(fail(s"no `job failed jobId=$submitJobId` line in captured stderr for the timeout path; got captured stderr: ${captured.take(2000)}"))
+
+        // (i) prefix
+        assert(failedLine.contains("job failed"),
+          clue = s"timeout-path failed line must carry `job failed` prefix matching 6b59ce4's pattern; got: $failedLine")
+        // (ii) jobId matching the 202 response
+        assert(failedLine.contains(s"jobId=$submitJobId"),
+          clue = s"timeout-path failed line must carry the submission's jobId; got: $failedLine")
+        // (iii) errorStatus=504 (THE TIMEOUT-DISTINCTIVE value)
+        assert(failedLine.contains("errorStatus=504"),
+          clue = s"timeout-path failed line MUST carry errorStatus=504 per JobQueue.scala line 765's classifyAnalysisError check `if error.startsWith(\"analysis timed out after\") then 504` -- this is the TIMEOUT classifier branch that 6b59ce4's backend-Left variant (which exercises the 400 default branch) doesn't catch; a refactor that broke the prefix-match (e.g. renaming the timeoutFailure error string OR changing the classifier prefix) would silently demote timeout errors to the 400 default branch, breaking operator timeout-vs-malformed-input distinction; got: $failedLine")
+        // (iv) error=analysis%20timed%20out%20after%20100ms
+        // (THE %20-escaped timeout message -- specific value)
+        assert(failedLine.contains("error=analysis%20timed%20out%20after%20100ms"),
+          clue = s"timeout-path failed line MUST carry the EXACT %20-escaped timeoutFailure error string `analysis%20timed%20out%20after%20100ms` per JobQueue.scala line 388's `s\"analysis timed out after $${analysisTimeoutMs}ms\"` template + the line 322 %20-escape via `error.replace(\" \", \"%20\")`; the 100ms reflects the test's analysisTimeoutMs=100L value; a refactor renaming to e.g. \"analysis exceeded N ms\" / \"analysis took longer than Nms\" would silently break BOTH the classifyAnalysisError prefix-match (demoting to 400) AND operator dashboards filtering by the documented exact wording; got: $failedLine")
+        // (v) EXCLUSION of unescaped form (catches escape-dropped refactor)
+        assert(!failedLine.contains("analysis timed out after 100ms"),
+          clue = s"timeout-path failed line MUST NOT contain the UNESCAPED form `analysis timed out after 100ms` (with literal spaces) -- catches a refactor that accidentally dropped the .replace(\" \", \"%20\") at JobQueue.scala line 322 ONLY on the timeout error variant while keeping backend-Left errors correctly escaped; matches the ESCAPE-CONTRACT VERIFICATION pattern from 6b59ce4 + e43081b; got: $failedLine")
+        // (vi) WARN level
+        assert(failedLine.contains("[WARN]"),
+          clue = s"timeout-path failed line must be WARN-level matching 6b59ce4's backend-Left variant -- both emit at the same JobQueue.scala line 321 logWarn site; got: $failedLine")
+        // (vii) service-tag
+        assert(failedLine.contains("[hand-history-review]"),
+          clue = s"timeout-path failed line must carry the [hand-history-review] service-tag prefix; got: $failedLine")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
