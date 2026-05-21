@@ -14708,6 +14708,121 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented 409 CancelOutcome.AlreadyTerminal
+  // response shape at HandHistoryReviewServerApi.scala
+  // lines 222-223 -- the SHAPE-BOUNDARY pin verifies that
+  // the 409 already-terminal rejection flows through the
+  // UNIVERSAL 1-field {error} shape (the JsonHandler line
+  // 561 fold pinned in 97fd354), NOT the 429 4-field
+  // metadata-rich shape (1a3f3f5); the documented EXCEPTION
+  // (429) is INTENTIONALLY THE ONLY error-response with
+  // additional metadata -- all OTHER error responses (404,
+  // 405, 401, 403, 409, 500, 503) flow through the
+  // universal 1-field minimal shape; TWENTY-THIRD per-
+  // emission-site SHAPE pin overall extending the
+  // ERROR-RESPONSE shape coverage from 97fd354 (universal
+  // 1-field) + 1a3f3f5 (429 exception) to a THIRD
+  // explicitly-pinned non-2xx status code (409) verifying
+  // the SHAPE BOUNDARY between the two error-shape
+  // families; the 409 already-terminal shape is
+  // OPERATIONALLY CRITICAL because: (a) the 409 is the
+  // ONLY non-2xx response from the cancellation flow other
+  // than 404 (job not found) -- if the 409 shape drifted
+  // to include the 429 metadata fields (e.g. as a
+  // refactor "extending the error response with retry
+  // metadata for completeness"), HTTP-aware clients
+  // implementing the universal 1-field error-handler would
+  // silently fail to parse the additional fields, (b) the
+  // documented 409 SEMANTICS are "the job already
+  // reached a terminal state, so cancellation is moot" --
+  // the error message is informational, not actionable
+  // (no retry-after metadata makes sense), (c) the SHAPE
+  // BOUNDARY between 409 and 429 reflects the documented
+  // intentional design: 429 is the ONE exception to the
+  // minimal shape (rate-limit needs structured backoff
+  // hints), all OTHER errors share the universal shape;
+  // per-format regression vectors uniquely caught (NOT
+  // caught by 97fd354 OR 1a3f3f5 individually): (i)
+  // refactor adding 429-style metadata to the 409 response
+  // (e.g. `retryAfterSeconds` for "consistency with rate-
+  // limit") would silently break the documented SHAPE
+  // BOUNDARY, (ii) refactor RENAMING the `error` field in
+  // the 409 response specifically (without affecting other
+  // endpoints) would silently desync the 409 from the
+  // universal contract, (iii) refactor moving the 409
+  // response off the JsonHandler line 561 fold (e.g. into
+  // a dedicated 409-handler with a different shape) would
+  // silently break the universal-error-shape contract;
+  // test approach: use immediateBackend with Right (job
+  // completes immediately to reach terminal state), submit
+  // playing-hall job + wait for completion via
+  // awaitTerminalJob, DELETE the now-terminal job -> 409
+  // response, extract the response body field name set,
+  // assert it matches the universal 1-field {error}
+  // closed set (NOT the 429 4-field shape) AND verify the
+  // documented error message.
+  test("409 CancelOutcome.AlreadyTerminal response body for /api/playing-hall/jobs/<id> DELETE on already-terminal job MUST emit EXACTLY the universal 1-field {error} closed set (NOT the 429 4-field metadata shape) per the JsonHandler line 561 fold + HandHistoryReviewServerApi.scala lines 222-223 -- the SHAPE-BOUNDARY pin distinguishes the 409 from the 429 documented exception (1a3f3f5)") {
+    withStaticSite { staticDir =>
+      // Use immediateBackend so the job completes IMMEDIATELY
+      // (terminal state reached before we issue DELETE)
+      withServer(staticDir, playingHallBackend = immediatePlayingHallBackend(Right(samplePlayingHallResult))) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Submit + wait for terminal completion
+        val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(submit.statusCode(), 202,
+          clue = "playing-hall submission must return 202 for the 409 shape pin to inspect")
+        val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+        val terminal = awaitTerminalJob(statusUri)
+        assertEquals(terminal("status").str, "completed",
+          clue = "playing-hall job must reach 'completed' terminal state before we DELETE it (to trigger CancelOutcome.AlreadyTerminal -> 409 -- DELETE on a NON-terminal job returns 200 with CancelOutcome.Accepted instead)")
+
+        // DELETE the already-terminal job -> 409
+        val alreadyTerminalResp = delete(statusUri)
+        assertEquals(alreadyTerminalResp.statusCode(), 409,
+          clue = "DELETE on an already-terminal job MUST return 409 per HandHistoryReviewServerApi.scala line 222-223's `Left(409 -> \"playing hall job already terminal\")` -- the CancelOutcome.AlreadyTerminal branch maps to 409 Conflict per the documented HTTP semantics")
+
+        val alreadyTerminalBody = jsonBody(alreadyTerminalResp)
+        val alreadyTerminalFields = alreadyTerminalBody.obj.keys.toSet
+
+        // (i) UNIVERSAL 1-FIELD CARDINALITY: matches the
+        // 97fd354 universal-error-shape pin (NOT the 1a3f3f5
+        // 429 4-field shape)
+        assertEquals(alreadyTerminalFields.size, 1,
+          clue = s"409 already-terminal response body MUST have exactly 1 field per AuthStack.scala line 561's universal JsonHandler fold `{ case (status, error) => JsonResponse(status, Obj(\"error\" -> Str(error))) }` -- this is the UNIVERSAL minimal shape that the 429 response is the documented EXCEPTION to (1a3f3f5 pins the 4-field 429 shape; THIS pin verifies 409 does NOT also have the extra metadata); got actual=${alreadyTerminalFields.size} expected=1, fields=${alreadyTerminalFields.toVector.sorted.mkString(", ")}")
+
+        // (ii) UNIVERSAL 1-FIELD SET EQUALITY: matches the
+        // 97fd354 universal-error-shape pin
+        val expectedUniversalFields = Set("error")
+        assertEquals(alreadyTerminalFields, expectedUniversalFields,
+          clue = s"409 already-terminal response body's field NAME SET MUST equal exactly {error} per the JsonHandler line 561 universal fold -- a refactor RENAMING the field to `message` or `detail` would silently break HTTP clients keying on the documented field name; got actual=${alreadyTerminalFields.toVector.sorted.mkString(", ")}")
+
+        // (iii) VALUE assertion: error message MUST match the
+        // documented literal at line 223
+        assertEquals(alreadyTerminalBody("error").str, "playing hall job already terminal",
+          clue = "409 already-terminal response's error message MUST be EXACTLY 'playing hall job already terminal' per HandHistoryReviewServerApi.scala line 223's hardcoded literal -- a refactor changing the message would silently change operator-visible text + saved Postman collection assertions; the message is intentionally minimal (no retry advice -- a terminal job stays terminal, retrying doesn't help)")
+
+        // (iv) SHAPE BOUNDARY: 409 does NOT have the 429
+        // metadata fields (the documented exception lives ONLY
+        // on 429; spreading to 409 would silently break the
+        // boundary)
+        assert(!alreadyTerminalFields.contains("rateLimitBucket"),
+          clue = s"409 response MUST NOT contain `rateLimitBucket` (this field is the 429 RATE-LIMIT-REJECTION exception per 1a3f3f5 -- 409 is NOT a rate-limit response, it's a state-conflict response; spreading the 429 metadata to 409 would silently break the documented SHAPE BOUNDARY between the two error-shape families); got: ${alreadyTerminalFields.toVector.sorted.mkString(", ")}")
+        assert(!alreadyTerminalFields.contains("limitPerMinute"),
+          clue = s"409 response MUST NOT contain `limitPerMinute` (this field is the 429 RATE-LIMIT-REJECTION exception -- not applicable to state-conflict responses); got: ${alreadyTerminalFields.toVector.sorted.mkString(", ")}")
+        assert(!alreadyTerminalFields.contains("retryAfterSeconds"),
+          clue = s"409 response MUST NOT contain `retryAfterSeconds` (a TERMINAL job stays terminal -- there's no useful retry advice to give; the 409 SEMANTICS are 'the action you requested no longer makes sense', not 'try again later'); got: ${alreadyTerminalFields.toVector.sorted.mkString(", ")}")
+
+        // (v) HEADER assertion: 409 MUST NOT have a Retry-After
+        // header (terminal jobs stay terminal; no useful retry
+        // advice; the AuthStack.scala line 572-573 fallback only
+        // applies to 503, not 409)
+        assertEquals(headerValue(alreadyTerminalResp, "Retry-After"), None,
+          clue = "409 response MUST NOT have a Retry-After header -- the AuthStack.scala lines 572-573 fallback only applies to 503 responses (per the `response.status == 503` check); a terminal job stays terminal, retrying doesn't help, so emitting Retry-After would silently mislead HTTP-aware clients into scheduling a useless retry")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
