@@ -12092,6 +12092,122 @@ class HandHistoryReviewServerTest extends FunSuite:
       clue = "Cancelled.isTerminal MUST be true per JobQueue.scala line 146 -- a refactor flipping this to false (e.g. 'a user could re-submit a cancelled job') would silently let the cleanup task ignore cancelled jobs, leaking memory AND would silently break the DELETE-then-terminal-poll flow that the existing tests at lines 4582/4589/12114/12118 rely on")
   }
 
+  // Pin the documented RateLimitBucket ENUM at the SOURCE
+  // per RateLimit.scala lines 14-25 -- the ENUM-INVARIANT
+  // isolation pin extending the 822a0df AnalysisJobState
+  // pattern to a SECOND enum, validating the FAMILY's
+  // applicability across the codebase's other documented
+  // enumeration types; FOURTH per-emission-site SHAPE pin
+  // overall (476f635 jobId / 45303cc statusUrl / 822a0df
+  // AnalysisJobState / THIS RateLimitBucket); RateLimit
+  // Bucket has TWO documented properties per case (.id +
+  // .description) so this pin verifies BOTH dimensions
+  // simultaneously, doubling the per-pin coverage; the
+  // RateLimitBucket enum is OPERATIONALLY CRITICAL because:
+  // (a) the .id values flow into the STRUCTURED LOG LINE
+  // `bucket=<id>` field on every `request rate limited`
+  // audit log emission -- operator log-grep workflows like
+  // `tail -f deploy.log | grep bucket=submit` filter
+  // failures by the EXACT documented id, a refactor
+  // renaming the id (e.g. `submit` -> `submission`,
+  // `job-status` -> `jobstatus` hyphen removal,
+  // `job-status` -> `job_status` separator change, `auth` -
+  // > `authentication`) would silently break operator
+  // grep + aggregator queries, (b) the .description values
+  // flow into the USER-FACING error message body (the
+  // 429-response body's reason field uses the description
+  // for human-readable diagnostics: "auth rate limit
+  // exceeded" vs "auth_per_minute_exceeded" -- the natural
+  // English form is more user-friendly), a refactor making
+  // the description match the .id (consolidating to a
+  // single string) would silently degrade UX, (c) the .id
+  // vs .description ASYMMETRY is INTENTIONAL -- .id uses
+  // hyphen-separated lowercase (URL-safe + grep-friendly)
+  // while .description uses space-separated lowercase
+  // (human-readable + matches natural English form); a
+  // refactor consolidating to a single string would
+  // silently break either log parsing (if description form
+  // wins: `bucket=job status` splits the structured key=
+  // value pair) OR user message readability (if id form
+  // wins: `error=job-status rate limit exceeded` looks
+  // robot-generated to users), (d) the SPECIFIC HYPHEN-VS-
+  // SPACE choice for the JobStatus case is the MOST LIKELY
+  // refactor target -- a code reviewer "normalizing" the
+  // separator across both .id + .description (e.g. "both
+  // should be hyphen for consistency") would silently
+  // break either format; per-format regression vectors
+  // this pin catches: (i) refactor renaming any .id (e.g.
+  // `submit` -> `submission`) -- per-case .id equality
+  // assertion catches the rename, (ii) refactor renaming
+  // any .description (e.g. `auth` -> `authentication`) --
+  // per-case .description equality assertion catches the
+  // rename, (iii) refactor consolidating .id + .description
+  // to a single string -- the asymmetric-form assertions
+  // (JobStatus.id has hyphen vs .description has space)
+  // catch this, (iv) refactor adding a new bucket (e.g.
+  // `Upload` for file-upload rate limits) without updating
+  // documentation -- the values.length assertion + set-
+  // equality assertions catch the new case, (v) refactor
+  // removing a bucket (e.g. consolidating Submit + Job
+  // Status into a single Job bucket) -- set-size + set-
+  // equality assertions catch the missing case, (vi)
+  // refactor introducing an id/description collision (e.g.
+  // two cases both emitting "auth" for .id) -- set-size
+  // assertion catches the deduplication; test approach
+  // mirrors 822a0df: import the enum's case objects,
+  // assert per-case .id + .description match documented
+  // spelling, assert the set of all 3 .id values equals
+  // exactly {submit, job-status, auth}, assert the set of
+  // all 3 .description values equals exactly {submit, job
+  // status, auth}, assert values.length == 3.
+  test("RateLimitBucket enum at RateLimit.scala lines 14-25 MUST emit EXACTLY 3 documented .id values (submit, job-status, auth) AND 3 documented .description values (submit, job status, auth) -- the SECOND ENUM-INVARIANT pin in the family extending 822a0df's pattern to RateLimit.scala; the .id vs .description ASYMMETRY (JobStatus.id='job-status' vs JobStatus.description='job status') is INTENTIONAL and catches refactors that consolidate to a single string") {
+    import sicfun.holdem.web.RateLimit.RateLimitBucket
+    import sicfun.holdem.web.RateLimit.RateLimitBucket.*
+
+    // (i-iii) per-case .id assertions (the URL-safe +
+    // grep-friendly hyphen-separated lowercase form that
+    // flows into structured log lines and 429-response
+    // headers)
+    assertEquals(Submit.id, "submit",
+      clue = "RateLimitBucket.Submit.id MUST be exactly 'submit' per RateLimit.scala line 18 -- a refactor to 'submission' for natural English OR 'submit-job' for prefix-consistency with the other bucket ids would silently break operator log-grep workflows filtering on the documented bucket=submit form")
+    assertEquals(JobStatus.id, "job-status",
+      clue = "RateLimitBucket.JobStatus.id MUST be exactly 'job-status' (HYPHEN separator, NOT underscore or space) per RateLimit.scala line 19 -- a refactor to 'jobstatus' (separator removal for compactness), 'job_status' (underscore for consistency with snake_case env-var names elsewhere), or 'job status' (consolidating to .description's space form) would silently break log-grep workflows AND would silently produce malformed structured log lines (a space in the bucket value splits the key=value pair); got: '${JobStatus.id}'")
+    assertEquals(Auth.id, "auth",
+      clue = "RateLimitBucket.Auth.id MUST be exactly 'auth' per RateLimit.scala line 20 -- a refactor to 'authentication' for clarity OR 'login' for user-friendliness would silently break operator log-grep workflows filtering on bucket=auth")
+
+    // (iv-vi) per-case .description assertions (the human-
+    // readable space-separated lowercase form that flows
+    // into user-facing 429-response error messages)
+    assertEquals(Submit.description, "submit",
+      clue = "RateLimitBucket.Submit.description MUST be exactly 'submit' per RateLimit.scala line 23 -- happens to be identical to .id for this case because 'submit' is a single word; a refactor to 'submission' would silently desync from .id breaking the documented description-mirrors-id-when-possible convention")
+    assertEquals(JobStatus.description, "job status",
+      clue = "RateLimitBucket.JobStatus.description MUST be exactly 'job status' (SPACE separator, NOT hyphen) per RateLimit.scala line 24 -- this is the INTENTIONAL ASYMMETRY with .id ('job-status' with hyphen); the .description uses space because it flows into user-facing error messages where natural English form is more readable than the URL-safe hyphenated form; a refactor consolidating to 'job-status' or 'jobstatus' would silently degrade user-facing readability; got: '${JobStatus.description}'")
+    assertEquals(Auth.description, "auth",
+      clue = "RateLimitBucket.Auth.description MUST be exactly 'auth' per RateLimit.scala line 25 -- identical to .id because 'auth' is a single word; a refactor to 'authentication' would silently desync the user-facing message from the log-line bucket id")
+
+    // (vii) set of all 3 .id values has exactly 3 distinct
+    // entries
+    val allIds = Set(Submit.id, JobStatus.id, Auth.id)
+    assertEquals(allIds.size, 3,
+      clue = s"RateLimitBucket MUST emit 3 distinct .id values (one per case) -- a refactor introducing an id collision would silently deduplicate; got distinct count: ${allIds.size} for values: $allIds")
+    assertEquals(allIds, Set("submit", "job-status", "auth"),
+      clue = s"RateLimitBucket's complete set of .id values MUST equal exactly {submit, job-status, auth} per RateLimit.scala lines 18-20 -- a refactor adding a new bucket (e.g. 'upload' for file-upload rate limits) would silently extend the rate-limit surface without updating docs / aggregator queries / pager rules; a refactor removing a bucket would silently lose operator-visible rate-limit category distinction; got: $allIds")
+
+    // (viii) set of all 3 .description values has exactly 3
+    // distinct entries
+    val allDescriptions = Set(Submit.description, JobStatus.description, Auth.description)
+    assertEquals(allDescriptions.size, 3,
+      clue = s"RateLimitBucket MUST emit 3 distinct .description values (one per case) -- a refactor introducing a description collision would silently lose user-facing distinction in 429-response error messages; got distinct count: ${allDescriptions.size} for values: $allDescriptions")
+    assertEquals(allDescriptions, Set("submit", "job status", "auth"),
+      clue = s"RateLimitBucket's complete set of .description values MUST equal exactly {submit, 'job status', auth} per RateLimit.scala lines 23-25; got: $allDescriptions")
+
+    // (ix) the enum has exactly 3 cases (defense-in-depth
+    // catch for add-case refactors via Scala 3's
+    // enum.values introspection)
+    assertEquals(RateLimitBucket.values.length, 3,
+      clue = s"RateLimitBucket.values MUST have exactly 3 entries per RateLimit.scala line 15's `case Submit, JobStatus, Auth` declaration -- a refactor adding a new case (e.g. 'Upload') would silently extend the rate-limit surface AND the per-case .id + .description assertions above would NOT catch it (they only verify the 3 KNOWN cases emit the right values); this assertion catches the add-case refactor via Scala 3's reflective enum.values introspection; got length: ${RateLimitBucket.values.length}")
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
