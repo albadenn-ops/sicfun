@@ -19532,6 +19532,134 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented CROSS-CLIENT-IP 429 ISOLATION contract
+  // at RateLimit.scala line 59's `s"${bucket.id}|$clientKey"`
+  // key construction -- the CROSS-CLIENT-ISOLATION pin verifies
+  // the documented per-client-key state isolation where two
+  // distinct client IPs (different X-Real-IP values) maintain
+  // INDEPENDENT rate-limit windows within the SAME bucket: one
+  // client depleting its slot does NOT consume the OTHER
+  // client's slot. FIFTY-EIGHTH per-emission-site SHAPE pin
+  // overall; existing line 5566 test verifies SAME-CLIENT
+  // header-keyed enforcement (2 submissions from the SAME
+  // X-Real-IP both go through the same client key), but the
+  // CROSS-CLIENT-IP INDEPENDENCE invariant -- which verifies
+  // that DIFFERENT X-Real-IP values produce DIFFERENT client
+  // keys with independent counters -- requires TWO distinct
+  // client IPs in a single test; the CROSS-CLIENT-ISOLATION
+  // contract is OPERATIONALLY CRITICAL because: (a) the
+  // documented design ensures that one hostile client cannot
+  // DoS legitimate users by exhausting a shared counter --
+  // each client has their own quota, so flooders only DoS
+  // themselves, (b) a refactor that dropped the client-key
+  // portion from the line 59 key would silently make ALL
+  // clients share ONE bucket-wide counter, transforming a
+  // per-client rate limit into a global rate limit (e.g.,
+  // 1/minute would mean only 1 user globally per minute can
+  // submit, regardless of how many users there are), (c) the
+  // SYMMETRIC pin pair (THIS commit cross-CLIENT + bd92a11
+  // cross-BUCKET) documents the FULL isolation matrix: each
+  // (bucket, client-key) pair has its OWN window state,
+  // requiring BOTH dimensions in the line 59 key
+  // construction; per-format regression vectors uniquely
+  // caught (NOT caught by the 5566 single-client header-keyed
+  // test OR the per-bucket pins): (i) refactor dropping the
+  // clientKey portion from the line 59 key (e.g., `key =
+  // bucket.id` only) would silently collapse all clients into
+  // a single shared counter -- the 5566 test would still
+  // PASS (single client, two requests, second one 429) but
+  // cross-client independence would be broken, (ii) refactor
+  // that accidentally re-keyed by a CONSTANT instead of the
+  // resolved clientKey (e.g., always using "default" or null)
+  // would silently collapse the per-client isolation while
+  // preserving per-bucket isolation; test approach:
+  // configure rateLimitClientIpHeader=Some("X-Real-IP") +
+  // rateLimitSubmitsPerMinute=1 (loopback peer is
+  // automatically trusted per the test framework), submit
+  // from Client A's X-Real-IP value (202), submit from Client
+  // A AGAIN (429 -- Client A exhausted), submit from Client
+  // B's DIFFERENT X-Real-IP value (202 -- INDEPENDENCE proof
+  // that Client A's exhaustion did NOT consume Client B's
+  // slot), submit from Client B AGAIN (429 -- Client B
+  // exhausted), cross-check both 429s identify bucket=submit
+  // but represent independent counter exhaustion.
+  test("CROSS-CLIENT-IP 429 ISOLATION: two distinct X-Real-IP values produce INDEPENDENT rate-limit windows within the SAME bucket per RateLimit.scala line 59's `s\"${bucket.id}|$$clientKey\"` key construction -- depleting one client's slot does NOT consume the OTHER client's slot, proving the per-client-key isolation that enables per-client quotas (vs a global shared counter)") {
+    withStaticSite { staticDir =>
+      withServer(
+        staticDir,
+        rateLimitSubmitsPerMinute = 1,
+        rateLimitStatusPerMinute = 0,
+        rateLimitClientIpHeader = Some("X-Real-IP")
+      ) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val clientAHeaders = Map("X-Real-IP" -> "203.0.113.10")
+        val clientBHeaders = Map("X-Real-IP" -> "203.0.113.20")
+
+        // (1) Client A submit 1 -> 202 (Client A slot 1/1 used)
+        val a1 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, clientAHeaders)
+        assertEquals(a1.statusCode(), 202,
+          clue = s"Client A's first submit MUST 202 to consume slot 1/1; got: ${a1.statusCode()}")
+
+        // (2) Client A submit 2 -> 429 (Client A exhausted).
+        // Sanity check: the SAME-CLIENT enforcement still
+        // works (catches a refactor that BROKE per-client
+        // enforcement entirely).
+        val a2 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, clientAHeaders)
+        assertEquals(a2.statusCode(), 429,
+          clue = s"Client A's second submit MUST 429 -- Client A bucket exhausted at 1/1; got: ${a2.statusCode()}")
+        val a2Body = jsonBody(a2)
+        assertEquals(a2Body("rateLimitBucket").str, "submit",
+          clue = s"Client A's 429 MUST identify rateLimitBucket=submit; got: ${a2Body("rateLimitBucket").str}")
+
+        // (3) Client B submit 1 -> 202 (Client B slot 1/1
+        // used). THE UNIQUE INDEPENDENCE SIGNAL: if the rate-
+        // limit state were SHARED across clients (e.g., the
+        // line 59 key dropped the clientKey portion), Client
+        // B's first submission would inherit Client A's
+        // exhausted counter and return 429 instead of 202.
+        val b1 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, clientBHeaders)
+        assertEquals(b1.statusCode(), 202,
+          clue = s"INDEPENDENCE PROOF: Client B's first submit MUST 202 even though Client A is exhausted -- the documented per-client-key isolation at RateLimit.scala line 59 ensures Client B has its own fresh window; a refactor dropping the clientKey portion from the line 59 key construction would collapse all clients into a shared counter, silently failing this assertion; got: ${b1.statusCode()}, body: ${b1.body()}")
+
+        // (4) Client B submit 2 -> 429 (Client B exhausted).
+        // Confirms Client B's bucket is ENFORCED, not just
+        // SHARED-but-empty.
+        val b2 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, clientBHeaders)
+        assertEquals(b2.statusCode(), 429,
+          clue = s"Client B's second submit MUST 429 -- Client B bucket exhausted at 1/1 (its OWN window, independent of Client A's); got: ${b2.statusCode()}")
+        val b2Body = jsonBody(b2)
+        assertEquals(b2Body("rateLimitBucket").str, "submit",
+          clue = s"Client B's 429 MUST identify rateLimitBucket=submit (same bucket id as Client A's 429, but independent counter); got: ${b2Body("rateLimitBucket").str}")
+
+        // (5) CROSS-CHECK: BOTH 429 responses identify the
+        // SAME bucket id (submit) -- proving that the
+        // independence is per-CLIENT, NOT per-BUCKET. Both
+        // clients are hitting the SAME bucket; the isolation
+        // is along the OTHER dimension of the line 59 key.
+        assertEquals(a2Body("rateLimitBucket").str, b2Body("rateLimitBucket").str,
+          clue = s"BOTH 429s MUST identify the SAME bucket id (`submit`) -- the per-client isolation is along the clientKey dimension of the line 59 key `bucket.id|clientKey`, NOT the bucket.id dimension; got A=${a2Body("rateLimitBucket").str}, B=${b2Body("rateLimitBucket").str}")
+
+        // (6) CROSS-CHECK: BOTH 429s identify the SAME
+        // limitPerMinute=1 (both have the same per-client
+        // quota of 1/minute, NOT a shared global quota)
+        assertEquals(a2Body("limitPerMinute").num.toInt, b2Body("limitPerMinute").num.toInt,
+          clue = s"BOTH 429s MUST identify limitPerMinute=1 -- the documented per-client quota is the SAME across clients (1/minute each), NOT a shared global cap; got A=${a2Body("limitPerMinute").num.toInt}, B=${b2Body("limitPerMinute").num.toInt}")
+        assertEquals(a2Body("limitPerMinute").num.toInt, 1,
+          clue = s"limitPerMinute MUST be 1 per the test's rateLimitSubmitsPerMinute=1 configuration; got: ${a2Body("limitPerMinute").num.toInt}")
+
+        // (7) NEGATIVE CHECK: Client A's exhaustion is
+        // PERSISTENT (re-hitting after Client B's window also
+        // gets 429). Catches a refactor that would
+        // accidentally clear Client A's counter when Client
+        // B's window got created.
+        val aRetry = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, clientAHeaders)
+        assertEquals(aRetry.statusCode(), 429,
+          clue = s"PERSISTENCE: Client A's window is still exhausted after Client B's window was created/exhausted -- the per-client states are persistent across other clients' activity; got: ${aRetry.statusCode()}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
