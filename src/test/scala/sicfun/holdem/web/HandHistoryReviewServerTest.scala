@@ -5635,6 +5635,128 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `failed to start web server: <host>:<port>
+  // is unavailable (<exception>)` ERROR audit log line per
+  // HandHistoryReviewServerRuntime.scala line 358-359 -- opens a
+  // NEW CATEGORY of operator-facing log line: STARTUP-FAILURE
+  // emissions, complementing the prior INFO (success/banner) and
+  // WARN (failure/rate-limit) categories with the ERROR level;
+  // the log line fires when a BindException prevents the HTTP
+  // server from binding to its configured host:port (e.g.
+  // another process already listening on the port, permission
+  // denied for privileged ports, network interface unavailable);
+  // operators triage by this ERROR log line to know "the boot
+  // failed and why" -- the INFO-level startup banner (pinned by
+  // 7c47f88) only emits on SUCCESSFUL boot, so its ABSENCE
+  // combined with this ERROR line is the operator's signal that
+  // a deployment failed to start; the format at line 358-359 is
+  // `s"failed to start web server: ${config.host}:${config.port}
+  // is unavailable (${e.getMessage})"` -- four fields: (a) the
+  // literal "failed to start web server:" prefix, (b) the
+  // configured host:port pair operators see was the intended
+  // bind target, (c) the literal "is unavailable" diagnostic
+  // (operators triage on this specific wording per the
+  // existing test at line ~11078 that pins the Left value),
+  // (d) the underlying BindException message in parens; the
+  // existing test at line ~11078 pins ONLY the Left value
+  // returned from startWithBackend -- it does NOT capture the
+  // logError emission to stderr; this commit adds the ERROR-
+  // LEVEL log line pin to complement the Left-value pin,
+  // catching a refactor that emitted the log line at a
+  // different level (e.g. WARN -- which would silently bury
+  // startup failures in the warning stream operators expect to
+  // contain rate-limit and validation noise) OR suppressed the
+  // log line entirely (silent boot failures that operators
+  // can only detect by polling the bound process state); per-
+  // field regression vectors that the prior log line pins
+  // don't catch: (i) the [ERROR] level (NOT [INFO] like
+  // startup-complete or [WARN] like rate-limit) -- this is the
+  // FIRST and ONLY ERROR-level log line pin in the operator-
+  // facing log line coverage; a refactor demoting to WARN
+  // would silently shift startup failures into the warning
+  // noise; (ii) the "failed to start web server:" prefix --
+  // matches the Left value's format so operators see CONSISTENT
+  // text between the log line + the CLI exit message; (iii)
+  // the "<host>:<port>" pattern -- the SPECIFIC host:port that
+  // was attempted (not e.g. a placeholder like "localhost"
+  // when the config explicitly set 127.0.0.1); (iv) the "is
+  // unavailable" diagnostic substring -- operators grep for
+  // this specific wording to detect bind-failure events; 5-tier
+  // format check: (i) `failed to start web server:` prefix
+  // (catches rename), (ii) `127.0.0.1:<port>` substring with
+  // the SPECIFIC port the conflicting first server bound to,
+  // (iii) `is unavailable` diagnostic substring (catches a
+  // refactor renaming to e.g. "already in use" / "bind
+  // failed"), (iv) [ERROR] level (catches level shift), (v)
+  // [hand-history-review] service-tag prefix.
+  test("startup BindException emits the documented `failed to start web server: <host>:<port> is unavailable (<exception>)` ERROR audit log line per HandHistoryReviewServerRuntime.scala line 358-359 -- opens a NEW CATEGORY (STARTUP-FAILURE emissions) with the FIRST ERROR-level pin in the operator-facing log line coverage") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { running =>
+        val port = running.binding.port
+
+        // Capture stderr around the second-bind attempt. The
+        // logError at HandHistoryReviewServerRuntime.scala line
+        // 359 writes to System.err per line 423-424.
+        val errBuf = new java.io.ByteArrayOutputStream()
+        val originalErr = System.err
+        System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+        val secondStart =
+          try
+            HandHistoryReviewServer.startWithBackend(
+              HandHistoryReviewServer.ServerConfig(
+                host = "127.0.0.1",
+                port = port,
+                staticDir = staticDir,
+                maxUploadBytes = 512,
+                analysisTimeoutMs = 120000L,
+                playingHallTimeoutMs = 900000L,
+                maxConcurrentJobs = 2,
+                maxQueuedJobs = 8,
+                shutdownGraceMs = 5000L,
+                rateLimitSubmitsPerMinute = 6,
+                rateLimitStatusPerMinute = 240,
+                rateLimitAuthPerMinute = 10,
+                rateLimitClientIpHeader = None,
+                rateLimitTrustedProxyIps = Set.empty,
+                drainSignalFile = None,
+                basicAuth = None,
+                serviceConfig = HandHistoryReviewService.ServiceConfig()
+              ),
+              immediateBackend(Right(sampleAnalysisResult))
+            )
+          finally
+            System.setErr(originalErr)
+
+        // The Left value pin is matched by the existing line
+        // ~11078 test; this test additionally pins the ERROR
+        // log line that emits alongside the Left return.
+        assert(secondStart.isLeft,
+          clue = "second start MUST fail (Left) because the first server is still bound to the port")
+
+        val captured = errBuf.toString(StandardCharsets.UTF_8)
+        val bindErrorLine = captured.split('\n').iterator
+          .find(_.contains("failed to start web server"))
+          .getOrElse(fail(s"no `failed to start web server` line in captured stderr -- HandHistoryReviewServerRuntime.scala line 358-359 documents this as the ERROR-level log line that fires alongside the Left return; if missing, either the logError was suppressed OR the bind-error path took a different branch; got captured stderr: ${captured.take(2000)}"))
+
+        // (i) prefix
+        assert(bindErrorLine.contains("failed to start web server:"),
+          clue = s"startup-failure log line must carry the literal `failed to start web server:` prefix per HandHistoryReviewServerRuntime.scala line 358's hardcoded template -- a refactor renaming to e.g. `boot failed` / `server start error` would silently break operator alert rules grep'ing for the documented startup-failure signal AND would silently desync from the Left value's format pinned by the existing line ~11078 test; got: $bindErrorLine")
+        // (ii) specific host:port that was attempted
+        assert(bindErrorLine.contains(s"127.0.0.1:$port"),
+          clue = s"startup-failure log line must carry the SPECIFIC host:port (127.0.0.1:$port) that was attempted -- catches a refactor that emitted a placeholder like 'localhost:0' instead of the actual config-provided values; got: $bindErrorLine")
+        // (iii) diagnostic substring
+        assert(bindErrorLine.contains("is unavailable"),
+          clue = s"startup-failure log line must carry the literal `is unavailable` diagnostic substring per HandHistoryReviewServerRuntime.scala line 358's template -- operators grep for this specific wording to detect bind-failure events; a refactor renaming to e.g. `already in use` / `bind failed` / `port collision` would silently break operator alert rules; got: $bindErrorLine")
+        // (iv) ERROR level (the NEW dimension this pin opens)
+        assert(bindErrorLine.contains("[ERROR]"),
+          clue = s"startup-failure log line must be ERROR-level per HandHistoryReviewServerRuntime.scala line 423-424's logError helper (which uses level=\"ERROR\" + stream=System.err) -- this is the FIRST and ONLY ERROR-level log line pin in the operator-facing log line coverage; a refactor demoting to WARN would silently shift startup failures into the warning noise stream where operators expect rate-limit + validation events, masking the boot-failure signal; a refactor promoting to FATAL or similar would silently break alert rules that filter by ERROR level; got: $bindErrorLine")
+        // (v) service-tag prefix
+        assert(bindErrorLine.contains("[hand-history-review]"),
+          clue = s"startup-failure log line must carry the `[hand-history-review]` service-tag prefix matching all prior log line pins -- the service-tag is level-invariant (ERROR lines have the same service-tag as INFO + WARN lines); got: $bindErrorLine")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
