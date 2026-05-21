@@ -5987,6 +5987,138 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented NONFATAL-EXCEPTION-PATH variant of the
+  // `job failed` audit log line: errorStatus=500 + error=analysis
+  // %20failed:%20<message> -- the THIRD AND FINAL classifier
+  // branch complement to 6b59ce4 (errorStatus=400 default
+  // branch) + 8577288 (errorStatus=504 timeout branch); JobQueue
+  // .scala line 297 emits this Failed state when the analyze
+  // backend throws NonFatal during runJob: `case NonFatal(e) =>
+  // if timedOut.get() then timeoutFailure(submittedAt, startedAt)
+  // else Failed(submittedAt, startedAt, nowMillis(), 500,
+  // s"analysis failed: ${e.getMessage}")` -- the errorStatus
+  // is HARDCODED to 500 (NOT passed through classifyAnalysisError
+  // like the backend-Left path), AND the error message is
+  // wrapped with the literal "analysis failed: " prefix; this
+  // wrapping is OPERATIONALLY MEANINGFUL because the SAME
+  // prefix is what classifyAnalysisError checks at line 765-766
+  // to classify as 500 -- so a backend Left starting with
+  // "analysis failed:" would ALSO get classified as 500, the
+  // wrapping ensures uncaught exceptions land in the same
+  // operator triage category as backend-Lefts that explicitly
+  // signal "analysis failed" without leaking the raw exception
+  // class/message back to the client; with this commit ALL 3
+  // classifyAnalysisError branches are pinned: 400 (6b59ce4
+  // default), 504 (8577288 timeout), 500 (THIS commit NonFatal
+  // wrapped); the error-message format `analysis failed:
+  // <exception-message>` is the ONLY emission that includes
+  // BOTH a server-generated prefix AND a USER-controlled body
+  // (the exception message could come from anywhere, including
+  // attacker-influenced parser failures); the %20-escape on
+  // the SPACE between "analysis" and "failed:" AND inside the
+  // exception message itself is critical because the message
+  // crosses BOTH the server-generated/user-controlled boundary
+  // AND has multi-word format; per-field regression vectors
+  // SPECIFIC to the NonFatal path that 6b59ce4 + 8577288 don't
+  // catch: (i) the HARDCODED 500 status at line 297 -- a
+  // refactor that routed NonFatal exceptions through
+  // classifyAnalysisError would silently demote ungraceful
+  // exceptions to 400 if the message didn't start with the
+  // matched prefixes (the wrapping at line 297 ensures the
+  // prefix matches), (ii) the "analysis failed: " prefix
+  // wrapping at line 297 -- a refactor dropping the prefix
+  // (e.g. "raw exception message is more informative") would
+  // (a) leak exception class details to operators bypassing
+  // the documented wrapping abstraction, (b) silently demote
+  // the errorStatus via classifyAnalysisError to 400 because
+  // the message would no longer match the "analysis failed:"
+  // prefix, (iii) the exception message PASS-THROUGH -- a
+  // refactor that filtered/masked the exception message
+  // would silently lose operator diagnostic detail; the test
+  // uses a synthetic exception with a space-bearing message
+  // ("synthetic NonFatal exception with spaces") so the
+  // %20-escape covers BOTH the prefix AND body together;
+  // 8-tier format check: (i) `job failed` prefix, (ii) jobId
+  // matching 202 response, (iii) errorStatus=500 (THE
+  // NonFatal-distinctive value), (iv)
+  // error=analysis%20failed:%20synthetic%20NonFatal%20
+  // exception%20with%20spaces (the LOAD-BEARING wrapped-and-
+  // escaped message pin), (v) EXCLUSION of the unescaped form
+  // "analysis failed: synthetic NonFatal exception with
+  // spaces" (catches escape-dropped refactor on the
+  // NonFatal path specifically), (vi) [WARN] level (matches
+  // 6b59ce4 + 8577288), (vii) [hand-history-review] service-
+  // tag, (viii) the test ALSO inline-pins the HTTP-response-
+  // shape errorStatus=500 at the wire layer (complements the
+  // existing tests' coverage of 400 + 504 statuses).
+  test("analyze worker that throws NonFatal exception emits the documented `job failed ... errorStatus=500 error=analysis%20failed:%20<message>` WARN audit log line per JobQueue.scala line 297 -- the THIRD AND FINAL classifier branch (NonFatal exception path) complementing 6b59ce4 (400 default) and 8577288 (504 timeout)") {
+    withStaticSite { staticDir =>
+      // Custom throwing backend -- the existing
+      // immediateBackend/BlockingBackend helpers return
+      // Either, not throw, so we need an inline backend that
+      // throws on analyze() to exercise line 295's
+      // `case NonFatal(e) =>` catch branch.
+      val throwingBackend = new HandHistoryReviewServer.AnalysisBackend:
+        override def analyze(request: HandHistoryReviewService.AnalysisRequest): Either[String, ujson.Value] =
+          throw new RuntimeException("synthetic NonFatal exception with spaces")
+
+      withServer(staticDir, backend = throwingBackend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Capture stderr around the submit + terminal-poll.
+        // The throwing backend throws RuntimeException which is
+        // NonFatal, caught at line 295's NonFatal(e) branch,
+        // producing a Failed(errorStatus=500, error="analysis
+        // failed: synthetic NonFatal exception with spaces").
+        val errBuf = new java.io.ByteArrayOutputStream()
+        val originalErr = System.err
+        System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+        val submitJobId =
+          try
+            val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+            assertEquals(submit.statusCode(), 202,
+              clue = "submission must return 202 -- the NonFatal exception happens at WORKER level, not submission")
+            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+            val capturedJobId = jsonBody(submit)("jobId").str
+            val terminal = awaitTerminalJob(statusUri)
+            assertEquals(terminal("status").str, "failed",
+              clue = "NonFatal exception in backend must reach Failed terminal state via line 295's catch branch")
+            assertEquals(terminal("errorStatus").num.toInt, 500,
+              clue = "NonFatal exception must produce errorStatus=500 (HARDCODED at line 297, NOT via classifier) -- this is the HTTP-response-shape pin matching the JobQueue.scala line 297 hardcoded value")
+            capturedJobId
+          finally
+            System.setErr(originalErr)
+
+        val captured = errBuf.toString(StandardCharsets.UTF_8)
+        val failedLine = captured.split('\n').iterator
+          .find(line => line.contains("job failed") && line.contains(s"jobId=$submitJobId"))
+          .getOrElse(fail(s"no `job failed jobId=$submitJobId` line in captured stderr for the NonFatal path; got captured stderr: ${captured.take(2000)}"))
+
+        // (i) prefix
+        assert(failedLine.contains("job failed"),
+          clue = s"NonFatal-path failed line must carry `job failed` prefix matching 6b59ce4 + 8577288; got: $failedLine")
+        // (ii) jobId
+        assert(failedLine.contains(s"jobId=$submitJobId"),
+          clue = s"NonFatal-path failed line must carry the submission's jobId; got: $failedLine")
+        // (iii) errorStatus=500 (the NonFatal-distinctive value)
+        assert(failedLine.contains("errorStatus=500"),
+          clue = s"NonFatal-path failed line MUST carry errorStatus=500 per JobQueue.scala line 297's HARDCODED 500 -- the THIRD classifier branch complementing 6b59ce4's 400 default and 8577288's 504 timeout; a refactor routing NonFatal exceptions through classifyAnalysisError would silently demote ungraceful exceptions to 400 if the message didn't start with the matched prefixes (the wrapping at line 297 ensures the prefix matches); got: $failedLine")
+        // (iv) error=analysis%20failed:%20<message> (LOAD-BEARING)
+        assert(failedLine.contains("error=analysis%20failed:%20synthetic%20NonFatal%20exception%20with%20spaces"),
+          clue = s"NonFatal-path failed line MUST carry the EXACT %20-escaped wrapped error string `analysis%20failed:%20synthetic%20NonFatal%20exception%20with%20spaces` per JobQueue.scala line 297's `s\"analysis failed: $${e.getMessage}\"` wrapping + line 322's `.replace(\" \", \"%20\")` escape; the `analysis failed: ` prefix wrapping is OPERATIONALLY MEANINGFUL because (a) it matches classifyAnalysisError's line 765-766 prefix check (so a backend Left starting with the same prefix gets the same 500 classification, providing consistent operator triage), (b) it abstracts the raw exception class/message away from the operator-visible error string, (c) it lets operators filter for ungraceful-exception failures by grep'ing the documented prefix; a refactor dropping the prefix wrapping (e.g. \"raw exception message is more informative\") would (a) leak exception class details bypassing the documented wrapping abstraction, (b) silently demote errorStatus via classifyAnalysisError to 400 because the message would no longer match the prefix; got: $failedLine")
+        // (v) EXCLUSION of unescaped form (catches escape-dropped refactor)
+        assert(!failedLine.contains("analysis failed: synthetic NonFatal exception with spaces"),
+          clue = s"NonFatal-path failed line MUST NOT contain the UNESCAPED form `analysis failed: synthetic NonFatal exception with spaces` (with literal spaces) -- catches a refactor that dropped the %20-escape on the NonFatal path specifically (the error string crosses BOTH the server-generated prefix AND the user-controlled exception body, so the escape applies to BOTH halves together); matches the ESCAPE-CONTRACT VERIFICATION pattern from 6b59ce4 + 8577288 + e43081b; got: $failedLine")
+        // (vi) WARN level
+        assert(failedLine.contains("[WARN]"),
+          clue = s"NonFatal-path failed line must be WARN-level matching 6b59ce4 + 8577288; got: $failedLine")
+        // (vii) service-tag
+        assert(failedLine.contains("[hand-history-review]"),
+          clue = s"NonFatal-path failed line must carry the [hand-history-review] service-tag prefix; got: $failedLine")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
