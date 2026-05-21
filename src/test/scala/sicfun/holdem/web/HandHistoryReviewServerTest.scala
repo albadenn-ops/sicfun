@@ -15216,6 +15216,132 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented OPTIONS-PREFLIGHT response shape at
+  // HandHistoryReviewServerApi.scala lines 53-59's
+  // optionsResponse helper -- the FIELD-SET-CARDINALITY pin
+  // for OPTIONS responses with the documented 1-field
+  // closed set {allow} (lowercase in body, vs uppercase
+  // Allow in the header) PLUS the documented body-header
+  // CROSS-CHECK that body.allow EQUALS the Allow header
+  // value (both derive from the SAME allowValue(supported)
+  // call at line 54); TWENTY-SEVENTH per-emission-site
+  // SHAPE pin overall extending the JSON CARDINALITY
+  // family from 405-error-shape coverage (97fd354 + 1a3f3f5
+  // + 66cf389 + the 3322984 Allow-header pin) to the
+  // 200-OPTIONS-preflight response shape -- complementing
+  // 3322984 which pinned the 405 Allow header for the
+  // METHOD-CAPABILITY ASYMMETRY but did NOT pin the
+  // OPTIONS body shape; the OPTIONS-preflight shape is
+  // OPERATIONALLY CRITICAL because: (a) CORS preflight
+  // checks (browsers issue OPTIONS before non-simple
+  // cross-origin requests) read the Allow header to
+  // determine if the actual request will be permitted --
+  // a refactor changing the OPTIONS response shape would
+  // silently break CORS-aware browser clients, (b) the
+  // body's `allow` field (lowercase) is the documented
+  // machine-parseable form of the supported-methods list
+  // -- HTTP clients that prefer body parsing over header
+  // parsing (some REST libraries with limited header
+  // access) read the body, (c) the body-header CROSS-
+  // CHECK is INTENTIONAL: both sources of the supported-
+  // methods list MUST agree, otherwise CORS clients and
+  // body-reading clients would see DIFFERENT supported
+  // method sets; per-format regression vectors uniquely
+  // caught: (i) refactor RENAMING the body field
+  // `allow` to `methods` or `supported` would silently
+  // break body-reading clients, (ii) refactor changing
+  // the body shape (e.g. wrapping in `{allow: {value:
+  // ..., ...}}` or making it an array) would silently
+  // break flat-field clients, (iii) refactor desyncing
+  // the body field from the header value (e.g. by
+  // computing them via different paths) would silently
+  // let body + header readers see different
+  // method sets, (iv) refactor changing the status from
+  // 200 to 204 No Content (a common HTTP-pedantic
+  // "improvement") would silently break clients that
+  // expected a body to parse; test approach: send OPTIONS
+  // to /api/analyze-hand-history/jobs/<UUID> (analyze
+  // status endpoint -- the OPTIONS preflight at
+  // HandHistoryReviewServerApi.scala line 172 emits
+  // `optionsResponse("GET, HEAD")` which produces Allow:
+  // "GET, HEAD, OPTIONS" via the allowValue helper) AND
+  // to /api/playing-hall/jobs/<UUID> (hall status
+  // endpoint -- line 192 emits `optionsResponse("GET,
+  // HEAD, DELETE")` producing Allow: "GET, HEAD, DELETE,
+  // OPTIONS"); for EACH endpoint, verify (a) status 200,
+  // (b) body has exactly 1 field {allow}, (c) body.allow
+  // value EQUALS the Allow header value (CROSS-CHECK).
+  test("OPTIONS-preflight responses on /api/analyze-hand-history/jobs/<id> + /api/playing-hall/jobs/<id> MUST emit the documented 1-field body {allow} per HandHistoryReviewServerApi.scala lines 53-59's optionsResponse helper AND body.allow MUST EQUAL the Allow header value -- the FIELD-SET-CARDINALITY pin for OPTIONS responses + the body-header CROSS-CHECK") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val jobId = "00000000-0000-0000-0000-000000000000"
+
+        // Helper to send OPTIONS via the standard HTTP client
+        def sendOptions(path: String) =
+          httpClient.send(
+            HttpRequest.newBuilder()
+              .uri(URI.create(s"$baseUri$path"))
+              .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+              .build(),
+            HttpResponse.BodyHandlers.ofString()
+          )
+
+        // (A) OPTIONS on analyze status endpoint
+        val analyzeOptions = sendOptions(s"/api/analyze-hand-history/jobs/$jobId")
+        assertEquals(analyzeOptions.statusCode(), 200,
+          clue = "OPTIONS preflight on /api/analyze-hand-history/jobs/<id> MUST return 200 per HandHistoryReviewServerApi.scala line 56's `JsonResponse(status = 200, ...)` -- a refactor returning 204 No Content (the HTTP-pedantic 'improvement' some teams adopt) would silently break clients that parse the body")
+        val analyzeBody = ujson.read(analyzeOptions.body())
+        val analyzeBodyFields = analyzeBody.obj.keys.toSet
+
+        // (i) analyze body CARDINALITY
+        assertEquals(analyzeBodyFields, Set("allow"),
+          clue = s"analyze OPTIONS body MUST have exactly 1 field `allow` per HandHistoryReviewServerApi.scala line 57's Obj-with-allow-field emission -- a refactor RENAMING the field to `methods` or `supported` would silently break body-reading CORS clients; a refactor ADDING extra fields would silently widen the contract; got actual=${analyzeBodyFields.toVector.sorted.mkString(", ")}")
+
+        // (ii) analyze body-header CROSS-CHECK
+        val analyzeHeaderAllow = headerValue(analyzeOptions, "Allow")
+          .getOrElse(fail("analyze OPTIONS response MUST include Allow header per HandHistoryReviewServerApi.scala line 58's emission"))
+        assertEquals(analyzeBody("allow").str, analyzeHeaderAllow,
+          clue = s"analyze OPTIONS body.allow MUST EQUAL Allow header value per HandHistoryReviewServerApi.scala line 54's `val allow = allowValue(supported)` shared between body emission (line 57) and header emission (line 58) -- a refactor desyncing the two sources would silently let body + header readers see different supported-method sets; got body=${analyzeBody("allow").str}, header=$analyzeHeaderAllow")
+
+        // (iii) analyze body-allow VALUE
+        assertEquals(analyzeBody("allow").str, "GET, HEAD, OPTIONS",
+          clue = s"analyze OPTIONS body.allow MUST be exactly `GET, HEAD, OPTIONS` per line 172's optionsResponse with GET-HEAD argument + line 54's allowValue helper appending `, OPTIONS` -- mirrors the 3322984 405-Allow-header pin's expected value; a refactor adding DELETE to analyze would silently change this value; got: ${analyzeBody("allow").str}")
+
+        // (B) OPTIONS on hall status endpoint
+        val hallOptions = sendOptions(s"/api/playing-hall/jobs/$jobId")
+        assertEquals(hallOptions.statusCode(), 200,
+          clue = "OPTIONS preflight on /api/playing-hall/jobs/<id> MUST return 200 (symmetric with analyze)")
+        val hallBody = ujson.read(hallOptions.body())
+        val hallBodyFields = hallBody.obj.keys.toSet
+
+        // (iv) hall body CARDINALITY
+        assertEquals(hallBodyFields, Set("allow"),
+          clue = s"hall OPTIONS body MUST have exactly 1 field `allow` (symmetric with analyze); got actual=${hallBodyFields.toVector.sorted.mkString(", ")}")
+
+        // (v) hall body-header CROSS-CHECK
+        val hallHeaderAllow = headerValue(hallOptions, "Allow")
+          .getOrElse(fail("hall OPTIONS response MUST include Allow header per HandHistoryReviewServerApi.scala line 58's emission"))
+        assertEquals(hallBody("allow").str, hallHeaderAllow,
+          clue = s"hall OPTIONS body.allow MUST EQUAL Allow header value (symmetric body-header CROSS-CHECK); got body=${hallBody("allow").str}, header=$hallHeaderAllow")
+
+        // (vi) hall body-allow VALUE
+        assertEquals(hallBody("allow").str, "GET, HEAD, DELETE, OPTIONS",
+          clue = s"hall OPTIONS body.allow MUST be exactly `GET, HEAD, DELETE, OPTIONS` per line 192's optionsResponse with GET-HEAD-DELETE argument + line 54's allowValue helper -- mirrors the 3322984 405-Allow-header pin's hall expected value; got: ${hallBody("allow").str}")
+
+        // (vii) METHOD-CAPABILITY ASYMMETRY (mirrors
+        // 3322984): the DIFFERENCE between hall + analyze
+        // OPTIONS-Allow sets is EXACTLY {DELETE} (the
+        // documented asymmetric capability holds in OPTIONS
+        // too, NOT just in 405 responses)
+        val analyzeMethods = analyzeBody("allow").str.split(",").map(_.trim).toSet
+        val hallMethods = hallBody("allow").str.split(",").map(_.trim).toSet
+        assertEquals(hallMethods -- analyzeMethods, Set("DELETE"),
+          clue = s"OPTIONS-preflight ASYMMETRIC CAPABILITY MUST be EXACTLY {DELETE} per the documented architectural decision (cancellation is HALL-ONLY) -- this assertion mirrors 3322984's 405-Allow-header pin's tier-iii catch but ALSO verifies the asymmetry holds in the OPTIONS preflight response (NOT just in 405s); a refactor that diverged the OPTIONS responses from the 405 responses would silently let CORS-aware clients see a DIFFERENT method set than non-CORS clients; got asymmetric=${(hallMethods -- analyzeMethods).toVector.sorted.mkString(", ")}, analyze=${analyzeMethods.toVector.sorted.mkString(", ")}, hall=${hallMethods.toVector.sorted.mkString(", ")}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
