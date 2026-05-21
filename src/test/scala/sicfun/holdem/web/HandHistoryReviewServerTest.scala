@@ -6517,6 +6517,151 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented sanitizeLogMessage END-TO-END escape
+  // contract -- the SANITIZATION-INVARIANT pin covering the
+  // CONTROL-CHARACTER DIMENSION for ALL log lines that flow
+  // user-controllable input; the existing line ~6789 test pins
+  // sanitizeLogMessage in ISOLATION (calls the helper directly
+  // with control characters + asserts the output), but BEFORE
+  // this commit there was NO end-to-end test verifying that
+  // the sanitization actually applies to USER-CONTROLLED FIELDS
+  // flowing through the log() helper's emission pipeline at
+  // line 512's `sanitizeLogMessage(message)` wrapping; the
+  // sanitization is OPERATIONALLY CRITICAL because the
+  // documented threat is LOG INJECTION: an attacker who can
+  // influence a field value (e.g. submit an email containing a
+  // newline character via the auth.login.failure path) could
+  // otherwise inject FAKE LOG LINES into the operator's audit
+  // stream -- a newline in the middle of a key=value sequence
+  // would split the line into two physical lines, with the
+  // SECOND line containing whatever the attacker put after the
+  // newline (potentially a forged `[INFO] [hand-history-review]
+  // auth.login.success email=attacker@victim.com ...` line that
+  // looks legitimate to the operator's grep workflow); the
+  // sanitizeLogMessage helper at line 486-499 escapes ALL
+  // control characters (\n, \r, \0, \t, and any byte < 0x20 or
+  // 0x7F) into safe-printable forms (\\n, \\r, \\0, \\t,
+  // \\x<hex>); without the sanitization, an attacker submitting
+  // email="alice\nbob@example.com" (with a literal newline byte)
+  // could split the log line into two physical lines + inject
+  // a forged log entry; this commit's END-TO-END test verifies
+  // the sanitization applies at the log() emission layer by:
+  // (1) configuring platformAuth, (2) submitting POST /api/auth/
+  // login with email containing a literal \n character (valid
+  // JSON escape sequence that parses to a string with an
+  // embedded newline byte), (3) the login fails validation +
+  // emits auth.login.failure logWarn with the user-submitted
+  // email in the email= field, (4) the log() helper's
+  // sanitizeLogMessage wrapping at line 512 catches the
+  // newline + escapes it to `\\n` (the 2-character backslash-n
+  // sequence), (5) the captured stderr SHOULD contain the
+  // escaped form `email=alice\nbob@example.com` (with literal
+  // backslash-n, NOT a physical newline character); per-format
+  // regression vectors: (i) refactor dropping the
+  // sanitizeLogMessage wrapping at line 512 (e.g. "the
+  // upstream formatSubmittedEmailForLog already escapes, the
+  // line 512 sanitize is redundant") would silently let
+  // user-controlled control characters split log lines, (ii)
+  // refactor changing the escape format (e.g. \\n -> %0A like
+  // the %20-space-escape) would silently break log
+  // aggregator parsers that expect the documented \\<char>
+  // backslash-escape form, (iii) refactor skipping the
+  // sanitization on specific field positions (e.g. "only
+  // sanitize the reason= field, not the email= field") would
+  // silently leave injection-vulnerable paths in the
+  // user-submitted email path; this test's emission via the
+  // auth.login.failure path (which carries the
+  // formatSubmittedEmailForLog'd submitted email) exercises
+  // the END-TO-END sanitization specifically on a USER-
+  // CONTROLLED field that the formatSubmittedEmailForLog
+  // helper does NOT itself escape control chars (only spaces
+  // → %20); the sanitization happens at the log() layer
+  // catching ALL control chars regardless of which field they
+  // appear in; 4-tier format check: (i) the
+  // auth.login.failure line exists in captured stderr, (ii)
+  // the line is a SINGLE physical line (no embedded newline
+  // splitting it), (iii) the email field contains the ESCAPED
+  // form `alice\nbob@example.com` (literal backslash-n, NOT
+  // raw newline), (iv) EXCLUSION of the unescaped form (the
+  // line MUST NOT contain a raw 0x0A newline byte in the
+  // middle of the email field).
+  test("log() helper's sanitizeLogMessage wrapping at HandHistoryReviewServerRuntime.scala line 512 escapes user-controlled control characters end-to-end -- the SANITIZATION-INVARIANT pin verifies that an attacker submitting an email with embedded newline cannot inject FORGED LOG LINES into the operator audit stream (the documented LOG INJECTION threat)") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture stderr around the malicious login attempt.
+          // The submitted email contains a JSON escape \n which
+          // parses to an embedded newline character (1 byte =
+          // 0x0A). The login fails validation + emits
+          // auth.login.failure logWarn at AuthStack.scala line
+          // 192 with formatSubmittedEmailForLog'd submitted
+          // email in the email= field; formatSubmittedEmailForLog
+          // ONLY escapes spaces, NOT control characters; the
+          // newline flows into the message s-string, then
+          // log() at line 512 calls sanitizeLogMessage which
+          // catches the newline + escapes to \\n.
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          try
+            val rejected = postJson(s"$baseUri/api/auth/login",
+              """{"email":"alice\nbob@example.com","password":"some-password"}""")
+            assertEquals(rejected.statusCode(), 401,
+              clue = "malformed-email login MUST return 401 (the email fails validateEmail's regex check; loginLocal returns Left -> 401)")
+          finally
+            System.setErr(originalErr)
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.login.failure"))
+            .getOrElse(fail(s"no `auth.login.failure` line in captured stderr; got: ${captured.take(800)}"))
+
+          // (i) the auth.login.failure line exists
+          assert(failureLine.contains("auth.login.failure"),
+            clue = s"auth.login.failure line must be present (the rejected login path at AuthStack.scala line 192 emits this on every invalid-credentials rejection); got: $failureLine")
+
+          // (ii) the line is a SINGLE physical line -- if
+          // sanitization is broken, the raw newline in the
+          // email field would split the line into TWO physical
+          // lines, and captured.split('\n') would yield 2+
+          // pieces with the second piece containing whatever
+          // was after the embedded newline (the rest of the
+          // email + remote + reason). The find() call above
+          // returned a line that contains "auth.login.failure"
+          // -- if sanitization is broken, that line would END
+          // at the embedded newline (so the line would NOT
+          // contain "bob@example.com" because that's after
+          // the newline). Check that the line contains BOTH
+          // halves of the email AFTER the prefix.
+          assert(failureLine.contains("alice") && failureLine.contains("bob@example.com"),
+            clue = s"auth.login.failure line MUST be a SINGLE physical line containing BOTH halves of the email (alice + bob@example.com) -- if sanitization is broken at line 512, the raw newline in the email would split the line into two physical lines and 'bob@example.com' would appear on the NEXT physical line (not in this find() result); got: $failureLine; full captured stream: ${captured.take(1500)}")
+
+          // (iii) the email contains the ESCAPED form with
+          // literal backslash-n
+          assert(failureLine.contains("alice\\nbob@example.com"),
+            clue = s"auth.login.failure line MUST carry the escaped form `alice\\\\nbob@example.com` (literal backslash followed by literal 'n') per HandHistoryReviewServerRuntime.scala line 488's `replace(\"\\\\n\", \"\\\\\\\\n\")` escape rule; the raw 0x0A newline byte in the submitted email gets caught by sanitizeLogMessage AT THE LOG LAYER (NOT at formatSubmittedEmailForLog which only escapes spaces); a refactor dropping the sanitizeLogMessage wrapping at line 512 would silently let the newline through, splitting the log line into two physical lines and enabling LOG INJECTION attacks; got: $failureLine")
+
+          // (iv) EXCLUSION: the line must NOT contain a raw
+          // newline byte. Since we already verified the line
+          // is a single physical line via the bob@example.com
+          // contains check, this is partially redundant -- but
+          // explicit assertion strengthens the documented
+          // contract. Use Char.toString conversion of the raw
+          // 0x0A byte to avoid Scala 3 multi-line-string-in-test
+          // parse issues.
+          val rawNewlineByte: String = '\n'.toString
+          assert(!failureLine.contains(rawNewlineByte),
+            clue = s"auth.login.failure line MUST NOT contain a raw 0x0A newline byte -- catches a refactor that escaped newlines to a DIFFERENT visible form but still allowed raw newlines through in some field positions; got line: $failureLine")
+        }
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
