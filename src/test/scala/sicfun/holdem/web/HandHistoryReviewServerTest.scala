@@ -6264,6 +6264,145 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented PLAYING-HALL NONFATAL-EXCEPTION-PATH
+  // variant of the `playing hall job failed` audit log line:
+  // errorStatus=500 + error=playing%20hall%20failed:%20<message>
+  // -- the THIRD AND FINAL classifyPlayingHallError branch on
+  // the hall side, completing the 3-of-3 hall-side coverage
+  // (817dd08 400 default + 9ac8689 504 timeout + THIS 500
+  // NonFatal); JobQueue.scala line 595 emits this Failed state
+  // when the playing-hall backend throws NonFatal: `case
+  // NonFatal(e) => if timedOut.get() then timeoutFailure(
+  // submittedAt, startedAt) else Failed(submittedAt, startedAt,
+  // nowMillis(), 500, s"playing hall failed: ${e.getMessage}")`
+  // -- the errorStatus is HARDCODED to 500 (NOT passed through
+  // classifyPlayingHallError) AND the error message is wrapped
+  // with the literal "playing hall failed: " prefix; this
+  // mirror of d96f892's analyze-side NonFatal pin completes the
+  // SYMMETRIC 3x2 matrix (3 classifier branches × 2 endpoints)
+  // for the JobQueue audit log family's failure-classifier
+  // coverage; with this commit ALL 6 classifier-branch × endpoint
+  // cells are pinned: analyze 400 (6b59ce4) + analyze 504
+  // (8577288) + analyze 500 (d96f892) + hall 400 (817dd08) +
+  // hall 504 (9ac8689) + hall 500 (THIS); per-field regression
+  // vectors SPECIFIC to the hall NonFatal path that the prior 5
+  // pins don't catch: (i) the HALL-SIDE prefix `playing hall
+  // job failed` (NOT `job failed` like d96f892 -- the
+  // asymmetric-drift catch from 1e030ed/817dd08/9ac8689), (ii)
+  // errorStatus=500 HARDCODED at line 595 on the HALL side
+  // independently of the analyze-side line 297 -- a refactor
+  // that routed hall-side NonFatal exceptions through
+  // classifyPlayingHallError (a "consistency" rationale to
+  // align with how the timeout path uses the classifier) would
+  // silently demote hall-side exceptions to 400 if the message
+  // didn't match the "playing hall timed out after" prefix,
+  // (iii) the "playing hall failed: " prefix wrapping at line
+  // 595 -- a refactor dropping this wrapping (e.g. "raw
+  // exception message is more informative") on the hall side
+  // ONLY would (a) leak hall-worker exception class details
+  // bypassing the documented wrapping abstraction, (b)
+  // silently demote hall errorStatus via the classifier to 400
+  // because the message would no longer match the "playing
+  // hall failed:" prefix at classifyPlayingHallError line 771's
+  // `else if error.startsWith("playing hall failed:") then 500`
+  // check, AND (c) silently desync from the analyze-side
+  // wrapping which would still emit "analysis failed:" --
+  // causing operators to see DIFFERENT wrapping conventions
+  // for the two endpoints' exception paths; the test uses a
+  // synthetic exception with a space-bearing message
+  // ("synthetic NonFatal hall exception with spaces") so the
+  // %20-escape covers BOTH the prefix AND body together;
+  // 8-tier format check at WARN level: (i) `playing hall job
+  // failed` prefix (hall-distinctive), (ii) EXCLUSION of
+  // standalone `job failed` (asymmetric-drift catch), (iii)
+  // jobId, (iv) errorStatus=500 (HARDCODED at line 595 -- NOT
+  // via classifyPlayingHallError), (v) error=playing%20hall%20
+  // failed:%20synthetic%20NonFatal%20hall%20exception%20with%20
+  // spaces (THE LOAD-BEARING wrapped + escaped hall NonFatal
+  // message), (vi) EXCLUSION of unescaped form, (vii) [WARN]
+  // level, (viii) [hand-history-review] service-tag.
+  test("playing-hall worker that throws NonFatal exception emits the documented `playing hall job failed ... errorStatus=500 error=playing%20hall%20failed:%20<message>` WARN audit log line per JobQueue.scala line 595 -- the HALL-SIDE NonFatal pin completing the 3-of-3 classifyPlayingHallError coverage on the hall side (817dd08 400 + 9ac8689 504 + THIS 500) AND the full 6-cell 3-classifier × 2-endpoint matrix in the JobQueue audit log family") {
+    withStaticSite { staticDir =>
+      // Custom throwing PlayingHallBackend -- mirrors d96f892's
+      // throwingBackend pattern but for the hall side. The
+      // existing BlockingPlayingHallBackend / immediatePlayingHall
+      // Backend return Either; this inline backend throws.
+      val throwingHallBackend = new HandHistoryReviewServer.PlayingHallBackend:
+        override def run(
+            request: HandHistoryReviewServer.PlayingHallRequest,
+            cancelSignal: () => Boolean
+        ): Either[String, ujson.Value] =
+          throw new RuntimeException("synthetic NonFatal hall exception with spaces")
+
+      withServer(staticDir, playingHallBackend = throwingHallBackend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Capture stderr around the submit + terminal-poll. The
+        // throwing backend triggers line 595's NonFatal catch,
+        // producing Failed(errorStatus=500, error="playing hall
+        // failed: synthetic NonFatal hall exception with
+        // spaces"). The hall-side NonFatal path is SYNCHRONOUS
+        // in the worker thread (the worker calls backend.run,
+        // catches the throw, immediately reaches the finalState
+        // match + logWarn) -- unlike the timeout path which has
+        // the async timeout-scheduler race the test had to
+        // mitigate in 9ac8689 via awaitReady; the NonFatal path
+        // here matches d96f892's analyze-side pattern: synchronous
+        // failure means the logWarn fires BEFORE awaitTerminalJob
+        // returns, so backend.finished + awaitReady aren't needed.
+        val errBuf = new java.io.ByteArrayOutputStream()
+        val originalErr = System.err
+        System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+        val submitJobId =
+          try
+            val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+            assertEquals(submit.statusCode(), 202,
+              clue = "playing-hall submission must return 202 -- the NonFatal exception happens at WORKER level, not submission")
+            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+            val capturedJobId = jsonBody(submit)("jobId").str
+            val terminal = awaitTerminalJob(statusUri)
+            assertEquals(terminal("status").str, "failed",
+              clue = "playing-hall NonFatal exception must reach Failed terminal state via line 593's catch branch")
+            assertEquals(terminal("errorStatus").num.toInt, 500,
+              clue = "terminal-state errorStatus must be 500 (HARDCODED at JobQueue.scala line 595, NOT via classifier) -- mirrors d96f892's analyze-side pin")
+            capturedJobId
+          finally
+            System.setErr(originalErr)
+
+        val captured = errBuf.toString(StandardCharsets.UTF_8)
+        val failedLine = captured.split('\n').iterator
+          .find(line => line.contains("playing hall job failed") && line.contains(s"jobId=$submitJobId"))
+          .getOrElse(fail(s"no `playing hall job failed jobId=$submitJobId` line in captured stderr for the hall-NonFatal path; got captured stderr: ${captured.take(2000)}"))
+
+        // (i) hall-side prefix
+        assert(failedLine.contains("playing hall job failed"),
+          clue = s"hall-NonFatal failed line must carry `playing hall job failed` prefix matching the hall-side terminal-state convention from 1e030ed/817dd08/9ac8689; got: $failedLine")
+        // (ii) EXCLUSION of standalone `job failed` (asymmetric-drift)
+        val withoutHallPrefix = failedLine.replace("playing hall job failed", "")
+        assert(!withoutHallPrefix.contains("job failed"),
+          clue = s"hall-NonFatal failed line must NOT also contain a standalone `job failed` prefix in a position other than the `playing hall job failed` substring -- asymmetric-drift catch matching 1e030ed/817dd08/9ac8689 pattern; got line after stripping hall prefix: '$withoutHallPrefix'")
+        // (iii) jobId
+        assert(failedLine.contains(s"jobId=$submitJobId"),
+          clue = s"hall-NonFatal failed line must carry the submission's jobId; got: $failedLine")
+        // (iv) errorStatus=500 (HARDCODED at line 595)
+        assert(failedLine.contains("errorStatus=500"),
+          clue = s"hall-NonFatal failed line MUST carry errorStatus=500 per JobQueue.scala line 595's HARDCODED 500 -- a refactor that routed hall-side NonFatal through classifyPlayingHallError (a 'consistency' rationale to align with how the timeout path uses the classifier) would silently demote hall-side exceptions to 400 if the message didn't match the documented prefix; matches d96f892's analyze-side HARDCODED 500 pin; got: $failedLine")
+        // (v) error=playing%20hall%20failed:%20<message> (LOAD-BEARING)
+        assert(failedLine.contains("error=playing%20hall%20failed:%20synthetic%20NonFatal%20hall%20exception%20with%20spaces"),
+          clue = s"hall-NonFatal failed line MUST carry the EXACT %20-escaped wrapped error string `playing%20hall%20failed:%20synthetic%20NonFatal%20hall%20exception%20with%20spaces` per JobQueue.scala line 595's `s\"playing hall failed: $${e.getMessage}\"` wrapping + line 615's `.replace(\" \", \"%20\")` escape; the `playing hall failed: ` prefix wrapping is OPERATIONALLY MEANINGFUL because (a) it matches classifyPlayingHallError's line 771 prefix check (so a backend Left starting with the same prefix gets the same 500 classification, providing consistent operator triage), (b) it abstracts the raw exception class/message away from the operator-visible error string, (c) it lets operators filter for ungraceful-exception failures by grep'ing the documented prefix; a refactor dropping the prefix wrapping on the hall side ONLY would silently desync from the analyze-side wrapping (`analysis failed:`) causing operators to see DIFFERENT wrapping conventions for the two endpoints; got: $failedLine")
+        // (vi) EXCLUSION of unescaped form
+        assert(!failedLine.contains("playing hall failed: synthetic NonFatal hall exception with spaces"),
+          clue = s"hall-NonFatal failed line MUST NOT contain the UNESCAPED form `playing hall failed: synthetic NonFatal hall exception with spaces` (with literal spaces) -- catches a refactor that dropped the %20-escape on the hall NonFatal path specifically; got: $failedLine")
+        // (vii) WARN level
+        assert(failedLine.contains("[WARN]"),
+          clue = s"hall-NonFatal failed line must be WARN-level matching d96f892's analyze-side NonFatal + the prior failure pins; got: $failedLine")
+        // (viii) service-tag
+        assert(failedLine.contains("[hand-history-review]"),
+          clue = s"hall-NonFatal failed line must carry the [hand-history-review] service-tag prefix; got: $failedLine")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
