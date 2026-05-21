@@ -4958,6 +4958,131 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `request rate limited` audit log line at
+  // AuthStack.scala line 673-675 -- opens a NEW CATEGORY of
+  // operator-facing log line distinct from the JobQueue audit
+  // log family (a04e51a through 29b1510): RATE-LIMIT REJECTION
+  // emissions, which fire at the AUTHENTICATION-STACK layer when
+  // a request exceeds the configured per-bucket rate cap (BEFORE
+  // reaching JobQueue.submit or the route handler); the deploy
+  // doc documents the rate-limit log line as the operator-visible
+  // signal for credential-stuffing / scrape probes / fleet
+  // saturation triage workflows, but BEFORE this commit there
+  // was ZERO test coverage of the log line format -- the
+  // existing rate-limit tests at line ~9852 + ~9883 + ~9916
+  // verify the 429 HTTP response shape (statusCode + body
+  // fields + Retry-After header) but NEVER capture the log
+  // line; the format at line 674 is `s"request rate limited
+  // path=${requestPath(exchange)} client=${rejection.clientKey}
+  // bucket=${rejection.bucket.id} limitPerMinute=${rejection.
+  // limitPerMinute} retryAfterMs=${rejection.retryAfterMs}"` --
+  // FIVE structured fields each with specific operator-relevance:
+  // (a) path is the request URI (operators triage by endpoint),
+  // (b) client is the rate-limit key (either "remote:<addr>" for
+  // unauthenticated or "user:<userId>" for platform-auth -- the
+  // line documents the rejected client AS the per-bucket-key
+  // resolved value, NOT the raw HTTP source address), (c)
+  // bucket is the bucket id ("submit", "job-status", "auth" --
+  // operators triage by which bucket saturated to know whether
+  // it's a credential-stuffing probe (auth bucket), a job
+  // scraper (job-status bucket), or just legitimate-but-bursty
+  // submissions (submit bucket)), (d) limitPerMinute is the
+  // CONFIGURED CAP that was exceeded (so operators know whether
+  // the cap needs tuning vs whether the traffic is actually
+  // abusive), (e) retryAfterMs is the wait time the rejection
+  // advised the client to wait (matches the Retry-After response
+  // header value); per-field regression vectors: (i) renaming
+  // "request rate limited" prefix would silently break operator
+  // alert rules filtering for rate-limit events, (ii) dropping
+  // any of the 5 fields would silently lose operator visibility
+  // into the corresponding dimension (path-based / client-based
+  // / bucket-based / cap-based / wait-based triage), (iii)
+  // emitting bucket=submit when the actual saturation was a
+  // different bucket would silently misroute incident response,
+  // (iv) emitting limitPerMinute as a stale value (e.g. cached
+  // from server-start instead of read live) would silently
+  // mislead about which deployment cap actually fired, (v)
+  // WARN level + stderr output -- demote-to-DEBUG would hide
+  // rate-limit signals from operator alerting, promote-to-ERROR
+  // would page incident response on every burst from a single
+  // user; test approach: reuse the existing rate-limit test
+  // pattern (basic-auth + rateLimitSubmitsPerMinute=1 + 2
+  // submissions = 1 accepted + 1 rejected) but capture stderr
+  // around the rejected submission and assert the format; 7-tier
+  // format check: (i) `request rate limited` prefix, (ii)
+  // path=/api/analyze-hand-history (the specific endpoint
+  // -- catches a refactor emitting path from a wrong source),
+  // (iii) client= field with `remote:` prefix presence (the
+  // documented "remote:<addr>" format for non-authenticated
+  // requests per RateLimit.scala line 182's
+  // `getOrElse(s"remote:${clientAddressKey(exchange)}")`),
+  // (iv) bucket=submit (the analyze-submit bucket id), (v)
+  // limitPerMinute=1 (the test's configured cap), (vi)
+  // retryAfterMs= field presence (the exact value depends on
+  // the rate-limit window timing), (vii) [WARN] level + [hand-
+  // history-review] service-tag.
+  test("rate-limit rejected analyze submission emits the documented `request rate limited path=<path> client=<key> bucket=<id> limitPerMinute=<n> retryAfterMs=<n>` WARN audit log line per AuthStack.scala line 673-675 -- opens a NEW CATEGORY (rate-limit rejection emissions) in the operator-facing log line coverage") {
+    withStaticSite { staticDir =>
+      val authConfig = HandHistoryReviewServer.BasicAuthConfig(username = "operator", password = "rate-limit-log-test")
+      val authHeaders = basicAuthHeaders(authConfig.username, authConfig.password)
+      withServer(
+        staticDir,
+        basicAuth = Some(authConfig),
+        rateLimitSubmitsPerMinute = 1,
+        rateLimitStatusPerMinute = 0
+      ) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Submission 1: accepted (consumes the rateLimitSubmitsPerMinute=1 slot)
+        val accepted = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, authHeaders)
+        assertEquals(accepted.statusCode(), 202,
+          clue = "first submission must accept (202) to consume the rate-limit slot before the second triggers rejection")
+
+        // Submission 2: rejected with 429 + emits rate-limit
+        // log line on stderr. Capture stderr around this call.
+        val errBuf = new java.io.ByteArrayOutputStream()
+        val originalErr = System.err
+        System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+        try
+          val rejected = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, authHeaders)
+          assertEquals(rejected.statusCode(), 429,
+            clue = "second submission MUST be rate-limited (429) so the rate-limit log line fires; if 202 the cap isn't being enforced and the log-line emission won't trigger")
+        finally
+          System.setErr(originalErr)
+
+        val captured = errBuf.toString(StandardCharsets.UTF_8)
+        val rateLimitLine = captured.split('\n').iterator
+          .find(_.contains("request rate limited"))
+          .getOrElse(fail(s"no `request rate limited` line in captured stderr -- AuthStack.scala line 674 documents this as the WARN-level line fired on every rate-limit rejection; if missing, either the logWarn was suppressed OR the 429 response was emitted by a different code path; got captured stderr: ${captured.take(2000)}"))
+
+        // (i) event prefix
+        assert(rateLimitLine.contains("request rate limited"),
+          clue = s"rate-limit audit line must carry the literal `request rate limited` event prefix per AuthStack.scala line 674's hardcoded literal -- a refactor renaming to e.g. `rate limit exceeded` / `throttled` would silently break operator alert rules filtering for rate-limit events; got: $rateLimitLine")
+        // (ii) path field
+        assert(rateLimitLine.contains("path=/api/analyze-hand-history"),
+          clue = s"rate-limit audit line must carry the request's path in the path= field -- a refactor that emitted a wrong source (e.g. config-level prefix instead of actual request URI) would silently break per-endpoint operator triage; got: $rateLimitLine")
+        // (iii) client= field with remote: prefix (the
+        // documented format for non-authenticated requests)
+        assert(rateLimitLine.contains("client=remote:"),
+          clue = s"rate-limit audit line must carry the rate-limit client key with the documented `remote:` prefix per RateLimit.scala line 182's `getOrElse(s\"remote:${'$'}{clientAddressKey(exchange)}\")` -- for non-platform-auth requests the key is the resolved IP-address-based client identifier (NOT the raw HTTP remote address); a refactor that emitted the raw remote without the prefix would silently desync from the audit-log's user-prefixed identifier format (the documented log shape distinguishes 'remote:' from 'user:' to separate per-IP-bucketing from per-user-bucketing); got: $rateLimitLine")
+        // (iv) bucket=submit (the analyze-submit bucket id)
+        assert(rateLimitLine.contains("bucket=submit"),
+          clue = s"rate-limit audit line must carry bucket=submit (the analyze-submit rate-limit bucket id) for analyze submissions -- a refactor that emitted a wrong bucket id (e.g. bucket=job-status or bucket=analyze for renaming) would silently break operator triage that filters by bucket to distinguish credential-stuffing (auth bucket) vs job-scraper (job-status bucket) vs submission-burst (submit bucket); got: $rateLimitLine")
+        // (v) limitPerMinute=1 (the test's configured cap)
+        assert(rateLimitLine.contains("limitPerMinute=1"),
+          clue = s"rate-limit audit line must carry limitPerMinute=1 (the test's withServer configured rateLimitSubmitsPerMinute=1 value) -- a refactor that emitted a stale value (cached at server-start instead of read from rejection.limitPerMinute) would silently mislead operators about which deployment cap actually fired; got: $rateLimitLine")
+        // (vi) retryAfterMs field presence
+        assert(rateLimitLine.contains("retryAfterMs="),
+          clue = s"rate-limit audit line must carry the retryAfterMs= field -- the value depends on the rate-limit window timing so we pin presence not exact value, but a refactor that dropped the field would silently lose operator visibility into 'how long should the client back off' info; got: $rateLimitLine")
+        // (vii) WARN level + service-tag
+        assert(rateLimitLine.contains("[WARN]"),
+          clue = s"rate-limit audit line must be WARN-level per AuthStack.scala line 673's logWarn call (writes to System.err per HandHistoryReviewServerRuntime.scala line 421); demote-to-DEBUG would silently hide rate-limit signals from operator alerting, promote-to-ERROR would silently page on every burst from a single user (training operators to ignore); got: $rateLimitLine")
+        assert(rateLimitLine.contains("[hand-history-review]"),
+          clue = s"rate-limit audit line must carry the [hand-history-review] service-tag prefix matching the prior audit log + banner pins -- the rate-limit category now joins the 7-way correlation: startup banner + requested banner + complete banner + auth-event audit lines + JobQueue audit lines + this rate-limit audit line + probe responses; got: $rateLimitLine")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
