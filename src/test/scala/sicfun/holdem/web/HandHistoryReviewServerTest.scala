@@ -16196,6 +16196,133 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented DefaultPollAfterMs CONSTANT VALUE at
+  // JobQueue.scala line 34 (`private val DefaultPollAfterMs
+  // = 750`) via SUBMISSION 202 RESPONSE BODY INFERENCE --
+  // the CONSTANT-VALUE pin verifies the documented 750ms
+  // server-suggested polling cadence that flows from the
+  // private constant through THREE distinct emission sites:
+  // (a) JobQueue.scala line 208's `pollAfterMs =
+  // DefaultPollAfterMs` argument to AcceptedJob (analyze
+  // 202 body), (b) JobQueue.scala line 511's same argument
+  // for hall 202 body, (c) JobQueue.scala lines 394/402/
+  // 700/708's `Some(DefaultPollAfterMs)` argument to
+  // baseStatus (non-terminal status-poll responses);
+  // existing pins COVER the BEHAVIOR of retryAfterSeconds
+  // FUNCTION on pollAfterMs=750 input (989ce10's tier f),
+  // but DO NOT verify the SERVER actually USES 750ms in
+  // its responses -- a refactor changing `DefaultPollAfter
+  // Ms = 750` to a different value (e.g. 1500ms for "slow
+  // down polling") would silently change the value flowing
+  // into responses + Retry-After headers WITHOUT breaking
+  // 989ce10 (which uses an explicit `750L` input to
+  // retryAfterSeconds, not the constant); THIRTY-FOURTH
+  // per-emission-site SHAPE pin overall + extension of
+  // the CONSTANT-INVARIANT sub-family (currently just
+  // 989ce10 indirectly + 99466be ENUM values); the
+  // DefaultPollAfterMs constant is OPERATIONALLY CRITICAL
+  // because: (a) the frontend at site.js polls every
+  // pollAfterMs (per the 202 + status-poll bodies) +
+  // every Retry-After-derived value (per the 989ce10
+  // ceiling-division formula) -- a constant change would
+  // silently change polling cadence across the entire
+  // frontend, (b) the 750ms value is documented to give
+  // sub-second feedback (rounded up to 1s via
+  // retryAfterSeconds for Retry-After header) while
+  // avoiding busy-spin -- a refactor to <750ms could
+  // approach busy-spin OR a refactor to >>750ms would
+  // silently make the UI feel sluggish, (c) operator
+  // configuration documentation references the 750ms
+  // default in capacity-planning calculations (e.g.
+  // "expect <max-running-jobs> polls/sec at the default
+  // cadence"); per-format regression vectors uniquely
+  // caught: (i) refactor changing the DefaultPollAfterMs
+  // VALUE (e.g. from 750 to 1500 or 250) would silently
+  // change polling cadence without 989ce10 catching it
+  // (989ce10 uses an explicit 750L input, not the
+  // constant), (ii) refactor renaming DefaultPollAfterMs
+  // to a different identifier without updating the call
+  // sites would break at compile time (not a regression
+  // vector this pin needs to catch -- compile errors are
+  // self-evident), (iii) refactor introducing per-endpoint
+  // pollAfterMs constants (e.g. AnalysisPollAfterMs +
+  // HallPollAfterMs with different values for "tuned
+  // cadences") would silently diverge analyze + hall
+  // polling cadences if they're set differently; test
+  // approach: submit analyze + hall jobs, extract
+  // pollAfterMs from both 202 response bodies, assert
+  // both EQUAL 750 (the documented constant value); also
+  // poll the status URL while QUEUED state has the
+  // pollAfterMs field + assert that value matches too
+  // (the constant flows into BOTH 202 + status-poll
+  // emissions); ALSO verify analyze + hall emit
+  // IDENTICAL pollAfterMs values (the constant is
+  // SHARED, not per-endpoint, so a refactor splitting
+  // would silently break the symmetric cadence).
+  test("DefaultPollAfterMs constant at JobQueue.scala line 34 MUST EQUAL the documented 750ms value as inferred via the 202 response body's pollAfterMs field on BOTH analyze + hall submissions -- the CONSTANT-VALUE pin closes the gap where 989ce10's retryAfterSeconds function pin uses an explicit 750L input rather than the constant, so a refactor changing the constant value would silently change polling cadence across the entire frontend without breaking 989ce10") {
+    withStaticSite { staticDir =>
+      withServer(staticDir, backend = immediateBackend(Right(sampleAnalysisResult)), playingHallBackend = immediatePlayingHallBackend(Right(samplePlayingHallResult))) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // (A) Extract pollAfterMs from analyze 202 body
+        val analyzeSubmit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(analyzeSubmit.statusCode(), 202)
+        val analyzePollAfterMs = jsonBody(analyzeSubmit)("pollAfterMs").num.toInt
+
+        // (B) Extract pollAfterMs from hall 202 body
+        val hallSubmit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(hallSubmit.statusCode(), 202)
+        val hallPollAfterMs = jsonBody(hallSubmit)("pollAfterMs").num.toInt
+
+        // (i) analyze pollAfterMs == 750 (the documented constant)
+        assertEquals(analyzePollAfterMs, 750,
+          clue = s"analyze 202 body's pollAfterMs MUST equal the documented 750ms value per JobQueue.scala line 34's `DefaultPollAfterMs = 750` constant flowing through line 208's `pollAfterMs = DefaultPollAfterMs` -- a refactor changing the constant value (e.g. from 750 to 1500 for 'slower polling') would silently change polling cadence across the entire frontend at site.js (which keys on this exact value for the initial poll delay) AND change the Retry-After header value (per 989ce10's ceiling-division formula); 989ce10's pin uses an explicit 750L input to retryAfterSeconds, so it would NOT catch a constant change -- THIS pin closes that gap; got: $analyzePollAfterMs")
+
+        // (ii) hall pollAfterMs == 750 (symmetric with analyze)
+        assertEquals(hallPollAfterMs, 750,
+          clue = s"hall 202 body's pollAfterMs MUST equal 750ms per JobQueue.scala line 511's `pollAfterMs = DefaultPollAfterMs` -- symmetric with analyze; a refactor introducing per-endpoint constants with different values would silently diverge analyze + hall polling cadences; got: $hallPollAfterMs")
+
+        // (iii) SYMMETRIC CADENCE: analyze + hall MUST emit
+        // IDENTICAL pollAfterMs (the constant is SHARED, not
+        // per-endpoint -- a refactor splitting would silently
+        // break the documented symmetric cadence)
+        assertEquals(analyzePollAfterMs, hallPollAfterMs,
+          clue = s"analyze + hall 202 body pollAfterMs MUST be IDENTICAL per the documented SHARED-CONSTANT design (both endpoints flow through the SAME DefaultPollAfterMs constant at line 34, NOT per-endpoint values) -- a refactor introducing AnalysisPollAfterMs + HallPollAfterMs with different values for 'tuned cadences' would silently diverge the cadences; got analyze=$analyzePollAfterMs, hall=$hallPollAfterMs")
+
+        // (iv) STATUS-POLL pollAfterMs flows from the SAME
+        // constant: query the status URL while terminal
+        // (sample backends return Right immediately, so the
+        // job reaches COMPLETED -- but COMPLETED state
+        // OMITS pollAfterMs per the b3c343f pin's tier-iii
+        // assertion). To verify the status-poll pollAfterMs
+        // value, we need a non-terminal state. Use the
+        // QUEUED state via maxConcurrentJobs=1 saturation
+        // (mirrors 016d138 + f9c33db pattern).
+        val saturatingBackend = new BlockingBackend(Right(sampleAnalysisResult))
+        withServer(staticDir, backend = saturatingBackend, maxConcurrentJobs = 1) { saturatingServer =>
+          val satBase = s"http://${saturatingServer.binding.host}:${saturatingServer.binding.port}"
+          val firstSubmit = postJson(s"$satBase/api/analyze-hand-history", validUploadPayload)
+          assertEquals(firstSubmit.statusCode(), 202)
+          assert(saturatingBackend.started.await(3, TimeUnit.SECONDS))
+          val secondSubmit = postJson(s"$satBase/api/analyze-hand-history", validUploadPayload)
+          assertEquals(secondSubmit.statusCode(), 202)
+          val secondStatusUri = s"$satBase${jsonBody(secondSubmit)("statusUrl").str}"
+          val queuedBody = getJson(secondStatusUri)
+          assertEquals(queuedBody("status").str, "queued")
+          val queuedPollAfterMs = queuedBody("pollAfterMs").num.toInt
+          assertEquals(queuedPollAfterMs, 750,
+            clue = s"status-poll QUEUED-state pollAfterMs MUST equal 750ms per JobQueue.scala line 394's `Some(DefaultPollAfterMs)` argument to baseStatus -- the SAME constant feeds BOTH the 202 body emission AND the status-poll non-terminal-state emission; if these two values diverge, the constant has been REPLACED rather than refactored consistently (a 'split per emission site' refactor); got: $queuedPollAfterMs")
+          // CROSS-EMISSION-SITE CHECK: status-poll
+          // pollAfterMs MUST EQUAL 202 body pollAfterMs
+          // (both come from the SAME constant)
+          assertEquals(queuedPollAfterMs, analyzePollAfterMs,
+            clue = s"status-poll QUEUED pollAfterMs MUST EQUAL 202 body pollAfterMs per the documented SHARED-CONSTANT design -- a refactor diverging the two emission sites (e.g. 202 uses DefaultPollAfterMs but status-poll uses HardcodedPollDelay) would silently break the documented invariant that the polling cadence is THE SAME from the moment of submission through the entire QUEUED window; got status-poll=$queuedPollAfterMs, 202=$analyzePollAfterMs")
+          saturatingBackend.release.countDown()
+        }
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
