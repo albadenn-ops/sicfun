@@ -12620,6 +12620,152 @@ class HandHistoryReviewServerTest extends FunSuite:
       clue = s"hall NonFatal emission MUST classify as 400 (default branch) when passed to the ANALYZE classifier -- symmetric asymmetry assertion; got emission=`$hallNonFatalEmission` analyze-classified=${classifyAnalysisError(hallNonFatalEmission)}")
   }
 
+  // Pin the CROSS-CHECK between the startup banner's
+  // `rateLimitClientIpSource=<value>` field at HandHistory
+  // ReviewServerRuntime.scala line 350 AND the
+  // rateLimitClientIpSource function at RateLimit.scala
+  // lines 101-111 -- the BANNER-FUNCTION CROSS-CHECK pin
+  // extends 3ed4da7's emission-classifier cross-check
+  // pattern to a SECOND function pair: rateLimitClient
+  // IpSource emits a string template, then the startup-
+  // banner code applies `.replace(" ", "%20")` at line 348
+  // before embedding into the banner s-string at line 350;
+  // the chain is `rateLimitClientIpSource(config.header,
+  // config.proxies)` -> `.replace(" ", "%20")` -> `embedded
+  // into banner's rateLimitClientIpSource=<value> field`;
+  // EIGHTH per-emission-site SHAPE pin overall extending
+  // the CROSS-CHECK sub-family from 3ed4da7 (emission s-
+  // string vs classifier startsWith) to (function output
+  // vs banner emission); the cross-check is OPERATIONALLY
+  // CRITICAL because: (a) the operator's startup-time
+  // audit workflow keys on the banner's
+  // `rateLimitClientIpSource=<value>` field to confirm
+  // proxy-trust configuration at process start -- if the
+  // banner emitted a STALE / HARDCODED value (a refactor
+  // that captured the value at compile time instead of
+  // calling rateLimitClientIpSource at runtime), operators
+  // would silently see the WRONG config in the audit log
+  // even though the server's actual rate-limit behavior
+  // was correctly using the configured header/proxies, (b)
+  // the `.replace(" ", "%20")` at line 348 is the
+  // load-bearing escape that keeps the banner's structured
+  // key=value parseability intact (the rateLimitClient
+  // IpSource templates `via loopback-or-allowlisted-proxy`
+  // contain literal spaces that would split the structured
+  // log line if not escaped); a refactor dropping the
+  // escape would silently break operator log-aggregator
+  // field extraction on the rateLimitClientIpSource field,
+  // (c) the BANNER FORM is what operators READ at startup
+  // -- a divergence between the function's output and the
+  // banner's emission could let attackers control how
+  // their IP source is identified in the audit log (e.g.
+  // via a misconfigured header that the function correctly
+  // classifies as `header:<name> via loopback-only` but
+  // the banner hardcodes as the more permissive
+  // `loopback-or-allowlisted-proxy` form); the test
+  // approach mirrors 3ed4da7: configure the server with a
+  // specific (rateLimitClientIpHeader, rateLimitTrusted
+  // ProxyIps) pair, capture stdout to find the banner
+  // line, extract the rateLimitClientIpSource=<value>
+  // field via string parsing, COMPUTE the EXPECTED value
+  // by calling rateLimitClientIpSource directly with the
+  // same config + applying the documented .replace
+  // escape, and assert EQUALITY between the banner's
+  // value and the computed value; per-format regression
+  // vectors uniquely caught: (i) refactor that hardcoded
+  // the banner value (e.g. inlining `header:X-Real-IP via
+  // loopback-only` as a literal string instead of
+  // calling rateLimitClientIpSource) would silently desync
+  // from the actual rate-limiter's IP-source selection on
+  // every config change, (ii) refactor dropping the
+  // `.replace(" ", "%20")` escape would silently break log
+  // aggregator field extraction by introducing raw spaces
+  // into the structured key=value line, (iii) refactor
+  // applying a DIFFERENT escape (e.g. `\` instead of `%20`)
+  // would silently break aggregators expecting the URL-
+  // style %20 form, (iv) refactor that captured the value
+  // at process start (eagerly) and never re-read it would
+  // silently emit a STALE value on every banner emission
+  // even though the function continues to return the
+  // current config's value.
+  test("startup banner's rateLimitClientIpSource=<value> field at HandHistoryReviewServerRuntime.scala line 350 MUST equal rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps).replace(' ', '%20') -- the BANNER-FUNCTION CROSS-CHECK pin extends 3ed4da7's pattern: function-emission coupling pins close drift between paired contracts that the existing scenario tests cover only via slow + race-prone HTTP integration") {
+    withStaticSite { staticDir =>
+      // Configure the server in the proxy-allowlist mode
+      // (Some(header) + non-empty trustedProxyIps) so the
+      // rateLimitClientIpSource template is the most-
+      // complex form: `header:<name> via loopback-or-
+      // allowlisted-proxy` (3 spaces in the value -- the
+      // %20-escape catches all 3 simultaneously). The
+      // other 2 modes (loopback-only + remote-address)
+      // exercise simpler templates that are partially
+      // tested via the 89e3479 function-isolation pin AND
+      // the bare `remote-address` mode has no spaces so
+      // doesn't exercise the .replace escape.
+      val testHeader = "X-Real-IP"
+      val testProxies = Set("10.0.0.1")
+
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      try
+        withServer(
+          staticDir,
+          rateLimitClientIpHeader = Some(testHeader),
+          rateLimitTrustedProxyIps = testProxies
+        ) { _ =>
+          // No HTTP requests -- the startup banner emits
+          // BEFORE the callback executes via logInfo at
+          // line 349-350.
+          ()
+        }
+      finally
+        System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val bannerLine = captured.split('\n').iterator
+        .find(_.contains("startup complete"))
+        .getOrElse(fail(s"no `startup complete` line in captured stdout -- the banner-function cross-check pin needs the banner line to inspect; got captured stdout: ${captured.take(800)}"))
+
+      // Extract the rateLimitClientIpSource=<value> field
+      // via split-by-space + find-by-prefix. The banner
+      // splits cleanly on spaces because the %20-escape at
+      // line 348 ensures no values contain literal spaces.
+      val fieldToken = bannerLine.split(' ').iterator
+        .find(_.startsWith("rateLimitClientIpSource="))
+        .getOrElse(fail(s"no `rateLimitClientIpSource=` token in startup banner -- the field is documented at line 350's banner template; if missing, the banner was refactored to drop or rename the field; got banner: $bannerLine"))
+      val fieldValue = fieldToken.drop("rateLimitClientIpSource=".length).stripTrailing()
+
+      // (i) Compute the EXPECTED value via the documented
+      // function + .replace escape, and assert equality
+      // with the banner's field value
+      val expected = RateLimit.rateLimitClientIpSource(Some(testHeader), testProxies).replace(" ", "%20")
+      assertEquals(fieldValue, expected,
+        clue = s"startup banner's rateLimitClientIpSource=<value> field MUST EQUAL rateLimitClientIpSource(config).replace(\" \", \"%20\") per HandHistoryReviewServerRuntime.scala lines 347-348's `val loggedRateLimitClientIpSource = rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps).replace(\" \", \"%20\")` AND line 350's embedded `rateLimitClientIpSource=$$loggedRateLimitClientIpSource` -- a refactor that hardcoded the banner value (e.g. inlining a literal string) would silently desync from the actual rate-limiter's IP-source selection on every config change; a refactor dropping the .replace escape would silently break log aggregator field extraction; got banner=`$fieldValue`, expected=`$expected`")
+
+      // (ii) For this specific config (Some(header) + non-
+      // empty trustedProxyIps), the documented template is
+      // `header:X-Real-IP via loopback-or-allowlisted-
+      // proxy` which after %20-escape becomes `header:X-
+      // Real-IP%20via%20loopback-or-allowlisted-proxy`
+      assertEquals(fieldValue, "header:X-Real-IP%20via%20loopback-or-allowlisted-proxy",
+        clue = s"startup banner's rateLimitClientIpSource=<value> field MUST equal `header:X-Real-IP%20via%20loopback-or-allowlisted-proxy` for the (Some(\"X-Real-IP\"), Set(\"10.0.0.1\")) config per the chain: rateLimitClientIpSource emits `header:X-Real-IP via loopback-or-allowlisted-proxy` (RateLimit.scala line 107) -> .replace(\" \", \"%20\") emits `header:X-Real-IP%20via%20loopback-or-allowlisted-proxy` -> banner embeds it at line 350; this assertion makes the contract VISIBLE in the test source (a future code reviewer can verify by reading the test that the documented escape form is %20 not e.g. `\\ ` or `_`); got: `$fieldValue`")
+
+      // (iii) NEGATIVE assertion: the banner value MUST
+      // NOT contain raw spaces (the %20-escape is the
+      // LOAD-BEARING escape that keeps the banner's
+      // structured key=value parseability intact)
+      assert(!fieldValue.contains(" "),
+        clue = s"startup banner's rateLimitClientIpSource=<value> field MUST NOT contain raw spaces -- the %20-escape at line 348 is the LOAD-BEARING escape that keeps the structured log line's key=value pairs parseable; a refactor dropping the escape would silently break log aggregator field extraction on the rateLimitClientIpSource field AND ALL downstream key=value pairs after it (the raw space splits the value into pieces, and the aggregator misinterprets subsequent fields); got value with raw space: `$fieldValue`")
+
+      // (iv) NEGATIVE assertion: the value MUST NOT be a
+      // hardcoded sentinel (defense-in-depth catch for a
+      // refactor that replaced the function call with a
+      // hardcoded string for `simpler banner code`)
+      assert(fieldValue != "unknown" && fieldValue != "-" && fieldValue != "default" && fieldValue != "TBD",
+        clue = s"startup banner's rateLimitClientIpSource=<value> field MUST be a real computed value (not a sentinel like `unknown`/`-`/`default`/`TBD`) -- catches a refactor that replaced the function call with a placeholder during incremental migration that was never finished; got: `$fieldValue`")
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
