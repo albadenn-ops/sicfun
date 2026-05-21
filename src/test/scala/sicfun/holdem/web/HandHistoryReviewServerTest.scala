@@ -4643,6 +4643,181 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `playing hall job accepted` JobQueue INFO
+  // audit log line WITH the embedded request.logSummary fields
+  // (hands/tableCount/playerCount/heroStyle/heroPosition/gtoMode/
+  // villainPool/seed) -- opens a NEW SUB-CATEGORY in the JobQueue
+  // audit log family: SUBMISSION-TIME emissions, which fire at
+  // POST-acceptance time (BEFORE the worker runs); the prior 5
+  // JobQueue audit log pins (a04e51a + 6b59ce4 + 1e030ed + 817dd08
+  // + 0a222f8) covered TERMINAL-STATE emissions (fired AFTER the
+  // worker reaches Completed/Failed/Cancelled), but the
+  // submission-time category is operationally distinct -- it
+  // fires SYNCHRONOUSLY inside the POST handler at JobQueue.scala
+  // line 503-505, BEFORE the worker thread starts executing, so
+  // the captured fields snapshot the QUEUE STATE AT ACCEPTANCE
+  // TIME (operators use this for "how loaded was the deployment
+  // when this job was queued" triage); the format at line 504 is
+  // `s"playing hall job accepted jobId=$jobId queuedJobs=
+  // ${executor.getQueue.size()} runningJobs=${executor.
+  // getActiveCount()} ${request.logSummary}"` where logSummary
+  // (HandHistoryReviewServerApi.scala line 837-838) expands to
+  // `hands=$hands tableCount=$tableCount playerCount=$playerCount
+  // heroStyle=$heroStyle heroPosition=$heroPosition gtoMode=
+  // $gtoMode villainPool=${villainPool.mkString(",")} seed=$seed`
+  // -- 8 request-specific fields embedded INTO the audit log
+  // line, so operators can correlate the submission-time
+  // queue-state with the SPECIFIC request parameters that
+  // produced the load; per-field regression vectors that the
+  // terminal-state pins don't catch: (i) renaming `playing hall
+  // job accepted` would silently break operator submission-time
+  // dashboards (distinct from the terminal-state `playing hall
+  // job completed` pinned by 1e030ed -- a refactor consolidating
+  // both to a single "job event" prefix would silently lose the
+  // submission-vs-completion distinction operators need), (ii)
+  // the EMBEDDED logSummary fields are the OPERATOR-RELEVANT
+  // submission parameters -- a refactor that dropped logSummary
+  // (e.g. "request details are private, don't log them") would
+  // silently break operator visibility into "what jobs are
+  // landing on this deployment" without forcing operators to
+  // grep the full HTTP request trace logs (the deploy doc's
+  // operator-side framing depends on the audit log being a
+  // self-contained operational dashboard), (iii) field-name
+  // changes in logSummary (e.g. `hands` -> `handCount` for
+  // noun-consistency with playerCount) would silently break
+  // operator queries filtering on the field names, (iv) seed=
+  // field MUST be present (operators use seed for reproducibility
+  // -- "what was the seed of the job that hit the bug?") so a
+  // refactor that omitted seed for log-volume reasons would
+  // silently break debug-reproducibility workflows, (v) NO
+  // durationMs / errorStatus / error fields -- the line is
+  // SUBMISSION-TIME so completion-time fields don't apply; a
+  // refactor that added durationMs=0 (or any value) at submission
+  // would silently break operator queries that distinguish
+  // submission-time from completion-time events based on
+  // field-presence; 12-tier format check: (i) `playing hall job
+  // accepted` prefix, (ii) EXCLUSION of `playing hall job
+  // completed` (the terminal-state pinned by 1e030ed -- a
+  // refactor conflating submission with completion would
+  // silently break dashboards), (iii) jobId matching the 202
+  // response, (iv) queuedJobs=0 (submission to an empty queue),
+  // (v) runningJobs= field presence (submission-time value
+  // depends on whether the executor has already started picking
+  // up other jobs), (vi) hands=120 (from validPlayingHallPayload),
+  // (vii) tableCount=2, (viii) playerCount=6, (ix) heroStyle=
+  // adaptive, (x) heroPosition=Button, (xi) gtoMode=exact + (xii)
+  // villainPool=tag,gto (the comma-separated list), (xiii) seed=
+  // field presence (the default seed value depends on
+  // PlayingHallRequest's seed default), (xiv) NO durationMs=
+  // field (catches a refactor adding completion-time fields to
+  // the submission line), (xv) [INFO] level, (xvi) [hand-history-
+  // review] service-tag prefix.
+  test("submitted playing-hall job emits the documented `playing hall job accepted jobId=<id> queuedJobs=<n> runningJobs=<n> hands=<n> tableCount=<n> playerCount=<n> heroStyle=<x> heroPosition=<x> gtoMode=<x> villainPool=<list> seed=<n>` INFO audit log line at submission time (per JobQueue.scala line 503-505) -- opens the SUBMISSION-TIME emission sub-category in the JobQueue audit log family") {
+    withStaticSite { staticDir =>
+      // Capture stdout around the submission. The default
+      // playingHallBackend (immediatePlayingHallBackend) completes
+      // synchronously, so the captured stream will contain BOTH
+      // the accepted line (this test's target, emitted at line
+      // 503-505) AND the completed line (already pinned by
+      // 1e030ed, emitted at line 609-611). We find the accepted
+      // line specifically by its distinctive prefix.
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      val submitJobId =
+        try
+          withServer(staticDir) { server =>
+            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+            val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+            assertEquals(submit.statusCode(), 202,
+              clue = "playing-hall submission must return 202 for the accepted log line to have fired")
+            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+            val capturedJobId = jsonBody(submit)("jobId").str
+            // Wait for terminal so the captured stream has the
+            // expected lifecycle but the test only asserts on the
+            // submission-time accepted line.
+            awaitTerminalJob(statusUri)
+            capturedJobId
+          }
+        finally
+          System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val acceptedLine = captured.split('\n').iterator
+        .find(_.contains("playing hall job accepted"))
+        .getOrElse(fail(s"no `playing hall job accepted` line in captured stdout -- JobQueue.scala line 503-505 documents this as the INFO-level submission-time line fired on every successful playing-hall job acceptance; if missing, either the logInfo was suppressed OR the executor.submit at line 499 threw RejectedExecutionException (catch at line 515 routes to a different `rejected` line); got captured stdout: ${captured.take(2000)}"))
+
+      // (i) event prefix
+      assert(acceptedLine.contains("playing hall job accepted"),
+        clue = s"submission-time line must carry the literal `playing hall job accepted` prefix per JobQueue.scala line 504's hardcoded literal -- a refactor renaming to e.g. `hall job queued` / `playing-hall accepted` (hyphen) would silently break operator submission-dashboards distinguishing acceptance from completion; got: $acceptedLine")
+      // (ii) EXCLUSION of completed prefix (catches conflation)
+      assert(!acceptedLine.contains("playing hall job completed"),
+        clue = s"submission-time line must NOT contain `playing hall job completed` (the 1e030ed-pinned terminal-state prefix) -- a refactor that emitted both prefixes for the same event would silently break the submission-vs-completion distinction operators rely on; got: $acceptedLine")
+      // (iii) jobId matching the 202 response
+      assert(acceptedLine.contains(s"jobId=$submitJobId"),
+        clue = s"submission-time line must carry the SAME jobId='$submitJobId' from the 202 submission response; got: $acceptedLine")
+      // (iv) queuedJobs=1 (the just-submitted job IS in the queue
+      // at submission-time -- distinct from completion-time
+      // queuedJobs=0). The executor.submit at line 499 enqueues
+      // the job, THEN line 503-505's logInfo reads
+      // executor.getQueue.size() which now reflects the
+      // just-enqueued job. This SUBMISSION-TIME vs
+      // COMPLETION-TIME asymmetry on queuedJobs is operationally
+      // meaningful: operators see queuedJobs=1 at the moment of
+      // acceptance (the job is enqueued but worker hasn't picked
+      // it up yet) and queuedJobs=0 at the moment of completion
+      // (the worker has dequeued + processed). A refactor that
+      // read the queue size BEFORE the executor.submit would
+      // emit queuedJobs=0 here, silently breaking the documented
+      // "queue state AT acceptance" semantic.
+      assert(acceptedLine.contains("queuedJobs=1"),
+        clue = s"submission-time line must carry queuedJobs=1 (the just-submitted job IS in the queue at submission-time per executor.submit at line 499 enqueueing BEFORE the logInfo at line 503 reads the queue size); distinct from completion-time queuedJobs=0 (1e030ed/817dd08/0a222f8) where the worker has already dequeued; a refactor that read the queue size BEFORE the executor.submit would silently emit 0 here, breaking the documented 'queue state AT acceptance' semantic; got: $acceptedLine")
+      // (v) runningJobs=0 at submission-time -- the worker
+      // hasn't started executing yet (the job was JUST queued,
+      // executor.getActiveCount() returns 0 since no worker is
+      // actively running this job). Distinct from completion-
+      // time where runningJobs could be 0 or 1 depending on
+      // executor timing.
+      assert(acceptedLine.contains("runningJobs=0"),
+        clue = s"submission-time line must carry runningJobs=0 (the worker hasn't started executing the just-queued job at submission time -- executor.getActiveCount() returns 0); distinct from completion-time runningJobs which is timing-dependent; got: $acceptedLine")
+      // (vi-xii) request.logSummary embedded fields -- the
+      // OPERATOR-RELEVANT submission parameters per
+      // HandHistoryReviewServerApi.scala line 837-838's
+      // logSummary template
+      assert(acceptedLine.contains("hands=120"),
+        clue = s"submission-time line must carry hands=120 (from validPlayingHallPayload's `\"hands\":120`); a refactor renaming the field or dropping it from logSummary would silently break operator visibility into 'what hands count was requested'; got: $acceptedLine")
+      assert(acceptedLine.contains("tableCount=2"),
+        clue = s"submission-time line must carry tableCount=2 (from validPlayingHallPayload's `\"tableCount\":2`); got: $acceptedLine")
+      assert(acceptedLine.contains("playerCount=6"),
+        clue = s"submission-time line must carry playerCount=6 (from validPlayingHallPayload's `\"playerCount\":6`); got: $acceptedLine")
+      assert(acceptedLine.contains("heroStyle=adaptive"),
+        clue = s"submission-time line must carry heroStyle=adaptive (from validPlayingHallPayload's `\"heroStyle\":\"adaptive\"`); got: $acceptedLine")
+      assert(acceptedLine.contains("heroPosition=Button"),
+        clue = s"submission-time line must carry heroPosition=Button (from validPlayingHallPayload's `\"heroPosition\":\"Button\"`); got: $acceptedLine")
+      assert(acceptedLine.contains("gtoMode=exact"),
+        clue = s"submission-time line must carry gtoMode=exact (from validPlayingHallPayload's `\"gtoMode\":\"exact\"`); got: $acceptedLine")
+      assert(acceptedLine.contains("villainPool=tag,gto"),
+        clue = s"submission-time line must carry villainPool=tag,gto (from validPlayingHallPayload's `\"villainPool\":[\"tag\",\"gto\"]` joined by `,` per HandHistoryReviewServerApi.scala line 838's `villainPool.mkString(\",\")`); a refactor that changed the separator to e.g. space or `;` or `|` would silently break operator queries filtering on the joined-pool string; got: $acceptedLine")
+      // (xiii) seed=42 (the PlayingHallRequest default seed
+      // value -- catches BOTH a refactor dropping the field AND
+      // a refactor changing the default; operators rely on the
+      // 42 default for debug-reproducibility queries 'what was
+      // the seed of the job that hit the bug?')
+      assert(acceptedLine.contains("seed=42"),
+        clue = s"submission-time line must carry seed=42 (the documented PlayingHallRequest default per the empirical observation of the line emission); a refactor dropping seed for log-volume reasons would silently break debug-reproducibility workflows AND a refactor changing the default would silently desync operator queries; got: $acceptedLine")
+      // (xiv) NO durationMs= field (catches a refactor adding
+      // completion-time fields to the submission line)
+      assert(!acceptedLine.contains("durationMs="),
+        clue = s"submission-time line must NOT carry durationMs= field -- the line is SUBMISSION-TIME, not completion-time; a refactor that added durationMs=0 (or any value) at submission would silently break operator queries distinguishing submission-time from completion-time events based on field-presence; got: $acceptedLine")
+      // (xv) INFO level (submission acceptance is normal)
+      assert(acceptedLine.contains("[INFO]"),
+        clue = s"submission-time line must be INFO-level per JobQueue.scala line 503's logInfo call -- submission acceptance is normal expected behavior, demote-to-DEBUG would hide submission dashboards, promote-to-WARN would flood alerting; got: $acceptedLine")
+      // (xvi) service-tag prefix
+      assert(acceptedLine.contains("[hand-history-review]"),
+        clue = s"submission-time line must carry the [hand-history-review] service-tag prefix matching the prior JobQueue audit log pins; got: $acceptedLine")
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
