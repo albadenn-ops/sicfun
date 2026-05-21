@@ -17181,6 +17181,111 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented applySecurityHeaders coverage on
+  // the STATIC HANDLER per StaticAssetsHandler.scala line 25
+  // -- the SECURITY-HEADERS-ON-STATIC-HANDLER pin extends
+  // the universal-coverage contract from JsonHandler (5a46898
+  // success + 49523d8 error + 7125738 OPTIONS) to a SECOND
+  // HANDLER TYPE; the static handler at StaticAssetsHandler
+  // .scala line 25 ALSO calls applySecurityHeaders at the
+  // start of every handle() invocation (BEFORE branch
+  // logic), so static responses (200 GET, 404 not-found,
+  // 405 method-not-allowed, 204 OPTIONS) MUST have the
+  // SAME 6 security headers as JsonHandler responses;
+  // FORTY-SECOND per-emission-site SHAPE pin overall;
+  // the static-handler security-headers coverage is
+  // OPERATIONALLY CRITICAL because: (a) static assets
+  // (HTML, CSS, JS, images) are loaded by browsers
+  // FIRST -- if the HTML page doesn't have CSP, the
+  // XSS attack surface widens for ALL JS loaded on the
+  // page (the CSP applies per-document), (b) the
+  // documented design is "EVERY handler type calls
+  // applySecurityHeaders at the start" -- a refactor
+  // adding a new handler type without calling
+  // applySecurityHeaders would silently widen the attack
+  // surface, (c) the cross-handler CONSISTENCY is what
+  // lets operators verify security-headers via ONE
+  // shared monitoring query across ALL routes -- a
+  // refactor diverging the static-handler headers from
+  // the JsonHandler headers would silently force per-
+  // handler monitoring; per-format regression vectors
+  // uniquely caught (NOT caught by 5a46898 + 49523d8 +
+  // 7125738 which cover JsonHandler only): (i) refactor
+  // dropping the line 25 applySecurityHeaders call on
+  // the static handler would silently leave static
+  // assets unprotected, (ii) refactor introducing a
+  // static-handler-specific security-header set (e.g.
+  // weaker CSP for static assets to allow inline
+  // scripts) would silently diverge from the JsonHandler
+  // contract; test approach: GET /index.html (the test
+  // static-dir file) → 200 from static handler → verify
+  // all 6 security headers + values match JsonHandler
+  // success-path (5a46898 cross-check).
+  test("static handler at StaticAssetsHandler.scala line 25 MUST emit ALL 6 documented security headers on its responses too -- the SECURITY-HEADERS-ON-STATIC-HANDLER pin extends the universal-coverage contract from JsonHandler (5a46898 + 49523d8 + 7125738) to a SECOND HANDLER TYPE, closing the cross-handler consistency gap (NOTE: the static handler's 404 path emits Cache-Control: no-store matching the applySecurityHeaders default, while the static 200 HTML path emits Cache-Control: public, max-age=0, must-revalidate as a documented override -- THIS pin targets the 404 path for direct comparison with JsonHandler)") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // GET /missing-file.html → 404 from the static handler
+        // (the 404 path emits the applySecurityHeaders default
+        // Cache-Control: no-store, matching JsonHandler responses)
+        val staticResp = get(s"$baseUri/missing-file.html")
+        assertEquals(staticResp.statusCode(), 404,
+          clue = "GET /missing-file.html MUST return 404 from the static handler for this pin to inspect security headers on the 404 path (where Cache-Control matches the applySecurityHeaders default)")
+
+        // (i-iv) 4 documented security headers verified
+        // (exact match for the simple headers)
+        assertEquals(headerValue(staticResp, "Cache-Control"), Some("no-store"),
+          clue = "static handler 404 response MUST emit `Cache-Control: no-store` per StaticAssetsHandler.scala line 25's applySecurityHeaders call -- the SAME contract as JsonHandler responses (5a46898 + 49523d8 + 7125738); a refactor dropping the call would silently leave static-404 responses cacheable, allowing 404s to be cached even after the resource becomes available")
+        assertEquals(headerValue(staticResp, "X-Content-Type-Options"), Some("nosniff"),
+          clue = "static handler 404 response MUST emit `X-Content-Type-Options: nosniff` -- protects against MIME-sniffing attacks")
+        assertEquals(headerValue(staticResp, "X-Frame-Options"), Some("DENY"),
+          clue = "static handler 404 response MUST emit `X-Frame-Options: DENY` -- clickjacking defense applies on all paths")
+        assertEquals(headerValue(staticResp, "Referrer-Policy"), Some("no-referrer"),
+          clue = "static handler 404 response MUST emit `Referrer-Policy: no-referrer`")
+
+        // (v) CSP on static handler
+        val csp = headerValue(staticResp, "Content-Security-Policy")
+          .getOrElse(fail("static handler response MUST include Content-Security-Policy"))
+        assert(csp.contains("frame-ancestors 'none'"),
+          clue = s"static handler CSP MUST contain `frame-ancestors 'none'` -- THIS IS ESPECIALLY CRITICAL for static HTML pages (which are the primary clickjacking target); got: $csp")
+
+        // (vi) Permissions-Policy on static handler
+        val permissionsPolicy = headerValue(staticResp, "Permissions-Policy")
+          .getOrElse(fail("static handler response MUST include Permissions-Policy"))
+        assert(permissionsPolicy.contains("camera=()"),
+          clue = s"static handler Permissions-Policy MUST deny camera access; got: $permissionsPolicy")
+
+        // (vii) AGGREGATE: ALL 6 security headers
+        val securityHeaderNames = Set(
+          "Cache-Control",
+          "Content-Security-Policy",
+          "Permissions-Policy",
+          "Referrer-Policy",
+          "X-Content-Type-Options",
+          "X-Frame-Options"
+        )
+        val presentHeaders = securityHeaderNames.filter(name => headerValue(staticResp, name).isDefined)
+        assertEquals(presentHeaders, securityHeaderNames,
+          clue = s"static handler response MUST have ALL 6 documented security headers from applySecurityHeaders -- the CROSS-HANDLER CONSISTENCY contract per StaticAssetsHandler.scala line 25's call mirroring JsonHandler's line 557 call; got present=${presentHeaders.toVector.sorted.mkString(", ")}, missing=${(securityHeaderNames -- presentHeaders).toVector.sorted.mkString(", ")}")
+
+        // (viii) CROSS-HANDLER CROSS-CHECK: static handler's
+        // Cache-Control EQUALS JsonHandler's Cache-Control
+        // (both flow through the SAME applySecurityHeaders
+        // helper) -- a refactor diverging the values between
+        // handler types would silently break the cross-
+        // handler consistency contract
+        val jsonResp = get(s"$baseUri/api/health")
+        assertEquals(headerValue(staticResp, "Cache-Control"), headerValue(jsonResp, "Cache-Control"),
+          clue = "static handler Cache-Control MUST EQUAL JsonHandler Cache-Control per the documented CROSS-HANDLER CONSISTENCY contract -- both handlers call applySecurityHeaders at the start of handle() (StaticAssetsHandler.scala line 25 + AuthStack.scala line 557); a refactor diverging the values would silently force per-handler monitoring queries")
+        assertEquals(headerValue(staticResp, "X-Frame-Options"), headerValue(jsonResp, "X-Frame-Options"),
+          clue = "static handler X-Frame-Options MUST EQUAL JsonHandler X-Frame-Options (symmetric cross-handler check)")
+        assertEquals(headerValue(staticResp, "Content-Security-Policy"), headerValue(jsonResp, "Content-Security-Policy"),
+          clue = "static handler CSP MUST EQUAL JsonHandler CSP (full-string match -- the SAME multi-directive policy applies to both handlers per the SHARED helper)")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
