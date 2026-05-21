@@ -5343,6 +5343,160 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `bucket=job-status` variant of the rate-
+  // limit log line -- the JOB-STATUS-BUCKET mirror to the prior 3
+  // rate-limit pins (47d91dd submit+remote, 82bca42 submit+user,
+  // 3361b2a auth+remote), closing the THIRD AND FINAL of 3
+  // rate-limit buckets the deploy doc + runbook document; with
+  // this commit the 3-pin bucket family (submit + auth +
+  // job-status) is COMPLETE across all 3 documented buckets; the
+  // job-status bucket throttles GET /api/.../jobs/<jobId>
+  // polling -- the SEPARATE bucket exists because polling has a
+  // fundamentally different traffic shape from submission: a
+  // single submitted job triggers MANY status polls during its
+  // lifetime (the documented poll-budget at site.js's
+  // maxPollWaitMs ranges from 16 minutes default to longer if
+  // the server's playingHallTimeoutMs is bumped, with 2-second
+  // poll intervals = up to ~480 polls per single submission);
+  // without the separate bucket the polling traffic would
+  // dominate the submit bucket and starve actual submissions
+  // OR force operators to choose between "high enough cap for
+  // polling load" (which exposes submit to abuse) and "low
+  // enough cap for submit safety" (which breaks polling); the
+  // 3-bucket taxonomy decouples these concerns; the format at
+  // line 674 is the SAME template as 47d91dd's submit variant
+  // but with the path + bucket fields flipped: path=
+  // /api/analyze-hand-history/jobs/<jobId> (or /api/playing-
+  // hall/jobs/<jobId>), bucket=job-status, limitPerMinute=
+  // <rateLimitStatusPerMinute value>; per-field regression
+  // vectors that the prior 3 rate-limit pins don't catch: (i)
+  // the BUCKET=JOB-STATUS literal (with hyphen!) -- a refactor
+  // renaming to e.g. "status" / "poll" / "job_status"
+  // (underscore not hyphen) would silently break operator
+  // dashboards filtering by the documented exact bucket id; the
+  // HYPHEN vs UNDERSCORE distinction is operationally
+  // meaningful because the prior 3 bucket names (submit, auth)
+  // have no separator at all -- job-status is the ONLY hyphenated
+  // bucket id, so a "consistency refactor" replacing with
+  // underscore would silently break only this bucket, (ii) the
+  // path=/api/analyze-hand-history/jobs/<jobId> dynamic value --
+  // contains the jobId UUID embedded INTO the path, so the
+  // EMITTED PATH FIELD reflects the specific job that was
+  // being polled; a refactor that emitted the parent route
+  // pattern (e.g. /api/analyze-hand-history/jobs/) instead of
+  // the full path with jobId would silently lose operator
+  // visibility into WHICH job was being scraped (the runbook's
+  // job-scraper-detection workflow keys on per-jobId polling
+  // patterns to identify scrapers vs legitimate clients), (iii)
+  // SEPARATE bucket cap from submit -- a refactor that
+  // consolidated the buckets to use a single shared cap would
+  // silently allow polling traffic to consume submit slots,
+  // breaking the documented isolation; 8-tier format check
+  // mirroring 47d91dd's pattern with the job-status-bucket-
+  // distinctive fields: (i) `request rate limited` prefix
+  // (same), (ii) path with /jobs/ substring AND jobId (catches
+  // wrong-path-source), (iii) `client=remote:` prefix (basic-
+  // auth doesn't use platformAuth principalKey), (iv)
+  // bucket=job-status (THE distinguishing field WITH the
+  // hyphen), (v) EXCLUSION of bucket=submit + bucket=auth
+  // (catches consolidation refactors with the 47d91dd/82bca42/
+  // 3361b2a variants -- the TRIPLE-EXCLUSION catch pattern
+  // matches e17c21d/aa6426d/e43081b's progression on the
+  // OIDC failure-reason chain), (vi) limitPerMinute=1 (the
+  // test's rateLimitStatusPerMinute=1 configured value --
+  // catches wrong-config-knob refactor reading rateLimit
+  // SubmitsPerMinute instead), (vii) retryAfterMs= field
+  // presence, (viii) [WARN] + [hand-history-review] service-
+  // tag.
+  test("rate-limit rejected job-status GET emits the documented `request rate limited path=/api/.../jobs/<jobId> client=remote:<addr> bucket=job-status limitPerMinute=<n> retryAfterMs=<n>` WARN audit log line -- the JOB-STATUS-BUCKET variant closing the 3-of-3 rate-limit bucket family (submit/auth/job-status)") {
+    withStaticSite { staticDir =>
+      val authConfig = HandHistoryReviewServer.BasicAuthConfig(username = "operator", password = "job-status-rate-limit-log")
+      val authHeaders = basicAuthHeaders(authConfig.username, authConfig.password)
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      withServer(
+        staticDir,
+        backend = backend,
+        basicAuth = Some(authConfig),
+        rateLimitSubmitsPerMinute = 0,
+        rateLimitStatusPerMinute = 1
+      ) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Submit an analyze job (consumes no rate-limit slot
+        // because rateLimitSubmitsPerMinute=0 disables submit
+        // throttling) -- the BlockingBackend keeps the job
+        // running so the status GETs return 200 instead of
+        // already-completed
+        val submission = jsonBody(postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, authHeaders))
+        val statusUri = s"$baseUri${submission("statusUrl").str}"
+
+        // First status GET: 200 (consumes the rateLimitStatusPerMinute=1 slot)
+        val firstStatus = get(statusUri, authHeaders)
+        assertEquals(firstStatus.statusCode(), 200,
+          clue = "first job-status GET must succeed (200) to consume the rate-limit slot before the second triggers rejection")
+
+        // Second status GET: rate-limited 429 + emits log line
+        val errBuf = new java.io.ByteArrayOutputStream()
+        val originalErr = System.err
+        System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+        try
+          val rejected = get(statusUri, authHeaders)
+          assertEquals(rejected.statusCode(), 429,
+            clue = "second job-status GET MUST be rate-limited (429) -- the per-IP job-status-bucket cap of 1 should be enforced")
+        finally
+          System.setErr(originalErr)
+
+        // Release the backend so the worker thread can finish
+        // and the test can tear down cleanly. We do NOT call
+        // awaitTerminalJob because the rate-limit is still in
+        // effect (the 1-per-minute cap WON'T reset within the
+        // test's lifetime), so subsequent GETs would return 429
+        // rather than the terminal-state JSON awaitTerminalJob
+        // expects -- the helper would fail with "key not found:
+        // status" when parsing the 429 body. The
+        // backend.release.countDown is sufficient for clean
+        // teardown; the worker completes its run on its own.
+        backend.release.countDown()
+
+        val captured = errBuf.toString(StandardCharsets.UTF_8)
+        val rateLimitLine = captured.split('\n').iterator
+          .find(_.contains("request rate limited"))
+          .getOrElse(fail(s"no `request rate limited` line in captured stderr for the job-status-bucket variant; got captured stderr: ${captured.take(2000)}"))
+
+        // (i) prefix
+        assert(rateLimitLine.contains("request rate limited"),
+          clue = s"job-status-bucket rate-limit line must carry the SAME `request rate limited` prefix matching the prior 3 rate-limit pins; got: $rateLimitLine")
+        // (ii) path with /jobs/ substring (job-status route)
+        assert(rateLimitLine.contains("path=/api/analyze-hand-history/jobs/"),
+          clue = s"job-status-bucket rate-limit line must carry the analyze-side jobs/ path -- the specific path includes the dynamic jobId UUID embedded in the URL; a refactor that emitted the parent route pattern (e.g. /api/analyze-hand-history/jobs/{id} or just /api/analyze-hand-history) would silently lose operator visibility into WHICH job was being scraped (the runbook's job-scraper-detection workflow keys on per-jobId polling patterns to identify scrapers vs legitimate clients); got: $rateLimitLine")
+        // (iii) client=remote: prefix (basic-auth doesn't use platformAuth)
+        assert(rateLimitLine.contains("client=remote:"),
+          clue = s"job-status-bucket rate-limit line must carry client=remote: prefix -- this test uses basic-auth (NOT platformAuth) so principalKey is None and the client-key falls back to remote: per RateLimit.scala line 182; got: $rateLimitLine")
+        // (iv) THE LOAD-BEARING CHANGE: bucket=job-status with
+        // hyphen (NOT submit or auth)
+        assert(rateLimitLine.contains("bucket=job-status"),
+          clue = s"job-status-bucket rate-limit line MUST carry `bucket=job-status` (with HYPHEN -- the ONLY hyphenated bucket id among the 3 buckets); a refactor renaming to e.g. 'status' / 'poll' / 'job_status' (underscore not hyphen for 'consistency' with submit/auth which have no separator) would silently break operator dashboards filtering by the documented bucket id; the HYPHEN distinction is operationally meaningful because the prior 3 bucket names (submit, auth) have no separator at all -- job-status is the ONLY hyphenated bucket id; got: $rateLimitLine")
+        // (v) TRIPLE-EXCLUSION of the prior 2 bucket variants
+        assert(!rateLimitLine.contains("bucket=submit"),
+          clue = s"job-status-bucket rate-limit line MUST NOT contain bucket=submit (the 47d91dd/82bca42-pinned bucket) -- catches a refactor consolidating buckets which would silently allow polling traffic to consume submit slots, breaking the documented isolation; got: $rateLimitLine")
+        assert(!rateLimitLine.contains("bucket=auth"),
+          clue = s"job-status-bucket rate-limit line MUST NOT contain bucket=auth (the 3361b2a-pinned bucket) -- the auth bucket is for credential-stuffing detection, distinct from polling traffic; got: $rateLimitLine")
+        // (vi) limitPerMinute=1 (catches wrong-config-knob
+        // refactor reading rateLimitSubmitsPerMinute)
+        assert(rateLimitLine.contains("limitPerMinute=1"),
+          clue = s"job-status-bucket rate-limit line must carry limitPerMinute=1 (the test's withServer rateLimitStatusPerMinute=1 configured value) -- catches a refactor reading the wrong config knob (e.g. rateLimitSubmitsPerMinute=0 from this test's config would emit limitPerMinute=0 if the wrong knob were used); got: $rateLimitLine")
+        // (vii) retryAfterMs field
+        assert(rateLimitLine.contains("retryAfterMs="),
+          clue = s"job-status-bucket rate-limit line must carry retryAfterMs= field; got: $rateLimitLine")
+        // (viii) WARN + service-tag
+        assert(rateLimitLine.contains("[WARN]"),
+          clue = s"job-status-bucket rate-limit line must be WARN-level matching the prior 3 rate-limit pins; got: $rateLimitLine")
+        assert(rateLimitLine.contains("[hand-history-review]"),
+          clue = s"job-status-bucket rate-limit line must carry the [hand-history-review] service-tag prefix; got: $rateLimitLine")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
