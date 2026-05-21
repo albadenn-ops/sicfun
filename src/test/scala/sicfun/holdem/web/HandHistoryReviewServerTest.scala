@@ -3978,6 +3978,186 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `job failed` JobQueue WARN audit log line
+  // format WITH the %20-ESCAPE CONTRACT on the error field --
+  // the FAILURE COMPANION to a04e51a's job-completed pin; line
+  // 321-323 in JobQueue.scala emits this when an analysis job
+  // reaches the Failed terminal state, either via backend Left
+  // (classified at line 291 by classifyAnalysisError) or via
+  // NonFatal exception at line 297; the format at line 322 is
+  // `s"job failed jobId=$jobId durationMs=${completedAt -
+  // startedAt} errorStatus=$errorStatus queuedJobs=${executor.
+  // getQueue.size()} runningJobs=${executor.getActiveCount()}
+  // error=${error.replace(" ", "%20")}"` -- THREE NEW fields
+  // beyond the job-completed pin (errorStatus + error + the
+  // %20-escape contract) AND a different log level (WARN not
+  // INFO) AND a different output stream (stderr not stdout per
+  // logWarn at HandHistoryReviewServerRuntime.scala line 421);
+  // the %20-ESCAPE CONTRACT is the load-bearing pin this commit
+  // uniquely catches because the prior JobQueue pin (a04e51a)
+  // exercised the SUCCESS path which has no error string at
+  // all -- and among ALL the JobQueue audit lines, only the
+  // failure paths carry user-controllable error strings that
+  // could split the structured key=value log format; the
+  // inline comment at JobQueue.scala lines 314-320 documents
+  // the threat: "%20-escape spaces in the Failed.error value
+  // before it lands in the structured log line. The value can
+  // be a backend-returned message ('no hands found in upload'),
+  // a wrapped exception ('analysis failed: <e.getMessage>'),
+  // or the timeoutFailure string ('analysis timed out after
+  // 120000ms') -- all of which contain spaces that would split
+  // the surrounding key=value pairs when a log aggregator
+  // tokenizes on whitespace"; this matches the e43081b
+  // auth.oidc.failure %20-escape pin at the AUTH side -- both
+  // pins exercise the same defense pattern (%20-escape on
+  // user/upstream-controlled error strings before structured
+  // log emission) but at different emission sites; per-field
+  // regression vectors that a04e51a's success-path pin doesn't
+  // catch: (i) THE %20-ESCAPE CONTRACT itself -- a refactor
+  // dropping the .replace(" ", "%20") at line 322 would
+  // silently emit unescaped error strings, and the actual
+  // backend Left values DO contain spaces (the test provides
+  // "invalid hand history format with spaces" specifically to
+  // exercise this), (ii) renaming "job failed" to e.g. "job
+  // errored" / "analyze failed" would silently break operator
+  // alert rules filtering for the failure-event signature
+  // (operators page on "job failed" specifically NOT on the
+  // generic "failed" word which might appear in many other
+  // log lines), (iii) the errorStatus field MUST be the
+  // classified HTTP status from classifyAnalysisError (400 for
+  // backend Left default, 500 for "analysis failed:" prefix,
+  // 504 for "analysis timed out" prefix) -- a refactor
+  // hardcoding errorStatus to 500 (or any single value) would
+  // silently lose operator visibility into WHY the job failed
+  // (404 = bad input, 500 = wrapped exception, 504 = timeout);
+  // the test uses a backend Left that DOESN'T match the
+  // "analysis failed:" or "analysis timed out" prefixes, so
+  // errorStatus=400 (the default-case branch at line 766), (iv)
+  // WARN level not INFO -- a refactor that demoted to INFO
+  // would silently make the failure line indistinguishable from
+  // success in operator log streams (every "job <foo>" event
+  // would be INFO, and operators couldn't grep by level for
+  // failures), promoting to ERROR would silently page on every
+  // user typo'd-upload (training operators to ignore), (v)
+  // STDERR output not stdout -- a refactor that flipped
+  // logWarn from stderr to stdout would silently desync the
+  // failure-side audit lines from operator log aggregators
+  // that route stderr to alerting; 10-tier format check at
+  // WARN level: (i) "job failed" prefix (catches rename), (ii)
+  // jobId matching the 202 response, (iii) durationMs= field
+  // with non-negative integer (same shape as a04e51a's
+  // job-completed pin), (iv) errorStatus=400 (the specific
+  // classified status for the test's backend Left), (v)
+  // queuedJobs=0 (no other jobs), (vi) runningJobs= field
+  // presence (timing-dependent), (vii)
+  // error=invalid%20hand%20history%20format%20with%20spaces
+  // (THE %20-ESCAPE CONTRACT pin -- the load-bearing
+  // load-bearing assertion), (viii) ESCAPE-CONTRACT
+  // VERIFICATION via !contains("invalid hand history format
+  // with spaces") (the UNESCAPED form -- catches refactor
+  // dropping the escape OR emitting both forms), (ix) [WARN]
+  // level (catches demote/promote), (x) [hand-history-review]
+  // service-tag prefix; ALSO EXCLUSION of "job completed"
+  // prefix in the failure line (catches a refactor that
+  // accidentally used the success-line shape for the failure
+  // path, which would silently break the failure-line
+  // detection at the operator log-aggregation level).
+  test("submitted analyze job that fails emits the documented `job failed jobId=<id> durationMs=<ms> errorStatus=<status> queuedJobs=<n> runningJobs=<n> error=<%20-escaped>` WARN audit log line WITH %20-escaped spaces in the error field -- the failure companion to the job-completed pin (a04e51a), closes the second of the JobQueue audit log lines AND pins the %20-escape contract on user-controlled error strings") {
+    withStaticSite { staticDir =>
+      // Capture stderr around the analyze submit + terminal-
+      // poll cycle. The backend is immediateBackend(Left(...))
+      // which returns Left("invalid hand history format with
+      // spaces") synchronously, triggering the failure path
+      // at JobQueue.scala line 291's `Failed(submittedAt,
+      // startedAt, nowMillis(), classifyAnalysisError(error),
+      // error)` -- classifyAnalysisError returns 400 for
+      // strings not starting with "analysis timed out" or
+      // "analysis failed:". The logWarn at line 321-323
+      // writes to System.err per HandHistoryReviewServerRuntime.
+      // scala line 421 (NOT System.out like the success line).
+      val errBuf = new java.io.ByteArrayOutputStream()
+      val originalErr = System.err
+      System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+      val failureBackend = immediateBackend(Left("invalid hand history format with spaces"))
+      val submitJobId =
+        try
+          withServer(staticDir, backend = failureBackend) { server =>
+            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+            val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+            assertEquals(submit.statusCode(), 202,
+              clue = "analyze submission must return 202 even when the backend will fail -- the failure happens at the WORKER level, not the submission-acceptance level")
+            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+            val capturedJobId = jsonBody(submit)("jobId").str
+            // Poll until terminal -- the worker emits the
+            // "job failed" line at JobQueue.scala line 321-323
+            // inside the finally block AFTER the Failed state
+            // is installed.
+            val terminal = awaitTerminalJob(statusUri)
+            assertEquals(terminal("status").str, "failed",
+              clue = "analyze must reach 'failed' terminal state for the job-failed log line to have fired")
+            capturedJobId
+          }
+        finally
+          System.setErr(originalErr)
+
+      val captured = errBuf.toString(StandardCharsets.UTF_8)
+      val failedLine = captured.split('\n').iterator
+        .find(_.contains("job failed"))
+        .getOrElse(fail(s"no `job failed` line in captured stderr -- JobQueue.scala line 321-323 documents this as the WARN-level line fired on every failed job terminal transition; if missing, either the logWarn emission was suppressed OR the worker exited via a different path; got captured stderr: ${captured.take(2000)}"))
+
+      // (i) event prefix
+      assert(failedLine.contains("job failed"),
+        clue = s"job-failed audit line must carry the literal `job failed` event prefix per JobQueue.scala line 322's hardcoded literal -- a refactor renaming to e.g. `job errored` / `analyze failed` would silently break operator alert rules filtering for the failure-event signature (operators page on `job failed` specifically NOT the generic `failed` word); got: $failedLine")
+      // EXCLUSION of the success-line prefix (catches a refactor
+      // that accidentally used the success-line shape for the
+      // failure path)
+      assert(!failedLine.contains("job completed"),
+        clue = s"job-failed audit line must NOT contain the `job completed` prefix (a04e51a's success-line prefix) -- a refactor that accidentally routed the failure path through the success-line emission helper would silently emit BOTH prefixes in the same line, breaking operator failure-detection signal; got: $failedLine")
+      // (ii) jobId matching the 202 submission response
+      assert(failedLine.contains(s"jobId=$submitJobId"),
+        clue = s"job-failed audit line must carry the SAME jobId='$submitJobId' that the 202 submission response returned -- this is the submission-to-failure correlation operators rely on for 'when did this specific job fail and why' incident analysis; got: $failedLine")
+      // (iii) durationMs field with non-negative integer value
+      assert(failedLine.contains("durationMs="),
+        clue = s"job-failed audit line must carry the durationMs= field matching the job-completed pin's shape; got: $failedLine")
+      val durationMsToken = failedLine.split(' ').iterator
+        .find(_.startsWith("durationMs="))
+        .getOrElse(fail(s"durationMs= token extraction failed; got: $failedLine"))
+      val durationMsValue = durationMsToken.drop("durationMs=".length).stripTrailing()
+      val durationMs = durationMsValue.toLongOption.getOrElse(fail(s"durationMs= value '$durationMsValue' not parseable as Long; got: $failedLine"))
+      assert(durationMs >= 0L,
+        clue = s"durationMs MUST be non-negative even on failure path -- the failure can happen very fast (the immediate backend returns Left synchronously) so the value is small but never negative; a refactor swapping subtraction order would silently emit negative numbers; got durationMs=$durationMs in line: $failedLine")
+      // (iv) errorStatus=400 (specific value -- the
+      // classifyAnalysisError default branch for backend Left
+      // strings not matching "analysis timed out" / "analysis
+      // failed:" prefixes; the test's backend returns "invalid
+      // hand history format..." which doesn't match either
+      // prefix, so the classifier returns 400)
+      assert(failedLine.contains("errorStatus=400"),
+        clue = s"job-failed audit line MUST carry errorStatus=400 per JobQueue.scala line 763-766's classifyAnalysisError default-case branch -- backend Left strings not starting with `analysis timed out` (504) or `analysis failed:` (500) get classified as 400 (bad input); the test's backend returns 'invalid hand history format with spaces' which doesn't match either prefix; a refactor hardcoding errorStatus to a single value would silently lose operator visibility into WHY the job failed (404 = bad input, 500 = wrapped exception, 504 = timeout); got: $failedLine")
+      // (v) queuedJobs=0
+      assert(failedLine.contains("queuedJobs=0"),
+        clue = s"job-failed audit line must carry queuedJobs=0 (no other jobs queued in single-job test) -- same shape as a04e51a's job-completed pin; got: $failedLine")
+      // (vi) runningJobs field presence (timing-dependent)
+      assert(failedLine.contains("runningJobs="),
+        clue = s"job-failed audit line must carry the runningJobs= field -- same shape as a04e51a's job-completed pin (presence only, value depends on executor decrement timing); got: $failedLine")
+      // (vii) error= field with %20-ESCAPED value (THE
+      // load-bearing %20-ESCAPE CONTRACT pin)
+      assert(failedLine.contains("error=invalid%20hand%20history%20format%20with%20spaces"),
+        clue = s"job-failed audit line MUST carry the %20-escaped error string `error=invalid%20hand%20history%20format%20with%20spaces` per JobQueue.scala line 322's `error.replace(\" \", \"%20\")` escape applied to the backend Left value 'invalid hand history format with spaces'; the %20-escape is the load-bearing contract this pin uniquely catches -- a refactor dropping the escape would silently emit unescaped spaces in the error field, splitting the structured key=value log format when a log aggregator tokenizes on whitespace; this matches the e43081b auth.oidc.failure %20-escape contract pattern but for the JobQueue emission site; got: $failedLine")
+      // (viii) ESCAPE-CONTRACT VERIFICATION: must NOT contain
+      // the UNESCAPED form (catches refactor dropping the
+      // escape OR emitting both forms)
+      assert(!failedLine.contains("invalid hand history format with spaces"),
+        clue = s"job-failed audit line MUST NOT contain the UNESCAPED form `invalid hand history format with spaces` (with literal spaces) -- the %20-escape contract at JobQueue.scala line 322 REQUIRES spaces be replaced with %20 BEFORE the log emission; a refactor that dropped the escape would emit the unescaped form which would split the structured key=value log format on aggregator tokenization; the !contains assertion catches the refactor when only the unescaped form is emitted AND when both forms are emitted (the e43081b auth.oidc.failure pin uses the same shape); got: $failedLine")
+      // (ix) WARN level (NOT INFO like the success line)
+      assert(failedLine.contains("[WARN]"),
+        clue = s"job-failed audit line must be WARN-level per JobQueue.scala line 321's logWarn call (writes to System.err per HandHistoryReviewServerRuntime.scala line 421); a refactor demoting to INFO would silently make the failure line indistinguishable from success in operator log streams, promoting to ERROR would silently page on every user typo'd-upload training operators to ignore; got: $failedLine")
+      // (x) service-tag prefix
+      assert(failedLine.contains("[hand-history-review]"),
+        clue = s"job-failed audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- matches /api/health.service (505ba6b); got: $failedLine")
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
