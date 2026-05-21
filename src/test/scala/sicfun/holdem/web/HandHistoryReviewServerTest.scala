@@ -19217,6 +19217,153 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented Retry-After EXPLICIT-SET contract for 429
+  // responses at AuthStack.scala lines 672-686 -- the
+  // 429-EXPLICIT-SET pin verifies the documented SYMMETRIC
+  // counterpart to the 503-fallback pin (7935924): where 503
+  // emits a UNIVERSAL "5" via the post-fold fallback at lines
+  // 572-573, 429 emits a COMPUTED value via the explicit
+  // ensureWithinRateLimitJson set-call at line 676, the value
+  // derived from the rate-limit window's remaining time at
+  // RateLimit.scala line 73's `retryAfterMs = math.max(1L,
+  // WindowMs - (now - existing.windowStartedAtMs))` formula.
+  // FIFTY-SIXTH per-emission-site SHAPE pin overall; existing
+  // line 14628 4-field 429-body-shape pin asserts the
+  // retryAfterSeconds body field matches the Retry-After
+  // header value, but the CROSS-CHECK between 429
+  // (handler-explicit) and 503 (fallback) -- which documents
+  // the SOURCE distinction between the two paths -- is
+  // unpinned; the 429-EXPLICIT-SET contract is OPERATIONALLY
+  // CRITICAL because: (a) the documented design intentionally
+  // emits 429 Retry-After from the rate-limit window's
+  // remaining time (NOT the generic 5-second fallback) so
+  // clients can compute the optimal backoff: hitting the rate
+  // limit at the start of a 60-second window means waiting
+  // 60 seconds, hitting it 50 seconds in means waiting 10
+  // seconds -- a refactor that emitted the generic "5"
+  // fallback would silently flatten this signal, causing all
+  // 429 clients to retry in a thundering herd, (b) the
+  // SYMMETRIC pin pair (THIS commit 429 + 7935924 503)
+  // documents the FULL Retry-After source matrix: 429 is
+  // always handler-explicit (line 676 unconditional set), 503
+  // is always fallback (handlers don't set their own per the
+  // current code), (c) a refactor that DROPPED the line 676
+  // explicit set on 429 would silently FALL THROUGH to the
+  // 503 fallback at lines 572-573 -- but only if the response
+  // status were ALSO 503, which would silently shift the
+  // contract entirely; per-format regression vectors uniquely
+  // caught (NOT caught by the 14628 body-shape pin which
+  // verifies retryAfterSeconds body field == Retry-After
+  // header value but not whether the value is computed-vs-
+  // fallback): (i) refactor changing line 676 from `set(
+  // "Retry-After", retryAfter)` to a hardcoded "5" would
+  // silently collapse the 429 path into the 503 fallback
+  // contract -- the 14628 pin would still PASS (body field
+  // == header value) but the OPERATIONAL signal would be
+  // lost, (ii) refactor that changes the
+  // retryAfterMs formula at RateLimit.scala line 73 (e.g. to
+  // `WindowMs` unconditionally instead of remaining-time)
+  // would silently emit a CONSTANT 60-second Retry-After even
+  // for clients who hit the limit late in the window -- a
+  // less-thundering-herd-resistant scheme, (iii) refactor
+  // that removed the math.max(1L, ...) floor at RateLimit.
+  // scala line 73 would silently allow Retry-After: 0 (or
+  // negative when the window expired between rejection and
+  // emission) -- breaking RFC 7231 sec 7.1.3 which requires
+  // Retry-After be a positive HTTP-date or delta-seconds; test
+  // approach: set rateLimitSubmitsPerMinute=1 + drain signal
+  // file, submit once (202 consumes the slot), submit again
+  // (429 + COMPUTED Retry-After), activate drain signal,
+  // /api/ready (503 + FALLBACK Retry-After), then cross-check
+  // the two distinct Retry-After values originate from
+  // distinct paths.
+  test("429 vs 503 Retry-After SOURCE DISTINCTION: 429 emits a COMPUTED Retry-After from the rate-limit window's remaining time per AuthStack.scala line 676's explicit set + RateLimit.scala line 73's retryAfterMs formula, while 503 emits the universal `5` fallback per AuthStack.scala lines 572-573 -- the SYMMETRIC pin closes the SOURCE dimension complementing 7935924's 503-fallback pin + 14628's 429-body-shape pin") {
+    withStaticSite { staticDir =>
+      val root = java.nio.file.Files.createTempDirectory("retry-after-source-")
+      try
+        val drainSignalFile = root.resolve("deploy-drain.signal")
+        withServer(
+          staticDir,
+          rateLimitSubmitsPerMinute = 1,
+          rateLimitStatusPerMinute = 0,
+          drainSignalFile = Some(drainSignalFile)
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // (1) Submit 1 -> 202 (consumes the 1/minute slot)
+          val accepted = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(accepted.statusCode(), 202,
+            clue = "first submit MUST 202 to consume the rateLimitSubmitsPerMinute=1 slot before driving the 429 path")
+
+          // (2) Submit 2 -> 429 with COMPUTED Retry-After
+          val rateLimited = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(rateLimited.statusCode(), 429,
+            clue = "second submit MUST 429 to drive the explicit-set Retry-After test")
+          val rateLimitedRetryAfter = headerValue(rateLimited, "Retry-After")
+            .getOrElse(fail("429 response MUST carry Retry-After per AuthStack.scala line 676's `set(\"Retry-After\", retryAfter)`"))
+
+          // (3) Activate drain signal -> /api/ready 503 with
+          // FALLBACK Retry-After: 5
+          java.nio.file.Files.writeString(drainSignalFile, "draining", StandardCharsets.UTF_8)
+          val drainingReady = get(s"$baseUri/api/ready")
+          assertEquals(drainingReady.statusCode(), 503,
+            clue = "draining /api/ready MUST 503 to drive the fallback Retry-After test")
+          val drainingReadyRetryAfter = headerValue(drainingReady, "Retry-After")
+            .getOrElse(fail("503 /api/ready MUST carry Retry-After: 5 fallback per AuthStack.scala lines 572-573"))
+
+          // (4) 503 Retry-After IS the fallback `5` constant
+          assertEquals(drainingReadyRetryAfter, "5",
+            clue = s"503 Retry-After MUST be `5` per AuthStack.scala lines 572-573 fallback -- the documented universal constant; got: $drainingReadyRetryAfter")
+
+          // (5) 429 Retry-After is a POSITIVE INTEGER (parseable)
+          // per RFC 7231 sec 7.1.3's delta-seconds requirement
+          val rateLimitedRetryAfterInt = scala.util.Try(rateLimitedRetryAfter.toInt).getOrElse(
+            fail(s"429 Retry-After MUST be parseable as integer per RFC 7231 sec 7.1.3 delta-seconds form; got: $rateLimitedRetryAfter")
+          )
+          assert(rateLimitedRetryAfterInt > 0,
+            clue = s"429 Retry-After MUST be > 0 per RateLimit.scala line 73's `math.max(1L, ...)` floor -- a refactor removing the floor could silently allow 0 or negative when the window expired between rejection and emission, violating RFC 7231 sec 7.1.3; got: $rateLimitedRetryAfterInt")
+
+          // (6) 429 Retry-After ≠ 503 Retry-After -- the
+          // SOURCE DISTINCTION assertion that catches a
+          // refactor collapsing the explicit-set path into
+          // the fallback (e.g. hardcoding line 676 to "5")
+          assertNotEquals(rateLimitedRetryAfter, drainingReadyRetryAfter,
+            clue = s"429 Retry-After ($rateLimitedRetryAfter) MUST differ from 503 Retry-After ($drainingReadyRetryAfter) -- the SOURCE distinction proves: 429 is computed from rate-limit-window remaining time (RateLimit.scala line 73), 503 is the fallback `5` constant (AuthStack.scala line 573); a refactor that hardcoded 429 to emit `5` would silently flatten the operational signal, causing all 429 clients to retry in a thundering herd at the 5-second mark")
+
+          // (7) 429 Retry-After value is REASONABLE for the
+          // rate-limit window (1-60 seconds for a 1/minute
+          // window struck at submit time -- catches a refactor
+          // that emitted a wildly different value like 0 or
+          // 3600)
+          assert(rateLimitedRetryAfterInt >= 1 && rateLimitedRetryAfterInt <= 61,
+            clue = s"429 Retry-After MUST be within 1..61 seconds for a rateLimitSubmitsPerMinute=1 window struck at submit time per RateLimit.scala line 73's `retryAfterMs = WindowMs - elapsed` formula + the line 840 `retryAfterSeconds` ceiling -- a refactor changing the window or formula would silently shift the value out of this band; got: $rateLimitedRetryAfterInt")
+
+          // (8) 429 Retry-After > 5 -- the explicit-set value
+          // is strictly GREATER than the 503 fallback. This
+          // catches a subtle refactor that changes the 429
+          // path to use a CONSTANT (e.g. `5` for "simplify")
+          // which would silently match the 503 fallback even
+          // though the SOURCES differ.
+          assert(rateLimitedRetryAfterInt > 5,
+            clue = s"429 Retry-After MUST be > 5 (the 503 fallback constant) -- the rate-limit window for rateLimitSubmitsPerMinute=1 is 60 seconds, so the remaining time at second submit is ≥55s per the formula; if the value collapsed to exactly 5, the SOURCE distinction would be operationally invisible (clients couldn't tell which path emitted the value); got: $rateLimitedRetryAfterInt")
+
+          // (9) CROSS-CHECK with 429 body: the documented
+          // explicit-set path emits the SAME value on BOTH
+          // header AND body.retryAfterSeconds (AuthStack.scala
+          // line 682-684 + 676 share the `retryAfter`
+          // variable). This is the symmetric counterpart to
+          // the 503 fallback path which doesn't add a body
+          // field (the 1-field {error} shape).
+          val rateLimitedBody = jsonBody(rateLimited)
+          val rateLimitedBodyRetryAfter = rateLimitedBody("retryAfterSeconds").num.toInt
+          assertEquals(rateLimitedBodyRetryAfter, rateLimitedRetryAfterInt,
+            clue = s"429 body.retryAfterSeconds MUST EQUAL header Retry-After per AuthStack.scala line 676 + 682-684's SHARED `retryAfter` variable -- a refactor that diverged the two emissions would silently produce inconsistent backoff hints; got header=$rateLimitedRetryAfterInt, body=$rateLimitedBodyRetryAfter")
+        }
+      finally
+        deleteRecursively(root)
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
