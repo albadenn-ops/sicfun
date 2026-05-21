@@ -16807,6 +16807,132 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/auth/logout response SHAPE-
+  // INVARIANCE with /api/auth/me + login + register per
+  // AuthStack.scala line 214's `service.authenticationState
+  // (None)` -- logout returns the SAME 7-field shape as the
+  // OTHER auth endpoints but with authenticated=FALSE + user=
+  // null + csrfToken=null (the just-signed-out state); the
+  // pin extends 064d28a's AUTH STATE-CHANGE SHAPE-INVARIANCE
+  // coverage to the FIFTH member of the family;
+  // THIRTY-NINTH per-emission-site SHAPE pin overall;
+  // documented contract: ALL 5 auth-state response surfaces
+  // (no-auth /me + basic-auth /me + platform-auth /me +
+  // login + register + logout) emit the SAME 7-field
+  // closed set, allowing the frontend to use ONE parser
+  // for ALL auth state transitions; the logout SHAPE-
+  // INVARIANCE is OPERATIONALLY CRITICAL because: (a) the
+  // logout response IS the post-logout /api/auth/me
+  // response (saving an extra round trip; the frontend
+  // can render the signed-out UI immediately from the
+  // logout response without polling /api/auth/me again),
+  // (b) the documented architectural contract is that
+  // EVERY auth state-change response is SHAPE-INVARIANT
+  // with /api/auth/me -- a refactor introducing a
+  // different shape for logout would silently break the
+  // frontend's ONE-PARSER contract; per-format regression
+  // vectors uniquely caught: (i) refactor returning a
+  // minimal {ok: true} shape for logout (a common "clean
+  // up" refactor) would silently break the SHAPE-
+  // INVARIANCE, (ii) refactor returning the LOGOUT-USER's
+  // profile in the user field (instead of null) would
+  // silently confuse the frontend into thinking the user
+  // is still signed in, (iii) refactor changing the
+  // authenticated value to true (e.g. "logout succeeded
+  // = action successful") would silently confuse the
+  // frontend; test approach: register a user, capture
+  // session cookie + CSRF token, POST /api/auth/logout
+  // with both, verify the response has the documented
+  // 7-field shape + authenticated=false + user=null +
+  // csrfToken=null.
+  test("/api/auth/logout response body MUST emit the SAME 7-field shape as /api/auth/me + login + register per AuthStack.scala line 214's authenticationState(None) -- the FIFTH member of the AUTH STATE-CHANGE SHAPE-INVARIANCE family extending 064d28a's login/register coverage to the logout endpoint, completing the documented architectural contract that the frontend uses ONE parser for ALL auth state transitions") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Register a user + capture session cookie + CSRF
+          // token (needed for the CSRF-protected logout endpoint
+          // per 64d28a's documented CSRF contract on logout)
+          val registerResp = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"logout-shape@example.com","password":"correct-horse-battery","displayName":"Tester"}"""
+          )
+          assertEquals(registerResp.statusCode(), 201)
+          val csrfToken = jsonBody(registerResp)("csrfToken").str
+          val sessionHeaders = authSessionHeaders(registerResp, csrfToken)
+
+          // Logout with valid session + CSRF token
+          val logoutResp = httpClient.send(
+            HttpRequest.newBuilder()
+              .uri(URI.create(s"$baseUri/api/auth/logout"))
+              .method("POST", HttpRequest.BodyPublishers.ofString("{}"))
+              .header("Content-Type", "application/json")
+              .header("Cookie", sessionHeaders.getOrElse("Cookie", ""))
+              .header("X-CSRF-Token", csrfToken)
+              .build(),
+            HttpResponse.BodyHandlers.ofString()
+          )
+          assertEquals(logoutResp.statusCode(), 200,
+            clue = s"logout MUST return 200 with session cookie + CSRF token per AuthStack.scala line 212's `JsonResponse(200, ...)`; got: ${logoutResp.statusCode()}, body: ${logoutResp.body()}")
+
+          val logoutBody = ujson.read(logoutResp.body())
+          val logoutFields = logoutBody.obj.keys.toSet
+
+          val expectedFields = Set(
+            "authenticationEnabled",
+            "authenticationMode",
+            "authenticated",
+            "allowLocalRegistration",
+            "providers",
+            "user",
+            "csrfToken"
+          )
+
+          // (i) CARDINALITY: same 7-field set as /api/auth/me
+          // + login + register (the AUTH STATE-CHANGE
+          // SHAPE-INVARIANCE)
+          assertEquals(logoutFields, expectedFields,
+            clue = s"/api/auth/logout response body MUST emit the SAME 7-field set as /api/auth/me + login + register per the documented SHAPE-INVARIANCE -- all flow through PlatformUserAuth.scala line 332's authenticationState helper, with logout passing None at line 214; a refactor returning a minimal {ok: true} shape for logout (a common 'clean up' refactor) would silently break the frontend's ONE-PARSER contract; got logout=${logoutFields.toVector.sorted.mkString(", ")}, expected=${expectedFields.toVector.sorted.mkString(", ")}")
+
+          // (ii) VALUE: authenticated == false (the
+          // distinguishing post-logout value vs login's
+          // true)
+          assertEquals(logoutBody("authenticated").bool, false,
+            clue = s"logout response: authenticated MUST be false (the just-signed-out state) per line 214's `authenticationState(None)` -- a refactor returning true (e.g. 'logout succeeded = action successful' misreading) would silently confuse the frontend into thinking the user is still signed in; got: ${logoutBody("authenticated").bool}")
+
+          // (iii) VALUE: user == null (no current user
+          // post-logout; mirrors the no-session /api/auth/me
+          // pattern from 4f74798's tier vi)
+          assertEquals(logoutBody("user"), ujson.Null,
+            clue = "logout response: user field MUST be PRESENT and equal to null per the authenticationState(None) emission -- a refactor returning the just-signed-out-user's profile (e.g. for 'last-session info display') would silently confuse the frontend into thinking the user is still signed in")
+
+          // (iv) VALUE: csrfToken == null (session
+          // ended; CSRF token no longer valid)
+          assertEquals(logoutBody("csrfToken"), ujson.Null,
+            clue = "logout response: csrfToken MUST be null per the authenticationState(None) emission -- the session has ended, so the CSRF token is no longer meaningful; a refactor returning the old token would silently let stale CSRF tokens be used")
+
+          // (v) Set-Cookie header present (the documented
+          // cookie-clearing emission at line 215 +
+          // line 209's `clearedCookie = service.revokeSession
+          // (cookieHeader(exchange))`)
+          val setCookieHeader = headerValue(logoutResp, "Set-Cookie")
+          assert(setCookieHeader.isDefined,
+            clue = "logout response MUST emit Set-Cookie header per AuthStack.scala line 215's `headers = Vector(\"Set-Cookie\" -> clearedCookie)` -- the cookie-clearing is what tells the browser to discard the session cookie; a refactor dropping this header would silently leave the session cookie active in the browser even after logout (potential security issue if the cookie is later reused via XSS or other vector)")
+
+          // (vi) SHAPE-INVARIANCE assertion: logout field
+          // set EQUALS /api/auth/me field set (the CORE
+          // architectural-contract assertion mirroring
+          // 064d28a's tier viii for login)
+          val meResp = getJson(s"$baseUri/api/auth/me")
+          val meFields = meResp.obj.keys.toSet
+          assertEquals(logoutFields, meFields,
+            clue = s"logout response field set MUST EQUAL /api/auth/me response field set per the documented AUTH-STATE SHAPE-INVARIANCE -- both flow through authenticationState helper (logout with None, me with current session); a refactor making logout's shape diverge from /api/auth/me would silently break the frontend's ONE-PARSER contract; got logout=${logoutFields.toVector.sorted.mkString(", ")}, me=${meFields.toVector.sorted.mkString(", ")}")
+        }
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
