@@ -4298,6 +4298,170 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `playing hall job failed` JobQueue WARN
+  // audit log line format WITH the %20-ESCAPE CONTRACT
+  // verification AND the asymmetric-drift catch -- closes the
+  // FOURTH JobQueue audit log line via the convergence of TWO
+  // contract dimensions established by prior commits:
+  // (1) the asymmetric-drift dimension from 1e030ed (analyze
+  // vs hall prefix distinction) and (2) the %20-escape contract
+  // dimension from 6b59ce4 (escape on user-controlled error
+  // strings); the playing-hall failure path at JobQueue.scala
+  // line 612-616 emits `s"playing hall job failed jobId=$jobId
+  // durationMs=${completedAt - startedAt} errorStatus=
+  // $errorStatus queuedJobs=${...} runningJobs=${...} error=
+  // ${error.replace(" ", "%20")}"` -- carrying the
+  // playing-hall-DISTINCT prefix (NOT just "job failed" -- the
+  // analyze-side 6b59ce4 prefix) AND the %20-escape on the
+  // user-controlled error string AND the errorStatus classified
+  // via classifyPlayingHallError (line 768-771: 504 for "playing
+  // hall timed out after" prefix, 500 for "playing hall failed:"
+  // prefix, 400 default); this commit is operationally the
+  // STRONGEST single-pin in the JobQueue family because it
+  // exercises BOTH contract dimensions simultaneously -- a
+  // refactor that broke either dimension AT this emission site
+  // would fail the test, while a refactor that broke ONLY one
+  // dimension would also fail (catches at the convergence of
+  // 1e030ed's asymmetric-drift catch AND 6b59ce4's %20-escape
+  // catch); per-field regression vectors that the prior 3
+  // JobQueue audit log pins (a04e51a + 6b59ce4 + 1e030ed) don't
+  // catch in combination: (i) ASYMMETRIC DRIFT specifically on
+  // the FAILURE PATH -- a refactor that consolidated only the
+  // failure prefixes (`job failed` for both endpoints) while
+  // keeping the success prefixes distinct would silently break
+  // operator per-endpoint failure dashboards while leaving
+  // per-endpoint success dashboards intact (a half-consolidation
+  // that 1e030ed's success-side pin alone can't catch since
+  // 1e030ed doesn't exercise the failure path); (ii) %20-ESCAPE
+  // SPECIFICALLY ON THE PLAYING-HALL PATH -- a refactor that
+  // dropped the .replace(" ", "%20") at JobQueue.scala line 615
+  // ONLY (without touching the analyze-side line 322 escape)
+  // would silently emit unescaped errors on hall failures while
+  // the analyze-side stays escaped, an asymmetric-drift case
+  // that 6b59ce4's analyze-side pin alone can't catch; (iii)
+  // errorStatus=400 for the playing-hall classifier default
+  // branch -- a refactor that broke classifyPlayingHallError's
+  // default branch independently of classifyAnalysisError's
+  // (which 6b59ce4 already pins) would silently emit a wrong
+  // status on hall failures while analyze stays correct; (iv)
+  // WARN level + stderr output for the hall failure path --
+  // matches 6b59ce4's analyze pattern but applies to a different
+  // emission site so a refactor that demoted/promoted/redirected
+  // the hall-failure-emission specifically would silently
+  // drift; 11-tier format check converging the prior pins'
+  // patterns: (i) `playing hall job failed` prefix (catches
+  // rename AND asymmetric-drift consolidation), (ii) EXCLUSION
+  // of standalone `job failed` in a position other than the
+  // playing-hall prefix substring (the asymmetric-drift catch
+  // from 1e030ed applied to failure), (iii) EXCLUSION of
+  // `playing hall job completed` (catches a refactor emitting
+  // wrong terminal-state shape -- mirrors 6b59ce4's exclusion
+  // of `job completed`), (iv) jobId matching the 202 response,
+  // (v) durationMs with toLongOption + >= 0L (catches swapped
+  // subtraction order), (vi) errorStatus=400 (default branch
+  // of classifyPlayingHallError), (vii) queuedJobs=0, (viii)
+  // runningJobs= field presence, (ix) error=invalid%20playing%20
+  // hall%20config%20with%20spaces (THE %20-escape contract
+  // pin), (x) ESCAPE-CONTRACT VERIFICATION via !contains the
+  // unescaped form (matches 6b59ce4 + e43081b pattern), (xi)
+  // [WARN] level (matches 6b59ce4's analyze-side WARN), AND
+  // [hand-history-review] service-tag; with this commit the
+  // JobQueue audit log family has FOUR pins (a04e51a +
+  // 6b59ce4 + 1e030ed + this commit) forming a 2x2 matrix
+  // (success/failure × analyze/hall) -- the asymmetric-mirror
+  // dimension is now FULLY pinned for the terminal-state
+  // events (success + failure on both endpoints); remaining
+  // gaps: cancelled (hall-only at line 617-620), accepted
+  // (hall-only at line 503-505), submission-rejection (both
+  // endpoints), timeout (both endpoints).
+  test("submitted playing-hall job that fails emits the documented `playing hall job failed jobId=<id> durationMs=<ms> errorStatus=<status> queuedJobs=<n> runningJobs=<n> error=<%20-escaped>` WARN audit log line -- the hall-side failure mirror combining 1e030ed's asymmetric-drift catch with 6b59ce4's %20-escape contract catch (closes the 2x2 success/failure × analyze/hall matrix for JobQueue terminal-state audit lines)") {
+    withStaticSite { staticDir =>
+      // Capture stderr around the playing-hall submit + terminal-
+      // poll cycle. The playingHallBackend is immediatePlayingHall
+      // Backend(Left("...")) returning a backend-controlled error
+      // string with spaces to exercise the %20-escape contract.
+      // classifyPlayingHallError returns 400 for strings not
+      // matching the "playing hall timed out after" or "playing
+      // hall failed:" prefixes; the test's error string is
+      // "invalid playing hall config with spaces" which falls
+      // through to the default branch.
+      val errBuf = new java.io.ByteArrayOutputStream()
+      val originalErr = System.err
+      System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+      val failureBackend = immediatePlayingHallBackend(Left("invalid playing hall config with spaces"))
+      val submitJobId =
+        try
+          withServer(staticDir, playingHallBackend = failureBackend) { server =>
+            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+            val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+            assertEquals(submit.statusCode(), 202,
+              clue = "playing-hall submission must return 202 even when backend will fail -- failure happens at the WORKER level not submission")
+            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+            val capturedJobId = jsonBody(submit)("jobId").str
+            val terminal = awaitTerminalJob(statusUri)
+            assertEquals(terminal("status").str, "failed",
+              clue = "playing-hall must reach 'failed' terminal state for the playing-hall-job-failed log line to have fired")
+            capturedJobId
+          }
+        finally
+          System.setErr(originalErr)
+
+      val captured = errBuf.toString(StandardCharsets.UTF_8)
+      val failedLine = captured.split('\n').iterator
+        .find(_.contains("playing hall job failed"))
+        .getOrElse(fail(s"no `playing hall job failed` line in captured stderr -- JobQueue.scala line 612-616 documents this; if missing, either the logWarn was suppressed OR the worker exited via a different terminal state (Completed/Cancelled); got captured stderr: ${captured.take(2000)}"))
+
+      // (i) event prefix (catches rename + asymmetric-drift)
+      assert(failedLine.contains("playing hall job failed"),
+        clue = s"playing-hall job-failed audit line must carry the literal `playing hall job failed` event prefix per JobQueue.scala line 615's hardcoded literal -- a refactor renaming OR consolidating with the analyze-side prefix (just `job failed`) would silently break per-endpoint failure dashboards; got: $failedLine")
+      // (ii) EXCLUSION of standalone analyze prefix -- the
+      // asymmetric-drift catch from 1e030ed applied to failure
+      val withoutHallFailedPrefix = failedLine.replace("playing hall job failed", "")
+      assert(!withoutHallFailedPrefix.contains("job failed"),
+        clue = s"playing-hall failed line must NOT also contain a STANDALONE `job failed` prefix (the analyze-side 6b59ce4 prefix) in a position other than the `playing hall job failed` substring -- a refactor emitting BOTH prefixes for the same event would silently pollute the analyze-side per-endpoint failure dashboard with hall events; the EXCLUSION pin matches 1e030ed's asymmetric-drift catch applied to the failure path; got line after stripping hall prefix: '$withoutHallFailedPrefix'")
+      // (iii) EXCLUSION of `playing hall job completed` (catches
+      // a refactor emitting wrong terminal-state shape for the
+      // hall failure path)
+      assert(!failedLine.contains("playing hall job completed"),
+        clue = s"playing-hall failed line must NOT contain `playing hall job completed` (the 1e030ed-pinned success-line prefix) -- a refactor that accidentally used the success-line shape for the failure path would silently break operator failure-detection signal; got: $failedLine")
+      // (iv) jobId matching the 202 response
+      assert(failedLine.contains(s"jobId=$submitJobId"),
+        clue = s"playing-hall job-failed line must carry the SAME jobId='$submitJobId' from the 202 submission response; got: $failedLine")
+      // (v) durationMs field with non-negative integer
+      assert(failedLine.contains("durationMs="),
+        clue = s"playing-hall job-failed line must carry durationMs= field matching the prior 3 JobQueue pins; got: $failedLine")
+      val durationMsToken = failedLine.split(' ').iterator
+        .find(_.startsWith("durationMs="))
+        .getOrElse(fail(s"durationMs= token extraction failed; got: $failedLine"))
+      val durationMsValue = durationMsToken.drop("durationMs=".length).stripTrailing()
+      val durationMs = durationMsValue.toLongOption.getOrElse(fail(s"durationMs= value '$durationMsValue' not parseable as Long; got: $failedLine"))
+      assert(durationMs >= 0L,
+        clue = s"playing-hall durationMs MUST be non-negative -- catches swapped subtraction order specifically on the hall-failure path (a refactor breaking ONLY the hall failure's emission while the analyze-side stays correct); got durationMs=$durationMs in line: $failedLine")
+      // (vi) errorStatus=400 (classifyPlayingHallError default branch)
+      assert(failedLine.contains("errorStatus=400"),
+        clue = s"playing-hall job-failed line MUST carry errorStatus=400 per JobQueue.scala line 768-771's classifyPlayingHallError default branch -- backend Left strings not starting with 'playing hall timed out after' (504) or 'playing hall failed:' (500) get classified as 400; the test's 'invalid playing hall config with spaces' doesn't match either prefix; a refactor that broke classifyPlayingHallError's default branch independently of classifyAnalysisError's (which 6b59ce4 pins) would silently emit wrong status on hall failures; got: $failedLine")
+      // (vii) queuedJobs=0
+      assert(failedLine.contains("queuedJobs=0"),
+        clue = s"playing-hall job-failed line must carry queuedJobs=0; matches 6b59ce4's analyze-failed pattern; got: $failedLine")
+      // (viii) runningJobs field presence
+      assert(failedLine.contains("runningJobs="),
+        clue = s"playing-hall job-failed line must carry runningJobs= field; matches 6b59ce4's analyze-failed pattern; got: $failedLine")
+      // (ix) error= field with %20-ESCAPED value (THE
+      // load-bearing %20-escape contract pin for the hall path)
+      assert(failedLine.contains("error=invalid%20playing%20hall%20config%20with%20spaces"),
+        clue = s"playing-hall job-failed line MUST carry the %20-escaped error string `error=invalid%20playing%20hall%20config%20with%20spaces` per JobQueue.scala line 615's `error.replace(\" \", \"%20\")` escape applied to the backend Left value -- the %20-escape contract from 6b59ce4 applied to the hall emission site; a refactor that dropped the escape ONLY on the hall-side line (without touching the analyze-side at line 322) would silently emit unescaped errors on hall failures, an asymmetric-drift case the 6b59ce4 pin alone doesn't catch; got: $failedLine")
+      // (x) ESCAPE-CONTRACT VERIFICATION: must NOT contain the
+      // UNESCAPED form (matches 6b59ce4 + e43081b pattern)
+      assert(!failedLine.contains("invalid playing hall config with spaces"),
+        clue = s"playing-hall job-failed line MUST NOT contain the UNESCAPED form 'invalid playing hall config with spaces' (with literal spaces) -- catches a refactor dropping the escape on the hall-side specifically; got: $failedLine")
+      // (xi) WARN level
+      assert(failedLine.contains("[WARN]"),
+        clue = s"playing-hall job-failed line must be WARN-level per JobQueue.scala line 614's logWarn call; matches 6b59ce4's analyze-failure WARN level; got: $failedLine")
+      assert(failedLine.contains("[hand-history-review]"),
+        clue = s"playing-hall job-failed line must carry the [hand-history-review] service-tag prefix; got: $failedLine")
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
