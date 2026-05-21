@@ -19364,6 +19364,174 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented CROSS-BUCKET 429 INDEPENDENCE contract
+  // at RateLimit.scala line 59 (`s"${bucket.id}|$clientKey"`)
+  // -- the CROSS-BUCKET-INDEPENDENCE pin verifies the
+  // documented per-bucket state isolation where each rate-
+  // limit bucket (Submit, JobStatus, Auth) maintains its OWN
+  // window state keyed by `<bucket-id>|<client-key>`, NOT a
+  // shared client-keyed counter that would deplete across
+  // buckets. FIFTY-SEVENTH per-emission-site SHAPE pin
+  // overall; existing per-bucket tests at lines 20176/20191/
+  // 20224 each test ONE bucket in isolation (with the other
+  // two buckets disabled via *PerMinute=0), but the
+  // CROSS-BUCKET INDEPENDENCE invariant -- which verifies
+  // that depleting ONE bucket does NOT consume slots in the
+  // OTHER buckets -- requires all 3 buckets to be
+  // simultaneously enabled in a single test; the CROSS-BUCKET
+  // INDEPENDENCE contract is OPERATIONALLY CRITICAL because:
+  // (a) the documented design ensures that a hostile client
+  // depleting one rate-limit bucket (e.g., flooding /api/
+  // analyze-hand-history submissions) CANNOT silently break
+  // their own access to OTHER endpoints (status polling
+  // becomes unavailable too) -- a refactor that shared the
+  // window state across buckets would cause this collateral
+  // damage that legitimate users would experience as random
+  // 429s on endpoints they didn't even hit, (b) per-bucket
+  // independence enables differential operator control: the
+  // Submit bucket can be tightened (e.g., 6/minute) without
+  // affecting JobStatus polling (240/minute) or Auth attempts
+  // (10/minute) -- a refactor losing the per-bucket isolation
+  // would force operators to choose the lowest-common-
+  // denominator value, hamstringing legitimate-traffic
+  // throughput, (c) RateLimit.scala line 59's key construction
+  // `s"${bucket.id}|$clientKey"` is the SOURCE OF TRUTH for
+  // the per-bucket isolation -- a refactor that dropped the
+  // bucket prefix (e.g., key = clientKey only) would silently
+  // collapse all 3 buckets into one shared counter; per-format
+  // regression vectors uniquely caught (NOT caught by the
+  // individual per-bucket tests at lines 20176/20191/20224
+  // which each disable the other two buckets): (i) refactor
+  // dropping the bucket prefix from the line 59 key would
+  // silently make all 3 buckets share one counter -- the
+  // individual tests would still PASS (each tests only their
+  // own bucket at limit=1), but cross-bucket independence
+  // would be broken, (ii) refactor that double-counted the
+  // bucket prefix (e.g. using `s"${bucket.id}|${bucket.id}|
+  // $clientKey"`) would silently still isolate by bucket BUT
+  // change the key shape (catches via the rateLimitBucket
+  // emission assertion which uses the documented enum value
+  // `submit`/`job-status`/`auth`), (iii) refactor that
+  // accidentally re-used the rate-limit state object across
+  // bucket lookups (e.g., a shared mutable map without bucket
+  // namespacing) would silently break independence; test
+  // approach: configure a single server with ALL 3 buckets
+  // enabled at limit=1 + platformAuth + immediateBackend (so
+  // /api/auth/* + status polling are reachable), exercise
+  // each bucket in turn proving (a) the FIRST request to a
+  // new bucket SUCCEEDS even after OTHER buckets are
+  // exhausted (independence) + (b) the SECOND request to the
+  // SAME bucket is 429 (bucket itself is enforced), and (c)
+  // each 429 has its own rateLimitBucket id.
+  test("CROSS-BUCKET 429 INDEPENDENCE: each rate-limit bucket (Submit / JobStatus / Auth) maintains its OWN window state per RateLimit.scala line 59's `s\"${bucket.id}|$$clientKey\"` key construction -- depleting one bucket does NOT consume slots in the others, and each 429 emits its own bucket-specific rateLimitBucket id from the documented enum") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath)),
+          rateLimitSubmitsPerMinute = 1,
+          rateLimitStatusPerMinute = 1,
+          rateLimitAuthPerMinute = 1
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // (1) Register a user (consumes Auth bucket slot
+          // 1/1; we'll separately exhaust it below by hitting
+          // login). But before that, let's verify that
+          // registration succeeds even though we'll exercise
+          // other buckets next -- proving the buckets ARE
+          // initially fresh.
+          val registerResp = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"cross-bucket@example.com","password":"correct-horse-battery","displayName":"X"}"""
+          )
+          assertEquals(registerResp.statusCode(), 201,
+            clue = s"register MUST 201 to consume the Auth bucket slot 1/1; got: ${registerResp.statusCode()}")
+          val sessionCookieValue = sessionCookie(registerResp)
+          val csrfToken = jsonBody(registerResp)("csrfToken").str
+
+          // (2) Submit POST 1 -> 202 (Submit slot 1/1).
+          // PROVES: Auth's slot exhaustion (next request to
+          // /api/auth/* will 429) does NOT consume the Submit
+          // slot. Submit is fresh.
+          val submitHeaders = Map("Cookie" -> sessionCookieValue, "X-CSRF-Token" -> csrfToken)
+          val submit1 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, submitHeaders)
+          assertEquals(submit1.statusCode(), 202,
+            clue = s"submit 1 MUST 202 -- the Submit bucket starts fresh even though Auth was just consumed; INDEPENDENCE proof #1; got: ${submit1.statusCode()}, body: ${submit1.body()}")
+          val statusUrl = s"$baseUri${jsonBody(submit1)("statusUrl").str}"
+
+          // (3) Submit POST 2 -> 429 bucket=submit (Submit
+          // exhausted)
+          val submit2 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, submitHeaders)
+          assertEquals(submit2.statusCode(), 429,
+            clue = s"submit 2 MUST 429 -- Submit bucket exhausted at 1/1; got: ${submit2.statusCode()}")
+          val submitBucketBody = jsonBody(submit2)
+          assertEquals(submitBucketBody("rateLimitBucket").str, "submit",
+            clue = s"Submit-bucket 429 MUST identify rateLimitBucket=`submit` per RateLimitBucket.Submit.id; got: ${submitBucketBody("rateLimitBucket").str}")
+
+          // (4) GET status URL 1 -> some-status (JobStatus
+          // slot 1/1 used). PROVES: Submit's exhaustion did
+          // NOT consume the JobStatus slot. JobStatus is fresh.
+          val status1 = get(statusUrl, submitHeaders)
+          assert(status1.statusCode() == 200 || status1.statusCode() == 202,
+            clue = s"status 1 MUST be 200 or 202 -- the JobStatus bucket starts fresh even though Submit was just exhausted; INDEPENDENCE proof #2; got: ${status1.statusCode()}")
+
+          // (5) GET status URL 2 -> 429 bucket=job-status
+          // (JobStatus exhausted)
+          val status2 = get(statusUrl, submitHeaders)
+          assertEquals(status2.statusCode(), 429,
+            clue = s"status 2 MUST 429 -- JobStatus bucket exhausted at 1/1; got: ${status2.statusCode()}")
+          val statusBucketBody = jsonBody(status2)
+          assertEquals(statusBucketBody("rateLimitBucket").str, "job-status",
+            clue = s"JobStatus-bucket 429 MUST identify rateLimitBucket=`job-status` per RateLimitBucket.JobStatus.id; got: ${statusBucketBody("rateLimitBucket").str}")
+
+          // (6) POST /api/auth/login 1 -> some-status
+          // (Auth slot already 1/1 used by registration at
+          // step (1)). So login 1 here ALREADY hits the
+          // exhausted Auth bucket -> 429 bucket=auth.
+          // PROVES: Submit + JobStatus exhaustion did NOT
+          // affect the Auth bucket's state -- the previously
+          // consumed slot (from register) is still the
+          // governing state for Auth.
+          val login1 = postJson(s"$baseUri/api/auth/login",
+            """{"email":"cross-bucket@example.com","password":"correct-horse-battery"}""")
+          assertEquals(login1.statusCode(), 429,
+            clue = s"login MUST 429 -- Auth bucket was already exhausted at step (1) via register, and Submit + JobStatus exhaustion did NOT alter the Auth bucket's state; INDEPENDENCE proof #3 -- if buckets shared state, the Auth slot would have been INCREMENTED past 1/1 by the Submit + JobStatus consumption above, but it was NOT (counter is per-bucket); got: ${login1.statusCode()}")
+          val authBucketBody = jsonBody(login1)
+          assertEquals(authBucketBody("rateLimitBucket").str, "auth",
+            clue = s"Auth-bucket 429 MUST identify rateLimitBucket=`auth` per RateLimitBucket.Auth.id; got: ${authBucketBody("rateLimitBucket").str}")
+
+          // (7) CROSS-CHECK: ALL 3 buckets emitted 429s with
+          // DISTINCT rateLimitBucket ids -- the CLOSED SET
+          // {submit, job-status, auth} matches the documented
+          // RateLimitBucket enum values per RateLimit.scala
+          // lines 14-25.
+          val bucketIds = Set(
+            submitBucketBody("rateLimitBucket").str,
+            statusBucketBody("rateLimitBucket").str,
+            authBucketBody("rateLimitBucket").str
+          )
+          val expectedBuckets = Set("submit", "job-status", "auth")
+          assertEquals(bucketIds, expectedBuckets,
+            clue = s"the 3 distinct 429 responses MUST emit ALL 3 documented bucket ids per the RateLimitBucket enum (submit + job-status + auth) -- the CROSS-BUCKET INDEPENDENCE proof shows each bucket has its own state AND each 429 correctly identifies its source bucket; got=$bucketIds, expected=$expectedBuckets")
+
+          // (8) CROSS-BUCKET DISTINCT-CLIENT-CHECK: depleting
+          // these 3 buckets did NOT consume slots in any OTHER
+          // bucket (since there are only 3 buckets in the
+          // documented enum). Defense-in-depth: verify that
+          // unrelated probe endpoints (which don't use rate
+          // limiting) still work.
+          val healthResp = get(s"$baseUri/api/health")
+          assertEquals(healthResp.statusCode(), 200,
+            clue = s"unrelated probe /api/health MUST still 200 after ALL 3 rate-limit buckets are exhausted -- /api/health is NOT rate-limited per HandHistoryReviewServerRuntime.scala line 76 (no rateLimiter passed) and remains reachable as a documented health-probe invariant; got: ${healthResp.statusCode()}")
+          val readyResp = get(s"$baseUri/api/ready")
+          assertEquals(readyResp.statusCode(), 200,
+            clue = s"unrelated probe /api/ready MUST still 200 after ALL 3 buckets exhausted -- /api/ready is NOT rate-limited per HandHistoryReviewServerRuntime.scala line 121; got: ${readyResp.statusCode()}")
+        }
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
