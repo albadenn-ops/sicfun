@@ -13565,6 +13565,146 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented STATUS-POLL-RESPONSE FIELD-SET-SHAPE
+  // for the FAILED terminal state at JobQueue.scala lines
+  // 414-419 -- the FIELD-SET-CARDINALITY pin for status-
+  // poll responses in the FAILURE terminal state, complementing
+  // b3c343f's COMPLETED-state pin to close the
+  // TERMINAL-STATES coverage pair (COMPLETED + FAILED);
+  // FIFTEENTH per-emission-site SHAPE pin overall extending
+  // the JSON CARDINALITY family from b3c343f's COMPLETED
+  // pin to the SECOND terminal state with the asymmetric
+  // 9-field shape (vs COMPLETED's 8-field shape -- FAILED
+  // adds errorStatus + error and omits result); the
+  // FAILED-state shape is OPERATIONALLY CRITICAL because:
+  // (a) the frontend at site.js renders failure UI via the
+  // (errorStatus, error) PAIR -- a refactor consolidating
+  // to a single field (e.g. dropping errorStatus and
+  // emitting error="500: <message>") would silently break
+  // the frontend's HTTP-status-based UI styling (different
+  // colors/icons for 400 vs 500 vs 504), (b) operator
+  // pager rules filter by `body.errorStatus` numeric
+  // comparison (page on 5xx, ticket on 4xx) -- a refactor
+  // emitting errorStatus as a string would silently break
+  // numeric comparison semantics, (c) the documented
+  // ASYMMETRY between FAILED (errorStatus + error) and
+  // COMPLETED (result) is INTENTIONAL: the two terminal
+  // states have orthogonal payloads (failure carries
+  // structured error metadata, success carries the
+  // analysis output) and a refactor consolidating to a
+  // single optional "outcome" field would silently lose
+  // the structural distinction operators rely on for
+  // automated triage; per-format regression vectors
+  // uniquely caught: (i) refactor ADDING the result field
+  // to FAILED state (e.g. "include the partial result if
+  // available") would silently break frontend logic
+  // expecting failure-state to lack result, (ii) refactor
+  // REMOVING errorStatus or error from FAILED state would
+  // silently break pager rules + UI rendering, (iii)
+  // refactor RENAMING errorStatus -> httpStatus or error
+  // -> message would silently break downstream consumers,
+  // (iv) refactor emitting errorStatus as a STRING ("500"
+  // instead of 500) would silently break numeric pager
+  // comparisons + log-aggregator field typing, (v)
+  // refactor mistakenly including pollAfterMs on FAILED
+  // state would silently confuse the frontend polling
+  // logic that uses absence-of-pollAfterMs as the signal
+  // to STOP polling, (vi) refactor renaming durationMs
+  // -> elapsedMs would silently break dashboards keying
+  // on the documented field; test approach mirrors
+  // b3c343f: submit an analyze job with immediateBackend
+  // (Left("invalid hand history format")) to trigger the
+  // FAILED terminal state (classifyAnalysisError returns
+  // 400 for non-prefix-matching error strings -- the
+  // 9f42256 pin verifies this classification), poll until
+  // terminal (using awaitTerminalJob), extract the
+  // response body's field name set, assert it equals
+  // exactly the documented 9-field closed set; uses
+  // immediateBackend so the test runs fast.
+  test("status-poll response body for /api/analyze-hand-history/jobs/<id> in the FAILED state MUST emit EXACTLY the documented 9-field closed set {jobId, status, statusUrl, submittedAtEpochMs, startedAtEpochMs, completedAtEpochMs, durationMs, errorStatus, error} per JobQueue.scala lines 414-419 -- the FIELD-SET-CARDINALITY pin for the FAILURE terminal state closes the TERMINAL-STATES coverage pair (b3c343f COMPLETED + THIS FAILED)") {
+    withStaticSite { staticDir =>
+      // Use Left-returning backend -- classifyAnalysisError
+      // returns 400 (default branch) for "invalid hand
+      // history format" which doesn't match the timeout or
+      // failure prefixes; the resulting Failed state carries
+      // errorStatus=400, error="invalid hand history format"
+      withServer(staticDir, backend = immediateBackend(Left("invalid hand history format"))) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(submit.statusCode(), 202,
+          clue = "analyze submission must return 202 -- the FAILED state happens at WORKER level, not submission")
+        val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+        val terminal = awaitTerminalJob(statusUri)
+        assertEquals(terminal("status").str, "failed",
+          clue = "the immediateBackend(Left(...)) configuration must reach the FAILED terminal state for this pin to inspect the documented 9-field shape")
+
+        val failedFields = terminal.obj.keys.toSet
+
+        // The documented 9-field closed set per JobQueue.scala
+        // lines 414-419 (baseStatus 6 mandatory fields +
+        // durationMs at line 416 + errorStatus at line 417 +
+        // error at line 418).
+        val expectedFields = Set(
+          "jobId",
+          "status",
+          "statusUrl",
+          "submittedAtEpochMs",
+          "startedAtEpochMs",
+          "completedAtEpochMs",
+          "durationMs",
+          "errorStatus",
+          "error"
+        )
+
+        // (i) CARDINALITY
+        assertEquals(failedFields.size, expectedFields.size,
+          clue = s"status-poll response for FAILED state MUST have exactly ${expectedFields.size} fields per JobQueue.scala lines 414-419 -- a refactor ADDING or REMOVING a field would silently change the documented terminal-state contract; got actual=${failedFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- failedFields).toVector.sorted.mkString(", ")}, extra=${(failedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(failedFields, expectedFields,
+          clue = s"status-poll response field NAME SET for FAILED state MUST equal exactly the documented 9-field closed set per JobQueue.scala lines 414-419 -- a refactor RENAMING any field (e.g. errorStatus -> httpStatus, error -> message) would silently break frontend rendering + operator pager rules; got actual=${failedFields.toVector.sorted.mkString(", ")}; expected=${expectedFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- failedFields).toVector.sorted.mkString(", ")}; extra=${(failedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) ABSENCE: pollAfterMs MUST NOT be present on
+        // terminal states (terminal-state purity catch
+        // matching b3c343f's pattern)
+        assert(!failedFields.contains("pollAfterMs"),
+          clue = s"status-poll response for FAILED state MUST NOT contain `pollAfterMs` (the field is non-terminal-state-only per JobQueue.scala line 441's conditional emission) -- a refactor emitting pollAfterMs on terminal states would silently confuse the frontend polling logic; got: ${failedFields.toVector.sorted.mkString(", ")}")
+
+        // (iv) ABSENCE: result MUST NOT be present on FAILED
+        // state (result is Completed-state-only per JobQueue
+        // .scala line 412 -- the documented terminal-state
+        // ASYMMETRY between Completed and Failed payloads)
+        assert(!failedFields.contains("result"),
+          clue = s"status-poll response for FAILED state MUST NOT contain `result` (the field is Completed-state-only per JobQueue.scala line 412) -- the documented terminal-state ASYMMETRY between Completed (result) and Failed (errorStatus + error) is INTENTIONAL: a refactor conflating the two payloads (e.g. always emitting result with null on failure) would silently lose the structural distinction operators rely on for automated triage; got: ${failedFields.toVector.sorted.mkString(", ")}")
+
+        // (v) PRESENCE: errorStatus + error PAIR (explicit
+        // assertions despite redundancy with tier (ii) --
+        // make the failure-payload contract visible)
+        assert(failedFields.contains("errorStatus"),
+          clue = s"status-poll response for FAILED state MUST contain `errorStatus` per JobQueue.scala line 417's emission -- this is the HTTP-status code (from classifyAnalysisError at lines 763-766) that operators key on for triage routing; got: ${failedFields.toVector.sorted.mkString(", ")}")
+        assert(failedFields.contains("error"),
+          clue = s"status-poll response for FAILED state MUST contain `error` per JobQueue.scala line 418's emission -- this is the human-readable error message operators read for diagnostic context; got: ${failedFields.toVector.sorted.mkString(", ")}")
+
+        // (vi) TYPE INVARIANT: errorStatus MUST be a numeric
+        // field (NOT a string) -- the documented contract is
+        // that errorStatus is an HTTP status code as an
+        // integer-valued JSON Num, matching what
+        // classifyAnalysisError returns and what operator
+        // pager rules expect for numeric comparison
+        val errorStatusValue = terminal("errorStatus")
+        assert(errorStatusValue.isInstanceOf[ujson.Num],
+          clue = s"status-poll response for FAILED state MUST emit errorStatus as a ujson.Num (NOT a string) per JobQueue.scala line 417's `ujson.Num(errorStatus)` emission -- a refactor emitting it as a string (e.g. `ujson.Str(errorStatus.toString)`) would silently break operator pager rules + log-aggregator field typing that depend on numeric comparison; got type: ${errorStatusValue.getClass.getSimpleName}, value: $errorStatusValue")
+        // For this test's input (Left("invalid hand history
+        // format") -- doesn't match timeout/failure prefixes,
+        // so classifier returns 400), errorStatus MUST be
+        // exactly 400 per the 9f42256 classifier pin
+        assertEquals(errorStatusValue.num.toInt, 400,
+          clue = s"FAILED state's errorStatus MUST be 400 for the Left('invalid hand history format') backend (the classifyAnalysisError default branch returns 400 for non-prefix-matching strings per JobQueue.scala line 766) -- this is the cross-check between the classifier pin (9f42256) and the status-poll response pin (THIS commit); a regression in EITHER catches the drift; got: ${errorStatusValue.num.toInt}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
