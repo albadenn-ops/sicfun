@@ -13453,6 +13453,118 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented STATUS-POLL-RESPONSE FIELD-SET-SHAPE
+  // for the COMPLETED terminal state at JobQueue.scala
+  // lines 409-413 -- the FIELD-SET-CARDINALITY pin for
+  // status-poll responses in the most-common terminal
+  // state (successful completion), closing the status-
+  // poll-shape gap left by the existing per-state scenario
+  // pins (which verify INDIVIDUAL fields are present but
+  // don't pin the COMPLETE field set as closed);
+  // FOURTEENTH per-emission-site SHAPE pin overall
+  // extending the JSON CARDINALITY family from 202
+  // submission responses (c696482) to STATUS-POLL
+  // responses (THIS commit); the status-poll-response
+  // shape is OPERATIONALLY CRITICAL because: (a) the
+  // frontend at site.js renders the completion state via
+  // ALL 8 fields (jobId for cancel-button correlation +
+  // status for "completed" badge + statusUrl as bookmark
+  // + 3 epochMs timestamps for timeline display +
+  // durationMs for performance metrics + result for the
+  // actual analysis output), (b) the architectural choice
+  // to include ALL 3 epochMs timestamps (submitted +
+  // started + completed) is INTENTIONAL: operators can
+  // compute QUEUE-WAIT-TIME (started - submitted) AND
+  // WORK-DURATION (completed - started) separately for
+  // capacity-planning analysis, (c) the durationMs field
+  // is REDUNDANT with completedAtEpochMs - startedAtEpochMs
+  // but is INTENTIONALLY PRECOMPUTED so dashboards don't
+  // have to do client-side subtraction (a refactor
+  // dropping durationMs "since it's derivable" would
+  // silently increase client-side rendering cost AND
+  // introduce floating-point precision drift across
+  // dashboard implementations); per-format regression
+  // vectors uniquely caught: (i) refactor ADDING a field
+  // (e.g. `workerThreadId` for trace correlation) without
+  // updating documentation OR frontend rendering would
+  // silently widen the contract, (ii) refactor REMOVING
+  // a field (e.g. dropping startedAtEpochMs since it can
+  // be derived) would silently break dashboards, (iii)
+  // refactor RENAMING a field (e.g. `result` -> `output`
+  // for naming consistency) would silently break frontend
+  // rendering, (iv) refactor changing the completion-state
+  // response shape (e.g. moving durationMs INTO the result
+  // object) would silently break shape-flat-key consumers,
+  // (v) refactor mistakenly including pollAfterMs on
+  // terminal state would silently confuse the frontend
+  // polling logic that uses absence-of-pollAfterMs as the
+  // signal to STOP polling; test approach: submit an
+  // analyze job, poll until terminal completion (via
+  // awaitTerminalJob), extract the response body's field
+  // name set, assert it equals exactly the documented
+  // 8-field closed set; uses immediateBackend so the test
+  // runs fast without blocking-coordination machinery.
+  test("status-poll response body for /api/analyze-hand-history/jobs/<id> in the COMPLETED state MUST emit EXACTLY the documented 8-field closed set {jobId, status, statusUrl, submittedAtEpochMs, startedAtEpochMs, completedAtEpochMs, durationMs, result} per JobQueue.scala lines 409-413 -- the FIELD-SET-CARDINALITY pin for the most-common terminal state closes the status-poll-shape gap that existing per-state scenario pins miss") {
+    withStaticSite { staticDir =>
+      withServer(staticDir, backend = immediateBackend(Right(sampleAnalysisResult))) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Submit + poll to terminal completion
+        val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(submit.statusCode(), 202,
+          clue = "analyze submission must return 202 for the status-poll-shape pin to inspect the COMPLETED state")
+        val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+        val terminal = awaitTerminalJob(statusUri)
+        assertEquals(terminal("status").str, "completed",
+          clue = "the immediateBackend(Right(...)) configuration must reach the COMPLETED terminal state for this pin to inspect the documented 8-field shape")
+
+        val completedFields = terminal.obj.keys.toSet
+
+        // The documented 8-field closed set per JobQueue.scala
+        // lines 409-413 (baseStatus 6 mandatory fields +
+        // durationMs at line 411 + result at line 412).
+        val expectedFields = Set(
+          "jobId",
+          "status",
+          "statusUrl",
+          "submittedAtEpochMs",
+          "startedAtEpochMs",
+          "completedAtEpochMs",
+          "durationMs",
+          "result"
+        )
+
+        // (i) CARDINALITY
+        assertEquals(completedFields.size, expectedFields.size,
+          clue = s"status-poll response for COMPLETED state MUST have exactly ${expectedFields.size} fields per JobQueue.scala lines 409-413 -- a refactor ADDING or REMOVING a field would silently change the documented closed-state contract; got actual=${completedFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- completedFields).toVector.sorted.mkString(", ")}, extra=${(completedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(completedFields, expectedFields,
+          clue = s"status-poll response field NAME SET for COMPLETED state MUST equal exactly the documented 8-field closed set per JobQueue.scala lines 409-413 -- a refactor RENAMING any field (e.g. `result` -> `output` for naming consistency) would silently break frontend rendering at site.js + saved curl snippets in OPERATOR_RUNBOOK.md; got actual=${completedFields.toVector.sorted.mkString(", ")}; expected=${expectedFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- completedFields).toVector.sorted.mkString(", ")}; extra=${(completedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) ABSENCE assertion: pollAfterMs MUST NOT be
+        // present on terminal states (the field is only
+        // emitted for non-terminal states per JobQueue.scala
+        // line 441's `pollAfterMs.foreach` conditional)
+        assert(!completedFields.contains("pollAfterMs"),
+          clue = s"status-poll response for COMPLETED state MUST NOT contain `pollAfterMs` (the field is non-terminal-state-only per JobQueue.scala line 441's conditional emission) -- a refactor emitting pollAfterMs on terminal states would silently confuse the frontend polling logic that uses absence-of-pollAfterMs as the signal to STOP polling; got: ${completedFields.toVector.sorted.mkString(", ")}")
+
+        // (iv) ABSENCE assertion: errorStatus/error MUST NOT
+        // be present on COMPLETED state (those fields are
+        // Failed-state-only per JobQueue.scala lines 417-418)
+        assert(!completedFields.contains("errorStatus"),
+          clue = s"status-poll response for COMPLETED state MUST NOT contain `errorStatus` (the field is Failed-state-only per JobQueue.scala line 417); a refactor that emitted errorStatus on COMPLETED state would silently confuse operator triage workflows that filter on errorStatus presence; got: ${completedFields.toVector.sorted.mkString(", ")}")
+        assert(!completedFields.contains("error"),
+          clue = s"status-poll response for COMPLETED state MUST NOT contain `error` (the field is Failed-state-only per JobQueue.scala line 418); got: ${completedFields.toVector.sorted.mkString(", ")}")
+
+        // (v) PRESENCE assertion: durationMs is the
+        // OPERATIONALLY MEANINGFUL precomputed field
+        assert(completedFields.contains("durationMs"),
+          clue = s"status-poll response for COMPLETED state MUST contain `durationMs` per JobQueue.scala line 411's INTENTIONAL precomputation -- a refactor dropping durationMs would silently increase client-side rendering cost AND introduce floating-point precision drift across dashboard implementations; got: ${completedFields.toVector.sorted.mkString(", ")}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
