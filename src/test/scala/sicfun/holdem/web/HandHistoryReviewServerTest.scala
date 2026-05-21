@@ -6658,6 +6658,170 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `[hand-history-review]` service-tag
+  // bracket on every log line per HandHistoryReviewServer
+  // Runtime.scala line 512's `stream.println(s"[$${Instant
+  // .now()}] [$$level] [hand-history-review] $${sanitize
+  // LogMessage(message)}")` template -- the FORMAT-INVARIANT
+  // pin covering the SERVICE-TAG DIMENSION for ALL log-line
+  // emission sites; this commit CLOSES the bracket-dimension
+  // trifecta started by b9fc4d4 (TIMESTAMP) and continued by
+  // d4f5e0f (LEVEL); all 3 pins verify properties enforced
+  // at the log() helper itself (line 510-512) so single pins
+  // cover the ENTIRE family of 30+ log-line emission sites;
+  // the SERVICE-TAG DIMENSION is OPERATIONALLY CRITICAL
+  // because: (a) in a multi-service deployment, ALL services
+  // log to a shared aggregator (e.g. operators run multiple
+  // sicfun services -- hand-history-review for the audit
+  // browser, real-time-coach for the live overlay, batch-
+  // trainer for offline model training); the service-tag is
+  // how operators filter by service in the aggregator's UI
+  // (a Splunk query like `service=hand-history-review level=
+  // ERROR last 1h` requires the service-tag bracket to be
+  // STABLE and DISTINCT from other services), a refactor
+  // changing the tag (e.g. to `hh-review`, `handHistory
+  // Review`, `hand_history_review`) would silently break the
+  // aggregator's saved searches + dashboards, (b) the
+  // runbook references this exact service name in
+  // diagnostic workflows (e.g. "to investigate audit-browser
+  // incidents, search aggregator for `[hand-history-review]`
+  // lines in the affected time window"); a refactor renaming
+  // the tag would silently desync the runbook from
+  // operational reality, (c) operator grep workflows like
+  // `tail -f deploy.log | grep hand-history-review` filter
+  // by the documented service name; a refactor would
+  // silently break these grep pipelines; the service-tag is
+  // emitted as a BAKED-IN STRING LITERAL at line 512's
+  // template -- the value is NOT pulled from configuration
+  // or build metadata, so changing it requires editing the
+  // source code (giving us a single anchor point to pin
+  // against); per-format regression vectors that this pin
+  // catches: (i) refactor renaming the service (e.g.
+  // `hand-history-review` -> `audit-browser` for "marketing
+  // clarity" OR -> `hh-review` for "brevity") would silently
+  // break aggregator saved searches expecting the exact
+  // documented name, (ii) refactor changing the separator
+  // case (e.g. hyphen -> underscore `hand_history_review` OR
+  // camelCase `handHistoryReview`) would silently break
+  // grep patterns expecting hyphen-separated form, (iii)
+  // refactor adding a version suffix (e.g. `hand-history-
+  // review-v2`) would silently desync from documented
+  // workflows that omit the suffix, (iv) refactor changing
+  // the bracket shape (e.g. `<hand-history-review>` or
+  // `(hand-history-review)`) would silently break field
+  // extraction regex patterns, (v) refactor adding padding
+  // inside the brackets like `[ hand-history-review ]`
+  // would silently break tight grep patterns, (vi) refactor
+  // dropping the service-tag entirely (e.g. "the log file
+  // is already named after the service") would silently
+  // break multi-service aggregator workflows that need the
+  // service-tag to distinguish lines from different
+  // services interleaved in the same aggregator index;
+  // test approach mirrors b9fc4d4 + d4f5e0f: capture stdout
+  // around withServer (which emits the startup banner -- a
+  // guaranteed log line with the service-tag), find the
+  // banner line, extract the THIRD bracketed field via
+  // string position arithmetic (the FIRST bracket is the
+  // timestamp pinned by b9fc4d4; the SECOND bracket is the
+  // level pinned by d4f5e0f; the THIRD bracket is the
+  // service-tag pinned by THIS commit); 5-tier format
+  // check: (i) the service-tag bracket starts with `[`
+  // immediately after the level's `] ` separator (catches
+  // dropped-bracket refactors), (ii) the service-tag
+  // bracket closes with `]`, (iii) the bracket content is
+  // EXACTLY the string `hand-history-review` (catches
+  // service-rename refactors, casing refactors, separator-
+  // style refactors, version-suffix refactors -- the most
+  // important assertion in the pin), (iv) the content has
+  // NO padding spaces inside the brackets (catches
+  // `[ hand-history-review ]`), (v) the message field
+  // follows the service-tag bracket with a single space
+  // separator (catches a refactor that changed the message
+  // separator OR appended additional metadata fields after
+  // the service-tag like `[hand-history-review] [region=us-
+  // west]` which would silently break operators expecting
+  // the message immediately after the service-tag).
+  test("log line format pins the documented `[hand-history-review]` service-tag bracket on every log line per HandHistoryReviewServerRuntime.scala line 512's template -- the FORMAT-INVARIANT pin covering the SERVICE-TAG DIMENSION for ALL 30+ log-line emission sites; CLOSES the bracket-dimension trifecta (b9fc4d4 timestamp + d4f5e0f level + THIS service-tag) covering the FULL log() helper template at the line 510-512 level") {
+    withStaticSite { staticDir =>
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      try
+        withServer(staticDir) { _ =>
+          // No HTTP requests -- the startup banner emits
+          // BEFORE the callback executes (the banner emits
+          // via logInfo at HandHistoryReviewServerRuntime
+          // .scala lines 349-350, so the line carries the
+          // service-tag in the THIRD bracket).
+          ()
+        }
+      finally
+        System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val bannerLine = captured.split('\n').iterator
+        .find(_.contains("startup complete"))
+        .getOrElse(fail(s"no `startup complete` line in captured stdout -- the service-tag-format pin needs ANY log line to inspect; the 7c47f88 startup-banner pin should catch this independently; got captured stdout: ${captured.take(800)}"))
+
+      val trimmed = bannerLine.trim
+
+      // Locate the FIRST `]` (timestamp end), then the
+      // SECOND `]` (level end) -- the service-tag bracket
+      // starts immediately after the level bracket's `] `
+      // separator.
+      val firstBracketEnd = trimmed.indexOf("]")
+      assert(firstBracketEnd > 0,
+        clue = s"log line must close the leading `[<timestamp>]` bracket with `]`; got line: ${trimmed.take(100)}")
+      val secondBracketEnd = trimmed.indexOf("]", firstBracketEnd + 1)
+      assert(secondBracketEnd > firstBracketEnd,
+        clue = s"log line must close the level bracket `[<level>]` with `]` (the second `]` after the timestamp's); got line: ${trimmed.take(100)}")
+
+      // (i) the service-tag bracket starts with `[`
+      // immediately after the level's `] ` separator
+      assert(trimmed.length > secondBracketEnd + 2,
+        clue = s"log line must extend past the level bracket + separator; got line: ${trimmed.take(100)}")
+      assert(trimmed.charAt(secondBracketEnd + 1) == ' ',
+        clue = s"the level's `]` MUST be followed by a single space (the documented field separator); got char `${trimmed.charAt(secondBracketEnd + 1)}` at position ${secondBracketEnd + 1}; line: ${trimmed.take(100)}")
+      val thirdBracketStart = secondBracketEnd + 2
+      assert(trimmed.charAt(thirdBracketStart) == '[',
+        clue = s"the service-tag field MUST start with `[` immediately after the level's `] ` separator per line 512's template; a refactor changing the bracket shape to `<` `>` or `(` `)` or dropping the brackets entirely would silently break log aggregator field extraction; got char `${trimmed.charAt(thirdBracketStart)}` (codepoint ${trimmed.charAt(thirdBracketStart).toInt}) at position $thirdBracketStart; line: ${trimmed.take(100)}")
+
+      // (ii) the service-tag bracket closes with `]`
+      val thirdBracketEnd = trimmed.indexOf("]", thirdBracketStart + 1)
+      assert(thirdBracketEnd > thirdBracketStart,
+        clue = s"the service-tag field MUST close with `]`; a refactor leaving the bracket open would silently break grep patterns; got line: ${trimmed.take(100)}")
+      val serviceTagStr = trimmed.substring(thirdBracketStart + 1, thirdBracketEnd)
+
+      // (iii) the bracket content is EXACTLY the string
+      // `hand-history-review` (catches service-rename,
+      // casing, separator-style, version-suffix refactors)
+      assert(serviceTagStr == "hand-history-review",
+        clue = s"service-tag content `$serviceTagStr` MUST be EXACTLY the string `hand-history-review` per HandHistoryReviewServerRuntime.scala line 512's BAKED-IN STRING LITERAL in the s\"...[hand-history-review]...\" template; regression vectors caught: service rename (`audit-browser`, `hh-review`), casing change (`Hand-History-Review`, `HAND-HISTORY-REVIEW`, `handHistoryReview`), separator change (`hand_history_review`, `hand.history.review`), version suffix (`hand-history-review-v2`), prefix change (`sicfun/hand-history-review`); the documented runbook diagnostic workflows + aggregator saved searches + operator grep pipelines ALL depend on this exact literal; got: `$serviceTagStr`; line: ${trimmed.take(100)}")
+
+      // (iv) the service-tag content has NO padding spaces
+      // (defensive -- the exact-match in (iii) would catch
+      // padded variants, but the explicit assertion makes
+      // the contract intent clearer)
+      assert(serviceTagStr.trim == serviceTagStr,
+        clue = s"service-tag content `$serviceTagStr` MUST have NO padding spaces inside the brackets -- catches a refactor injecting whitespace padding (e.g. `[ hand-history-review ]`); got: `$serviceTagStr`")
+
+      // (v) the message field follows the service-tag
+      // bracket with a single space separator (catches a
+      // refactor that changed the separator OR appended
+      // additional metadata fields after the service-tag)
+      assert(trimmed.length > thirdBracketEnd + 2,
+        clue = s"log line must extend past the service-tag bracket + separator (the message field follows); got line: ${trimmed.take(100)}")
+      assert(trimmed.charAt(thirdBracketEnd + 1) == ' ',
+        clue = s"the service-tag's `]` MUST be followed by a single space (the documented separator before the message field); a refactor changing the separator would silently break log aggregator field extraction OR a refactor adding additional metadata brackets after the service-tag (like `[region=us-west]`) would silently break operators expecting the message immediately after the service-tag; got char `${trimmed.charAt(thirdBracketEnd + 1)}` at position ${thirdBracketEnd + 1}; line: ${trimmed.take(100)}")
+      // Verify the next char is NOT `[` -- catches the
+      // additional-metadata-bracket refactor specifically
+      // (the documented format has MESSAGE content here, NOT
+      // another bracket field)
+      assert(trimmed.charAt(thirdBracketEnd + 2) != '[',
+        clue = s"the position immediately after the service-tag bracket + separator MUST contain MESSAGE content, NOT another `[` bracket -- catches a refactor adding additional metadata fields after the service-tag (e.g. `[hand-history-review] [region=us-west] startup complete...`) which would silently break operators expecting the message field directly after the service-tag; got char `${trimmed.charAt(thirdBracketEnd + 2)}` at position ${thirdBracketEnd + 2}; line: ${trimmed.take(100)}")
+    }
+  }
+
   // Pin the documented sanitizeLogMessage END-TO-END escape
   // contract -- the SANITIZATION-INVARIANT pin covering the
   // CONTROL-CHARACTER DIMENSION for ALL log lines that flow
