@@ -17286,6 +17286,120 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented applySecurityHeaders coverage on
+  // the REDIRECT HANDLER (OIDC start endpoint) per AuthStack
+  // .scala line 594 -- the SECURITY-HEADERS-ON-REDIRECT-
+  // HANDLER pin extends the universal-coverage contract
+  // from JsonHandler (5a46898 success + 49523d8 error +
+  // 7125738 OPTIONS) + StaticAssetsHandler (1a93823 404)
+  // to a THIRD HANDLER TYPE; the RedirectHandler at line
+  // 594 ALSO calls applySecurityHeaders at the start of
+  // every handle() invocation BEFORE branch logic, so
+  // redirect responses (302 to OIDC provider) MUST have
+  // the SAME 6 security headers as the OTHER handler
+  // types; with this commit the SECURITY-HEADERS
+  // UNIVERSAL COVERAGE is FULLY CLOSED across ALL THREE
+  // handler types in the codebase; FORTY-THIRD per-
+  // emission-site SHAPE pin overall; the redirect-
+  // handler security-headers coverage is OPERATIONALLY
+  // CRITICAL because: (a) OIDC start redirects are the
+  // entry point to cross-domain auth flows -- if the
+  // redirect response misses CSP, browsers may treat
+  // the response as suspicious + block the redirect,
+  // breaking the documented OIDC flow, (b) the
+  // documented design is "EVERY handler type calls
+  // applySecurityHeaders at the start" -- with this
+  // pin all three handler types are explicitly verified,
+  // (c) the redirect handler is the ONLY remaining
+  // handler type that flows through applySecurityHeaders
+  // and was previously uncovered -- a refactor
+  // dropping the line 594 call would silently affect
+  // every OIDC redirect; per-format regression vectors
+  // uniquely caught (NOT caught by 5a46898 + 49523d8 +
+  // 7125738 + 1a93823 which cover JsonHandler +
+  // StaticAssetsHandler only): (i) refactor dropping the
+  // line 594 applySecurityHeaders call would silently
+  // leave OIDC redirects unprotected, (ii) refactor
+  // introducing a redirect-handler-specific security-
+  // header set (e.g. weaker CSP for redirects) would
+  // silently diverge from the universal contract; test
+  // approach: configure server with OIDC provider, GET
+  // /api/auth/oidc/google/start → 302 redirect to the
+  // provider's authorization URL, verify all 6 security
+  // headers present + values match JsonHandler success-
+  // path.
+  test("RedirectHandler at AuthStack.scala line 594 MUST emit ALL 6 documented security headers on its redirect responses -- the SECURITY-HEADERS-ON-REDIRECT-HANDLER pin closes the THIRD handler type, completing the universal-coverage contract across ALL handler types (JsonHandler + StaticAssetsHandler + THIS RedirectHandler)") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(
+            PlatformUserAuth.Config(
+              storePath = storePath,
+              oidcProviders = Vector(provider)
+            )
+          )
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // GET /api/auth/oidc/google/start → 302 redirect
+          // (the default Java HttpClient doesn't follow
+          // redirects, so we get the 302 directly with its
+          // headers)
+          val redirectResp = get(s"$baseUri${provider.startPath}")
+          assertEquals(redirectResp.statusCode(), 302,
+            clue = "OIDC /start MUST return 302 redirect for this pin to inspect security headers on the redirect response")
+
+          // (i-iv) 4 documented security headers verified
+          assertEquals(headerValue(redirectResp, "Cache-Control"), Some("no-store"),
+            clue = "RedirectHandler 302 response MUST emit `Cache-Control: no-store` per AuthStack.scala line 594's applySecurityHeaders call -- a refactor dropping the call would silently leave OIDC redirect responses cacheable, which could let the browser cache the redirect URL (containing the OAuth state value) for replay")
+          assertEquals(headerValue(redirectResp, "X-Content-Type-Options"), Some("nosniff"),
+            clue = "RedirectHandler 302 response MUST emit `X-Content-Type-Options: nosniff`")
+          assertEquals(headerValue(redirectResp, "X-Frame-Options"), Some("DENY"),
+            clue = "RedirectHandler 302 response MUST emit `X-Frame-Options: DENY`")
+          assertEquals(headerValue(redirectResp, "Referrer-Policy"), Some("no-referrer"),
+            clue = "RedirectHandler 302 response MUST emit `Referrer-Policy: no-referrer` -- ESPECIALLY CRITICAL for OIDC redirects since the OAuth state token in the Location URL could be leaked via Referer header if a downstream page loaded the same browser tab")
+
+          // (v) CSP
+          val csp = headerValue(redirectResp, "Content-Security-Policy")
+            .getOrElse(fail("RedirectHandler 302 response MUST include Content-Security-Policy"))
+          assert(csp.contains("frame-ancestors 'none'"),
+            clue = s"RedirectHandler CSP MUST contain `frame-ancestors 'none'`; got: $csp")
+
+          // (vi) Permissions-Policy
+          val permissionsPolicy = headerValue(redirectResp, "Permissions-Policy")
+            .getOrElse(fail("RedirectHandler 302 response MUST include Permissions-Policy"))
+          assert(permissionsPolicy.contains("camera=()"),
+            clue = s"RedirectHandler Permissions-Policy MUST deny camera access; got: $permissionsPolicy")
+
+          // (vii) AGGREGATE: ALL 6 security headers present
+          val securityHeaderNames = Set(
+            "Cache-Control",
+            "Content-Security-Policy",
+            "Permissions-Policy",
+            "Referrer-Policy",
+            "X-Content-Type-Options",
+            "X-Frame-Options"
+          )
+          val presentHeaders = securityHeaderNames.filter(name => headerValue(redirectResp, name).isDefined)
+          assertEquals(presentHeaders, securityHeaderNames,
+            clue = s"RedirectHandler 302 response MUST have ALL 6 documented security headers from applySecurityHeaders -- the FINAL piece of the universal-coverage contract across ALL THREE handler types (JsonHandler + StaticAssetsHandler + RedirectHandler); got present=${presentHeaders.toVector.sorted.mkString(", ")}, missing=${(securityHeaderNames -- presentHeaders).toVector.sorted.mkString(", ")}")
+
+          // (viii) CROSS-HANDLER CROSS-CHECK with JsonHandler
+          // (5a46898): RedirectHandler's Cache-Control + CSP
+          // EQUAL JsonHandler's values (the SAME helper
+          // produces both)
+          val jsonResp = get(s"$baseUri/api/health")
+          assertEquals(headerValue(redirectResp, "Cache-Control"), headerValue(jsonResp, "Cache-Control"),
+            clue = "RedirectHandler Cache-Control MUST EQUAL JsonHandler Cache-Control (CROSS-HANDLER CONSISTENCY per the SHARED applySecurityHeaders helper -- a refactor diverging values between handler types would silently break the documented universal contract)")
+          assertEquals(headerValue(redirectResp, "Content-Security-Policy"), headerValue(jsonResp, "Content-Security-Policy"),
+            clue = "RedirectHandler CSP MUST EQUAL JsonHandler CSP -- the SAME multi-directive policy applies to ALL handler types")
+        }
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
