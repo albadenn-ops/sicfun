@@ -5497,6 +5497,144 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `client=header:<value>` TRUSTED-HEADER
+  // variant of the rate-limit log line -- the THIRD AND FINAL
+  // client-key prefix completing the 3-of-3 client-key family
+  // (47d91dd remote: + 82bca42 user: + THIS header:); with this
+  // commit the rate-limit log line family covers ALL 3 documented
+  // client-key prefixes from RateLimit.scala's keying logic at
+  // lines 179-182: (a) `header:<value>` -- the trusted-header
+  // path at line 181 when rateLimitClientIpHeader is configured
+  // AND the peer IP is in trustedProxyIps, (b) `remote:<addr>`
+  // -- the fallback IP-based key at line 182 when the trusted-
+  // header path doesn't apply, (c) `user:<userId>` -- the
+  // principalKey path at AuthStack.scala line 666 when
+  // authenticatedUser is non-empty; the trusted-header variant
+  // is REVERSE-PROXY-RELEVANT: in production deployments behind
+  // a load balancer / API gateway, the direct TCP peer is the
+  // proxy, NOT the actual end-user IP; without the trusted-
+  // header path, rate-limit would bucket ALL traffic from the
+  // proxy as a single client (silently consolidating all real
+  // end-users into one bucket and either starving legitimate
+  // users when ONE user misbehaves OR effectively disabling
+  // rate-limit when the cap is bumped high enough to absorb
+  // fleet traffic); the header: prefix lets operators see
+  // "this rejection was for end-user IP 203.0.113.10 (as
+  // forwarded by the trusted proxy)" rather than just the
+  // proxy IP; per-field regression vectors that 47d91dd's
+  // remote: pin doesn't catch: (i) the trusted-proxy
+  // verification path at RateLimit.scala line 180's
+  // `trustsRateLimitClientIpHeader(remoteInetAddress(exchange),
+  // trustedProxyIps)` -- a refactor that bypassed this
+  // verification (e.g. "trust the header for any peer for
+  // simplicity") would silently allow attackers to forge
+  // X-Real-IP values from the open internet, effectively
+  // disabling rate-limiting for any attacker that knows the
+  // configured header name; (ii) the `header:` prefix itself
+  // -- a refactor renaming to e.g. "forwarded:" / "xfwd:" /
+  // "proxy:" would silently break operator dashboards filtering
+  // by the documented header: prefix; (iii) the header-value
+  // PASS-THROUGH semantic -- the prefix MUST be followed by
+  // the literal header value (not e.g. a parsed IP-and-port
+  // tuple); a refactor that normalized the value (e.g. always
+  // emitted just the IP without port, or always lowercased)
+  // would silently drift from the documented "this was the
+  // value the trusted header carried" semantic; test approach:
+  // mirror the existing trusted-header rate-limit test at line
+  // ~10522 (rateLimitClientIpHeader=Some("X-Real-IP") +
+  // rateLimitSubmitsPerMinute=1 + submit twice with same
+  // X-Real-IP value = 1 accepted + 1 rejected) but capture
+  // stderr around the rejected submission and assert the log
+  // line carries `client=header:<value>` (the trusted-header
+  // value) AND does NOT carry `client=remote:` or `client=user:`
+  // (the other client-key prefixes); 9-tier format check
+  // mirroring the prior rate-limit pins with the header-
+  // distinctive client value: (i) `request rate limited`
+  // prefix, (ii) path=/api/analyze-hand-history (same as
+  // 47d91dd), (iii) `client=header:203.0.113.10` (THE
+  // load-bearing trusted-header value pin -- specific value
+  // from the test's forged X-Real-IP header), (iv) EXCLUSION
+  // of `client=remote:` (the 47d91dd-pinned IP-based fallback
+  // -- catches a refactor where the trusted-header path was
+  // bypassed and the fallback fired instead), (v) EXCLUSION
+  // of `client=user:` (the 82bca42-pinned principalKey path
+  // -- catches a refactor where authenticated-user took
+  // precedence over the trusted header, but the test has no
+  // platformAuth so this is defense-in-depth), (vi)
+  // bucket=submit, (vii) limitPerMinute=1, (viii) retryAfterMs=
+  // field, (ix) [WARN] + [hand-history-review].
+  test("rate-limit rejected analyze submission with trusted X-Real-IP header emits the documented `client=header:<value>` variant of the rate-limit log line (per RateLimit.scala line 181's trusted-header path when rateLimitClientIpHeader is configured + peer is loopback-trusted) -- closes the 3-of-3 client-key prefix family (remote:/user:/header:) and the 5x bucket × client-key matrix's reachable cells") {
+    withStaticSite { staticDir =>
+      withServer(
+        staticDir,
+        rateLimitSubmitsPerMinute = 1,
+        rateLimitStatusPerMinute = 0,
+        rateLimitClientIpHeader = Some("X-Real-IP")
+      ) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        // Same X-Real-IP value across both submissions so the
+        // trusted-header client key is identical (rate-limit
+        // groups by client key, not by header presence)
+        val clientHeaders = Map("X-Real-IP" -> "203.0.113.10")
+
+        // Submission 1: accepted (consumes the rate-limit slot
+        // keyed by header:203.0.113.10)
+        val accepted = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, clientHeaders)
+        assertEquals(accepted.statusCode(), 202,
+          clue = "first submission with trusted X-Real-IP header must accept (202) to consume the header-keyed rate-limit slot")
+
+        // Submission 2: rejected with 429 + emits log line
+        val errBuf = new java.io.ByteArrayOutputStream()
+        val originalErr = System.err
+        System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+        try
+          val rejected = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, clientHeaders)
+          assertEquals(rejected.statusCode(), 429,
+            clue = "second submission with same trusted X-Real-IP MUST be rate-limited (429) -- the per-header rate-limit cap of 1 should be enforced via the same client key")
+        finally
+          System.setErr(originalErr)
+
+        val captured = errBuf.toString(StandardCharsets.UTF_8)
+        val rateLimitLine = captured.split('\n').iterator
+          .find(_.contains("request rate limited"))
+          .getOrElse(fail(s"no `request rate limited` line in captured stderr for the trusted-header variant; got captured stderr: ${captured.take(2000)}"))
+
+        // (i) prefix
+        assert(rateLimitLine.contains("request rate limited"),
+          clue = s"trusted-header rate-limit line must carry the SAME `request rate limited` prefix matching the prior 4 rate-limit pins; got: $rateLimitLine")
+        // (ii) path
+        assert(rateLimitLine.contains("path=/api/analyze-hand-history"),
+          clue = s"trusted-header rate-limit line must carry the analyze submit path; got: $rateLimitLine")
+        // (iii) THE LOAD-BEARING CHANGE: client=header:<value>
+        assert(rateLimitLine.contains("client=header:203.0.113.10"),
+          clue = s"trusted-header rate-limit line MUST carry `client=header:203.0.113.10` per RateLimit.scala line 181's `s\"header:$$value\"` template -- the value is the literal X-Real-IP header value the test set, passed through without normalization; a refactor renaming the prefix to e.g. `forwarded:` / `xfwd:` / `proxy:` would silently break operator dashboards; a refactor that normalized the value (lowercased, stripped port, etc.) would silently drift from the documented pass-through semantic; a refactor that BYPASSED the trusted-proxy verification at line 180 would silently allow forged X-Real-IP values from the open internet, effectively disabling rate-limiting (and the test would still pass for the contains check, but the EXCLUSION of `remote:` below would distinguish this case from the bypass-and-fallback case); got: $rateLimitLine")
+        // (iv) EXCLUSION of client=remote: (catches refactor
+        // where trusted-header path was bypassed and fallback
+        // fired instead)
+        assert(!rateLimitLine.contains("client=remote:"),
+          clue = s"trusted-header rate-limit line MUST NOT contain `client=remote:` (the 47d91dd-pinned IP-based fallback prefix) -- a refactor where the trusted-header path was bypassed and the fallback fired instead would silently emit the proxy's TCP-peer address as the client key, breaking operator visibility into the actual end-user IP behind the proxy; the EXCLUSION pin is the load-bearing catch for the trusted-header-vs-fallback path ordering; got: $rateLimitLine")
+        // (v) EXCLUSION of client=user: (defense-in-depth for
+        // the precedence order)
+        assert(!rateLimitLine.contains("client=user:"),
+          clue = s"trusted-header rate-limit line MUST NOT contain `client=user:` (the 82bca42-pinned principalKey prefix) -- this test has no platformAuth so principalKey is always None, but the EXCLUSION pins the documented client-key-resolution-precedence ordering as defense-in-depth; a refactor that emitted user: when authenticated would still not affect this test, but the EXCLUSION ensures the test catches a regression that emitted user: regardless of auth state; got: $rateLimitLine")
+        // (vi) bucket=submit (same as 47d91dd)
+        assert(rateLimitLine.contains("bucket=submit"),
+          clue = s"trusted-header rate-limit line must carry bucket=submit matching the analyze-side path; got: $rateLimitLine")
+        // (vii) limitPerMinute=1
+        assert(rateLimitLine.contains("limitPerMinute=1"),
+          clue = s"trusted-header rate-limit line must carry limitPerMinute=1 (the test's configured cap); got: $rateLimitLine")
+        // (viii) retryAfterMs= field
+        assert(rateLimitLine.contains("retryAfterMs="),
+          clue = s"trusted-header rate-limit line must carry retryAfterMs= field; got: $rateLimitLine")
+        // (ix) WARN + service-tag
+        assert(rateLimitLine.contains("[WARN]"),
+          clue = s"trusted-header rate-limit line must be WARN-level matching the prior 4 rate-limit pins; got: $rateLimitLine")
+        assert(rateLimitLine.contains("[hand-history-review]"),
+          clue = s"trusted-header rate-limit line must carry the [hand-history-review] service-tag prefix; got: $rateLimitLine")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
