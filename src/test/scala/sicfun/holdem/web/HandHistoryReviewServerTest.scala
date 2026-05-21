@@ -12932,6 +12932,134 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/health JSON FIELD-SET-SHAPE
+  // at Readiness.scala lines 73-112 -- the FIELD-SET-CARDINALITY
+  // pin verifies the COMPLETE set of documented field names
+  // emitted by /api/health AND the exact total field count,
+  // catching add-field / remove-field / rename-field refactors
+  // that piecewise per-field pins (existing line ~2089-2113,
+  // 8751, 9083, 9117) would miss when fields drift IN PAIRS
+  // (e.g. adding `newField` while renaming `existingField` ->
+  // `newField` would pass per-field absence pins for the
+  // RENAMED field BUT the cardinality would change); TENTH
+  // per-emission-site SHAPE pin overall extending the SHAPE
+  // family from per-field pins to FULL-SET pins (the natural
+  // generalization: 822a0df pinned ENUMS as closed sets,
+  // 99466be similarly, and now THIS commit pins JSON FIELD
+  // NAMES as a closed set); the /api/health field set is
+  // OPERATIONALLY CRITICAL because: (a) dashboard consumers
+  // at site.js render the WHOLE field set (not just specific
+  // fields) -- a refactor adding a new field would silently
+  // appear in dashboards as raw JSON keys without
+  // human-readable formatting, AND a refactor removing a
+  // field would silently leave dashboards with blank cells
+  // OR JS undefined-reference errors, (b) the OPERATOR_RUNBOOK
+  // .md documents the field set explicitly so operators can
+  // grep `body.<field>` queries from saved curl snippets --
+  // a refactor renaming a field would silently break the
+  // saved snippets; (c) the /api/health endpoint is a
+  // versioned API surface even though it's not formally in
+  // a /v1/ path -- the implicit contract is that the field
+  // set is stable across releases; per-format regression
+  // vectors uniquely caught: (i) refactor ADDING a field
+  // (e.g. `gitCommitHash` for traceability OR `cpuLoadAvg`
+  // for capacity monitoring) without updating documentation
+  // OR dashboard formatters would silently widen the
+  // contract, (ii) refactor REMOVING a field (e.g. `uptimeMs`
+  // because "modelSource/startedAtEpochMs already cover the
+  // restart-triage use case") would silently break
+  // dashboard consumers + saved curl snippets, (iii)
+  // refactor RENAMING a field (e.g. `acceptingAnalysisJobs`
+  // -> `analysisOpen` for brevity) would silently break
+  // ALL downstream consumers, (iv) refactor swapping field
+  // ORDER would NOT break consumers (JSON is unordered) BUT
+  // a swap that introduces TYPO field names would be caught
+  // by this pin's set-equality assertion, (v) refactor that
+  // CONDITIONALLY emits fields based on config (e.g. only
+  // include `userAuthMaxUsers` when platformAuth is
+  // enabled) without updating documentation would silently
+  // produce inconsistent JSON shapes -- the pin uses
+  // PLATFORM-AUTH-DISABLED config so the userAuth* fields
+  // are present as `null` (not omitted); test approach:
+  // configure a server with default settings (no auth, no
+  // proxies -- minimal config to exercise the field set in
+  // its baseline form), query /api/health, extract the JSON
+  // object's keys as a Set, assert the Set equals exactly
+  // the documented field-name closed set; this is the
+  // SAME closed-set pattern from 822a0df (enum 5-case
+  // closure) + 99466be (enum 3-case closure) + 9f42256
+  // (function 3-status closure) -- the pattern scales from
+  // enums to JSON object shapes; complementary to the
+  // existing piecewise per-field pins which catch INDIVIDUAL
+  // field regressions but miss the GLOBAL CARDINALITY.
+  test("/api/health JSON response field-set MUST equal exactly the documented 34-field closed set per Readiness.scala lines 73-112 -- the FIELD-SET-CARDINALITY pin catches add-field / remove-field / rename-field refactors that piecewise per-field pins would miss when fields drift in pairs; first JSON-shape closed-set pin extending the enum closed-set pattern (822a0df / 99466be) to JSON object shapes") {
+    withStaticSite { staticDir =>
+      // Use default config (no platformAuth, no proxies) so
+      // the userAuth* fields are present as `null` (not
+      // omitted) -- the JSON SHAPE is the same regardless of
+      // platformAuth state, only the userAuth* VALUES differ
+      val healthBody =
+        withServer(staticDir) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          getJson(s"$baseUri/api/health")
+        }
+
+      // The documented 34-field closed set per Readiness.scala
+      // lines 73-112. Order doesn't matter (JSON is unordered);
+      // the SET equality assertion catches any add/remove/rename.
+      val expectedFields = Set(
+        "ok",
+        "ready",
+        "readyReason",
+        "draining",
+        "acceptingAnalysisJobs",
+        "authenticationEnabled",
+        "authenticationMode",
+        "userAuthMaxUsers",
+        "userAuthStoredUsers",
+        "userAuthActiveSessions",
+        "userAuthPendingOidcFlows",
+        "service",
+        "host",
+        "port",
+        "startedAtEpochMs",
+        "uptimeMs",
+        "modelConfigured",
+        "modelSource",
+        "drainSignalConfigured",
+        "drainSignalPresent",
+        "maxUploadBytes",
+        "analysisTimeoutMs",
+        "playingHallTimeoutMs",
+        "rateLimitSubmitsPerMinute",
+        "rateLimitStatusPerMinute",
+        "rateLimitAuthPerMinute",
+        "rateLimitClientIpSource",
+        "maxConcurrentJobs",
+        "maxQueuedJobs",
+        "activeHttpRequests",
+        "queuedJobs",
+        "runningJobs",
+        "timedOutWorkersInFlight",
+        "retainedTerminalJobs"
+      )
+
+      val actualFields = healthBody.obj.keys.toSet
+
+      // (i) CARDINALITY: exact field count (catches add/remove
+      // refactors that change the total count)
+      assertEquals(actualFields.size, expectedFields.size,
+        clue = s"/api/health JSON object MUST have exactly ${expectedFields.size} fields per Readiness.scala lines 73-112 -- a refactor ADDING a new field (e.g. `gitCommitHash` for traceability) OR REMOVING a documented field (e.g. dropping `uptimeMs` because `startedAtEpochMs` covers the same use case) would silently change the contract; if this assertion fails after an intentional schema change, BOTH the test AND the OPERATOR_RUNBOOK.md schema documentation MUST be updated in the same commit; got actual=${actualFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- actualFields).toVector.sorted.mkString(", ")}, extra=${(actualFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+      // (ii) SET EQUALITY: exact field name set (catches
+      // rename refactors AND any divergence the CARDINALITY
+      // check might miss if fields drift in pairs that
+      // preserve the count)
+      assertEquals(actualFields, expectedFields,
+        clue = s"/api/health JSON object's field NAME SET MUST equal exactly the documented 34-field closed set per Readiness.scala lines 73-112 -- a refactor renaming any field (e.g. `acceptingAnalysisJobs` -> `analysisOpen` for brevity) would silently break ALL downstream consumers (dashboards at site.js + saved curl snippets in OPERATOR_RUNBOOK.md + log-aggregator field extraction); if this assertion fails after an intentional schema change, update BOTH this test AND OPERATOR_RUNBOOK.md schema together; got actual fields=${actualFields.toVector.sorted.mkString(", ")}; expected fields=${expectedFields.toVector.sorted.mkString(", ")}; missing-from-actual=${(expectedFields -- actualFields).toVector.sorted.mkString(", ")}; extra-in-actual=${(actualFields -- expectedFields).toVector.sorted.mkString(", ")}")
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
