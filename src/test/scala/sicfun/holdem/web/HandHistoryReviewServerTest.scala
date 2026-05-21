@@ -17985,6 +17985,168 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented Vary: Accept-Encoding CONDITIONAL EMISSION
+  // contract at StaticAssetsHandler.scala lines 100-103. The
+  // VARY-CONDITIONAL pin verifies the documented closed-set
+  // emission policy where Vary: Accept-Encoding is emitted ONLY
+  // when the content type is compressible (per WebResponses.scala
+  // line 84-89's isCompressibleType -- text/*, application/
+  // javascript, application/json, image/svg+xml). Non-compressible
+  // content types (image/png, image/jpeg, font/woff2,
+  // application/wasm, application/octet-stream, etc.) must NOT
+  // emit the Vary header because there is no encoding variation:
+  // the server NEVER gzip-compresses these types regardless of
+  // the client's Accept-Encoding header, so emitting Vary would
+  // mislead caches into partitioning storage by an axis that
+  // doesn't actually vary the response. FORTY-NINTH per-emission-
+  // site SHAPE pin overall; existing coverage at line 10149-10168
+  // verifies the positive case (compressible HTML -> Vary present
+  // for both with-Accept-Encoding and without), but the NEGATIVE
+  // case (non-compressible content -> Vary ABSENT) is unpinned;
+  // the VARY-CONDITIONAL contract is OPERATIONALLY CRITICAL
+  // because: (a) caches use Vary to partition stored variants by
+  // request header values -- a misleading Vary: Accept-Encoding
+  // on a non-compressible response would silently force caches
+  // to store separate variants for every distinct Accept-Encoding
+  // value (e.g., one for "gzip", another for "gzip, deflate",
+  // another for "br, gzip", etc.) even though the actual
+  // responses are byte-identical, wasting cache storage + cache
+  // hit rate, (b) the documented compressible-type list at
+  // WebResponses.scala lines 84-89 is the SOURCE OF TRUTH for
+  // the Vary emission policy -- a refactor adding a new
+  // compressible type without updating the Vary emission, or
+  // dropping the line 102 `if compressible` guard so Vary is
+  // emitted unconditionally, would silently desync the variant
+  // partitioning from the actual encoding behavior, (c) the
+  // unconditional-emission failure mode is especially harmful
+  // for high-fanout assets (logos, icons, fonts) where a single
+  // mis-emitted Vary multiplies cache pressure across all CDN
+  // edge nodes; per-format regression vectors uniquely caught
+  // (NOT caught by the existing line 10149-10168 test which
+  // covers only compressible content): (i) refactor dropping
+  // the line 102 `if compressible` guard would silently emit
+  // Vary on non-compressible responses, (ii) refactor changing
+  // the Vary value from "Accept-Encoding" to a different token
+  // (e.g., adding ", User-Agent" or replacing with "*") would
+  // silently break cache partitioning by encoding, (iii) refactor
+  // moving the Vary set-call AFTER the 304 sendResponseHeaders
+  // call would silently drop Vary from 304 responses (since the
+  // HttpExchange container locks headers after sendResponseHeaders),
+  // (iv) refactor inverting the conditional (e.g., `if !compressible
+  // then set Vary`) would silently invert the contract; test
+  // approach: create a static dir with BOTH a compressible file
+  // (the default index.html -> text/html) AND a non-compressible
+  // file (logo.png -> image/png), then issue 4 GETs covering
+  // compressible-with-AE, compressible-without-AE, non-compressible-
+  // with-AE, non-compressible-without-AE, plus 2 304 conditional
+  // GETs verifying the Vary preserves the conditional emission
+  // across the 304 branch.
+  test("static handler Vary: Accept-Encoding header is emitted ONLY for compressible content types per StaticAssetsHandler.scala lines 100-103's conditional emission contract + WebResponses.scala lines 84-89's isCompressibleType source-of-truth -- complements the existing line 10149-10168 test (compressible HTML positive case) by closing the NEGATIVE case for non-compressible types (image/png, application/octet-stream, etc.) where Vary must be ABSENT to avoid misleading cache partitioning") {
+    withStaticSite { staticDir =>
+      // Create a non-compressible asset (PNG -- image/png is
+      // not in the WebResponses.scala line 84-89 compressible
+      // list). The minimal 8-byte PNG signature suffices since
+      // the server classifies by extension at WebResponses.scala
+      // line 234, not by content sniffing.
+      java.nio.file.Files.write(
+        staticDir.resolve("logo.png"),
+        Array[Byte](0x89.toByte, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+      )
+
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // (i) COMPRESSIBLE + Accept-Encoding: gzip
+        // -> Vary: Accept-Encoding present (existing coverage,
+        // re-asserted for boundary completeness)
+        val htmlGz = get(s"$baseUri/index.html",
+          Map("Accept-Encoding" -> "gzip"))
+        assertEquals(htmlGz.statusCode(), 200,
+          clue = "compressible HTML with Accept-Encoding: gzip MUST return 200")
+        assertEquals(headerValue(htmlGz, "Vary"), Some("Accept-Encoding"),
+          clue = s"compressible HTML with Accept-Encoding: gzip MUST emit Vary: Accept-Encoding per StaticAssetsHandler.scala line 103; got: ${headerValue(htmlGz, "Vary")}")
+
+        // (ii) COMPRESSIBLE without Accept-Encoding
+        // -> Vary: Accept-Encoding STILL present (the variant
+        // declaration semantic -- caches must partition storage
+        // even when this particular response is uncompressed)
+        val htmlPlain = get(s"$baseUri/index.html")
+        assertEquals(htmlPlain.statusCode(), 200,
+          clue = "compressible HTML without Accept-Encoding MUST return 200")
+        assertEquals(headerValue(htmlPlain, "Vary"), Some("Accept-Encoding"),
+          clue = s"compressible HTML without Accept-Encoding MUST STILL emit Vary: Accept-Encoding per StaticAssetsHandler.scala line 103 -- the variant-declaration semantic ensures caches partition storage by encoding regardless of THIS response's encoding; got: ${headerValue(htmlPlain, "Vary")}")
+
+        // (iii) NON-COMPRESSIBLE with Accept-Encoding: gzip
+        // -> Vary header MUST BE ABSENT per the line 102
+        // `if compressible` guard (the documented closed-set
+        // contract -- non-compressible responses NEVER vary by
+        // Accept-Encoding because the server NEVER gzips them)
+        val pngGz = get(s"$baseUri/logo.png",
+          Map("Accept-Encoding" -> "gzip"))
+        assertEquals(pngGz.statusCode(), 200,
+          clue = "non-compressible PNG with Accept-Encoding: gzip MUST return 200")
+        assertEquals(headerValue(pngGz, "Vary"), None,
+          clue = s"NON-COMPRESSIBLE PNG with Accept-Encoding: gzip MUST NOT emit Vary header per StaticAssetsHandler.scala line 102's `if compressible` guard -- a refactor dropping the guard would silently force caches to partition storage by an axis that doesn't actually vary the response (the server NEVER gzips PNG content); got Vary: ${headerValue(pngGz, "Vary")}")
+
+        // (iv) NON-COMPRESSIBLE Content-Encoding is NOT set
+        // (defense-in-depth: confirms the server is actually
+        // NOT compressing the non-compressible content, so the
+        // Vary-absence contract is semantically correct)
+        assertEquals(headerValue(pngGz, "Content-Encoding"), None,
+          clue = s"NON-COMPRESSIBLE PNG MUST NOT carry Content-Encoding header (the server never gzips non-compressible types regardless of Accept-Encoding -- this is the semantic basis for the Vary-absence contract); got: ${headerValue(pngGz, "Content-Encoding")}")
+
+        // (v) NON-COMPRESSIBLE without Accept-Encoding
+        // -> Vary STILL absent (symmetric with iii)
+        val pngPlain = get(s"$baseUri/logo.png")
+        assertEquals(pngPlain.statusCode(), 200,
+          clue = "non-compressible PNG without Accept-Encoding MUST return 200")
+        assertEquals(headerValue(pngPlain, "Vary"), None,
+          clue = s"NON-COMPRESSIBLE PNG without Accept-Encoding MUST NOT emit Vary header; got Vary: ${headerValue(pngPlain, "Vary")}")
+
+        // (vi) CONDITIONAL 304 BRANCH PRESERVATION on compressible:
+        // when a compressible-type response returns 304, the Vary
+        // header MUST still be present (since the line 102-103
+        // Vary set-call happens BEFORE the 304 branch decision at
+        // line 142 -- catches a refactor that moves the Vary call
+        // after sendResponseHeaders, silently dropping it from 304s)
+        val htmlEtag = headerValue(htmlPlain, "ETag")
+          .getOrElse(fail("server MUST emit ETag on compressible 200 to drive the 304 path"))
+        val html304 = get(s"$baseUri/index.html",
+          Map("If-None-Match" -> htmlEtag))
+        assertEquals(html304.statusCode(), 304,
+          clue = s"GET with matching If-None-Match MUST return 304 to drive the 304-preserves-Vary check; got: ${html304.statusCode()}")
+        assertEquals(headerValue(html304, "Vary"), Some("Accept-Encoding"),
+          clue = s"304 response from compressible type MUST STILL include Vary: Accept-Encoding (the line 102-103 set happens BEFORE the line 142 304 branch); a refactor moving Vary set after sendResponseHeaders would silently drop Vary from 304 responses, breaking cache partitioning for revalidated entries; got: ${headerValue(html304, "Vary")}")
+
+        // (vii) CONDITIONAL 304 BRANCH PRESERVATION on
+        // non-compressible: 304 from non-compressible type
+        // ALSO has NO Vary (the symmetric absence preserved
+        // across the 304 branch)
+        val pngEtag = headerValue(pngPlain, "ETag")
+          .getOrElse(fail("server MUST emit ETag on non-compressible 200 to drive the 304 path"))
+        val png304 = get(s"$baseUri/logo.png",
+          Map("If-None-Match" -> pngEtag))
+        assertEquals(png304.statusCode(), 304,
+          clue = s"GET with matching If-None-Match on PNG MUST return 304 to drive the symmetric-absence check; got: ${png304.statusCode()}")
+        assertEquals(headerValue(png304, "Vary"), None,
+          clue = s"304 response from NON-compressible type MUST STILL omit Vary (the conditional absence is preserved across the 304 branch -- catches a refactor that adds Vary unconditionally in the 304 path); got: ${headerValue(png304, "Vary")}")
+
+        // (viii) CLOSED-SET assertion: Vary value is EXACTLY
+        // "Accept-Encoding" with no extra tokens (catches a
+        // refactor that adds additional Vary axes like
+        // "Accept-Encoding, User-Agent" or "*" wildcard --
+        // both would silently widen the cache partitioning
+        // contract beyond the documented Accept-Encoding-only
+        // axis)
+        val varyValues = Set(htmlGz, htmlPlain, html304)
+          .map(r => headerValue(r, "Vary"))
+          .flatten
+        assertEquals(varyValues, Set("Accept-Encoding"),
+          clue = s"the static handler MUST emit EXACTLY one Vary value `Accept-Encoding` across all 3 compressible-response paths (with-AE 200, without-AE 200, 304) -- a refactor adding extra Vary tokens (e.g., User-Agent) or replacing with `*` would silently widen the partitioning axis; got distinct Vary values: $varyValues")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
