@@ -17062,6 +17062,125 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented applySecurityHeaders UNIVERSAL
+  // coverage MUST extend to OPTIONS-preflight responses
+  // per AuthStack.scala line 557's pre-handler invocation
+  // -- the SECURITY-HEADERS-ON-OPTIONS pin closes the
+  // THIRD response-path branch of the universal-coverage
+  // contract (5a46898 success path + 49523d8 error path +
+  // THIS OPTIONS preflight path); ALL JsonHandler
+  // responses -- regardless of whether the handler returns
+  // a JsonResponse (200/202/4xx/5xx) OR an OPTIONS
+  // preflight via optionsResponse(...) -- flow through the
+  // SAME line 557 applySecurityHeaders call BEFORE branch
+  // logic, so OPTIONS preflight responses MUST also have
+  // the documented 6 security headers; FORTY-FIRST per-
+  // emission-site SHAPE pin overall; the OPTIONS-preflight
+  // security-headers coverage is OPERATIONALLY CRITICAL
+  // because: (a) OPTIONS preflight is what browsers issue
+  // BEFORE non-simple cross-origin requests -- if the
+  // preflight response misses security headers, browsers
+  // may treat the response as suspicious + block the
+  // actual request, breaking cross-origin scenarios, (b)
+  // the documented design is "applySecurityHeaders is
+  // called ONCE at the start of every JsonHandler
+  // invocation, BEFORE any branch logic" -- a refactor
+  // moving it into specific response-type branches (e.g.
+  // success-only) would silently drop the headers on
+  // OPTIONS preflight, (c) the 5a46898 + 49523d8 pair
+  // covered success + error paths but the OPTIONS path
+  // was uncovered -- a refactor could affect OPTIONS
+  // specifically without breaking those pins; per-format
+  // regression vectors uniquely caught (NOT caught by
+  // 5a46898 or 49523d8): (i) refactor branching
+  // applySecurityHeaders application to skip OPTIONS
+  // ("CORS preflight doesn't need security headers")
+  // would silently drop the headers on OPTIONS, (ii)
+  // refactor moving applySecurityHeaders into the
+  // JsonResponse-writing branch only (line 574) would
+  // silently affect OPTIONS responses (which also flow
+  // through writeJson at the same line), but if the
+  // refactor moved AFTER the optionsResponse path it
+  // would specifically drop OPTIONS headers; test approach
+  // mirrors 49523d8 but targets an OPTIONS request:
+  // OPTIONS /api/playing-hall/jobs/<id>, verify all 6
+  // security headers present + the security-header values
+  // match success-path (5a46898) + error-path (49523d8).
+  test("applySecurityHeaders UNIVERSAL coverage MUST extend to OPTIONS-preflight responses too -- the SECURITY-HEADERS-ON-OPTIONS complement to 5a46898's success-path + 49523d8's error-path pins closes the documented universal-coverage contract: applySecurityHeaders is called at AuthStack.scala line 557 BEFORE any branch logic, so OPTIONS preflight responses MUST have the same 6 headers as success + error responses") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Send OPTIONS preflight to /api/playing-hall/jobs/<id>
+        // (the same endpoint used by 22671ec's OPTIONS-preflight
+        // shape pin)
+        val optionsResp = httpClient.send(
+          HttpRequest.newBuilder()
+            .uri(URI.create(s"$baseUri/api/playing-hall/jobs/00000000-0000-0000-0000-000000000000"))
+            .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+            .build(),
+          HttpResponse.BodyHandlers.ofString()
+        )
+        assertEquals(optionsResp.statusCode(), 200,
+          clue = "OPTIONS preflight MUST return 200 for this pin to inspect the security headers on the preflight response")
+
+        // (i) Cache-Control: no-store on OPTIONS preflight
+        assertEquals(headerValue(optionsResp, "Cache-Control"), Some("no-store"),
+          clue = "OPTIONS preflight response MUST emit `Cache-Control: no-store` per applySecurityHeaders at WebResponses.scala line 115 -- a refactor branching the security-headers application to skip OPTIONS (e.g. \"CORS preflight doesn't need security headers\") would silently drop this header on OPTIONS responses; browsers may treat preflight responses as suspicious + block the actual request if security headers are missing")
+
+        // (ii) X-Content-Type-Options: nosniff on OPTIONS
+        assertEquals(headerValue(optionsResp, "X-Content-Type-Options"), Some("nosniff"),
+          clue = "OPTIONS preflight response MUST emit `X-Content-Type-Options: nosniff` per applySecurityHeaders -- the universal-coverage contract spans ALL JsonHandler response paths including OPTIONS preflight")
+
+        // (iii) X-Frame-Options: DENY on OPTIONS
+        assertEquals(headerValue(optionsResp, "X-Frame-Options"), Some("DENY"),
+          clue = "OPTIONS preflight response MUST emit `X-Frame-Options: DENY` per applySecurityHeaders")
+
+        // (iv) Referrer-Policy on OPTIONS
+        assertEquals(headerValue(optionsResp, "Referrer-Policy"), Some("no-referrer"),
+          clue = "OPTIONS preflight response MUST emit `Referrer-Policy: no-referrer` per applySecurityHeaders")
+
+        // (v) Content-Security-Policy on OPTIONS
+        val csp = headerValue(optionsResp, "Content-Security-Policy")
+          .getOrElse(fail("OPTIONS preflight response MUST include Content-Security-Policy header per applySecurityHeaders"))
+        assert(csp.contains("frame-ancestors 'none'"),
+          clue = s"OPTIONS preflight CSP MUST contain `frame-ancestors 'none'` matching the documented value from 5a46898 + 49523d8; got: $csp")
+
+        // (vi) Permissions-Policy on OPTIONS
+        val permissionsPolicy = headerValue(optionsResp, "Permissions-Policy")
+          .getOrElse(fail("OPTIONS preflight response MUST include Permissions-Policy header"))
+        assert(permissionsPolicy.contains("camera=()"),
+          clue = s"OPTIONS preflight Permissions-Policy MUST deny camera access; got: $permissionsPolicy")
+
+        // (vii) AGGREGATE catch: ALL 6 security headers
+        // present on the OPTIONS response
+        val securityHeaderNames = Set(
+          "Cache-Control",
+          "Content-Security-Policy",
+          "Permissions-Policy",
+          "Referrer-Policy",
+          "X-Content-Type-Options",
+          "X-Frame-Options"
+        )
+        val presentHeaders = securityHeaderNames.filter(name => headerValue(optionsResp, name).isDefined)
+        assertEquals(presentHeaders, securityHeaderNames,
+          clue = s"OPTIONS preflight response MUST have ALL 6 documented security headers from applySecurityHeaders -- the documented universal-coverage contract per the line 557 pre-handler invocation extends to OPTIONS responses; a refactor that branched applySecurityHeaders to skip OPTIONS would silently drop ALL 6 headers on every preflight; got present=${presentHeaders.toVector.sorted.mkString(", ")}, missing=${(securityHeaderNames -- presentHeaders).toVector.sorted.mkString(", ")}")
+
+        // (viii) CROSS-CHECK with 5a46898 + 49523d8:
+        // OPTIONS response's Cache-Control matches both
+        // success (200) + error (404) responses' values
+        // (all three come from the SAME applySecurityHeaders
+        // helper called BEFORE branch logic)
+        val successResp = get(s"$baseUri/api/health")
+        val errorResp = get(s"$baseUri/api/playing-hall/jobs/00000000-0000-0000-0000-000000000000")
+        assertEquals(headerValue(optionsResp, "Cache-Control"), headerValue(successResp, "Cache-Control"),
+          clue = "OPTIONS preflight Cache-Control MUST EQUAL 200 SUCCESS Cache-Control -- both come from applySecurityHeaders; a refactor diverging values between OPTIONS + other paths would silently break the universal-coverage contract")
+        assertEquals(headerValue(optionsResp, "Cache-Control"), headerValue(errorResp, "Cache-Control"),
+          clue = "OPTIONS preflight Cache-Control MUST EQUAL 404 ERROR Cache-Control (symmetric with the success-path check) -- THE THREE-WAY CROSS-CHECK between OPTIONS + 200 + 4xx responses verifies the universal-coverage contract holds across ALL JsonHandler response paths")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
