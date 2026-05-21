@@ -13060,6 +13060,141 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/ready JSON FIELD-SET-SHAPE at
+  // Readiness.scala lines 129-153 -- the FIELD-SET-CARDINALITY
+  // pin for the ORCHESTRATOR-FACING endpoint complementing
+  // 08b35f1's OPERATOR-FACING /api/health pin; the
+  // documented asymmetry between the two endpoints is
+  // PRESERVED by this pin: /api/ready emits 23 fields
+  // (strict subset of /api/health's 34 plus the renamed
+  // `reason` field vs /api/health's `readyReason`), the
+  // smaller set reflects the ORCHESTRATOR-LEVEL contract
+  // (load balancer / kubernetes probe / circuit breaker)
+  // which doesn't need operator-side fields like
+  // `userAuth*`, `startedAtEpochMs`, `uptimeMs`,
+  // `modelConfigured`, `modelSource`, `maxUploadBytes`,
+  // `retainedTerminalJobs`; ELEVENTH per-emission-site
+  // SHAPE pin overall extending the JSON FIELD-SET
+  // CARDINALITY pattern from 08b35f1 (/api/health) to a
+  // SECOND endpoint with an ASYMMETRIC field set; the
+  // asymmetry catches a refactor that consolidated the
+  // two endpoints into a single shared field set "for
+  // simplicity"; the /api/ready field set is OPERATIONALLY
+  // CRITICAL because: (a) kubernetes / load balancer probes
+  // ping this endpoint repeatedly and parse the JSON for
+  // `ready` boolean -- a refactor changing the field
+  // structure (e.g. dropping fields the probe doesn't
+  // strictly need) might break the probe's response-size
+  // expectations OR break custom probe implementations
+  // that key on other fields, (b) circuit breakers
+  // implemented by upstream proxies key on the
+  // `acceptingAnalysisJobs` field to decide when to mark
+  // the instance as out-of-service -- a refactor renaming
+  // this field would silently break the circuit breaker
+  // logic, (c) the documented STRICT-SUBSET relationship
+  // with /api/health is the IMPLICIT CONTRACT that lets
+  // dashboards built for /api/health fall back to
+  // /api/ready for partially-degraded operations -- a
+  // refactor introducing /api/ready-only fields would
+  // silently break this fallback assumption, (d) the
+  // `reason` vs `readyReason` rename is the documented
+  // ASYMMETRY between the two endpoints (line 134 vs line
+  // 75): /api/ready uses the shorter `reason` because the
+  // orchestrator-side context implies "the reason WHY
+  // ready is true/false", while /api/health uses
+  // `readyReason` because operators reading the JSON need
+  // the `ready` prefix as namespace context to
+  // distinguish from other reason-fields the operator-
+  // side JSON could include; per-format regression vectors
+  // uniquely caught: (i) refactor consolidating
+  // /api/health + /api/ready field sets into a single
+  // shared shape would silently break the documented
+  // strict-subset contract + the renamed `reason` vs
+  // `readyReason` asymmetry, (ii) refactor renaming
+  // `reason` to `readyReason` "for consistency with
+  // /api/health" would silently drop the documented
+  // asymmetry + break orchestrator probes keying on
+  // `reason`, (iii) refactor adding new /api/ready-only
+  // fields (e.g. `lastProbeAtMs` for self-introspection)
+  // would silently widen the orchestrator contract +
+  // increase parse cost on high-frequency probes; test
+  // approach mirrors 08b35f1: configure default server,
+  // query /api/ready, assert the JSON object's keys
+  // equal exactly the documented 23-field closed set.
+  test("/api/ready JSON response field-set MUST equal exactly the documented 23-field closed set per Readiness.scala lines 130-152 -- the FIELD-SET-CARDINALITY pin for the ORCHESTRATOR-FACING endpoint complementing 08b35f1's OPERATOR-FACING /api/health pin; the asymmetric `reason` vs `readyReason` field name + the smaller field set vs /api/health are INTENTIONAL design decisions that this pin preserves") {
+    withStaticSite { staticDir =>
+      val readyBody =
+        withServer(staticDir) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          getJson(s"$baseUri/api/ready")
+        }
+
+      // The documented 23-field closed set per Readiness.scala
+      // lines 130-152. Note the asymmetric `reason` field name
+      // (vs /api/health's `readyReason`) and the absence of:
+      // ok, userAuth*, startedAtEpochMs, uptimeMs,
+      // modelConfigured, modelSource, maxUploadBytes,
+      // retainedTerminalJobs (all of which are operator-side
+      // fields that /api/ready omits per the documented
+      // strict-subset contract).
+      val expectedFields = Set(
+        "service",
+        "host",
+        "port",
+        "ready",
+        "reason",  // NOTE: NOT `readyReason` -- INTENTIONAL ASYMMETRY with /api/health line 75
+        "draining",
+        "acceptingAnalysisJobs",
+        "authenticationEnabled",
+        "authenticationMode",
+        "drainSignalConfigured",
+        "drainSignalPresent",
+        "analysisTimeoutMs",
+        "playingHallTimeoutMs",
+        "rateLimitSubmitsPerMinute",
+        "rateLimitStatusPerMinute",
+        "rateLimitAuthPerMinute",
+        "rateLimitClientIpSource",
+        "activeHttpRequests",
+        "maxConcurrentJobs",
+        "maxQueuedJobs",
+        "queuedJobs",
+        "runningJobs",
+        "timedOutWorkersInFlight"
+      )
+
+      val actualFields = readyBody.obj.keys.toSet
+
+      // (i) CARDINALITY: exact field count (catches add/remove
+      // refactors that change the total count)
+      assertEquals(actualFields.size, expectedFields.size,
+        clue = s"/api/ready JSON object MUST have exactly ${expectedFields.size} fields per Readiness.scala lines 130-152 -- a refactor ADDING a new field would silently widen the orchestrator contract + increase parse cost on high-frequency probes; a refactor REMOVING a documented field would silently break orchestrator probes keying on the removed field; if this assertion fails after an intentional schema change, BOTH the test AND the OPERATOR_RUNBOOK.md schema documentation MUST be updated in the same commit; got actual=${actualFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- actualFields).toVector.sorted.mkString(", ")}, extra=${(actualFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+      // (ii) SET EQUALITY: exact field name set (catches
+      // rename refactors AND the `reason` vs `readyReason`
+      // asymmetric naming)
+      assertEquals(actualFields, expectedFields,
+        clue = s"/api/ready JSON object's field NAME SET MUST equal exactly the documented 23-field closed set per Readiness.scala lines 130-152 -- a refactor renaming the `reason` field to `readyReason` 'for consistency with /api/health' would silently drop the documented asymmetric naming + break orchestrator probes keying on `reason`; a refactor consolidating /api/health + /api/ready field sets into a single shared shape would silently break the documented strict-subset contract; if this assertion fails after an intentional schema change, update BOTH this test AND OPERATOR_RUNBOOK.md schema together; got actual fields=${actualFields.toVector.sorted.mkString(", ")}; expected fields=${expectedFields.toVector.sorted.mkString(", ")}; missing-from-actual=${(expectedFields -- actualFields).toVector.sorted.mkString(", ")}; extra-in-actual=${(actualFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+      // (iii) ASYMMETRY ASSERTION: /api/ready MUST have
+      // `reason` (NOT `readyReason`) -- the documented
+      // asymmetry vs /api/health line 75. This assertion is
+      // partially redundant with tier (ii)'s set equality
+      // BUT the explicit assertion makes the asymmetry
+      // CONTRACT visible in the test source so future code
+      // reviewers can verify the documented design
+      // decision: /api/ready uses the shorter `reason`
+      // because the orchestrator-side context implies "the
+      // reason WHY ready is true/false", while /api/health
+      // uses `readyReason` because operators reading the
+      // JSON need the `ready` prefix as namespace context
+      // to distinguish from other reason-fields the
+      // operator-side JSON could include.
+      assert(actualFields.contains("reason") && !actualFields.contains("readyReason"),
+        clue = s"/api/ready MUST emit `reason` (NOT `readyReason`) per the documented asymmetry between /api/ready (line 134) + /api/health (line 75) -- a refactor consolidating to a single field name on BOTH endpoints would silently drop this documented asymmetric design decision; got actualFields contains-reason=${actualFields.contains("reason")}, contains-readyReason=${actualFields.contains("readyReason")}")
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
