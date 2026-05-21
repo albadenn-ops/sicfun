@@ -18147,6 +18147,175 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented 304 RESPONSE SHAPE-INVARIANT contract at
+  // StaticAssetsHandler.scala lines 142-143 -- the 304-SHAPE
+  // pin verifies the documented closed set of headers that MUST
+  // be preserved on a 304 Not Modified response (per RFC 7232
+  // sec 4.1's SHOULD-clause) vs the body-specific headers that
+  // MUST be DROPPED. Existing 304 tests assert individual
+  // dimensions in isolation: body emptiness (31839af + 5ba56c5),
+  // ETag presence (31839af), Last-Modified presence (5ba56c5),
+  // Vary preservation across 304 (64f3d4f), but the CLOSED-SET
+  // SHAPE-INVARIANT assertion -- which simultaneously verifies
+  // PRESERVED + ABSENT headers as a single contract -- is
+  // unpinned. FIFTIETH per-emission-site SHAPE pin overall
+  // (50th milestone); the 304-SHAPE contract is OPERATIONALLY
+  // CRITICAL because: (a) RFC 7232 sec 4.1 mandates that a 304
+  // response "MUST generate any of the following header fields
+  // that would have been sent in a 200 OK response to the same
+  // request: Cache-Control, Content-Location, Date, ETag,
+  // Expires, and Vary" -- a refactor that strips ANY of these
+  // headers from the 304 branch silently violates the RFC and
+  // breaks client caches that depend on revalidation header
+  // continuity, (b) the static handler's emission order at
+  // lines 97-103 (Cache-Control + ETag + Last-Modified + Vary)
+  // is BEFORE the line 142 304 branch decision, which means a
+  // refactor moving any header set-call AFTER sendResponseHeaders
+  // would silently drop it from 304 responses (since
+  // HttpExchange locks the response headers map after
+  // sendResponseHeaders is called), (c) the body-specific
+  // headers Content-Type + Content-Encoding MUST be absent
+  // because the 304 response has no body to characterize -- a
+  // refactor that pre-emptively sets Content-Type at the top
+  // of the handler (e.g., moving the line 145/164/171 set-call
+  // before the 304 branch) would silently include Content-Type
+  // in 304 responses, potentially confusing aggressive clients
+  // that interpret Content-Type on 304 as indicating the body
+  // shape; per-format regression vectors uniquely caught (NOT
+  // caught by the individual 304 assertions in other pins): (i)
+  // refactor stripping any of the 4 cache-revalidation headers
+  // (ETag, Last-Modified, Cache-Control, Vary) from the 304
+  // path would silently violate RFC 7232 sec 4.1's MUST-clause
+  // for these headers (note: RFC says SHOULD for some, MUST for
+  // others -- ETag is SHOULD, but our handler unconditionally
+  // emits it via the line 98 set-call ordering), (ii) refactor
+  // adding Content-Type or Content-Encoding to the 304 branch
+  // (or moving them out of the body-emission branches at lines
+  // 145/151/164/165/171) would silently include body-specific
+  // headers on a body-less response, (iii) refactor that drops
+  // any of the 8 security headers from the 304 branch would
+  // silently leave revalidated entries unprotected against the
+  // documented threats (CSP, X-Frame-Options, CORP, etc.), (iv)
+  // refactor that changes the header VALUES between the 200
+  // and 304 responses (e.g., emitting different Cache-Control
+  // on 304 vs 200, breaking the documented "same headers as
+  // 200 OK" contract) would silently desync cache state -- the
+  // cross-check assertion below catches this. Test approach:
+  // GET with Accept-Encoding: gzip to capture the FULL 200
+  // response (compressible variant), then GET with matching
+  // If-None-Match + Accept-Encoding: gzip to trigger 304,
+  // then cross-check that ALL preserved headers carry IDENTICAL
+  // values across the 200 + 304 + verify ABSENT headers + body
+  // emptiness.
+  test("static handler 304 response SHAPE-INVARIANT: closed set of preserved headers (ETag + Last-Modified + Cache-Control + Vary + 8 security headers) carry IDENTICAL values to the originating 200, while body-specific headers (Content-Type, Content-Encoding) are absent + body is empty per StaticAssetsHandler.scala lines 142-143's documented 304-branch contract + RFC 7232 sec 4.1's SHOULD-clause + applySecurityHeaders inheritance") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // (1) Establish the 200 baseline (compressible variant
+        // with Accept-Encoding: gzip so the full set including
+        // Content-Encoding + Vary is in play)
+        val baseline = get(s"$baseUri/index.html",
+          Map("Accept-Encoding" -> "gzip"))
+        assertEquals(baseline.statusCode(), 200,
+          clue = "baseline GET MUST return 200 to establish the preserved-header values")
+
+        val baselineEtag = headerValue(baseline, "ETag")
+          .getOrElse(fail("baseline 200 MUST emit ETag to drive the If-None-Match revalidation"))
+        val baselineLastModified = headerValue(baseline, "Last-Modified")
+          .getOrElse(fail("baseline 200 MUST emit Last-Modified"))
+        val baselineCacheControl = headerValue(baseline, "Cache-Control")
+          .getOrElse(fail("baseline 200 MUST emit Cache-Control"))
+        val baselineVary = headerValue(baseline, "Vary")
+          .getOrElse(fail("baseline 200 (compressible) MUST emit Vary"))
+        val baselineCsp = headerValue(baseline, "Content-Security-Policy")
+          .getOrElse(fail("baseline 200 MUST emit Content-Security-Policy"))
+
+        // (2) Trigger 304 via matching If-None-Match
+        val revalidated = get(s"$baseUri/index.html",
+          Map("If-None-Match" -> baselineEtag, "Accept-Encoding" -> "gzip"))
+        assertEquals(revalidated.statusCode(), 304,
+          clue = s"GET with matching If-None-Match MUST return 304 to drive the SHAPE-INVARIANT check; got: ${revalidated.statusCode()}")
+
+        // (3) 304 body is empty per RFC 7232 sec 4.1
+        assertEquals(revalidated.body(), "",
+          clue = s"304 response body MUST be empty per RFC 7232 sec 4.1 (304 MUST NOT include a message-body); got body length: ${revalidated.body().length}")
+
+        // (4) CROSS-CHECK: preserved cache-revalidation headers
+        // carry IDENTICAL values to the originating 200 per RFC
+        // 7232 sec 4.1's "same headers as 200 OK" contract
+        assertEquals(headerValue(revalidated, "ETag"), Some(baselineEtag),
+          clue = s"304 ETag MUST equal the 200's ETag per RFC 7232 sec 4.1 (the validator that triggered the 304 is canonical); a refactor changing the ETag emission between 200 and 304 would silently desync client caches; 200=$baselineEtag, 304=${headerValue(revalidated, "ETag")}")
+        assertEquals(headerValue(revalidated, "Last-Modified"), Some(baselineLastModified),
+          clue = s"304 Last-Modified MUST equal the 200's Last-Modified per RFC 7232 sec 4.1; 200=$baselineLastModified, 304=${headerValue(revalidated, "Last-Modified")}")
+        assertEquals(headerValue(revalidated, "Cache-Control"), Some(baselineCacheControl),
+          clue = s"304 Cache-Control MUST equal the 200's Cache-Control per RFC 7232 sec 4.1 (Cache-Control is explicitly listed in the SHOULD-clause); 200=$baselineCacheControl, 304=${headerValue(revalidated, "Cache-Control")}")
+        assertEquals(headerValue(revalidated, "Vary"), Some(baselineVary),
+          clue = s"304 Vary MUST equal the 200's Vary per RFC 7232 sec 4.1 (Vary is explicitly listed in the SHOULD-clause -- without it caches cannot determine whether the 304 applies to the variant they stored); 200=$baselineVary, 304=${headerValue(revalidated, "Vary")}")
+
+        // (5) CROSS-CHECK: 8 security headers preserved across
+        // 304 with IDENTICAL values per the applySecurityHeaders
+        // inheritance contract (the line 25 call at the top of
+        // handle() runs BEFORE the 304 branch decision)
+        assertEquals(headerValue(revalidated, "Content-Security-Policy"), Some(baselineCsp),
+          clue = s"304 Content-Security-Policy MUST equal the 200's CSP -- security headers MUST be preserved across 304 because revalidated cache entries are served to the user just like the original 200; a refactor that strips CSP from 304 would silently leave revalidated entries unprotected against XSS; 200=$baselineCsp, 304=${headerValue(revalidated, "Content-Security-Policy")}")
+        val securityHeaders = Seq(
+          "X-Content-Type-Options",
+          "X-Frame-Options",
+          "Referrer-Policy",
+          "Permissions-Policy",
+          "Cross-Origin-Opener-Policy",
+          "Cross-Origin-Resource-Policy",
+          "X-Robots-Tag"
+        )
+        securityHeaders.foreach { header =>
+          assertEquals(headerValue(revalidated, header), headerValue(baseline, header),
+            clue = s"304 security header `$header` MUST equal the 200's value (preserved via applySecurityHeaders inheritance through the line 25 set-call ordering BEFORE the line 142 304 branch); a refactor moving applySecurityHeaders after sendResponseHeaders would silently drop ALL security headers from 304 responses, leaving revalidated entries unprotected; 200=${headerValue(baseline, header)}, 304=${headerValue(revalidated, header)}")
+        }
+
+        // (6) ABSENCE: body-specific headers MUST NOT be on the
+        // 304 response. Content-Type + Content-Encoding are set
+        // only in the body-emission branches at lines 145/151/
+        // 164/165/171, all of which run AFTER the line 142 304
+        // branch decision -- a refactor pre-emptively setting
+        // Content-Type at the top of the handler would silently
+        // include it on 304 responses (potentially confusing
+        // aggressive clients that interpret Content-Type on 304
+        // as indicating body shape)
+        assertEquals(headerValue(revalidated, "Content-Type"), None,
+          clue = s"304 response MUST NOT include Content-Type (no body to characterize) per the static handler's emission ordering at lines 144/164/171 where Content-Type is set only AFTER the 304 branch decision; a refactor that pre-emptively sets Content-Type at the top of the handler would silently include it on 304 responses; got: ${headerValue(revalidated, "Content-Type")}")
+        assertEquals(headerValue(revalidated, "Content-Encoding"), None,
+          clue = s"304 response MUST NOT include Content-Encoding (no body to encode) per the static handler's emission ordering at lines 151/165 where Content-Encoding is set only in body-emission branches AFTER the 304 branch decision; a refactor that emits Content-Encoding: gzip on 304 (e.g., because the request had Accept-Encoding: gzip) would silently mislead clients into expecting a gzipped body; got: ${headerValue(revalidated, "Content-Encoding")}")
+
+        // (7) CLOSED-SET: the 304 response's server-controlled
+        // header set EXACTLY matches the documented preserved
+        // header names (excluding Java-HttpServer-added headers
+        // like Date + Content-Length that we don't control). The
+        // closed-set defense catches a refactor that adds a NEW
+        // header to the static handler's emission order without
+        // updating the documentation/tests.
+        val expectedPreserved = Set(
+          "ETag",
+          "Last-Modified",
+          "Cache-Control",
+          "Vary",
+          "Content-Security-Policy",
+          "Permissions-Policy",
+          "Referrer-Policy",
+          "X-Content-Type-Options",
+          "X-Frame-Options",
+          "Cross-Origin-Opener-Policy",
+          "Cross-Origin-Resource-Policy",
+          "X-Robots-Tag"
+        )
+        val actualPreserved = expectedPreserved
+          .filter(headerValue(revalidated, _).isDefined)
+        assertEquals(actualPreserved, expectedPreserved,
+          clue = s"304 response MUST include ALL ${expectedPreserved.size} documented preserved headers (4 cache-revalidation + 8 security) -- a refactor dropping any header from the line 97-103 + line 25 applySecurityHeaders set-call sequences would silently weaken the 304 response shape; expected=$expectedPreserved, actual=$actualPreserved, missing=${expectedPreserved -- actualPreserved}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
