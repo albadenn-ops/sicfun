@@ -11808,6 +11808,157 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented statusUrl PATH FORMAT on BOTH
+  // submission endpoints' 202 responses per JobQueue.scala
+  // line 31's `AnalyzeJobPathPrefix = "/api/analyze-hand-
+  // history/jobs/"` + line 33's `PlayingHallJobPathPrefix =
+  // "/api/playing-hall/jobs/"` constants -- the SHAPE-
+  // INVARIANT pin covering the STATUSURL-PATH DIMENSION
+  // that the existing Location-header pin at line 11842+
+  // covers in EQUALITY-with-body.statusUrl-only (it pins
+  // Location == body.statusUrl but neither has a shape
+  // assertion on the path itself); the second per-emission-
+  // site SHAPE pin extending the per-field shape pattern
+  // started by 476f635 (jobId UUID format); the statusUrl
+  // path format is OPERATIONALLY CRITICAL because: (a)
+  // frontend code at site.js polls the statusUrl directly
+  // by appending it to the base origin (a refactor changing
+  // the path prefix would break ALL polling without an
+  // explicit migration -- the bundled frontend treats the
+  // statusUrl as opaque but it MUST still be a valid path),
+  // (b) generic HTTP-202-aware clients (Postman 'follow
+  // Location' toggle, REST library auto-follow) parse the
+  // path to extract the jobId for client-side correlation;
+  // a refactor stripping the jobId from the URL (e.g.
+  // `/api/analyze-hand-history/jobs/current` without the
+  // id) would silently break these clients while leaving
+  // our bundled frontend (which keys on body.jobId
+  // separately) unaffected, (c) the runbook documents the
+  // status URL paths explicitly: "to investigate a
+  // specific analyze job, GET /api/analyze-hand-history/
+  // jobs/<id>" -- a refactor renaming the path prefix
+  // would silently desync the runbook from operational
+  // reality, (d) the SAME prefix constants are referenced
+  // from MULTIPLE call sites in JobQueue.scala (lines 207
+  // / 436 / 510 / 743 -- the statusUrl is constructed
+  // identically at submission time AND status-poll-
+  // response time, so the format must remain consistent
+  // across all 4 emission sites), (e) the ASYMMETRY between
+  // analyze (`/api/analyze-hand-history/jobs/`) and hall
+  // (`/api/playing-hall/jobs/`) is INTENTIONAL -- analyze
+  // uses the verb-named endpoint (`analyze-hand-history`)
+  // because the endpoint mutates state (creates a new
+  // analysis), while hall uses the noun-named endpoint
+  // (`playing-hall`) because the endpoint queries a
+  // simulated hall (the asymmetry reflects REST verb-vs-
+  // noun conventions in the codebase's API design); a
+  // refactor consolidating to a single shape (e.g. both
+  // `/api/jobs/<id>`) would silently drop the verb/noun
+  // distinction; per-format regression vectors that this
+  // pin catches: (i) refactor renaming the analyze prefix
+  // (e.g. `/api/analyze` shortening) would silently break
+  // the runbook + saved Postman collections + curl scripts
+  // referencing the documented full path, (ii) refactor
+  // renaming the hall prefix (e.g. `/api/hall` shortening)
+  // would silently break the hall-side analog, (iii)
+  // refactor consolidating analyze+hall to a shared shape
+  // would silently drop the verb/noun distinction encoded
+  // in the asymmetric prefixes, (iv) refactor making the
+  // statusUrl ABSOLUTE (e.g. `https://host/api/...` from a
+  // misconfigured reverse proxy) would silently break the
+  // Location header equality contract (pinned at line
+  // 11842+) by introducing scheme + host in the URL, (v)
+  // refactor stripping the jobId from the URL would
+  // silently break generic clients parsing the path; the
+  // jobId UUID-shape pin (476f635) catches changes in
+  // generator format BUT NOT changes in PATH structure --
+  // this pin closes that complementary gap; test approach
+  // mirrors 476f635 exactly: submit one analyze + one hall
+  // (BlockingBackend pauses workers so 202 returns
+  // reliably), extract both statusUrls + jobIds from
+  // response bodies, apply 6-tier format check: (i)
+  // analyze statusUrl matches `^/api/analyze-hand-history/
+  // jobs/<UUID>$` (specific prefix + UUID at end), (ii)
+  // hall statusUrl matches `^/api/playing-hall/jobs/<UUID>$`
+  // (specific prefix + UUID at end, asymmetric with
+  // analyze), (iii) analyze statusUrl is RELATIVE (starts
+  // with `/`, NOT a scheme like `http`), (iv) hall
+  // statusUrl is RELATIVE (symmetric), (v) analyze
+  // statusUrl's last path segment equals body.jobId
+  // (correlation invariant -- the jobId in the URL MUST
+  // match the jobId in the body so consumers parsing
+  // either get the same id), (vi) hall statusUrl's last
+  // path segment equals body.jobId (correlation, symmetric).
+  test("submission 202 responses for analyze + playing-hall MUST carry statusUrl paths matching the documented prefixes `/api/analyze-hand-history/jobs/<UUID>` (analyze) and `/api/playing-hall/jobs/<UUID>` (hall) per JobQueue.scala lines 31/33's AnalyzeJobPathPrefix/PlayingHallJobPathPrefix constants -- the SHAPE-INVARIANT pin closes the path-format gap left by the existing Location-header pin (which pins Location==body.statusUrl equality but NOT the path shape)") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      val playingHallBackend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, backend = backend, playingHallBackend = playingHallBackend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val uuidPattern = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        val analyzeStatusUrlRegex = s"^/api/analyze-hand-history/jobs/$uuidPattern$$"
+        val hallStatusUrlRegex = s"^/api/playing-hall/jobs/$uuidPattern$$"
+
+        // Submit analyze + hall; capture the 202 response
+        // bodies. The blocking backends pause the worker AT
+        // the analyze/run call site so the 202 returns
+        // immediately + reliably without needing thread sync.
+        val analyzeResp = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(analyzeResp.statusCode(), 202,
+          clue = "analyze submission must return 202 for the statusUrl-format pin to inspect the response body")
+        val analyzeBody = jsonBody(analyzeResp)
+        val analyzeStatusUrl = analyzeBody("statusUrl").str
+        val analyzeJobId = analyzeBody("jobId").str
+
+        val hallResp = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(hallResp.statusCode(), 202,
+          clue = "hall submission must return 202 for the symmetric statusUrl-format pin to inspect the response body")
+        val hallBody = jsonBody(hallResp)
+        val hallStatusUrl = hallBody("statusUrl").str
+        val hallJobId = hallBody("jobId").str
+
+        // (i) analyze statusUrl matches the analyze path
+        // regex `^/api/analyze-hand-history/jobs/<UUID>$`
+        assert(analyzeStatusUrl.matches(analyzeStatusUrlRegex),
+          clue = s"analyze 202 body.statusUrl MUST match the path regex `$analyzeStatusUrlRegex` per JobQueue.scala line 31's `AnalyzeJobPathPrefix = \"/api/analyze-hand-history/jobs/\"` constant + line 207/436's `s\"$$AnalyzeJobPathPrefix$$jobId\"` construction; a refactor renaming the prefix (e.g. `/api/analyze` shortening) would silently break the runbook documentation + saved Postman collections + curl scripts referencing the documented full path; a refactor making the URL absolute (e.g. `https://host/api/...` from a misconfigured reverse proxy) would silently break the Location header equality contract; a refactor stripping the jobId from the URL would silently break generic clients parsing the path to extract the id; got: '$analyzeStatusUrl'")
+
+        // (ii) hall statusUrl matches the hall path regex
+        // `^/api/playing-hall/jobs/<UUID>$` (asymmetric with
+        // analyze -- analyze uses verb-named endpoint while
+        // hall uses noun-named endpoint, reflecting REST
+        // verb-vs-noun conventions in the API design)
+        assert(hallStatusUrl.matches(hallStatusUrlRegex),
+          clue = s"hall 202 body.statusUrl MUST match the path regex `$hallStatusUrlRegex` per JobQueue.scala line 33's `PlayingHallJobPathPrefix = \"/api/playing-hall/jobs/\"` constant + line 510/743's `s\"$$PlayingHallJobPathPrefix$$jobId\"` construction; the prefix asymmetry vs analyze is INTENTIONAL (analyze uses verb-named `analyze-hand-history` because the endpoint mutates state; hall uses noun-named `playing-hall` because the endpoint queries a simulated hall); a refactor consolidating analyze+hall to a shared shape (e.g. both `/api/jobs/<id>`) would silently drop the verb/noun distinction encoded in the asymmetric prefixes; got: '$hallStatusUrl'")
+
+        // (iii) analyze statusUrl is RELATIVE (starts with
+        // `/`, NOT a scheme like `http`)
+        assert(analyzeStatusUrl.startsWith("/"),
+          clue = s"analyze 202 body.statusUrl MUST be a RELATIVE path (starts with `/`) per the documented format -- a refactor making the URL absolute (e.g. `https://host/api/...`) would silently break the Location header equality contract (the header is also `/api/...` per HandHistoryReviewServerApi.scala emission) AND break frontend code at site.js that appends the path to a base origin (an already-absolute statusUrl would double-up the scheme + host); got: '$analyzeStatusUrl'")
+
+        // (iv) hall statusUrl is RELATIVE (symmetric)
+        assert(hallStatusUrl.startsWith("/"),
+          clue = s"hall 202 body.statusUrl MUST be a RELATIVE path (starts with `/`) symmetric with analyze; got: '$hallStatusUrl'")
+
+        // (v) analyze statusUrl's last path segment equals
+        // body.jobId (CORRELATION INVARIANT -- the jobId
+        // embedded in the URL MUST match the jobId in the
+        // body)
+        val analyzeUrlJobId = analyzeStatusUrl.substring(analyzeStatusUrl.lastIndexOf('/') + 1)
+        assert(analyzeUrlJobId == analyzeJobId,
+          clue = s"analyze statusUrl's last path segment '$analyzeUrlJobId' MUST EQUAL body.jobId '$analyzeJobId' (CORRELATION INVARIANT) -- a refactor that emitted a DIFFERENT identifier in the URL vs the body (e.g. URL uses an internal sequence number while body uses the UUID) would silently break generic clients parsing the path to extract the id; got statusUrl='$analyzeStatusUrl', body.jobId='$analyzeJobId'")
+
+        // (vi) hall statusUrl's last path segment equals
+        // body.jobId (correlation, symmetric)
+        val hallUrlJobId = hallStatusUrl.substring(hallStatusUrl.lastIndexOf('/') + 1)
+        assert(hallUrlJobId == hallJobId,
+          clue = s"hall statusUrl's last path segment '$hallUrlJobId' MUST EQUAL body.jobId '$hallJobId' (CORRELATION INVARIANT, symmetric with analyze); got statusUrl='$hallStatusUrl', body.jobId='$hallJobId'")
+
+        backend.release.countDown()
+        playingHallBackend.release.countDown()
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
