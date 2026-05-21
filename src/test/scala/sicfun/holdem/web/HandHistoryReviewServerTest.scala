@@ -4462,6 +4462,187 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `playing hall job cancelled` JobQueue
+  // INFO audit log line -- closes the FIFTH JobQueue audit log
+  // line and the UNIQUE-TO-HALL terminal state that has NO
+  // analyze-side counterpart; the analyze path's worker only
+  // has 2 terminal states (Completed + Failed) per JobQueue.
+  // scala lines 308-323, but the playing-hall path has 3
+  // terminal states (Completed + Failed + Cancelled) per lines
+  // 607-620, with the THIRD Cancelled state firing when the
+  // operator cancels a long-running hall job via DELETE on
+  // the status URL (per 758b86e's prior coverage of the
+  // cancellation flow); analyze jobs are short-running (2-minute
+  // default timeout) so cancellation isn't surfaced in the UI,
+  // but playing-hall jobs are long-running (15-minute default
+  // timeout per 61e49a8) so the UI exposes a Cancel button and
+  // operators need the audit log signal to distinguish
+  // "user-initiated cancel" from "worker timeout" from "backend
+  // failure" -- three distinct operational categories that
+  // share the WARN-or-INFO categorization but split into
+  // 3 distinct log line prefixes; the format at line 617-620
+  // is `s"playing hall job cancelled jobId=$jobId durationMs=
+  // ${completedAt - startedAt} queuedJobs=${...} runningJobs=
+  // ${...}"` -- matches the COMPLETED line format (no error
+  // field, no errorStatus field) because cancellation isn't a
+  // FAILURE (no error string to escape, no HTTP status to
+  // classify), it's a USER-INITIATED EARLY TERMINATION;
+  // operationally, the Cancelled line emits at INFO level (NOT
+  // WARN like Failed) because user-initiated cancel is normal
+  // expected behavior -- WARN level would silently flood
+  // alerting on every Cancel button click; per-field
+  // regression vectors that the prior 4 JobQueue audit log
+  // pins (a04e51a + 6b59ce4 + 1e030ed + 817dd08) don't catch:
+  // (i) ASYMMETRIC INTRODUCTION of the Cancelled terminal
+  // state on the analyze side -- a refactor that "unified" the
+  // two worker types' terminal-state handling by adding
+  // Cancelled to the analyze path too would silently emit a
+  // NEW analyze-side log line (`job cancelled` or `analyze
+  // cancelled`) that operators wouldn't expect, AND would
+  // create asymmetric-mirror-pair questions for every future
+  // pin; this commit's EXCLUSION pin of standalone `job
+  // cancelled` in a position other than the playing-hall
+  // prefix catches that asymmetric-introduction refactor, (ii)
+  // INFO level not WARN -- a refactor that conflated
+  // cancellation with failure (e.g. "treat cancel as a kind of
+  // failure for unified handling") would silently demote
+  // operator alerting (the line would suddenly appear at WARN
+  // level, polluting failure dashboards), OR promote (the
+  // line would suddenly disappear at INFO level if a refactor
+  // tried to "treat cancel as a NON-event for log volume
+  // reduction"), (iii) terminal-state shape MATCH with
+  // completed (no error field, no errorStatus field) -- a
+  // refactor that "added an error field for consistency with
+  // failed" (e.g. emitting "error=cancelled by user") would
+  // silently change the cancellation line's structure to look
+  // like a failure to operators parsing the log stream, AND
+  // would silently add the %20-escape contract burden to the
+  // cancellation path; (iv) durationMs MUST be non-negative
+  // BUT cancellation typically fires very fast (the DELETE
+  // happens while the worker is running, the cancelFlag is
+  // checked when the backend returns, so durationMs is the
+  // wall-clock from worker-start to cancel-detected); 10-tier
+  // format check: (i) `playing hall job cancelled` prefix
+  // (catches rename), (ii) EXCLUSION of standalone `job
+  // cancelled` (catches asymmetric introduction to analyze
+  // path), (iii) EXCLUSION of `playing hall job completed`
+  // (catches wrong terminal-state shape -- mirrors 1e030ed +
+  // 817dd08), (iv) EXCLUSION of `playing hall job failed`
+  // (catches wrong terminal-state shape on the failure side
+  // -- the Cancelled line MUST NOT look like a Failed line),
+  // (v) jobId matching the DELETE response, (vi) durationMs
+  // field with non-negative integer, (vii) queuedJobs=0,
+  // (viii) runningJobs= field presence, (ix) [INFO] level
+  // (NOT WARN -- cancellation is normal not a failure), AND
+  // (x) [hand-history-review] service-tag; the 4 distinct
+  // EXCLUSION pins are the highest-density exclusion check
+  // in the JobQueue family pin chain -- catches REFACTORS
+  // that would conflate Cancelled with Completed OR Failed
+  // OR introduce Cancelled to the analyze path; with this
+  // commit the JobQueue audit log family has FIVE pins
+  // (a04e51a + 6b59ce4 + 1e030ed + 817dd08 + this commit),
+  // covering ALL the terminal-state transitions for BOTH
+  // worker types -- the family is COMPLETE for terminal
+  // states (success + failure on both endpoints + cancelled
+  // on hall-only); remaining gaps are SUBMISSION-TIME
+  // emissions (accepted + rejection lines) which fire BEFORE
+  // the worker runs and have different format characteristics.
+  test("DELETE on a running playing-hall job emits the documented `playing hall job cancelled jobId=<id> durationMs=<ms> queuedJobs=<n> runningJobs=<n>` INFO audit log line at the worker's cancelled-terminal-state transition (per JobQueue.scala line 617-620) -- the UNIQUE-TO-HALL Cancelled terminal state with the 4-exclusion catch (asymmetric introduction + wrong-terminal-state shapes)") {
+    withStaticSite { staticDir =>
+      // Setup a BlockingPlayingHallBackend so the test can
+      // submit a job, cancel it while running, and verify the
+      // Cancelled terminal-state log line emits. The pattern
+      // mirrors the existing "playing hall running job can be
+      // cancelled with DELETE" test at line 8701 + 758b86e's
+      // cancellation-flow coverage but with stdout capture
+      // around the full lifecycle.
+      val backend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      val submitJobId =
+        try
+          withServer(staticDir, playingHallBackend = backend) { server =>
+            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+            val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+            assertEquals(submit.statusCode(), 202,
+              clue = "playing-hall submission must return 202 before the worker can be cancelled")
+            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+            val capturedJobId = jsonBody(submit)("jobId").str
+            // Wait for the backend to start running before
+            // issuing the cancel -- otherwise the cancel might
+            // hit a queued (not yet running) job, which takes
+            // a different terminal-state path.
+            assert(backend.started.await(3, TimeUnit.SECONDS),
+              "playing hall backend never started before cancel test could trigger")
+            try
+              val cancelResponse = delete(statusUri)
+              assertEquals(cancelResponse.statusCode(), 200,
+                clue = "DELETE on a running playing-hall job must return 200 with the Cancelled state")
+              assertEquals(jsonBody(cancelResponse)("status").str, "cancelled",
+                clue = "DELETE response body must report status=cancelled per the documented cancellation flow")
+              // Release the backend so it returns and the
+              // worker thread reaches the terminal-state log
+              // emission at JobQueue.scala line 617-620.
+              backend.release.countDown()
+              val terminal = awaitTerminalJob(statusUri)
+              assertEquals(terminal("status").str, "cancelled",
+                clue = "playing-hall must reach 'cancelled' terminal state for the playing-hall-job-cancelled log line to have fired")
+            finally
+              backend.release.countDown()
+            capturedJobId
+          }
+        finally
+          System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val cancelledLine = captured.split('\n').iterator
+        .find(_.contains("playing hall job cancelled"))
+        .getOrElse(fail(s"no `playing hall job cancelled` line in captured stdout -- JobQueue.scala line 617-620 documents this as the INFO-level line fired on every cancelled hall job; if missing, either the logInfo emission was suppressed OR the worker exited via a different terminal state (Completed or Failed); got captured stdout: ${captured.take(2000)}"))
+
+      // (i) prefix
+      assert(cancelledLine.contains("playing hall job cancelled"),
+        clue = s"playing-hall cancellation audit line must carry the literal `playing hall job cancelled` event prefix per JobQueue.scala line 618's hardcoded literal -- a refactor renaming to e.g. `job cancelled by user` / `hall job aborted` / `playing-hall cancelled` (hyphen) would silently break operator scripts grep'ing for the user-initiated cancellation signal; got: $cancelledLine")
+      // (ii) EXCLUSION of standalone `job cancelled` (catches
+      // asymmetric introduction to analyze)
+      val withoutHallCancelledPrefix = cancelledLine.replace("playing hall job cancelled", "")
+      assert(!withoutHallCancelledPrefix.contains("job cancelled"),
+        clue = s"cancellation audit line must NOT also contain a standalone `job cancelled` prefix (an analyze-side variant that doesn't currently exist) in a position other than the `playing hall job cancelled` substring -- a refactor that ADDED Cancelled to the analyze-side terminal states (e.g. for `unified handling` symmetry with hall) would silently introduce a NEW `job cancelled` log line that operators don't currently expect; the EXCLUSION pin is the ASYMMETRIC-INTRODUCTION catch -- mirrors 1e030ed/817dd08's asymmetric-drift catch but for the opposite direction (adding a state to analyze that's currently hall-only); got line after stripping hall prefix: '$withoutHallCancelledPrefix'")
+      // (iii) EXCLUSION of `playing hall job completed`
+      assert(!cancelledLine.contains("playing hall job completed"),
+        clue = s"cancellation audit line MUST NOT contain `playing hall job completed` (the 1e030ed-pinned success-line prefix) -- a refactor that conflated cancellation with completion (e.g. treating cancelled as 'completed with partial result') would silently break operator distinction between user-initiated cancel and natural completion; got: $cancelledLine")
+      // (iv) EXCLUSION of `playing hall job failed`
+      assert(!cancelledLine.contains("playing hall job failed"),
+        clue = s"cancellation audit line MUST NOT contain `playing hall job failed` (the 817dd08-pinned failure-line prefix) -- a refactor that treated cancellation as a 'kind of failure for unified handling' would silently promote cancellation to WARN-level alerting AND silently break operator distinction between user-initiated cancel and backend failure (operationally distinct: cancel is normal expected, failure needs incident response); got: $cancelledLine")
+      // (v) jobId matching the response
+      assert(cancelledLine.contains(s"jobId=$submitJobId"),
+        clue = s"cancellation audit line must carry the SAME jobId='$submitJobId' from the 202 submission response -- this is the submission-to-cancellation correlation for incident analysis (operators auditing 'who cancelled which job and when' key on this); got: $cancelledLine")
+      // (vi) durationMs field with non-negative integer
+      assert(cancelledLine.contains("durationMs="),
+        clue = s"cancellation audit line must carry durationMs= field matching the completed/failed line shapes; got: $cancelledLine")
+      val durationMsToken = cancelledLine.split(' ').iterator
+        .find(_.startsWith("durationMs="))
+        .getOrElse(fail(s"durationMs= token extraction failed; got: $cancelledLine"))
+      val durationMsValue = durationMsToken.drop("durationMs=".length).stripTrailing()
+      val durationMs = durationMsValue.toLongOption.getOrElse(fail(s"durationMs= value '$durationMsValue' not parseable as Long; got: $cancelledLine"))
+      assert(durationMs >= 0L,
+        clue = s"cancellation durationMs MUST be non-negative -- catches swapped subtraction order specifically on the cancellation path (a refactor breaking ONLY the cancellation line's emission while the success/failure lines stay correct); got durationMs=$durationMs in line: $cancelledLine")
+      // (vii) queuedJobs=0
+      assert(cancelledLine.contains("queuedJobs=0"),
+        clue = s"cancellation audit line must carry queuedJobs=0 (single-job test, no other jobs queued); matches the prior JobQueue audit log pin pattern; got: $cancelledLine")
+      // (viii) runningJobs field presence
+      assert(cancelledLine.contains("runningJobs="),
+        clue = s"cancellation audit line must carry runningJobs= field (presence-only, timing-dependent); matches the prior pattern; got: $cancelledLine")
+      // (ix) INFO level (NOT WARN -- cancellation is normal not
+      // a failure, per JobQueue.scala line 618's logInfo call)
+      assert(cancelledLine.contains("[INFO]"),
+        clue = s"cancellation audit line MUST be INFO-level per JobQueue.scala line 618's logInfo call (writes to System.out per HandHistoryReviewServerRuntime.scala line 418) -- NOT WARN like the failure path because user-initiated cancellation is normal expected behavior; a refactor that promoted to WARN (e.g. 'treat cancel as a kind of failure for unified handling') would silently flood operator alerting on every Cancel button click, AND silently train operators to ignore the cancellation signal as noise -- masking real WARN-level events (actual failures) when they fire; got: $cancelledLine")
+      // (x) service-tag prefix
+      assert(cancelledLine.contains("[hand-history-review]"),
+        clue = s"cancellation audit line must carry the `[hand-history-review]` service-tag prefix matching the prior 4 JobQueue audit log pins + the server-lifecycle banner pins + the auth-event audit pins; got: $cancelledLine")
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
