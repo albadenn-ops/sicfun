@@ -17730,6 +17730,124 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented Last-Modified HTTP-date FORMAT contract
+  // at StaticAssetsHandler.scala lines 70-75 + 99 -- the
+  // LAST-MODIFIED-FORMAT pin verifies the documented RFC 7231
+  // sec 7.1.1.1 "preferred" HTTP-date format (the RFC 1123 form
+  // "Wed, 21 Oct 2015 07:28:00 GMT") emitted via the documented
+  // DateTimeFormatter.RFC_1123_DATE_TIME formatter applied to
+  // the truncated-to-second mtime in UTC; the documented inline
+  // comment at lines 72-73 explains the second-resolution
+  // truncation rationale: "HTTP-date is second-resolution.
+  // Truncate file mtime so the value we emit can be parsed and
+  // compared losslessly by clients on the way back."
+  // FORTY-SEVENTH per-emission-site SHAPE pin overall; the
+  // Last-Modified format is OPERATIONALLY CRITICAL because:
+  // (a) browsers + caching proxies use the Last-Modified value
+  // as the If-Modified-Since fallback when ETag is unavailable
+  // -- a refactor breaking the format would silently cause
+  // revalidation failures, forcing full re-downloads even when
+  // the resource hasn't changed, (b) RFC 7231 sec 7.1.1.1
+  // mandates the RFC 1123 format as the "preferred" HTTP-date
+  // form -- a refactor switching to ISO-8601 or any other
+  // format would silently violate the RFC + cause client
+  // parsers (browsers, curl --remote-time, generic
+  // HttpClient libraries) to reject the value as malformed,
+  // (c) the second-resolution truncation is the documented
+  // defense for the lossless-round-trip claim -- a refactor
+  // dropping the line 73 truncation would emit ms-precision
+  // values that clients round to seconds in their
+  // If-Modified-Since echo, silently breaking revalidation on
+  // every poll (the value the server emitted would never equal
+  // the value the client echoes back); per-format regression
+  // vectors uniquely caught (NOT caught by 4a49db1's ETag
+  // format pin OR 31839af's W/-prefix normalization pin which
+  // target the ETag header specifically): (i) refactor
+  // switching DateTimeFormatter.RFC_1123_DATE_TIME to any
+  // other format (e.g. ISO_INSTANT, ISO_LOCAL_DATE_TIME) would
+  // silently violate RFC 7231 sec 7.1.1.1, (ii) refactor
+  // switching the zone from ZoneOffset.UTC to a system-local
+  // zone would silently emit values with non-GMT zone
+  // abbreviations (e.g. "EDT", "PST") that conservative
+  // clients reject, (iii) refactor switching to a non-English
+  // locale (e.g. via DateTimeFormatter.RFC_1123_DATE_TIME.
+  // withLocale(systemLocale)) would silently emit non-English
+  // day/month abbreviations (e.g. "Mié, 21 Oct" in Spanish)
+  // that ALL HTTP clients reject, (iv) refactor dropping the
+  // line 73 second-truncation would silently emit
+  // millisecond-precision values that break If-Modified-Since
+  // round-trip; test approach: GET /index.html → 200 with
+  // Last-Modified header, verify the value (a) matches the
+  // RFC 1123 regex pattern with English day/month
+  // abbreviations + GMT zone, (b) parses via the documented
+  // DateTimeFormatter.RFC_1123_DATE_TIME, (c) the parsed
+  // instant is at second-resolution (epoch ms ends in 000),
+  // (d) re-fetching is deterministic, (e) the parsed instant
+  // equals the file's actual mtime truncated to seconds.
+  test("static handler Last-Modified header follows the documented RFC 1123 HTTP-date format with GMT zone + second-resolution truncation per StaticAssetsHandler.scala lines 70-75 + 99's RFC 7231 sec 7.1.1.1 preferred-format contract -- complements the ETag-family pins (4a49db1 format + 31839af weak comparison) by closing the SECOND conditional-request header (the If-Modified-Since fallback when ETag is unavailable)") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val resp = get(s"$baseUri/index.html")
+        assertEquals(resp.statusCode(), 200,
+          clue = "GET /index.html MUST return 200 so the Last-Modified header is on the response")
+
+        // (i) Last-Modified header is PRESENT on the 200 response
+        // per StaticAssetsHandler.scala line 99
+        val lastModified = headerValue(resp, "Last-Modified")
+          .getOrElse(fail("static handler MUST emit Last-Modified on 200 responses per StaticAssetsHandler.scala line 99"))
+
+        // (ii) Value matches the RFC 1123 HTTP-date pattern with
+        // English day-of-week + month abbreviations + GMT zone
+        // per RFC 7231 sec 7.1.1.1's "preferred" form (catches
+        // refactors that switch format, zone, or locale)
+        val rfc1123Pattern = raw"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{1,2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$$"
+        assert(lastModified.matches(rfc1123Pattern),
+          clue = s"Last-Modified value MUST match the documented RFC 1123 HTTP-date pattern (English day/month abbreviations + GMT zone) per RFC 7231 sec 7.1.1.1's preferred-format contract; a refactor changing format/zone/locale would silently violate the RFC + break ALL HTTP client parsers; got: $lastModified")
+
+        // (iii) Zone abbreviation is GMT (catches refactor
+        // switching from ZoneOffset.UTC to a system-local zone)
+        assert(lastModified.endsWith(" GMT"),
+          clue = s"Last-Modified value MUST end with ` GMT` per ZoneOffset.UTC + RFC 1123 GMT-zone canonical form; got: $lastModified")
+
+        // (iv) Value PARSES via the documented
+        // DateTimeFormatter.RFC_1123_DATE_TIME (catches a
+        // structural-pattern-match-but-not-parseable refactor)
+        val parsedInstant = scala.util.Try(
+          java.time.ZonedDateTime
+            .parse(lastModified, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+            .toInstant
+        ).getOrElse(fail(s"Last-Modified value MUST parse via DateTimeFormatter.RFC_1123_DATE_TIME (the documented formatter at StaticAssetsHandler.scala line 74); got: $lastModified"))
+
+        // (v) Parsed instant is at second-resolution (epoch ms
+        // ends in 000) per the documented line 73 truncation
+        // -- catches a refactor dropping the truncation that
+        // would silently break If-Modified-Since round-trip
+        assertEquals(parsedInstant.toEpochMilli % 1000L, 0L,
+          clue = s"parsed Last-Modified instant MUST be at second-resolution (no fractional milliseconds) per StaticAssetsHandler.scala line 73's documented truncation -- a refactor dropping the truncation would silently emit ms-precision values that clients round to seconds in their If-Modified-Since echo, breaking revalidation on every poll; got epochMs: ${parsedInstant.toEpochMilli}")
+
+        // (vi) DETERMINISM: re-fetching the same file produces
+        // the identical Last-Modified value (catches a refactor
+        // using request-time clock instead of file mtime)
+        val resp2 = get(s"$baseUri/index.html")
+        assertEquals(headerValue(resp2, "Last-Modified"), Some(lastModified),
+          clue = s"Last-Modified value MUST be deterministic across requests for the same unchanged file -- catches a refactor that uses request-time clock instead of file mtime; first=$lastModified, second=${headerValue(resp2, "Last-Modified").getOrElse("<missing>")}")
+
+        // (vii) CROSS-CHECK: the parsed Last-Modified equals
+        // the file's actual mtime truncated to seconds per
+        // StaticAssetsHandler.scala lines 70-73 (catches a
+        // refactor that uses something other than the file's
+        // mtime as the source -- e.g. server-start-time,
+        // process-create-time, or a hardcoded epoch)
+        val actualMtimeMs = java.nio.file.Files.getLastModifiedTime(staticDir.resolve("index.html")).toMillis
+        val expectedSecondMs = (actualMtimeMs / 1000L) * 1000L
+        assertEquals(parsedInstant.toEpochMilli, expectedSecondMs,
+          clue = s"parsed Last-Modified MUST equal the file's actual mtime truncated to seconds per StaticAssetsHandler.scala lines 70-73; a refactor that uses anything other than Files.getLastModifiedTime(target) as the source would silently desync the Last-Modified value from the file's actual modification time, breaking the documented contract; got parsed=${parsedInstant.toEpochMilli}, expectedSecond=$expectedSecondMs (actualMtimeMs=$actualMtimeMs)")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
