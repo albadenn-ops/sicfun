@@ -15091,6 +15091,131 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented applySecurityHeaders UNIVERSAL
+  // SECURITY-HEADER coverage ALSO on 4xx/5xx ERROR
+  // responses per AuthStack.scala line 557's pre-handler
+  // invocation -- the SECURITY-HEADERS-ON-ERROR
+  // complement to 5a46898's success-path pin closes the
+  // gap where security headers might be applied ONLY on
+  // the success path and dropped on error responses;
+  // 5a46898 verified the headers on a 200 /api/health
+  // response (the success path), but the JsonHandler's
+  // line 561 Left-fold also goes through writeJson at
+  // line 574 with the SAME exchange that had
+  // applySecurityHeaders called at line 557 -- so error
+  // responses SHOULD have the same headers; if they
+  // don't, a refactor has either bypassed line 557 OR
+  // moved applySecurityHeaders into the success-branch
+  // only; TWENTY-SIXTH per-emission-site SHAPE pin overall
+  // extending the SECURITY-HEADER coverage from
+  // success-path (5a46898) to error-path (THIS commit);
+  // the security-headers-on-error coverage is
+  // OPERATIONALLY CRITICAL because: (a) browsers cache
+  // error responses too (404s, 401s) -- a refactor
+  // dropping Cache-Control: no-store on 404s would
+  // silently let browsers cache the 404 + serve it for
+  // subsequent requests to the same URL even AFTER the
+  // resource becomes available, (b) the security-header
+  // contract is UNIVERSAL by design -- splitting it
+  // between success + error paths would silently create
+  // an attack surface where attackers could probe error
+  // responses for missing headers (XSS via a CSP-less
+  // 401 page, MIME-sniff attacks on a nosniff-less
+  // 500), (c) the documented design is "applySecurityHeaders
+  // is called ONCE at the start of every JsonHandler
+  // invocation, BEFORE any branch logic" -- a refactor
+  // moving it into branch-specific paths would silently
+  // create the asymmetry; per-format regression vectors
+  // uniquely caught (NOT caught by 5a46898): (i) refactor
+  // moving applySecurityHeaders from line 557's pre-
+  // handler position to AFTER the handler return,
+  // silently skipping it on early-return error paths,
+  // (ii) refactor adding a branch that bypasses
+  // applySecurityHeaders specifically on certain error
+  // status codes (e.g. "404s don't need security
+  // headers"), (iii) refactor that puts security headers
+  // INSIDE the handler success-branch only (e.g.
+  // mistakenly applying them in the .map clause at line
+  // 113 instead of universally) would silently affect
+  // ALL error paths; test approach: mirror 5a46898 but
+  // on a 4xx response -- GET /api/playing-hall/jobs/<UUID>
+  // for a non-existent job (the same scenario 97fd354
+  // exercised for the 1-field error-shape pin), verify
+  // ALL 6 security headers are present with documented
+  // values on the 404 response.
+  test("applySecurityHeaders UNIVERSAL coverage MUST extend to 4xx/5xx ERROR responses too -- the SECURITY-HEADERS-ON-ERROR complement to 5a46898's success-path pin closes the documented universal-coverage contract: applySecurityHeaders is called at AuthStack.scala line 557 BEFORE any branch logic, so error responses going through the line 561 Left-fold MUST have the same 6 headers as success responses") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Trigger a 404 by GET on a non-existent hall job
+        val notFoundResp = get(s"$baseUri/api/playing-hall/jobs/00000000-0000-0000-0000-000000000000")
+        assertEquals(notFoundResp.statusCode(), 404,
+          clue = "GET on a non-existent playing-hall jobId MUST return 404 for this pin to inspect the error-path security headers")
+
+        // (i) Cache-Control: no-store on 4xx ERROR -- the
+        // browser caching concern is acute for errors too
+        // (e.g. a cached 404 would silently mask a
+        // subsequent resource-available response)
+        assertEquals(headerValue(notFoundResp, "Cache-Control"), Some("no-store"),
+          clue = "404 ERROR response MUST emit `Cache-Control: no-store` per applySecurityHeaders at WebResponses.scala line 115 -- a refactor moving applySecurityHeaders into the success-branch only would silently drop this header on ALL error paths, letting browsers cache the 404 + serve it for subsequent requests to the same URL even AFTER the resource becomes available")
+
+        // (ii) X-Content-Type-Options: nosniff on 4xx ERROR
+        // -- mime-sniffing on error responses could let
+        // attackers craft a 404 body that browsers
+        // re-interpret as HTML (potentially containing
+        // injected scripts)
+        assertEquals(headerValue(notFoundResp, "X-Content-Type-Options"), Some("nosniff"),
+          clue = "404 ERROR response MUST emit `X-Content-Type-Options: nosniff` per applySecurityHeaders at line 119 -- mime-sniffing attacks via error responses are a documented vector (attackers craft a 404 URL with a body that browsers re-interpret as HTML); dropping the header on error paths would silently widen the attack surface")
+
+        // (iii) X-Frame-Options: DENY on 4xx ERROR
+        assertEquals(headerValue(notFoundResp, "X-Frame-Options"), Some("DENY"),
+          clue = "404 ERROR response MUST emit `X-Frame-Options: DENY` per applySecurityHeaders at line 139 -- clickjacking attacks via error responses (e.g. framing the 401 page to capture credentials) are a documented vector; dropping the header on error paths would silently widen the attack surface")
+
+        // (iv) Referrer-Policy: no-referrer on 4xx ERROR
+        assertEquals(headerValue(notFoundResp, "Referrer-Policy"), Some("no-referrer"),
+          clue = "404 ERROR response MUST emit `Referrer-Policy: no-referrer` per applySecurityHeaders at line 118 -- error responses still navigate to subsequent pages, so the referrer-leak concern applies equally")
+
+        // (v) Content-Security-Policy on 4xx ERROR
+        val csp = headerValue(notFoundResp, "Content-Security-Policy")
+          .getOrElse(fail("404 ERROR response MUST include Content-Security-Policy header per applySecurityHeaders at line 116 -- a refactor moving applySecurityHeaders into success-branch only would silently drop CSP on ALL error paths, leaving error pages vulnerable to XSS that the rest of the app is protected from"))
+        assert(csp.contains("frame-ancestors 'none'"),
+          clue = s"4xx ERROR response's CSP MUST contain `frame-ancestors 'none'` (matching the success-path 5a46898 pin's documented CSP); got: $csp")
+
+        // (vi) Permissions-Policy on 4xx ERROR
+        val permissionsPolicy = headerValue(notFoundResp, "Permissions-Policy")
+          .getOrElse(fail("404 ERROR response MUST include Permissions-Policy header per applySecurityHeaders at line 117"))
+        assert(permissionsPolicy.contains("camera=()"),
+          clue = s"4xx ERROR response's Permissions-Policy MUST contain `camera=()` (matching the success-path 5a46898 pin's documented policy); got: $permissionsPolicy")
+
+        // (vii) AGGREGATE catch: ALL 6 headers present on
+        // the error response (this is the CORE INVARIANT
+        // matching 5a46898's tier-vii aggregate)
+        val securityHeaderNames = Set(
+          "Cache-Control",
+          "Content-Security-Policy",
+          "Permissions-Policy",
+          "Referrer-Policy",
+          "X-Content-Type-Options",
+          "X-Frame-Options"
+        )
+        val presentHeaders = securityHeaderNames.filter(name => headerValue(notFoundResp, name).isDefined)
+        assertEquals(presentHeaders, securityHeaderNames,
+          clue = s"4xx ERROR response MUST have ALL 6 documented security headers from applySecurityHeaders -- the documented universal-coverage contract per the line 557 pre-handler invocation; a refactor moving applySecurityHeaders into the success-branch ONLY (e.g. mistakenly putting it after the line 560 fold) would silently drop ALL 6 headers on EVERY error response; got present=${presentHeaders.toVector.sorted.mkString(", ")}, missing=${(securityHeaderNames -- presentHeaders).toVector.sorted.mkString(", ")}")
+
+        // (viii) CROSS-CHECK with 5a46898: error-response
+        // Cache-Control matches success-response Cache-Control
+        // (both come from the SAME applySecurityHeaders helper
+        // -- a refactor that diverged the header values
+        // between success + error would silently break the
+        // universal-coverage contract)
+        val successResp = get(s"$baseUri/api/health")
+        assertEquals(headerValue(notFoundResp, "Cache-Control"), headerValue(successResp, "Cache-Control"),
+          clue = "4xx ERROR response's Cache-Control MUST EQUAL 200 SUCCESS response's Cache-Control -- both come from the SAME applySecurityHeaders helper at line 557 (called BEFORE branch logic), so a refactor diverging the values between success + error paths would silently break the universal-coverage contract; this CROSS-CHECK between error-path (THIS pin) and success-path (5a46898) ensures the SAME helper is producing both")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
