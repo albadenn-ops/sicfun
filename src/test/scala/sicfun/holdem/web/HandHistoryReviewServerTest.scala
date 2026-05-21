@@ -18881,6 +18881,212 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented profile-update PARTIAL-UPDATE
+  // ASYMMETRY contract at PlatformUserAuth.scala lines
+  // 669-672 -- the PARTIAL-UPDATE-ASYMMETRY pin verifies the
+  // documented inconsistency where:
+  //   (a) displayName -- if the request omits / nulls /
+  //       empties the field, the EXISTING value is PRESERVED
+  //       (line 669: `sanitizeDisplayName(displayName)
+  //       .getOrElse(current.profile.displayName)`),
+  //   (b) heroName, preferredSite, timeZone -- if the request
+  //       omits / nulls / empties the field, the EXISTING
+  //       value is CLEARED to None (lines 670-672:
+  //       `sanitizeOptionalField(...)` returns None for
+  //       missing input WITHOUT any getOrElse fallback to
+  //       current value).
+  // FIFTY-FOURTH per-emission-site SHAPE pin overall; the
+  // existing line 16981 test pins the 7-field auth-state
+  // SHAPE-INVARIANCE on the profile-update response, but the
+  // documented per-field PARTIAL-UPDATE asymmetry semantic is
+  // unpinned; the ASYMMETRY contract is OPERATIONALLY
+  // CRITICAL because: (a) the documented design intentionally
+  // makes displayName "sticky" -- the frontend UI never has
+  // to re-send displayName when updating other fields,
+  // simplifying the form-submit logic and preventing
+  // accidental displayName clearing when the user updates
+  // their preferred-site dropdown without touching the
+  // display-name input, (b) the documented design
+  // intentionally makes heroName / preferredSite / timeZone
+  // "ephemeral" -- a user clears these fields by submitting
+  // a form with empty/null values, which the frontend can do
+  // implicitly without a dedicated "clear" button, (c) a
+  // refactor that HOMOGENIZES the 4 fields (all preserve, or
+  // all clear) would silently break BOTH design intents at
+  // once: making all-preserve would silently prevent users
+  // from clearing heroName/preferredSite/timeZone (forcing
+  // the frontend to add a dedicated clear endpoint),
+  // making all-clear would silently wipe displayName every
+  // time the user updates ANY other field (forcing the
+  // frontend to ALWAYS resend displayName on every POST);
+  // per-format regression vectors uniquely caught (NOT
+  // caught by the 16981 7-field-shape pin which targets
+  // RESPONSE SHAPE not PARTIAL-UPDATE SEMANTICS): (i)
+  // refactor changing line 669 from `getOrElse(current.
+  // profile.displayName)` to no getOrElse (i.e., displayName
+  // = sanitizeDisplayName(displayName).getOrElse(None) or
+  // similar) would silently CLEAR displayName on every
+  // partial update -- the frontend would lose the user's
+  // displayName the moment they change their timezone, (ii)
+  // refactor adding `.getOrElse(current.profile.heroName)`
+  // to line 670 would silently PRESERVE heroName on partial
+  // updates -- breaking the documented user-controlled
+  // clear semantic, (iii) refactor that switches the
+  // semantics of `optionalString` parsing in
+  // parseProfileUpdateRequest (e.g. from "missing/null/empty
+  // -> None" to "missing -> currentValue, null -> None")
+  // would silently subvert the per-field asymmetry by
+  // distinguishing JSON-missing from JSON-null -- both of
+  // which the current parser collapses to None; test
+  // approach: register a user, POST profile with all 4
+  // fields set (initial state), then POST partial-update
+  // requests to demonstrate the documented asymmetry, then
+  // verify the final state via /api/auth/me to confirm the
+  // STORE-side state matches the response-side observation.
+  test("/api/auth/profile PARTIAL-UPDATE ASYMMETRY contract: displayName is PRESERVED when omitted (line 669 getOrElse) while heroName + preferredSite + timeZone are CLEARED when omitted (lines 670-672 no-getOrElse) per PlatformUserAuth.scala lines 669-672's documented per-field asymmetric semantic -- complements the existing line 16981 7-field-shape pin by closing the PARTIAL-UPDATE SEMANTICS dimension") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Helper: register user + capture session+CSRF for
+          // subsequent profile updates
+          val registerResp = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"partial-update@example.com","password":"correct-horse-battery","displayName":"InitialName"}"""
+          )
+          assertEquals(registerResp.statusCode(), 201,
+            clue = "user registration must succeed to drive the profile-update asymmetry test")
+          val csrfToken = jsonBody(registerResp)("csrfToken").str
+          val sessionCookieValue = sessionCookie(registerResp)
+
+          def postProfile(body: String): HttpResponse[String] =
+            httpClient.send(
+              HttpRequest.newBuilder()
+                .uri(URI.create(s"$baseUri/api/auth/profile"))
+                .method("POST", HttpRequest.BodyPublishers.ofString(body))
+                .header("Content-Type", "application/json")
+                .header("Cookie", sessionCookieValue)
+                .header("X-CSRF-Token", csrfToken)
+                .build(),
+              HttpResponse.BodyHandlers.ofString()
+            )
+
+          // (1) Initial setup: POST all 4 fields together
+          val setupResp = postProfile(
+            """{"displayName":"FullName","heroName":"HeroAlias","preferredSite":"PokerStars","timeZone":"America/New_York"}"""
+          )
+          assertEquals(setupResp.statusCode(), 200,
+            clue = s"setup profile update with all 4 fields MUST return 200; got: ${setupResp.statusCode()}, body: ${setupResp.body()}")
+          val setupBody = ujson.read(setupResp.body())
+          val setupUser = setupBody("user").obj
+          assertEquals(setupUser("displayName").str, "FullName",
+            clue = "setup: displayName MUST be FullName after full-fields POST")
+          assertEquals(setupUser("heroName").str, "HeroAlias",
+            clue = "setup: heroName MUST be HeroAlias after full-fields POST")
+          assertEquals(setupUser("preferredSite").str, "PokerStars",
+            clue = "setup: preferredSite MUST be PokerStars after full-fields POST")
+          assertEquals(setupUser("timeZone").str, "America/New_York",
+            clue = "setup: timeZone MUST be America/New_York after full-fields POST")
+
+          // (2) ASYMMETRY DEMO #1: POST {} (empty body) ->
+          // displayName PRESERVED, heroName + preferredSite +
+          // timeZone CLEARED. This is the documented
+          // per-field-asymmetric behavior at lines 669-672.
+          val emptyResp = postProfile("""{}""")
+          assertEquals(emptyResp.statusCode(), 200,
+            clue = s"empty-body profile POST MUST return 200; got: ${emptyResp.statusCode()}")
+          val emptyBody = ujson.read(emptyResp.body())
+          val emptyUser = emptyBody("user").obj
+          assertEquals(emptyUser("displayName").str, "FullName",
+            clue = s"ASYMMETRY: displayName MUST be PRESERVED when omitted from the request body per line 669's `getOrElse(current.profile.displayName)` semantic -- a refactor dropping the getOrElse would silently clear displayName on every partial update, breaking the documented `sticky displayName` contract; got: ${emptyUser("displayName")}")
+          assertEquals(emptyUser.get("heroName"), Some(ujson.Null),
+            clue = s"ASYMMETRY: heroName MUST be CLEARED (null) when omitted from the request body per line 670's no-getOrElse semantic -- a refactor adding `.getOrElse(current.profile.heroName)` would silently preserve heroName, breaking the documented user-controlled clear semantic; got: ${emptyUser.get("heroName")}")
+          assertEquals(emptyUser.get("preferredSite"), Some(ujson.Null),
+            clue = s"ASYMMETRY: preferredSite MUST be CLEARED when omitted per line 671's no-getOrElse semantic; got: ${emptyUser.get("preferredSite")}")
+          assertEquals(emptyUser.get("timeZone"), Some(ujson.Null),
+            clue = s"ASYMMETRY: timeZone MUST be CLEARED when omitted per line 672's no-getOrElse semantic; got: ${emptyUser.get("timeZone")}")
+
+          // (3) Re-setup: POST all 4 fields again
+          val resetResp = postProfile(
+            """{"displayName":"FullName","heroName":"HeroAlias","preferredSite":"PokerStars","timeZone":"America/New_York"}"""
+          )
+          assertEquals(resetResp.statusCode(), 200,
+            clue = "reset profile update MUST return 200")
+
+          // (4) ASYMMETRY DEMO #2: POST {"heroName": "new"}
+          // (single-field heroName update) -> displayName
+          // PRESERVED (because omitted = preserve for
+          // displayName), heroName=NewHero, preferredSite +
+          // timeZone CLEARED (because omitted = clear for
+          // them). This is the most operationally important
+          // scenario: a user wants to ONLY update heroName
+          // without touching anything else.
+          val heroOnlyResp = postProfile("""{"heroName":"NewHero"}""")
+          assertEquals(heroOnlyResp.statusCode(), 200,
+            clue = "single-field heroName update MUST return 200")
+          val heroOnlyUser = ujson.read(heroOnlyResp.body())("user").obj
+          assertEquals(heroOnlyUser("displayName").str, "FullName",
+            clue = s"ASYMMETRY DEMO #2: displayName MUST be PRESERVED after single-field heroName update (omitted from request -> preserve via line 669); got: ${heroOnlyUser("displayName")}")
+          assertEquals(heroOnlyUser("heroName").str, "NewHero",
+            clue = s"ASYMMETRY DEMO #2: heroName MUST be UPDATED to NewHero (explicit value in request); got: ${heroOnlyUser("heroName")}")
+          assertEquals(heroOnlyUser.get("preferredSite"), Some(ujson.Null),
+            clue = s"ASYMMETRY DEMO #2: preferredSite MUST be CLEARED after single-field heroName update (omitted from request -> clear via line 671's no-getOrElse) -- this is the silent-clear failure mode that would catch a frontend bug where the form sends partial updates without resending preferredSite; got: ${heroOnlyUser.get("preferredSite")}")
+          assertEquals(heroOnlyUser.get("timeZone"), Some(ujson.Null),
+            clue = s"ASYMMETRY DEMO #2: timeZone MUST be CLEARED after single-field heroName update; got: ${heroOnlyUser.get("timeZone")}")
+
+          // (5) Re-setup
+          val reset2Resp = postProfile(
+            """{"displayName":"FullName","heroName":"HeroAlias","preferredSite":"PokerStars","timeZone":"America/New_York"}"""
+          )
+          assertEquals(reset2Resp.statusCode(), 200, clue = "reset #2 MUST return 200")
+
+          // (6) ASYMMETRY DEMO #3: POST
+          // {"displayName": "Updated"} (single-field
+          // displayName update) -> displayName=Updated,
+          // heroName + preferredSite + timeZone CLEARED.
+          // This demonstrates the inverse of demo #2: when
+          // the request EXPLICITLY sets displayName, it
+          // overwrites; when it omits the other 3 fields,
+          // they all CLEAR.
+          val displayOnlyResp = postProfile("""{"displayName":"UpdatedName"}""")
+          assertEquals(displayOnlyResp.statusCode(), 200,
+            clue = "single-field displayName update MUST return 200")
+          val displayOnlyUser = ujson.read(displayOnlyResp.body())("user").obj
+          assertEquals(displayOnlyUser("displayName").str, "UpdatedName",
+            clue = s"ASYMMETRY DEMO #3: displayName MUST be UPDATED to UpdatedName; got: ${displayOnlyUser("displayName")}")
+          assertEquals(displayOnlyUser.get("heroName"), Some(ujson.Null),
+            clue = s"ASYMMETRY DEMO #3: heroName MUST be CLEARED after single-field displayName update -- demonstrating that the asymmetry is INTRINSIC TO THE FIELD (not to the request shape); got: ${displayOnlyUser.get("heroName")}")
+          assertEquals(displayOnlyUser.get("preferredSite"), Some(ujson.Null),
+            clue = s"ASYMMETRY DEMO #3: preferredSite MUST be CLEARED; got: ${displayOnlyUser.get("preferredSite")}")
+          assertEquals(displayOnlyUser.get("timeZone"), Some(ujson.Null),
+            clue = s"ASYMMETRY DEMO #3: timeZone MUST be CLEARED; got: ${displayOnlyUser.get("timeZone")}")
+
+          // (7) STORE-SIDE CROSS-CHECK: /api/auth/me reflects
+          // the same state observed in the profile-update
+          // response (catches a refactor that returns the
+          // updated state in the response but persists a
+          // different state to the store)
+          val meResp = httpClient.send(
+            HttpRequest.newBuilder()
+              .uri(URI.create(s"$baseUri/api/auth/me"))
+              .header("Cookie", sessionCookieValue)
+              .GET()
+              .build(),
+            HttpResponse.BodyHandlers.ofString()
+          )
+          assertEquals(meResp.statusCode(), 200,
+            clue = "/api/auth/me MUST return 200 to verify store-side state matches response-side observation")
+          val meUser = ujson.read(meResp.body())("user").obj
+          assertEquals(meUser("displayName").str, "UpdatedName",
+            clue = s"STORE CROSS-CHECK: /api/auth/me displayName MUST equal the last-update value (the response state matches the store state); got: ${meUser("displayName")}")
+          assertEquals(meUser.get("heroName"), Some(ujson.Null),
+            clue = s"STORE CROSS-CHECK: /api/auth/me heroName MUST be null (cleared); got: ${meUser.get("heroName")}")
+        }
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
