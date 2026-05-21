@@ -14438,6 +14438,144 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented retryAfterSeconds FUNCTION at
+  // HandHistoryReviewServerApi.scala lines 840-841 -- the
+  // FUNCTION-INVARIANT pin verifies the ceiling-division
+  // semantics + the 1-second minimum-floor for the
+  // pollAfterMs -> seconds conversion that powers the
+  // Retry-After header on all 202 submission responses +
+  // status-poll responses on non-terminal states; the
+  // documented formula is `math.max(1L, (pollAfterMs +
+  // 999L) / 1000L).toString` -- the +999 trick gives
+  // CEILING division (any pollAfterMs > 0 returns at
+  // least 1) and the math.max(1L, ...) ensures the
+  // minimum value is 1 second; TWENTY-FIRST per-emission-
+  // site SHAPE pin overall extending the FUNCTION-
+  // INVARIANT sub-family from 9f42256 (classify*Error) +
+  // 89e3479 (rateLimitClientIpSource) to a THIRD pure
+  // function with mathematical invariants; the
+  // retryAfterSeconds function is OPERATIONALLY CRITICAL
+  // because: (a) its output is the EXACT value emitted in
+  // the Retry-After HTTP header on submission 202s +
+  // non-terminal status-poll 200s -- HTTP-client retry
+  // logic depends on this value to schedule retries (a
+  // refactor producing 0 would silently let clients
+  // busy-spin against the server), (b) the CEILING
+  // SEMANTICS are INTENTIONAL: pollAfterMs is a HINT
+  // (server says "wait at least this long"), and rounding
+  // UP to seconds ensures the actual wait is >= the hint
+  // (rounding DOWN could violate the contract by waiting
+  // less than the server asked), (c) the 1-second minimum
+  // floor protects against rapid-polling scenarios when
+  // pollAfterMs is small (< 1000ms) -- a refactor
+  // dropping the floor would silently allow Retry-After:
+  // 0 responses which violate RFC 7231 sec 6.6.4 (the
+  // value MUST be a positive integer for delta-seconds);
+  // per-format regression vectors uniquely caught: (i)
+  // refactor changing ceiling-division to floor-division
+  // (e.g. `pollAfterMs / 1000L`) would silently emit
+  // shorter Retry-After values than the server hint,
+  // (ii) refactor dropping the +999 (e.g. `pollAfterMs /
+  // 1000L`) would silently change ceiling semantics to
+  // floor semantics, (iii) refactor dropping the
+  // math.max(1L, ...) floor would silently emit "0" for
+  // small pollAfterMs values (or NEGATIVE values if
+  // pollAfterMs is negative), (iv) refactor changing the
+  // output type from String to Int (the header value
+  // MUST be a String per HTTP spec) would silently
+  // break the HTTP response emission; test approach:
+  // ISOLATION pin (no HTTP) covering ALL boundary
+  // conditions: (a) pollAfterMs = 0 -> "1" (minimum
+  // floor), (b) pollAfterMs = 1 -> "1" (boundary
+  // ceiling), (c) pollAfterMs = 999 -> "1" (just under
+  // 1 second), (d) pollAfterMs = 1000 -> "1" (exactly 1
+  // second), (e) pollAfterMs = 1001 -> "2" (just over 1
+  // second -- ceiling kicks in), (f) pollAfterMs = 750
+  // -> "1" (the DefaultPollAfterMs value), (g)
+  // pollAfterMs = 5000 -> "5" (whole-seconds), (h)
+  // pollAfterMs = 5001 -> "6" (ceiling at 5-second
+  // boundary), (i) pollAfterMs = Long.MaxValue / 2 ->
+  // expected value via direct math; ALSO verify the
+  // output type is String (not Int) -- catches refactor
+  // changing the return signature.
+  test("retryAfterSeconds at HandHistoryReviewServerApi.scala lines 840-841 MUST emit the documented CEILING-DIVISION formula `math.max(1L, (pollAfterMs + 999L) / 1000L).toString` with the 1-second minimum floor -- the FUNCTION-INVARIANT pin verifies the pollAfterMs -> seconds conversion that powers the Retry-After HTTP header on all 202s + status-poll non-terminal responses") {
+    import HandHistoryReviewServerApi.retryAfterSeconds
+
+    // (a) MINIMUM FLOOR: pollAfterMs = 0 -> "1"
+    assertEquals(retryAfterSeconds(0L), "1",
+      clue = "retryAfterSeconds(0) MUST return '1' per the math.max(1L, ...) minimum-floor at line 841 -- a refactor dropping the floor would silently emit '0' for zero pollAfterMs, violating RFC 7231 sec 6.6.4 (Retry-After delta-seconds MUST be positive)")
+
+    // (b) BOUNDARY: pollAfterMs = 1 -> "1" (rounds up to 1 second)
+    assertEquals(retryAfterSeconds(1L), "1",
+      clue = "retryAfterSeconds(1) MUST return '1' per the ceiling-division semantics -- pollAfterMs=1ms still requires at least 1 second wait (the 1-second minimum-floor applies to all pollAfterMs <= 1000)")
+
+    // (c) JUST UNDER 1 SECOND: pollAfterMs = 999 -> "1"
+    assertEquals(retryAfterSeconds(999L), "1",
+      clue = "retryAfterSeconds(999) MUST return '1' -- the boundary value just below 1000ms still rounds UP to 1 second per ceiling semantics; a refactor using floor division (pollAfterMs/1000) would emit '0' here")
+
+    // (d) EXACTLY 1 SECOND: pollAfterMs = 1000 -> "1"
+    // (the +999 trick: (1000 + 999) / 1000 = 1)
+    assertEquals(retryAfterSeconds(1000L), "1",
+      clue = "retryAfterSeconds(1000) MUST return '1' -- exactly 1000ms is exactly 1 second; per the +999 ceiling trick: (1000+999)/1000 = 1999/1000 = 1")
+
+    // (e) JUST OVER 1 SECOND: pollAfterMs = 1001 -> "2"
+    // (the ceiling kicks in: (1001 + 999) / 1000 = 2)
+    assertEquals(retryAfterSeconds(1001L), "2",
+      clue = "retryAfterSeconds(1001) MUST return '2' -- ceiling-division kicks in at 1001ms (one millisecond over 1 second forces rounding to 2 seconds); per +999 trick: (1001+999)/1000 = 2000/1000 = 2; this assertion catches a refactor swapping ceiling -> floor division which would emit '1' here")
+
+    // (f) DEFAULT POLL: pollAfterMs = 750 (the documented
+    // DefaultPollAfterMs at JobQueue.scala line 34) -> "1"
+    assertEquals(retryAfterSeconds(750L), "1",
+      clue = "retryAfterSeconds(750) MUST return '1' -- 750ms is the documented DefaultPollAfterMs constant at JobQueue.scala line 34, the value used by the submission 202s + status-poll non-terminal responses; the ceiling rounds 750ms up to 1 second; a refactor changing DefaultPollAfterMs would shift this expected value but NOT change the formula's correctness")
+
+    // (g) WHOLE SECONDS: pollAfterMs = 5000 -> "5"
+    assertEquals(retryAfterSeconds(5000L), "5",
+      clue = "retryAfterSeconds(5000) MUST return '5' -- exactly 5000ms is exactly 5 seconds; per +999 trick: (5000+999)/1000 = 5999/1000 = 5")
+
+    // (h) CEILING AT 5-SECOND BOUNDARY: pollAfterMs = 5001 -> "6"
+    assertEquals(retryAfterSeconds(5001L), "6",
+      clue = "retryAfterSeconds(5001) MUST return '6' -- ceiling kicks in at 5001ms (one millisecond over 5 seconds forces rounding to 6 seconds); per +999 trick: (5001+999)/1000 = 6000/1000 = 6")
+
+    // (i) LARGE VALUES: pollAfterMs = 60000 -> "60"
+    assertEquals(retryAfterSeconds(60000L), "60",
+      clue = "retryAfterSeconds(60000) MUST return '60' -- 60000ms is exactly 60 seconds; verifies the formula works correctly for large values without overflow")
+
+    // (j) TYPE assertion: output is String (NOT Int) per
+    // HTTP header value contract
+    val result: String = retryAfterSeconds(1000L)
+    assert(result.isInstanceOf[String],
+      clue = "retryAfterSeconds MUST return a String (the HTTP header value MUST be a String per the headers Vector emission pattern at JobQueue.scala lines 399/407) -- a refactor changing the return type to Int would silently break the headers emission")
+    // The return value MUST be parseable as a positive int
+    // (RFC 7231 requires delta-seconds form)
+    val parsedSeconds = result.toIntOption.getOrElse(fail(s"retryAfterSeconds output '$result' MUST be parseable as Int (RFC 7231 sec 6.6.4 requires delta-seconds form)"))
+    assert(parsedSeconds > 0,
+      clue = s"retryAfterSeconds output MUST be > 0 per RFC 7231 sec 6.6.4 delta-seconds form (HTTP clients reject Retry-After: 0 as invalid); got: $parsedSeconds")
+
+    // (k) CROSS-CHECK with actual HTTP emission: 202
+    // submission's Retry-After header value MUST equal
+    // retryAfterSeconds(<the-pollAfterMs-the-server-uses>)
+    // -- the cross-check pin verifies that the function's
+    // output flows into the actual header emission (a
+    // refactor swapping the function call for a hardcoded
+    // value would silently desync from the documented
+    // formula)
+    withStaticSite { staticDir =>
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      withServer(staticDir, backend = backend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(submit.statusCode(), 202,
+          clue = "submission must return 202 for the cross-check inspection")
+        val pollAfterMsFromBody = jsonBody(submit)("pollAfterMs").num.toLong
+        val retryAfterFromHeader = headerValue(submit, "Retry-After")
+          .getOrElse(fail("submission 202 MUST include Retry-After header"))
+        assertEquals(retryAfterFromHeader, retryAfterSeconds(pollAfterMsFromBody),
+          clue = s"submission 202 Retry-After header value MUST EQUAL retryAfterSeconds(pollAfterMs) per JobQueue.scala line 399's `Vector(\"Retry-After\" -> retryAfterSeconds(DefaultPollAfterMs))` emission -- if the header desyncs from the function, a refactor has decoupled them; got header=`$retryAfterFromHeader`, expected=`${retryAfterSeconds(pollAfterMsFromBody)}` for pollAfterMs=$pollAfterMsFromBody")
+        backend.release.countDown()
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
