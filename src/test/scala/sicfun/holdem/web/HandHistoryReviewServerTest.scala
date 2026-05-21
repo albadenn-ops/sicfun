@@ -5757,6 +5757,96 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented WWW-Authenticate header EXACT wire form
+  // `Basic realm="sicfun-hand-history-review", charset="UTF-8"`
+  // per AuthStack.scala line 35-36 + deploy doc line 130 -- the
+  // existing line ~8471 test only verifies `.startsWith("Basic
+  // ")` which would pass for ANY realm string, including a
+  // refactor that renamed the realm; THIS commit pins the
+  // SPECIFIC realm value AND the charset parameter that the
+  // deploy doc EXPLICITLY documents as the wire form; the
+  // realm string is OPERATIONALLY MEANINGFUL because: (a)
+  // browser auth popups display the realm as prompt context
+  // ("sicfun-hand-history-review wants you to sign in"), so a
+  // refactor changing the realm would silently change what
+  // users see in the auth dialog, (b) password managers SCOPE
+  // saved credentials by `(origin, realm)` pair -- a refactor
+  // changing the realm would silently INVALIDATE all saved
+  // password-manager entries (users would have to re-enter
+  // their credentials AND would have duplicate stale entries
+  // until they cleaned up); the deploy doc explicitly says: "If
+  // you want one shared password-manager entry to cover
+  // multiple sicfun instances on different hosts/ports, keep
+  // this realm string stable across them" -- this commit pins
+  // that stability via CI enforcement; the `charset="UTF-8"`
+  // parameter is OPERATIONALLY MEANINGFUL because: per the
+  // deploy doc, "modern browsers honor it (encoding non-ASCII
+  // passwords as UTF-8), older ones default to ISO-8859-1
+  // which still works for ASCII-only passwords"; a refactor
+  // dropping the charset parameter would silently regress
+  // non-ASCII password handling on modern browsers, AND would
+  // silently break RFC 7617 sec 2.1 compliance; per-field
+  // regression vectors that the existing `.startsWith("Basic
+  // ")` check doesn't catch: (i) realm rename (e.g.
+  // sicfun-hand-history-review -> sicfun-poker-analytics for
+  // a project rebranding) would silently invalidate all
+  // saved password-manager entries, (ii) realm syntax change
+  // (e.g. realm=sicfun without quotes) would silently break
+  // browser parsing of the challenge AND silently break
+  // RFC 7235 sec 2.2 compliance, (iii) dropping charset (e.g.
+  // for backwards-compat with very old browsers) would
+  // silently regress non-ASCII password support, (iv)
+  // charset value change (e.g. "UTF-8" -> "utf-8" or
+  // "ISO-8859-1") would silently change the wire encoding
+  // semantics -- a refactor that "fixed" the case to match
+  // some other convention would silently break the documented
+  // RFC 7617 compliance claim; 3-tier format check + exact-
+  // value pin: (i) realm value "sicfun-hand-history-review"
+  // exactly (with quotes -- the RFC 7235 quoted-string form),
+  // (ii) charset value "UTF-8" exactly (with quotes -- RFC
+  // 7617 sec 2.1 form), (iii) the FULL header value matches
+  // the documented wire form (catches separator changes like
+  // semicolon-instead-of-comma between the realm + charset
+  // parameters); test approach: configure withServer with
+  // basicAuth + make an unauthenticated request, verify the
+  // 401 response's WWW-Authenticate header carries the EXACT
+  // documented wire form.
+  test("WWW-Authenticate header for 401 responses under basic-auth mode carries the EXACT documented wire form `Basic realm=\"sicfun-hand-history-review\", charset=\"UTF-8\"` per AuthStack.scala line 35-36 + deploy doc line 130 (the realm string MUST stay stable for password-manager scope-by-(origin,realm) AND the charset parameter MUST be present for RFC 7617 sec 2.1 compliance)") {
+    withStaticSite { staticDir =>
+      val authConfig = HandHistoryReviewServer.BasicAuthConfig(username = "operator", password = "auth-realm-test")
+      withServer(staticDir, basicAuth = Some(authConfig)) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Make an unauthenticated request to trigger the 401
+        // response carrying the WWW-Authenticate header per
+        // AuthStack.scala line 645's
+        // `exchange.getResponseHeaders.set("WWW-Authenticate",
+        // BasicAuthChallenge)` where BasicAuthChallenge is the
+        // documented wire form from line 36.
+        val unauthorized = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(unauthorized.statusCode(), 401,
+          clue = "unauthenticated request to a basic-auth-protected route must return 401 before the WWW-Authenticate header can be inspected")
+
+        val wwwAuth = headerValue(unauthorized, "WWW-Authenticate")
+          .getOrElse(fail("WWW-Authenticate header missing on 401 response per RFC 7235 sec 4.1 'A server generating a 401 response MUST send a WWW-Authenticate header field'"))
+
+        // (i) THE LOAD-BEARING PIN: the EXACT documented wire
+        // form matching AuthStack.scala line 36's hardcoded
+        // BasicAuthChallenge value AND the deploy doc line
+        // 130's documented operator-visible string
+        assertEquals(wwwAuth, """Basic realm="sicfun-hand-history-review", charset="UTF-8"""",
+          clue = s"WWW-Authenticate header MUST carry the EXACT documented wire form `Basic realm=\"sicfun-hand-history-review\", charset=\"UTF-8\"` per AuthStack.scala line 36's `BasicAuthChallenge = s\"\"\"Basic realm=\"$$BasicAuthRealm\", charset=\"UTF-8\"\"\"\"` + deploy doc line 130's documented wire format; the existing line ~8471 test only verifies .startsWith(\"Basic \") which would pass for ANY realm string (catching only the most extreme regressions); this exact-equality assertion pins the realm string AND the charset parameter AND the separator format ALL AT ONCE so a refactor that broke ANY of the three (rename realm, drop charset, change separator) would fail this test; the realm string `sicfun-hand-history-review` is the password-manager scoping key (the deploy doc says: 'password managers scope saved credentials by (origin, realm) pair -- if you want one shared password-manager entry to cover multiple sicfun instances on different hosts/ports, keep this realm string stable across them') so a refactor changing it would silently invalidate all saved password-manager entries fleet-wide; the charset=\"UTF-8\" parameter is RFC 7617 sec 2.1 compliance (the deploy doc says 'modern browsers honor it (encoding non-ASCII passwords as UTF-8), older ones default to ISO-8859-1 which still works for ASCII-only passwords') so dropping it would silently regress non-ASCII password support on modern browsers; got: $wwwAuth")
+        // (ii) substring assertions for diagnostic clarity
+        // (the exact-equality assertion above is sufficient,
+        // these add diagnostic context for partial failures)
+        assert(wwwAuth.contains("""realm="sicfun-hand-history-review""""),
+          clue = s"WWW-Authenticate realm MUST be the exact documented string `sicfun-hand-history-review` (with quotes) -- a refactor renaming would silently break the documented `(origin, realm)` password-manager scoping; got: $wwwAuth")
+        assert(wwwAuth.contains("""charset="UTF-8""""),
+          clue = s"WWW-Authenticate must carry charset=\"UTF-8\" (with quotes -- RFC 7617 sec 2.1 form) -- dropping silently regresses non-ASCII password support per the deploy doc line 130's documented compatibility rationale; got: $wwwAuth")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
