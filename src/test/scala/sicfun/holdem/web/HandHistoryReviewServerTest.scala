@@ -14823,6 +14823,139 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented 405 ALLOW-HEADER ASYMMETRY between
+  // analyze + hall status endpoints at HandHistoryReviewServer
+  // Api.scala lines 174 (analyze) + 227 (hall) -- the
+  // METHOD-CAPABILITY pin verifies the documented
+  // architectural decision that cancellation is HALL-ONLY:
+  // analyze status emits Allow: "GET, HEAD, OPTIONS" while
+  // hall status emits Allow: "GET, HEAD, DELETE, OPTIONS"
+  // (the DELETE method is the asymmetric capability per
+  // the 188fe91 commit's documented constraint); the
+  // methodNotAllowed function at lines 41-46 + allowValue
+  // helper at line 33 BOTH consume the supported-methods
+  // string + append ", OPTIONS" via `s"$supported, OPTIONS"`;
+  // TWENTY-FOURTH per-emission-site SHAPE pin overall
+  // extending the HEADER-INVARIANT family from 989ce10
+  // (retryAfterSeconds function + 202 Retry-After header
+  // cross-check) to a SECOND HTTP header invariant; the
+  // Allow header is OPERATIONALLY CRITICAL because: (a)
+  // RFC 7231 sec 6.5.5 REQUIRES the server to "generate
+  // an Allow header field in a 405 response containing a
+  // list of the target resource's currently supported
+  // methods" -- a refactor dropping the header would
+  // silently violate RFC compliance, (b) capability-
+  // discovery tools (Postman, REST clients with auto-
+  // method-detection) read the Allow header to determine
+  // what verbs the resource supports, (c) the documented
+  // ASYMMETRY between analyze + hall (DELETE on hall only)
+  // is a SECURITY-RELEVANT architectural decision: the
+  // analyze endpoint is the user-input pipeline (file
+  // upload + analysis) so cancellation isn't useful (the
+  // job is mostly user-input-bound), while the hall
+  // endpoint runs the simulation worker so cancellation
+  // is the documented way to abort a slow simulation; a
+  // refactor that consolidated to "both endpoints
+  // support DELETE" would silently widen the cancellation
+  // attack surface (users could cancel each other's
+  // analyses via guessable jobIds, though the per-user
+  // ownership check at line 181 would mitigate that --
+  // the documented design avoids the attack surface
+  // entirely by not supporting analyze cancellation), (d)
+  // the OPTIONS method is ALWAYS in the supported list
+  // (appended via line 33's allowValue helper) because
+  // OPTIONS is required for CORS preflight checks; a
+  // refactor dropping OPTIONS would silently break
+  // browser-side CORS-aware clients; per-format
+  // regression vectors uniquely caught: (i) refactor
+  // ADDING DELETE to the analyze endpoint (e.g. for
+  // "consistency with hall") would silently widen the
+  // cancellation attack surface AND change the analyze
+  // Allow header from "GET, HEAD, OPTIONS" to "GET,
+  // HEAD, DELETE, OPTIONS", (ii) refactor REMOVING
+  // DELETE from the hall endpoint (e.g. "cancellation
+  // breaks worker invariants, disable it") would
+  // silently break the documented hall-cancellation
+  // workflow, (iii) refactor changing the methodNotAllowed
+  // function or allowValue helper to OMIT OPTIONS would
+  // silently break CORS-aware clients, (iv) refactor
+  // changing the Allow-header VALUE format (e.g. from
+  // comma-separated `GET, HEAD, OPTIONS` to pipe-separated
+  // `GET|HEAD|OPTIONS` for "easier parsing") would
+  // silently violate RFC 7231's documented comma-list
+  // format; test approach: trigger 405 on BOTH endpoints
+  // by issuing UNSUPPORTED methods -- DELETE on analyze
+  // (only GET/HEAD allowed) + POST on hall (only
+  // GET/HEAD/DELETE allowed), then extract the Allow
+  // header from each response, assert (a) analyze emits
+  // "GET, HEAD, OPTIONS", (b) hall emits "GET, HEAD,
+  // DELETE, OPTIONS", (c) the DIFFERENCE between the
+  // two sets is exactly {DELETE} (the documented
+  // asymmetric capability), (d) BOTH responses have
+  // OPTIONS in the list (the CORS-preflight invariant).
+  test("405 Method-Not-Allowed response Allow header for analyze + hall status endpoints MUST encode the documented method-capability ASYMMETRY: analyze emits Allow: `GET, HEAD, OPTIONS` while hall emits Allow: `GET, HEAD, DELETE, OPTIONS` per HandHistoryReviewServerApi.scala lines 174 + 227 -- the METHOD-CAPABILITY pin verifies the documented architectural decision that cancellation is HALL-ONLY (the 188fe91 commit documented this constraint when discovering it)") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val jobId = "00000000-0000-0000-0000-000000000000"
+
+        // (A) DELETE on analyze status endpoint -> 405 because
+        // analyze supports GET/HEAD only (the 188fe91 commit
+        // documented constraint)
+        val analyzeMethodNotAllowed = delete(s"$baseUri/api/analyze-hand-history/jobs/$jobId")
+        assertEquals(analyzeMethodNotAllowed.statusCode(), 405,
+          clue = "DELETE on /api/analyze-hand-history/jobs/<id> MUST return 405 per HandHistoryReviewServerApi.scala lines 173-174's methodNotAllowed branch")
+        val analyzeAllowHeader = headerValue(analyzeMethodNotAllowed, "Allow")
+          .getOrElse(fail("analyze 405 response MUST include Allow header per RFC 7231 sec 6.5.5 + HandHistoryReviewServerApi.scala line 45's `headers = Vector(\"Allow\" -> allowValue(supported))` emission"))
+
+        // (B) POST on hall status endpoint -> 405 because hall
+        // supports GET/HEAD/DELETE only (POST is not in the
+        // supported set)
+        val hallMethodNotAllowed = postJson(s"$baseUri/api/playing-hall/jobs/$jobId", "{}")
+        assertEquals(hallMethodNotAllowed.statusCode(), 405,
+          clue = "POST on /api/playing-hall/jobs/<id> MUST return 405 per HandHistoryReviewServerApi.scala line 227's methodNotAllowed(\"GET, HEAD, DELETE\") branch")
+        val hallAllowHeader = headerValue(hallMethodNotAllowed, "Allow")
+          .getOrElse(fail("hall 405 response MUST include Allow header per RFC 7231 sec 6.5.5"))
+
+        // (i) analyze Allow header VALUE assertion
+        assertEquals(analyzeAllowHeader, "GET, HEAD, OPTIONS",
+          clue = s"analyze 405 Allow header MUST be exactly `GET, HEAD, OPTIONS` per HandHistoryReviewServerApi.scala line 174's `methodNotAllowed(\"GET, HEAD\")` + line 33's `allowValue` helper appending `\", OPTIONS\"` -- a refactor ADDING DELETE to analyze (e.g. for `consistency with hall`) would silently widen the cancellation attack surface AND change this Allow header; got: `$analyzeAllowHeader`")
+
+        // (ii) hall Allow header VALUE assertion
+        assertEquals(hallAllowHeader, "GET, HEAD, DELETE, OPTIONS",
+          clue = s"hall 405 Allow header MUST be exactly `GET, HEAD, DELETE, OPTIONS` per HandHistoryReviewServerApi.scala line 227's `methodNotAllowed(\"GET, HEAD, DELETE\")` + line 33's `allowValue` helper appending `\", OPTIONS\"` -- a refactor REMOVING DELETE from hall (e.g. `cancellation breaks worker invariants, disable it`) would silently break the documented hall-cancellation workflow; got: `$hallAllowHeader`")
+
+        // (iii) ASYMMETRIC CAPABILITY catch: the DIFFERENCE
+        // between the two Allow sets is EXACTLY {DELETE} (the
+        // documented asymmetric capability)
+        val analyzeMethods = analyzeAllowHeader.split(",").map(_.trim).toSet
+        val hallMethods = hallAllowHeader.split(",").map(_.trim).toSet
+        val asymmetricCapability = hallMethods -- analyzeMethods
+        assertEquals(asymmetricCapability, Set("DELETE"),
+          clue = s"the DIFFERENCE between hall + analyze Allow-header method sets MUST be EXACTLY {DELETE} per the documented architectural decision that cancellation is HALL-ONLY -- a refactor adding any method to ONE endpoint but not the other would silently break the documented asymmetric capability set; got asymmetric=$asymmetricCapability, analyze=$analyzeMethods, hall=$hallMethods")
+
+        // (iv) CORS-PREFLIGHT INVARIANT: BOTH responses MUST
+        // include OPTIONS in the Allow list (the CORS-preflight
+        // requirement); the line 33 allowValue helper appends
+        // OPTIONS unconditionally, so a refactor that bypassed
+        // the helper would silently drop CORS compatibility
+        assert(analyzeMethods.contains("OPTIONS"),
+          clue = s"analyze 405 Allow header MUST contain OPTIONS per the line 33 allowValue helper's unconditional `s\"$$supported, OPTIONS\"` append -- a refactor bypassing the helper would silently break browser-side CORS-aware clients that issue OPTIONS preflight before the actual request; got: $analyzeMethods")
+        assert(hallMethods.contains("OPTIONS"),
+          clue = s"hall 405 Allow header MUST contain OPTIONS per the line 33 allowValue helper's unconditional `s\"$$supported, OPTIONS\"` append (symmetric with analyze); got: $hallMethods")
+
+        // (v) COMMON METHODS: BOTH endpoints share {GET, HEAD,
+        // OPTIONS} (the read-the-job-status capabilities); a
+        // refactor that diverged the read-side methods (e.g.
+        // removed HEAD from analyze only) would silently break
+        // the documented shared-read-capability contract
+        val commonMethods = analyzeMethods intersect hallMethods
+        assertEquals(commonMethods, Set("GET", "HEAD", "OPTIONS"),
+          clue = s"analyze + hall MUST share exactly {GET, HEAD, OPTIONS} as common methods per the documented design that BOTH endpoints support the same read-side capabilities (the only asymmetry is the write-side DELETE on hall); a refactor that diverged the read-side methods would silently break the shared-read-capability contract; got common=$commonMethods, analyze=$analyzeMethods, hall=$hallMethods")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
