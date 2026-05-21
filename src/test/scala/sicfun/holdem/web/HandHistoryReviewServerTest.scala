@@ -15884,6 +15884,159 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented STATUS-POLL-RESPONSE FIELD-SET-SHAPE
+  // for the PLAYING-HALL RUNNING non-terminal state at
+  // JobQueue.scala lines 707-714 -- the hall-side mirror
+  // of 65b46f6's analyze RUNNING pin verifying the
+  // documented SYMMETRY between the analyze + hall status-
+  // poll RUNNING shapes, with the documented
+  // playing-hall-specific message text "Playing hall run
+  // in progress" (vs analyze's "Analysis in progress" --
+  // distinct message texts that drive different frontend
+  // UI rendering); with this commit the hall side has 4
+  // of 5 states pinned (188fe91 CANCELLED + 191da3e
+  // COMPLETED + 01295d1 FAILED + THIS RUNNING), leaving
+  // QUEUED as the FINAL piece of the hall-side 5-state
+  // closure; THIRTY-SECOND per-emission-site SHAPE pin
+  // overall; the hall-RUNNING shape is OPERATIONALLY
+  // CRITICAL because: (a) the frontend at site.js polls
+  // the hall RUNNING state during the worker execution
+  // window (LONGER than analyze RUNNING since hall
+  // simulations take 15 min vs analyze's 2 min per the
+  // documented timeout asymmetry from 61e49a8) and uses
+  // the `message` field for human-readable rendering
+  // ("Playing hall run in progress" visible to the user
+  // while the worker runs the simulation), a refactor
+  // renaming the message would silently change
+  // user-visible text during the most-visible polling
+  // window, (b) the RUNNING state has startedAtEpochMs =
+  // Some + completedAtEpochMs = null per the documented
+  // partial-shape (mirrors 65b46f6's lifecycle-phase
+  // encoding), (c) the DIFFERENCE between hall RUNNING's
+  // "Playing hall run in progress" + analyze RUNNING's
+  // "Analysis in progress" message texts is INTENTIONAL
+  // -- the frontend renders DIFFERENT UI hints based on
+  // which simulation is running (hall takes longer +
+  // shows different progress affordances); per-format
+  // regression vectors uniquely caught (NOT caught by
+  // 65b46f6's analyze pin): (i) refactor consolidating
+  // hall + analyze message texts to a single string would
+  // silently lose the documented per-endpoint user
+  // signal, (ii) refactor changing hall RUNNING's message
+  // text from "Playing hall run in progress" would
+  // silently change user-visible text without UI review,
+  // (iii) refactor diverging the hall RUNNING shape from
+  // analyze (e.g. adding a `hallRunStage` field only on
+  // hall) would silently break the SYMMETRY contract;
+  // test approach mirrors 65b46f6 exactly but uses
+  // BlockingPlayingHallBackend + /api/playing-hall, with
+  // a SYMMETRY assertion vs the analyze-side RUNNING shape.
+  test("status-poll response body for /api/playing-hall/jobs/<id> in the RUNNING non-terminal state MUST emit EXACTLY the documented 8-field closed set {jobId, status, statusUrl, submittedAtEpochMs, startedAtEpochMs, completedAtEpochMs, pollAfterMs, message} per JobQueue.scala lines 707-714 -- the hall-side mirror of 65b46f6's analyze RUNNING pin with the documented playing-hall-specific message text 'Playing hall run in progress'") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, playingHallBackend = backend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Submit + wait for worker to start (state transitions
+        // to RUNNING) but worker is blocked on latch (never
+        // reaches COMPLETED)
+        val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(submit.statusCode(), 202,
+          clue = "playing-hall submission must return 202 for the hall-RUNNING-state pin to inspect")
+        val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+        assert(backend.started.await(3, TimeUnit.SECONDS),
+          "BlockingPlayingHallBackend.started latch never flipped -- the worker must enter the run call for the state to transition from QUEUED to RUNNING")
+
+        val runningBody = getJson(statusUri)
+        assertEquals(runningBody("status").str, "running",
+          clue = s"hall job state MUST be `running` after backend.started flipped; got: ${runningBody("status").str}")
+
+        val runningFields = runningBody.obj.keys.toSet
+
+        // The documented 8-field closed set (mirrors analyze
+        // RUNNING at lines 401-408)
+        val expectedFields = Set(
+          "jobId",
+          "status",
+          "statusUrl",
+          "submittedAtEpochMs",
+          "startedAtEpochMs",
+          "completedAtEpochMs",
+          "pollAfterMs",
+          "message"
+        )
+
+        // (i) CARDINALITY
+        assertEquals(runningFields.size, expectedFields.size,
+          clue = s"hall RUNNING state MUST have exactly ${expectedFields.size} fields per JobQueue.scala lines 707-714 (mirrors analyze lines 401-408); got actual=${runningFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- runningFields).toVector.sorted.mkString(", ")}, extra=${(runningFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(runningFields, expectedFields,
+          clue = s"hall RUNNING state field NAME SET MUST equal exactly the documented 8-field closed set per JobQueue.scala lines 707-714 (mirrors the analyze RUNNING state at lines 401-408 per the documented SYMMETRY contract); got actual=${runningFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- runningFields).toVector.sorted.mkString(", ")}; extra=${(runningFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) ABSENCE: terminal-payload fields (mirrors
+        // 65b46f6's non-terminal-shape contract)
+        assert(!runningFields.contains("result"),
+          clue = s"hall RUNNING state MUST NOT contain `result` (Completed-state-only payload); got: ${runningFields.toVector.sorted.mkString(", ")}")
+        assert(!runningFields.contains("errorStatus"),
+          clue = s"hall RUNNING state MUST NOT contain `errorStatus` (Failed-state-only payload); got: ${runningFields.toVector.sorted.mkString(", ")}")
+        assert(!runningFields.contains("error"),
+          clue = s"hall RUNNING state MUST NOT contain `error` (Failed-state-only payload); got: ${runningFields.toVector.sorted.mkString(", ")}")
+        assert(!runningFields.contains("durationMs"),
+          clue = s"hall RUNNING state MUST NOT contain `durationMs` (terminal-state-only); got: ${runningFields.toVector.sorted.mkString(", ")}")
+
+        // (iv) VALUE assertion: hall RUNNING's message MUST
+        // be EXACTLY "Playing hall run in progress" per line
+        // 709's hardcoded literal (DIFFERS from analyze
+        // RUNNING's "Analysis in progress" -- the
+        // INTENTIONAL per-endpoint user-visible text)
+        assertEquals(runningBody("message").str, "Playing hall run in progress",
+          clue = "hall RUNNING state's message field MUST be EXACTLY 'Playing hall run in progress' per JobQueue.scala line 709's hardcoded literal -- DIFFERS from analyze RUNNING's 'Analysis in progress' at line 403, the INTENTIONAL per-endpoint user-visible text that drives different frontend UI hints; a refactor consolidating to a single message text would silently lose the documented per-endpoint user signal; a refactor changing the text would silently change user-visible text without UI review")
+
+        // (v) startedAtEpochMs MUST be Num (lifecycle-phase
+        // encoding mirrors 65b46f6)
+        val startedAtValue = runningBody("startedAtEpochMs")
+        assert(startedAtValue.isInstanceOf[ujson.Num],
+          clue = s"hall RUNNING state's startedAtEpochMs MUST be ujson.Num (NOT null) per the documented lifecycle-phase encoding; got type: ${startedAtValue.getClass.getSimpleName}")
+        assert(startedAtValue.num.toLong > 0L,
+          clue = s"hall RUNNING state's startedAtEpochMs MUST be positive; got: ${startedAtValue.num.toLong}")
+
+        // (vi) completedAtEpochMs MUST be null
+        assertEquals(runningBody("completedAtEpochMs"), ujson.Null,
+          clue = "hall RUNNING state's completedAtEpochMs MUST be null per line 708's None argument; mirrors 65b46f6's analyze RUNNING assertion")
+
+        // (vii) pollAfterMs > 0 (mirrors 65b46f6)
+        assert(runningBody("pollAfterMs").num.toInt > 0,
+          clue = s"hall RUNNING state's pollAfterMs MUST be > 0 (frontend busy-spin prevention); got: ${runningBody("pollAfterMs").num.toInt}")
+
+        // (viii) SYMMETRY ASSERTION: hall RUNNING field set
+        // MUST EQUAL analyze RUNNING field set (the CORE
+        // SYMMETRIC-MIRROR assertion -- spawns second
+        // analyze withServer + asserts identical field sets
+        // despite different message texts)
+        val analyzeBackend = new BlockingBackend(Right(sampleAnalysisResult))
+        val analyzeRunningFields = withServer(staticDir, backend = analyzeBackend) { analyzeServer =>
+          val analyzeBase = s"http://${analyzeServer.binding.host}:${analyzeServer.binding.port}"
+          val analyzeSubmit = postJson(s"$analyzeBase/api/analyze-hand-history", validUploadPayload)
+          assertEquals(analyzeSubmit.statusCode(), 202)
+          val analyzeStatusUri = s"$analyzeBase${jsonBody(analyzeSubmit)("statusUrl").str}"
+          assert(analyzeBackend.started.await(3, TimeUnit.SECONDS),
+            "analyze backend never started for SYMMETRY cross-check")
+          val analyzeRunning = getJson(analyzeStatusUri)
+          assertEquals(analyzeRunning("status").str, "running")
+          val fields = analyzeRunning.obj.keys.toSet
+          analyzeBackend.release.countDown()
+          fields
+        }
+        assertEquals(runningFields, analyzeRunningFields,
+          clue = s"hall RUNNING field set MUST EQUAL analyze RUNNING field set per the documented architectural symmetry (mirrors 191da3e + 01295d1 patterns); a refactor diverging the two endpoints' RUNNING shapes would silently break the SYMMETRY contract that lets the frontend reuse polling logic; got hall=${runningFields.toVector.sorted.mkString(", ")}, analyze=${analyzeRunningFields.toVector.sorted.mkString(", ")}")
+
+        // Release backend so the hall job can complete cleanly
+        backend.release.countDown()
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
