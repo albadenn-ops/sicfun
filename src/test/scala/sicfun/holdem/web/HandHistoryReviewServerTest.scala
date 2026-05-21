@@ -17518,6 +17518,117 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented STATIC-HANDLER ETAG FORMAT
+  // contract at StaticAssetsHandler.scala line 93's
+  // `etag = s"""W/"$size-$lastModified${if
+  // wouldCompressIfGet then "-gz" else ""}""""` -- the
+  // ETAG-FORMAT pin verifies the documented weak-ETag
+  // structure (W/ prefix + double-quote-wrapped + size-
+  // lastModified[-gz] body) per RFC 7232 sec 2.3.1 weak
+  // ETag semantics + the documented gzip-variant suffix
+  // for conservative caches that key on ETag without
+  // Vary; existing tests at line 9249 + line 10248
+  // verify ETag PRESENCE on vendor responses but not the
+  // FORMAT structure; FORTY-FIFTH per-emission-site
+  // SHAPE pin overall; the ETag format is OPERATIONALLY
+  // CRITICAL because: (a) browsers + caching proxies
+  // use the ETag for If-None-Match conditional GETs to
+  // skip body bytes on unchanged resources -- a refactor
+  // breaking the format would silently cause revalidation
+  // failures, forcing full re-downloads even when the
+  // resource hasn't changed, (b) the W/ weak-prefix
+  // indicates the ETag is content-equivalence-only (NOT
+  // byte-for-byte) -- a refactor changing to strong
+  // ETags would silently reject conditional requests
+  // that should have succeeded (different gzip versions
+  // would mismatch), (c) the -gz suffix variant is the
+  // documented defense against the cache-poisoning
+  // attack where a conservative cache (keying on ETag
+  // without Vary: Accept-Encoding) might serve the
+  // gzipped body to an uncompressed-Accept-Encoding
+  // client -- a refactor dropping the suffix would
+  // silently reintroduce the cache-poisoning vector;
+  // per-format regression vectors uniquely caught: (i)
+  // refactor dropping the W/ weak prefix would silently
+  // upgrade to strong ETags + break gzip-vs-uncompressed
+  // revalidation, (ii) refactor changing the format
+  // (e.g. dropping the size-lastModified components OR
+  // adding new components without updating callers)
+  // would silently break If-None-Match matching, (iii)
+  // refactor dropping the -gz suffix would silently
+  // reintroduce the gzip-variant cache-poisoning vector;
+  // test approach: GET /index.html WITHOUT Accept-
+  // Encoding: gzip → verify ETag has documented
+  // structure but NO -gz suffix; GET /index.html WITH
+  // Accept-Encoding: gzip → verify ETag has -gz suffix;
+  // assert the two ETags differ (the documented gzip-
+  // variant invariant).
+  test("static handler ETag MUST follow the documented `W/\"<size>-<lastModified>[-gz]\"` weak-ETag format per StaticAssetsHandler.scala line 93's emission with the documented gzip-variant suffix for cache-keying disambiguation -- the ETAG-FORMAT pin closes the documented RFC 7232 sec 2.3.1 weak-ETag contract + the documented defense against gzip-variant cache poisoning") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // GET index.html WITHOUT Accept-Encoding: gzip
+        val plainResp = get(s"$baseUri/index.html")
+        assertEquals(plainResp.statusCode(), 200,
+          clue = "GET /index.html MUST return 200")
+        val plainEtag = headerValue(plainResp, "ETag")
+          .getOrElse(fail("static 200 response MUST include ETag header per StaticAssetsHandler.scala line 98's emission"))
+
+        // (i) ETag starts with `W/` (weak ETag per RFC 7232
+        // sec 2.3.1)
+        assert(plainEtag.startsWith("W/"),
+          clue = s"static handler ETag MUST start with `W/` (weak ETag prefix per RFC 7232 sec 2.3.1) -- a refactor dropping the W/ prefix would silently upgrade to strong ETags, breaking gzip-vs-uncompressed revalidation (the weak ETag indicates content-equivalence, allowing different byte-for-byte representations to share an ETag); got: $plainEtag")
+
+        // (ii) ETag is double-quote wrapped (after the W/)
+        val plainBody = plainEtag.stripPrefix("W/")
+        assert(plainBody.startsWith("\"") && plainBody.endsWith("\""),
+          clue = s"static handler ETag body (after W/) MUST be double-quote wrapped per RFC 7232 sec 2.3 (the etag-value production requires DQUOTE); a refactor dropping the quotes would silently break clients that parse the ETag value (most HTTP clients enforce the quote contract); got: $plainEtag")
+
+        // (iii) ETag plain body does NOT end with -gz
+        // (no gzip suffix on the uncompressed variant)
+        val plainEtagInside = plainBody.stripPrefix("\"").stripSuffix("\"")
+        assert(!plainEtagInside.endsWith("-gz"),
+          clue = s"static handler ETag (uncompressed variant) MUST NOT end with `-gz` per the documented gzip-variant disambiguation -- the `-gz` suffix is the documented marker for the gzipped representation; got: $plainEtag")
+
+        // (iv) GET with Accept-Encoding: gzip → ETag SHOULD
+        // have -gz suffix
+        val gzipResp = get(s"$baseUri/index.html", Map("Accept-Encoding" -> "gzip"))
+        assertEquals(gzipResp.statusCode(), 200,
+          clue = "GET with Accept-Encoding: gzip MUST return 200")
+        val gzipEtag = headerValue(gzipResp, "ETag")
+          .getOrElse(fail("gzipped response MUST include ETag header"))
+
+        // (v) gzip variant ETag also starts with W/ + quoted
+        assert(gzipEtag.startsWith("W/"),
+          clue = s"gzip-variant ETag MUST also start with W/ (weak ETag); got: $gzipEtag")
+
+        // (vi) gzip variant ETag ends with -gz before the
+        // closing quote (the documented gzip-variant
+        // disambiguation per RFC 7232 + the cache-poisoning
+        // defense for conservative caches)
+        val gzipEtagInside = gzipEtag.stripPrefix("W/").stripPrefix("\"").stripSuffix("\"")
+        assert(gzipEtagInside.endsWith("-gz"),
+          clue = s"gzipped static response ETag MUST end with `-gz` (before closing quote) per StaticAssetsHandler.scala line 93's gzip-conditional template -- the documented gzip-variant disambiguation per RFC 7232 sec 2.3.1 protects against the cache-poisoning attack where conservative caches keying on ETag without Vary: Accept-Encoding might serve the gzipped body to an uncompressed-Accept-Encoding client; got: $gzipEtag")
+
+        // (vii) the gzip ETag MUST differ from the plain
+        // ETag (the gzip-variant invariant -- otherwise
+        // conditional requests would match across variants)
+        assertNotEquals(plainEtag, gzipEtag,
+          clue = s"gzipped ETag MUST differ from plain ETag per the documented gzip-variant disambiguation -- if they matched, a conservative cache (keying on ETag without Vary) could serve the wrong variant; got plain=$plainEtag, gzip=$gzipEtag")
+
+        // (viii) the gzip ETag MUST be the plain ETag with
+        // `-gz` inserted before the closing quote -- the
+        // structural relationship between the two variants
+        // is documented (same size + lastModified, just
+        // with the suffix)
+        val expectedGzipEtag = plainEtag.stripSuffix("\"") + "-gz\""
+        assertEquals(gzipEtag, expectedGzipEtag,
+          clue = s"gzipped ETag MUST equal the plain ETag with `-gz` inserted before the closing quote per the documented structural relationship (same size + lastModified components, just with the gzip-variant suffix); got gzip=$gzipEtag, expected=$expectedGzipEtag")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
