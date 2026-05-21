@@ -4158,6 +4158,146 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `playing hall job completed` audit log line
+  // for the /api/playing-hall worker terminal-state transition --
+  // the PARALLEL MIRROR to a04e51a's analyze-side job-completed
+  // pin, closing the FIRST of the playing-hall-side JobQueue audit
+  // lines; the playing-hall path has its OWN distinct prefix at
+  // JobQueue.scala line 609-611: `s"playing hall job completed
+  // jobId=$jobId durationMs=${completedAt - startedAt} queuedJobs=
+  // ${...} runningJobs=${...}"` -- NOT just `job completed` (the
+  // analyze path's prefix at a04e51a's line 311), so this is an
+  // OPERATIONALLY DISTINCT log line that operators filter on
+  // separately to compute per-endpoint dashboards (analyze
+  // throughput vs hall throughput, analyze latency vs hall
+  // latency, etc.); the playing-hall path also has a THIRD
+  // terminal state the analyze path doesn't have: Cancelled (at
+  // line 617-620 emits `playing hall job cancelled`) -- because
+  // playing-hall jobs are long-running (default 15-minute timeout
+  // vs analyze's 2-minute) and operators can cancel via the UI's
+  // Cancel button (per 758b86e's prior coverage of the cancellation
+  // flow); per-field regression vectors SPECIFIC to the playing-
+  // hall completion path that a04e51a + 6b59ce4 don't catch: (i)
+  // ASYMMETRIC DRIFT between analyze and hall prefixes -- a
+  // refactor that consolidated the two prefixes (e.g. emitting
+  // just `job completed` for BOTH endpoints under a "DRY refactor
+  // to reduce log-line duplication" rationale) would silently
+  // break operator per-endpoint dashboards that filter by the
+  // distinguishing `playing hall job completed` prefix; this
+  // matches the asymmetric-drift catch pattern from the multi-
+  // event audit log pins (b1339cd /api/auth/me, 505ba6b service
+  // field, etc.), (ii) consolidation refactor through a shared
+  // helper that emitted only one variant -- a refactor that
+  // unified the two worker types' emission helpers behind a
+  // single `s"$workerType job completed ..."` template where
+  // workerType is hardcoded "analyze" or always-empty would
+  // silently break the hall-side prefix, (iii) prefix-token-
+  // order refactor (e.g. emitting `playing-hall job completed`
+  // with a hyphen instead of a space, or `playing hall completed
+  // job` with token-reordering for readability) would silently
+  // break operator queries filtering on the EXACT
+  // multi-word-with-spaces prefix string; the playing-hall
+  // success line still uses LOG SPACES BETWEEN words (NOT
+  // hyphens, NOT camelCase) -- a defensible style choice for
+  // human readability but operators encode the exact format in
+  // their grep queries; 8-tier format check matching the
+  // a04e51a pattern with the playing-hall-specific prefix:
+  // (i) `playing hall job completed` prefix (catches rename
+  // AND catches the asymmetric-drift consolidation refactor),
+  // (ii) EXCLUSION of the analyze-side `job completed` standalone
+  // prefix (catches a refactor that emitted both prefixes OR
+  // emitted only the analyze prefix for the hall path), (iii)
+  // jobId matching the 202 response, (iv) durationMs= field
+  // with non-negative integer (same toLongOption + >= 0L shape
+  // as a04e51a + 6b59ce4), (v) queuedJobs=0, (vi) runningJobs=
+  // field presence, (vii) [INFO] level (matches a04e51a's
+  // analyze success), (viii) [hand-history-review] service-tag
+  // (mode-invariant); the EXCLUSION pin (ii) is the KEY
+  // ASYMMETRIC-DRIFT CATCH -- without it, a refactor that
+  // emitted "job completed" alongside "playing hall job
+  // completed" (e.g. a logger that emitted both for legacy
+  // log-aggregator compatibility during a transition) would
+  // silently pass the positive prefix check while polluting
+  // the analyze-side per-endpoint dashboard with hall events.
+  // The exclusion uses the substring "playing hall job completed"
+  // contains "job completed" as a sub-string, so we have to be
+  // careful: the check is "does the line ALSO contain the
+  // STANDALONE 'job completed' prefix in a position OTHER than
+  // the `playing hall job completed` substring". The safest
+  // assertion: strip the playing-hall prefix from the line and
+  // verify the residual doesn't contain "job completed" again.
+  test("submitted playing-hall job emits the documented `playing hall job completed jobId=<id> durationMs=<ms> queuedJobs=<n> runningJobs=<n>` INFO audit log line at the worker's terminal-state transition (per JobQueue.scala line 609-611) -- the parallel mirror to a04e51a's analyze-side job-completed pin, closes the first of the playing-hall-side JobQueue audit lines") {
+    withStaticSite { staticDir =>
+      // Capture stdout around the playing-hall submit + terminal-
+      // poll cycle. The default playingHallBackend
+      // (immediatePlayingHallBackend) returns
+      // Right(samplePlayingHallResult) synchronously, so by the
+      // time awaitTerminalJob returns "completed", the JobQueue
+      // worker has already emitted the playing-hall-specific
+      // line on stdout.
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      val submitJobId =
+        try
+          withServer(staticDir) { server =>
+            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+            val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+            assertEquals(submit.statusCode(), 202,
+              clue = "playing-hall submission must return 202 before the JobQueue worker can reach the playing-hall-job-completed emission point")
+            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+            val capturedJobId = jsonBody(submit)("jobId").str
+            val terminal = awaitTerminalJob(statusUri)
+            assertEquals(terminal("status").str, "completed",
+              clue = "playing-hall must reach 'completed' terminal state for the playing-hall-job-completed log line to have fired")
+            capturedJobId
+          }
+        finally
+          System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val completedLine = captured.split('\n').iterator
+        .find(_.contains("playing hall job completed"))
+        .getOrElse(fail(s"no `playing hall job completed` line in captured stdout -- JobQueue.scala line 609-611 documents this as the INFO-level line fired on every successful playing-hall job terminal transition; if missing, either the logInfo emission was suppressed OR the worker exited via a different path (Cancelled/Failed); got captured stdout: ${captured.take(2000)}"))
+
+      // (i) event prefix
+      assert(completedLine.contains("playing hall job completed"),
+        clue = s"playing-hall job-completed audit line must carry the literal `playing hall job completed` event prefix per JobQueue.scala line 610's hardcoded literal -- a refactor renaming to e.g. `hall job completed` / `playing-hall completed` (hyphen) / `playing hall completed job` (token-reorder) would silently break operator per-endpoint dashboards that filter by the distinguishing playing-hall prefix string; got: $completedLine")
+      // (ii) EXCLUSION of the standalone analyze-side prefix --
+      // the asymmetric-drift catch. Strip the playing-hall prefix
+      // first then check the residual doesn't contain the
+      // analyze-only "job completed" prefix again.
+      val withoutHallPrefix = completedLine.replace("playing hall job completed", "")
+      assert(!withoutHallPrefix.contains("job completed"),
+        clue = s"playing-hall audit line must NOT ALSO contain a STANDALONE `job completed` prefix (the analyze-side a04e51a-pinned prefix) in a position other than the `playing hall job completed` substring -- a refactor that emitted BOTH prefixes for the same event (e.g. a 'unify under legacy compatibility' transition emitter) would silently pass the positive `playing hall job completed` contains check while polluting the analyze-side per-endpoint dashboard with hall events; the EXCLUSION pin is the asymmetric-drift catch that distinguishes this from a04e51a; got line after stripping hall prefix: '$withoutHallPrefix'")
+      // (iii) jobId matching the 202 response
+      assert(completedLine.contains(s"jobId=$submitJobId"),
+        clue = s"playing-hall job-completed audit line must carry the SAME jobId='$submitJobId' that the 202 submission response returned -- this is the submission-to-completion correlation for the hall worker matching the analyze-side pattern; got: $completedLine")
+      // (iv) durationMs field with non-negative integer
+      assert(completedLine.contains("durationMs="),
+        clue = s"playing-hall job-completed audit line must carry the durationMs= field matching the analyze-side pin's shape; got: $completedLine")
+      val durationMsToken = completedLine.split(' ').iterator
+        .find(_.startsWith("durationMs="))
+        .getOrElse(fail(s"durationMs= token extraction failed; got: $completedLine"))
+      val durationMsValue = durationMsToken.drop("durationMs=".length).stripTrailing()
+      val durationMs = durationMsValue.toLongOption.getOrElse(fail(s"durationMs= value '$durationMsValue' not parseable as Long; got: $completedLine"))
+      assert(durationMs >= 0L,
+        clue = s"playing-hall durationMs MUST be non-negative matching the analyze-side a04e51a + 6b59ce4 pattern -- the immediate hall backend completes ~instantly so the value is small but never negative; a refactor swapping subtraction order in the hall-side emission specifically (without touching the analyze-side) would silently emit negative numbers ONLY for hall events, an asymmetric-drift case the a04e51a pin alone wouldn't catch; got durationMs=$durationMs in line: $completedLine")
+      // (v) queuedJobs=0
+      assert(completedLine.contains("queuedJobs=0"),
+        clue = s"playing-hall job-completed audit line must carry queuedJobs=0 (no other hall jobs queued in single-job test); matches a04e51a's analyze-side pattern; got: $completedLine")
+      // (vi) runningJobs field presence
+      assert(completedLine.contains("runningJobs="),
+        clue = s"playing-hall job-completed audit line must carry the runningJobs= field (presence-only since the executor timing is non-deterministic); matches a04e51a's analyze-side pattern; got: $completedLine")
+      // (vii) INFO level (matches a04e51a analyze success)
+      assert(completedLine.contains("[INFO]"),
+        clue = s"playing-hall job-completed audit line must be INFO-level per JobQueue.scala line 609's logInfo call; demote-to-DEBUG would silently hide hall throughput dashboards, promote-to-WARN would silently flood alerting on every successful hall job; got: $completedLine")
+      // (viii) service-tag prefix
+      assert(completedLine.contains("[hand-history-review]"),
+        clue = s"playing-hall job-completed audit line must carry the `[hand-history-review]` service-tag prefix per HandHistoryReviewServerRuntime.scala line 512's hardcoded literal -- matches /api/health.service (505ba6b); the service-tag is endpoint-invariant (both /api/analyze-hand-history + /api/playing-hall worker emissions share the same service-tag per the file-level logInfo helper); got: $completedLine")
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
