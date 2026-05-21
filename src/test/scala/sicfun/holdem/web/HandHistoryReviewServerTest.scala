@@ -16323,6 +16323,121 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/auth/me JSON FIELD-SET-SHAPE
+  // at AuthStack.scala lines 69-77 (no-auth mode) +
+  // PlatformUserAuth.scala lines 332-341 (platform-auth
+  // mode) -- the FIELD-SET-CARDINALITY pin for /api/auth/me
+  // responses with the documented 7-field closed set
+  // {authenticationEnabled, authenticationMode,
+  // authenticated, allowLocalRegistration, providers, user,
+  // csrfToken} that is IDENTICAL across both auth modes
+  // (the SHAPE doesn't change; only the field VALUES
+  // differ); THIRTY-FIFTH per-emission-site SHAPE pin
+  // overall extending the JSON CARDINALITY family from
+  // 08b35f1 + c0e75ca + 1f57ed6 (readiness endpoints) +
+  // c696482 (202-response) + b3c343f/df98f1f/188fe91/
+  // 016d138/65b46f6 + 191da3e/01295d1/d1af0e6/f9c33db
+  // (status-poll 5-state mirrors) + 05c911c (DELETE-
+  // response) + 97fd354/1a3f3f5/66cf389 (error-response
+  // shapes) + 22671ec/345a2f7/e31b12a (OPTIONS-preflight)
+  // to the /api/auth/me endpoint -- the AUTH-STATE
+  // INTROSPECTION response shape; the /api/auth/me field
+  // set is OPERATIONALLY CRITICAL because: (a) the
+  // frontend at site.js polls /api/auth/me on every page
+  // load + after every auth state-change to determine
+  // what UI to render (sign-in form vs signed-in
+  // dashboard) -- a refactor changing the shape would
+  // silently break frontend state detection, (b) the
+  // documented SHAPE-INVARIANCE between auth modes
+  // (no-auth + basic-auth + platform-auth) is the
+  // ARCHITECTURAL CONTRACT that lets the frontend use
+  // ONE code path for ALL deployment modes -- a refactor
+  // diverging the shapes between modes would silently
+  // require per-mode frontend logic, (c) the user +
+  // csrfToken fields are nullable in unauthenticated
+  // contexts but always PRESENT in the field set -- a
+  // refactor that omitted them when null (instead of
+  // emitting null) would silently change the field-set
+  // cardinality between authenticated + unauthenticated
+  // states; per-format regression vectors uniquely
+  // caught: (i) refactor ADDING a field (e.g.
+  // `lastLoginAtMs` for session metadata) without updating
+  // documentation OR frontend parsing would silently widen
+  // the contract, (ii) refactor REMOVING a field would
+  // silently break frontend logic, (iii) refactor
+  // RENAMING any field would silently break frontend
+  // state detection, (iv) refactor diverging the SHAPE
+  // between auth modes (e.g. omitting providers in
+  // no-auth mode) would silently force per-mode
+  // frontend code paths, (v) refactor making nullable
+  // fields ABSENT instead of NULL would silently change
+  // the cardinality across authenticated/unauthenticated
+  // states; test approach: GET /api/auth/me on a
+  // no-auth server (no platformAuth), assert the response
+  // body has exactly the 7-field closed set; also verify
+  // the documented VALUES (authenticationEnabled=false,
+  // authenticationMode="no-auth", etc.).
+  test("/api/auth/me response body MUST emit EXACTLY the documented 7-field closed set {authenticationEnabled, authenticationMode, authenticated, allowLocalRegistration, providers, user, csrfToken} per AuthStack.scala lines 69-77 (no-auth mode) -- the FIELD-SET-CARDINALITY pin for the AUTH-STATE INTROSPECTION endpoint closes the auth-side JSON-shape coverage that the 5-state status-poll family covers for jobs but not for auth-state") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val meResp = getJson(s"$baseUri/api/auth/me")
+        val meFields = meResp.obj.keys.toSet
+
+        val expectedFields = Set(
+          "authenticationEnabled",
+          "authenticationMode",
+          "authenticated",
+          "allowLocalRegistration",
+          "providers",
+          "user",
+          "csrfToken"
+        )
+
+        // (i) CARDINALITY
+        assertEquals(meFields.size, expectedFields.size,
+          clue = s"/api/auth/me response body MUST have exactly ${expectedFields.size} fields per AuthStack.scala lines 69-77; a refactor ADDING or REMOVING a field would silently widen/narrow the auth-state contract; got actual=${meFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- meFields).toVector.sorted.mkString(", ")}, extra=${(meFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(meFields, expectedFields,
+          clue = s"/api/auth/me response body's field NAME SET MUST equal exactly the documented 7-field closed set per AuthStack.scala lines 69-77 -- a refactor RENAMING any field would silently break frontend state detection at site.js (which keys on these exact names); got actual=${meFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- meFields).toVector.sorted.mkString(", ")}; extra=${(meFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) VALUE assertions for the documented no-auth
+        // mode (the SHAPE is identical across modes but the
+        // VALUES differ per mode)
+        assertEquals(meResp("authenticationEnabled").bool, false,
+          clue = s"no-auth mode: authenticationEnabled MUST be false per AuthStack.scala line 70's `Bool(authenticationEnabled(basicAuth, platformAuth))` -- with no basicAuth + no platformAuth, the helper returns false; a refactor changing the default would silently affect operator-side auth-status displays; got: ${meResp("authenticationEnabled").bool}")
+        assertEquals(meResp("authenticated").bool, false,
+          clue = s"no-auth mode: authenticated MUST be false (no user signed in); got: ${meResp("authenticated").bool}")
+        assertEquals(meResp("allowLocalRegistration").bool, false,
+          clue = s"no-auth mode: allowLocalRegistration MUST be false per line 73 -- the no-auth mode has no user-store so registration is meaningless; got: ${meResp("allowLocalRegistration").bool}")
+
+        // (iv) ABSENCE: nullable fields MUST be PRESENT
+        // (with null value) -- a refactor that omitted them
+        // when null would silently change cardinality
+        // between authenticated + unauthenticated states
+        assertEquals(meResp("user"), ujson.Null,
+          clue = "no-auth mode: user field MUST be PRESENT and equal to null per AuthStack.scala line 75's `ujson.Null` -- a refactor that omitted the field when null (e.g. for 'cleaner JSON') would silently change the cardinality between authenticated + unauthenticated states, breaking the documented SHAPE-INVARIANCE contract")
+        assertEquals(meResp("csrfToken"), ujson.Null,
+          clue = "no-auth mode: csrfToken field MUST be PRESENT and equal to null per AuthStack.scala line 76 -- there's no CSRF gate to issue tokens for in no-auth mode")
+
+        // (v) providers MUST be PRESENT as an empty array
+        // (not null, not absent)
+        val providers = meResp("providers")
+        assert(providers.isInstanceOf[ujson.Arr],
+          clue = s"no-auth mode: providers field MUST be a ujson.Arr (NOT null or absent) per AuthStack.scala line 74's `Arr()` -- a refactor making it null in no-auth mode would silently change the type contract; got type: ${providers.getClass.getSimpleName}")
+        assertEquals(providers.arr.length, 0,
+          clue = s"no-auth mode: providers array MUST be empty (no OIDC providers configured); got length: ${providers.arr.length}")
+
+        // (vi) authenticationMode VALUE assertion
+        val authMode = meResp("authenticationMode").str
+        assert(authMode == "no-auth" || authMode == "none",
+          clue = s"no-auth mode: authenticationMode MUST be one of {'no-auth', 'none'} per the documented authenticationMode helper -- the exact string is determined by AuthStack.scala's authenticationMode(basicAuth, platformAuth) function; got: $authMode")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
