@@ -4818,6 +4818,146 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `job accepted` analyze-side JobQueue INFO
+  // audit log line at submission time -- the ANALYZE-SIDE MIRROR
+  // to 0af1462's playing-hall accepted line, with the
+  // analyze-side-distinctive `bytes=<n>` field (instead of the
+  // hall-side's `request.logSummary` 8-field structured summary);
+  // line 200-202 in JobQueue.scala emits this when an analyze
+  // submission successfully reaches the executor.submit; the
+  // format at line 201 is `s"job accepted jobId=$jobId queuedJobs=
+  // ${executor.getQueue.size()} runningJobs=${executor.
+  // getActiveCount()} bytes=${request.handHistoryText.getBytes(
+  // StandardCharsets.UTF_8).length}"` -- the analyze-side has
+  // SIMPLER request-context (just bytes, not the 8-field hall
+  // structured summary) because analyze inputs are unstructured
+  // hand-history text where the most operationally-relevant
+  // metric is "how large is this upload"; per-field regression
+  // vectors specific to the analyze-side accepted line that the
+  // hall-side pins (1e030ed / 0af1462) don't catch: (i)
+  // ASYMMETRIC PREFIX DRIFT -- the analyze-side prefix is `job
+  // accepted` (NO `playing hall` qualifier) while the hall-side
+  // prefix is `playing hall job accepted` (with qualifier); a
+  // refactor consolidating both submission-time prefixes (e.g.
+  // adding the qualifier to analyze: "for consistency with hall")
+  // would silently change the analyze-side prefix and break
+  // operator per-endpoint dashboards filtering on the
+  // distinguishing prefix; (ii) `bytes=<n>` field is UNIQUE to
+  // the analyze-side -- a refactor that swapped to logSummary-
+  // style fields (hands=, tableCount=, etc.) for "unified shape"
+  // would silently emit hall-side fields on analyze lines, OR
+  // dropping the bytes field would silently lose operator
+  // visibility into "what size analyze inputs are landing on
+  // this deployment" (the operationally-relevant analyze input
+  // metric); (iii) bytes value MUST be the UTF-8 byte length of
+  // request.handHistoryText -- the validUploadPayload's
+  // handHistoryText is "PokerStars Hand #1" which is 18 ASCII
+  // characters = 18 UTF-8 bytes; a refactor that emitted character
+  // count instead of byte count would silently emit a different
+  // number on non-ASCII inputs (e.g. an emoji or extended Unicode
+  // character would have len != bytes), AND a refactor that
+  // emitted the SERIALIZED JSON payload size instead of just the
+  // handHistoryText field would silently emit a much larger
+  // value; (iv) NO request-logSummary fields (hands=, tableCount=,
+  // etc.) -- the analyze submission doesn't carry those fields
+  // because the analyze flow doesn't have a structured request
+  // model like PlayingHallRequest does; 12-tier format check
+  // mirroring 0af1462's pattern with the analyze-distinctive
+  // fields: (i) `job accepted` prefix (catches rename + catches
+  // asymmetric-drift consolidation with hall), (ii) EXCLUSION of
+  // `playing hall job accepted` (catches a refactor that
+  // emitted both prefixes OR added the hall qualifier to the
+  // analyze line), (iii) jobId matching the 202 response, (iv)
+  // queuedJobs=1 (matches the SUBMISSION-TIME queue-size
+  // asymmetry pinned by 0af1462: the just-submitted job IS in
+  // the queue at submission time, NOT 0 like completion-time),
+  // (v) runningJobs=0 (worker hasn't started yet), (vi)
+  // bytes=18 (the exact UTF-8 byte length of
+  // validUploadPayload's "PokerStars Hand #1" handHistoryText
+  // -- catches a refactor changing the source field OR the
+  // length-computation), (vii) EXCLUSION of hands= /
+  // tableCount= / heroStyle= (the hall-side logSummary fields
+  // that MUST NOT appear on analyze-side lines), (viii) NO
+  // durationMs= field (submission-time, not completion-time),
+  // (ix) [INFO] level, (x) [hand-history-review] service-tag.
+  test("submitted analyze job emits the documented `job accepted jobId=<id> queuedJobs=<n> runningJobs=<n> bytes=<n>` INFO audit log line at submission time (per JobQueue.scala line 200-202) -- the analyze-side mirror to 0af1462's playing-hall submission-time pin, with the analyze-distinctive `bytes=<n>` field (instead of the hall-side's 8-field logSummary)") {
+    withStaticSite { staticDir =>
+      // Capture stdout around the analyze submission + terminal-
+      // poll cycle. The default immediateBackend completes
+      // synchronously, so by the time awaitTerminalJob returns
+      // "completed", both the accepted (line 201) AND completed
+      // (line 311, pinned by a04e51a) lines are on stdout.
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      val submitJobId =
+        try
+          withServer(staticDir) { server =>
+            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+            val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+            assertEquals(submit.statusCode(), 202,
+              clue = "analyze submission must return 202 before the JobQueue accepted log line fires")
+            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+            val capturedJobId = jsonBody(submit)("jobId").str
+            awaitTerminalJob(statusUri)
+            capturedJobId
+          }
+        finally
+          System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      // Find the accepted line specifically. The captured stream
+      // contains BOTH the accepted line (target) AND the
+      // completed line (a04e51a's target). The "job accepted"
+      // contains-substring search finds the accepted line --
+      // the completed line is "job completed" which doesn't
+      // contain "accepted".
+      val acceptedLine = captured.split('\n').iterator
+        .find(_.contains("job accepted"))
+        .getOrElse(fail(s"no `job accepted` line in captured stdout -- JobQueue.scala line 200-202 documents this as the INFO-level submission-time line; if missing, either the logInfo was suppressed OR the submission path took a different branch (drain/rate-limit/auth); got captured stdout: ${captured.take(2000)}"))
+
+      // (i) event prefix
+      assert(acceptedLine.contains("job accepted"),
+        clue = s"analyze submission-time line must carry the literal `job accepted` prefix per JobQueue.scala line 201's hardcoded literal; got: $acceptedLine")
+      // (ii) EXCLUSION of hall-side prefix (asymmetric-drift catch)
+      assert(!acceptedLine.contains("playing hall job accepted"),
+        clue = s"analyze submission-time line must NOT contain `playing hall job accepted` (the 0af1462-pinned hall-side prefix) -- a refactor that emitted both prefixes OR added the hall qualifier to the analyze line for 'consistency' would silently break operator per-endpoint dashboards distinguishing analyze submissions from hall submissions; got: $acceptedLine")
+      // (iii) jobId matching the 202 response
+      assert(acceptedLine.contains(s"jobId=$submitJobId"),
+        clue = s"analyze submission-time line must carry the SAME jobId='$submitJobId' from the 202 submission response; got: $acceptedLine")
+      // (iv) queuedJobs=1 (SUBMISSION-TIME queue-size asymmetry
+      // -- the just-submitted job IS in the queue at submission
+      // time, matching the empirical observation pinned by
+      // 0af1462 on the hall side)
+      assert(acceptedLine.contains("queuedJobs=1"),
+        clue = s"analyze submission-time line must carry queuedJobs=1 (the just-submitted job IS in the queue at submission time per executor.submit at line 196 enqueueing BEFORE the logInfo at line 200 reads the queue size); this matches the SUBMISSION-TIME vs COMPLETION-TIME queue-size asymmetry empirically documented + pinned by 0af1462 on the hall side; a refactor reading the queue size BEFORE executor.submit would silently emit 0 here; got: $acceptedLine")
+      // (v) runningJobs=0 (worker hasn't started yet at submission)
+      assert(acceptedLine.contains("runningJobs=0"),
+        clue = s"analyze submission-time line must carry runningJobs=0 (the worker hasn't started executing the just-queued job at submission time -- executor.getActiveCount() returns 0); matches 0af1462's pattern on the hall side; got: $acceptedLine")
+      // (vi) bytes=18 (UTF-8 byte length of "PokerStars Hand #1"
+      // = 18 ASCII characters = 18 UTF-8 bytes); pins the
+      // analyze-side-distinctive request-context field
+      assert(acceptedLine.contains("bytes=18"),
+        clue = s"analyze submission-time line MUST carry bytes=18 (the UTF-8 byte length of validUploadPayload's `handHistoryText`: \"PokerStars Hand #1\" = 18 ASCII characters = 18 UTF-8 bytes); a refactor that emitted character count instead of byte count would silently emit a different number on non-ASCII inputs, AND a refactor that emitted the SERIALIZED JSON payload size instead of just handHistoryText would silently emit a much larger value -- the test pins the EXACT byte count so any source-field-change is caught; got: $acceptedLine")
+      // (vii) EXCLUSION of hall-side logSummary fields
+      assert(!acceptedLine.contains("hands="),
+        clue = s"analyze submission-time line must NOT contain `hands=` (a hall-side logSummary field pinned by 0af1462) -- a refactor that swapped the analyze bytes= field for the hall-side logSummary template would silently emit hall fields on analyze lines, breaking the documented per-endpoint distinction; got: $acceptedLine")
+      assert(!acceptedLine.contains("tableCount="),
+        clue = s"analyze submission-time line must NOT contain `tableCount=` (a hall-side logSummary field); got: $acceptedLine")
+      assert(!acceptedLine.contains("heroStyle="),
+        clue = s"analyze submission-time line must NOT contain `heroStyle=` (a hall-side logSummary field); got: $acceptedLine")
+      // (viii) NO durationMs (submission-time, not completion)
+      assert(!acceptedLine.contains("durationMs="),
+        clue = s"analyze submission-time line must NOT contain durationMs= -- the line is SUBMISSION-TIME (executor.submit just enqueued the job, worker hasn't started); a refactor adding durationMs at submission would silently break the documented submission-vs-completion field distinction; got: $acceptedLine")
+      // (ix) INFO level
+      assert(acceptedLine.contains("[INFO]"),
+        clue = s"analyze submission-time line must be INFO-level per JobQueue.scala line 200's logInfo call; got: $acceptedLine")
+      // (x) service-tag
+      assert(acceptedLine.contains("[hand-history-review]"),
+        clue = s"analyze submission-time line must carry the [hand-history-review] service-tag prefix; got: $acceptedLine")
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
