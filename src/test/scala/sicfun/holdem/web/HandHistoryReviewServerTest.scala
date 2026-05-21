@@ -7101,6 +7101,157 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented sanitizeLogMessage BACKSLASH (0x5C)
+  // escape rule END-TO-END at HandHistoryReviewServerRuntime
+  // .scala line 488 -- the FIRST replace in the explicit-
+  // replace chain (lines 488-492); the SANITIZATION-INVARIANT
+  // family now covers ALL 5 BRANCH POSITIONS that a regression
+  // could target: (4db713d) line 489 newline 0x0A, (a696f57)
+  // line 490 CR 0x0D, (7aeaa8d) line 492 TAB 0x09, (b98b458)
+  // lines 494-497 generic fallback DEL 0x7F, (THIS commit)
+  // line 488 backslash 0x5C; the BACKSLASH pin is the MOST
+  // CRITICAL of the family because line 488 is the FIRST
+  // replace in the chain AND has CASCADE IMPLICATIONS: if
+  // line 488 is broken, moved AFTER another replace, or
+  // removed, the OTHER replaces (newline -> backslash-n, CR
+  // -> backslash-r, tab -> backslash-t, null -> backslash-0)
+  // would EMIT backslash chars that would NOT THEN BE
+  // ESCAPED -- the output for a user-submitted newline would
+  // be the 2-char sequence backslash-n, but if the user ALSO
+  // submitted a literal backslash, the OUTPUT would be
+  // AMBIGUOUS between "literal backslash + n" and "escaped
+  // newline" -- breaking the GROUND-TRUTH ROUND-TRIP of the
+  // log line; the backslash is the ONLY ASCII PRINTABLE byte
+  // (0x5C is 'backslash', printable, not a control char)
+  // caught by sanitizeLogMessage -- the family's other 4
+  // pins all target control chars (< 0x20 or 0x7F); the
+  // backslash escape is what makes the OTHER escapes
+  // UNAMBIGUOUS -- without it, an attacker could submit a
+  // literal backslash-n sequence (2 chars: 0x5C + 0x6E) that
+  // LOOKS like an escaped newline in the log output,
+  // creating CONFUSION between attacker-injected escapes and
+  // real sanitization output; the sanitizeLogMessage helper
+  // at line 488's replace(2-backslash-string, 4-backslash-
+  // string) in Scala source -- which is replace(single-
+  // backslash, double-backslash) in resulting String values
+  // -- catches the raw 0x5C byte and emits the 2-backslash
+  // escape; this commit's END-TO-END test verifies the
+  // sanitization applies at the log() emission layer by:
+  // (1) configuring platformAuth, (2) submitting POST /api/
+  // auth/login with email containing a JSON-escaped
+  // backslash (the 2-char JSON escape parses to 1 byte 0x5C
+  // at JSON-decode time), (3) the login fails validateEmail
+  // (backslash is not in the [A-Za-z0-9_.+-] local-part
+  // character class) + emits auth.login.failure logWarn
+  // with the user-submitted email containing the raw
+  // backslash byte, (4) formatSubmittedEmailForLog ONLY
+  // escapes spaces, NOT backslash -- the raw backslash flows
+  // through into the logWarn s-string, (5) the log() helper's
+  // sanitizeLogMessage wrapping at line 512 catches the
+  // backslash at line 488 + escapes it to 2 backslashes;
+  // per-format regression vectors that this pin uniquely
+  // catches (NONE of the other 4 family pins catch these):
+  // (i) refactor REORDERING the line 488 replace to AFTER
+  // line 489's newline replace -- this would cause the line
+  // 489 emit of backslash-n for newlines to NOT have its
+  // emitted backslash re-escaped, so a user-submitted
+  // newline would output as backslash-n but a user-submitted
+  // backslash would also output as backslash -- the OUTPUT
+  // would be INDISTINGUISHABLE between "escaped newline" and
+  // "literal user backslash followed by n", (ii) refactor
+  // removing line 488 entirely would let raw backslashes
+  // through, creating the same ambiguity problem as (i),
+  // (iii) refactor changing the escape format (e.g.
+  // backslash -> %5C uri-style) would silently break log
+  // aggregator parsers expecting the documented backslash-
+  // escape convention; this test's emission via the
+  // auth.login.failure path exercises the END-TO-END
+  // sanitization specifically on a USER-CONTROLLED field
+  // that formatSubmittedEmailForLog does NOT itself escape;
+  // 4-tier format check: (i) the auth.login.failure line
+  // exists in captured stderr, (ii) the line contains BOTH
+  // halves of the email (alice + bob@example.com), (iii)
+  // the email field contains the ESCAPED form with 2
+  // backslashes between alice and bob per line 488's escape
+  // rule, (iv) EXCLUSION of the 1-backslash form -- this is
+  // the STRUCTURAL DIFFERENCE between sanitized and
+  // unsanitized output; if sanitization is broken, the
+  // 1-backslash form WOULD be present.
+  test("log() helper's sanitizeLogMessage wrapping at HandHistoryReviewServerRuntime.scala line 512 escapes user-controlled BACKSLASH (0x5C) bytes end-to-end via the line 488 escape rule -- the SANITIZATION-INVARIANT pin for the FIRST replace in the chain; backslash is the ONLY ASCII PRINTABLE byte caught by sanitizeLogMessage, and the FIRST escape applied -- if reordered or removed, the OTHER escapes would emit backslashes that themselves wouldn't get re-escaped, breaking the UNAMBIGUITY of every escape rule") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture stderr around the malicious login attempt.
+          // The submitted email JSON contains the 2-char JSON
+          // backslash escape (which ujson parses to 1 byte
+          // 0x5C backslash); the raw backslash flows into the
+          // logWarn s-string via formatSubmittedEmailForLog
+          // (which only escapes spaces, NOT backslash), and
+          // log() at line 512 calls sanitizeLogMessage which
+          // catches the backslash at line 488 + escapes to
+          // 2 backslashes. In the Scala raw triple-quoted
+          // string body below, double-backslash is a literal
+          // 2-char sequence (Scala raw strings do NOT process
+          // backslash escapes -- the resulting Scala String
+          // has 2 literal backslash bytes). HTTP transmits
+          // these 2 bytes verbatim; ujson parses the JSON
+          // backslash-backslash escape into 1 byte 0x5C.
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          try
+            val rejected = postJson(s"$baseUri/api/auth/login",
+              """{"email":"alice\\bob@example.com","password":"some-password"}""")
+            assertEquals(rejected.statusCode(), 401,
+              clue = "malformed-email login MUST return 401 (the email fails validateEmail's regex check because backslash is not in the [A-Za-z0-9_.+-] local-part character class; loginLocal returns Left -> 401)")
+          finally
+            System.setErr(originalErr)
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.login.failure"))
+            .getOrElse(fail(s"no `auth.login.failure` line in captured stderr; got: ${captured.take(800)}"))
+
+          // (i) the auth.login.failure line exists
+          assert(failureLine.contains("auth.login.failure"),
+            clue = s"auth.login.failure line must be present (the rejected login path at AuthStack.scala line 192 emits this on every invalid-credentials rejection); got: $failureLine")
+
+          // (ii) the line contains BOTH halves of the email
+          assert(failureLine.contains("alice") && failureLine.contains("bob@example.com"),
+            clue = s"auth.login.failure line MUST contain BOTH halves of the email (alice + bob@example.com); got: $failureLine; full captured stream: ${captured.take(1500)}")
+
+          // (iii) the email contains the ESCAPED form with 2
+          // backslashes between alice and bob. Scala source
+          // 4-backslash sequence = String value 2 backslashes.
+          // The line 488 rule replaces 1 raw backslash with 2
+          // backslashes, so the output between alice and bob
+          // is 2 backslashes.
+          assert(failureLine.contains("alice\\\\bob@example.com"),
+            clue = s"auth.login.failure line MUST carry the escaped form `alice\\\\\\\\bob@example.com` (Scala source 4 backslashes = 2 literal backslashes between alice and bob) per HandHistoryReviewServerRuntime.scala line 488's escape rule; the raw 0x5C backslash byte in the submitted email gets caught by sanitizeLogMessage's line 488 (the FIRST replace in the chain) AT THE LOG LAYER; a refactor REORDERING line 488 to AFTER another replace would silently break the unambiguity of every OTHER escape (the emitted backslashes from those replaces would not themselves be re-escaped, conflating user-submitted backslashes with sanitization-emitted backslashes); a refactor REMOVING line 488 entirely would let raw backslashes through, creating the same ambiguity problem; got: $failureLine")
+
+          // (iv) EXCLUSION: the line must NOT contain the
+          // 1-backslash form. Scala source 2-backslash
+          // sequence = String value 1 backslash. When
+          // sanitization works, the output has 2 backslashes
+          // between alice and bob, and a substring search for
+          // 1-backslash form FAILS (the search target starts
+          // at the 'alice + 1-backslash + b' pattern which
+          // mismatches at the 6th char where output has the
+          // SECOND backslash but the target wants 'b'). This
+          // is the CORE STRUCTURAL ASSERTION distinguishing
+          // sanitized from unsanitized output.
+          assert(!failureLine.contains("alice\\bob@example.com"),
+            clue = s"auth.login.failure line MUST NOT contain the 1-backslash form `alice\\\\bob@example.com` (Scala source 2 backslashes = 1 literal backslash between alice and bob) -- this is the UNSANITIZED form; if this assertion fails, the line 488 backslash escape is BROKEN and user-submitted backslashes are flowing through to the log unescaped, creating UNAMBIGUITY with the OTHER escapes' emitted backslashes (a user-submitted backslash-n sequence would output as backslash-n indistinguishable from an escaped newline); got line: $failureLine")
+        }
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
