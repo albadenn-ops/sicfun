@@ -5211,6 +5211,138 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `bucket=auth` variant of the rate-limit
+  // log line -- the AUTH-BUCKET mirror to 47d91dd + 82bca42's
+  // submit-bucket pair, closing the SECOND of 3 rate-limit
+  // buckets the deploy doc + runbook document; the rate-limit
+  // taxonomy has 3 distinct buckets with documented
+  // operationally-distinct triage workflows: (a) "submit" --
+  // analyze + playing-hall submission throttling (pinned by
+  // 47d91dd + 82bca42 -- credential-stuffing-detection adjacent),
+  // (b) "auth" -- register/login throttling (THIS commit --
+  // credential-stuffing DIRECT detection), and (c) "job-status"
+  // -- GET /jobs/<id> polling throttling (next-fire candidate
+  // -- job-scraper detection); the auth-bucket is the
+  // SECURITY-CRITICAL variant because it directly throttles the
+  // credential-stuffing attack surface: register+login share a
+  // single auth bucket so attackers can't bypass the login
+  // throttle by hammering registration with PBKDF2-cost
+  // requests (per the existing line 10198 test's inline comment
+  // documenting the shared-bucket design); the format at line
+  // 674 is the SAME template as 47d91dd's submit variant but
+  // with the path + bucket fields flipped: path=/api/auth/login
+  // (or /api/auth/register), bucket=auth, limitPerMinute=
+  // <rateLimitAuthPerMinute value>; per-field regression
+  // vectors that 47d91dd's submit-bucket pin doesn't catch:
+  // (i) the BUCKET=AUTH literal -- a refactor renaming to
+  // e.g. "credentials" / "login" would silently break operator
+  // alert rules filtering for credential-stuffing detection
+  // (the runbook's section X.Y triage entry filters by
+  // bucket=auth to spot the documented "high WARN rate from
+  // many remote= sources" pattern that signals
+  // credential-stuffing per the deploy doc line 218's
+  // discussion of the email= field's brute-force-detection
+  // role), (ii) the path=/api/auth/login field -- catches a
+  // refactor that emitted a wrong path source for the auth
+  // routes (e.g. always emitting the same fixed path), (iii)
+  // the SHARED auth bucket across login + register -- the
+  // documented "attackers can't bypass the login throttle by
+  // hammering registration" property depends on BOTH routes
+  // hitting bucket=auth; a refactor that split them into
+  // separate buckets (bucket=login + bucket=register) would
+  // silently allow the bypass while still emitting plausible-
+  // looking 429s; this test pins ONLY the login-route emission
+  // (sufficient to establish the bucket=auth literal AND the
+  // path-source-correctness AND distinguishes from
+  // bucket=submit at 47d91dd); a future fire could add the
+  // register-route mirror to pin the shared-bucket property
+  // directly via TWO routes emitting the same bucket=auth, but
+  // for now the existing line 10200 test verifies the
+  // shared-throttling behavior (register gets 429 after login
+  // hits cap) at the HTTP-response level; 7-tier format check
+  // mirroring 47d91dd's pattern with the auth-bucket-distinctive
+  // fields: (i) `request rate limited` prefix (same as 47d91dd
+  // / 82bca42), (ii) path=/api/auth/login (the auth-route
+  // path -- distinguishes from /api/analyze-hand-history at
+  // 47d91dd), (iii) `client=remote:` prefix presence (the
+  // login flow happens BEFORE authentication completes so
+  // principalKey is None and the client-key falls back to
+  // remote: per 47d91dd's documented pattern -- catches a
+  // refactor that somehow used user: prefix for auth-bucket
+  // rejections), (iv) bucket=auth (THE distinguishing field
+  // -- catches rename), (v) EXCLUSION of bucket=submit (the
+  // 47d91dd-pinned alternative bucket -- catches a refactor
+  // that emitted the wrong bucket id for auth rejections),
+  // (vi) limitPerMinute=1 (the test's rateLimitAuthPerMinute
+  // configured value), (vii) [WARN] + [hand-history-review]
+  // service-tag.
+  test("rate-limit rejected auth attempt emits the documented `request rate limited path=/api/auth/login client=remote:<addr> bucket=auth limitPerMinute=<n> retryAfterMs=<n>` WARN audit log line -- the AUTH-BUCKET variant complementing 47d91dd/82bca42's submit-bucket pair (closes the second of 3 rate-limit buckets the runbook documents)") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath)),
+          rateLimitSubmitsPerMinute = 0,
+          rateLimitStatusPerMinute = 0,
+          rateLimitAuthPerMinute = 1
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // First auth attempt (with non-existent user): 401
+          // -- consumes the auth-bucket slot for the
+          // remote-keyed client
+          val firstLogin = postJson(s"$baseUri/api/auth/login",
+            """{"email":"victim@example.com","password":"any-wrong-password"}""")
+          assertEquals(firstLogin.statusCode(), 401,
+            clue = "first auth attempt must reach the auth handler and return 401 (invalid credentials) to consume the rate-limit slot")
+
+          // Second auth attempt: rate-limited 429 + emits log line
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          try
+            val rejected = postJson(s"$baseUri/api/auth/login",
+              """{"email":"victim@example.com","password":"another-wrong-password"}""")
+            assertEquals(rejected.statusCode(), 429,
+              clue = "second auth attempt MUST be rate-limited (429) -- the per-IP auth-bucket cap of 1 should be enforced before reaching loginLocal")
+          finally
+            System.setErr(originalErr)
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val rateLimitLine = captured.split('\n').iterator
+            .find(_.contains("request rate limited"))
+            .getOrElse(fail(s"no `request rate limited` line in captured stderr for the auth-bucket variant -- AuthStack.scala line 674's logWarn should fire identically for submit + auth bucket rejections; got captured stderr: ${captured.take(2000)}"))
+
+          // (i) prefix
+          assert(rateLimitLine.contains("request rate limited"),
+            clue = s"auth-bucket rate-limit line must carry the SAME `request rate limited` prefix as 47d91dd/82bca42 submit-bucket variants; got: $rateLimitLine")
+          // (ii) path=/api/auth/login (auth-route path)
+          assert(rateLimitLine.contains("path=/api/auth/login"),
+            clue = s"auth-bucket rate-limit line must carry path=/api/auth/login (the login-route path) -- a refactor that emitted a wrong path source (e.g. always config-level prefix) would silently mislead operator per-endpoint triage; got: $rateLimitLine")
+          // (iii) client=remote: prefix (login is unauthenticated)
+          assert(rateLimitLine.contains("client=remote:"),
+            clue = s"auth-bucket rate-limit line must carry client=remote: prefix -- the login flow happens BEFORE authentication completes so principalKey is None per AuthStack.scala line 666, and the client-key falls back to remote: per RateLimit.scala line 182; got: $rateLimitLine")
+          // (iv) THE LOAD-BEARING CHANGE: bucket=auth (NOT
+          // bucket=submit like 47d91dd/82bca42)
+          assert(rateLimitLine.contains("bucket=auth"),
+            clue = s"auth-bucket rate-limit line MUST carry `bucket=auth` per AuthStack.scala line 674's rejection.bucket.id field -- the runbook's credential-stuffing-detection triage filters specifically for bucket=auth to distinguish credential-attack traffic from legitimate-but-bursty submissions (bucket=submit) or job scrapers (bucket=job-status); a refactor renaming to e.g. 'credentials' / 'login' would silently break the credential-stuffing alert rules AND the documented shared-bucket-for-login-and-register property (per the existing line 10198 test's inline comment); got: $rateLimitLine")
+          // (v) EXCLUSION of bucket=submit (the 47d91dd-pinned
+          // alternative -- asymmetric-pair catch)
+          assert(!rateLimitLine.contains("bucket=submit"),
+            clue = s"auth-bucket rate-limit line MUST NOT contain bucket=submit (the 47d91dd-pinned analyze-route bucket) -- a refactor that emitted BOTH buckets OR used the wrong bucket id for auth rejections would silently misroute operator triage between credential-attack vs submission-burst patterns; the EXCLUSION is the load-bearing asymmetric-pair catch matching 82bca42's `client=remote:` EXCLUSION pattern; got: $rateLimitLine")
+          // (vi) limitPerMinute=1 (test's configured cap)
+          assert(rateLimitLine.contains("limitPerMinute=1"),
+            clue = s"auth-bucket rate-limit line must carry limitPerMinute=1 (the test's withServer rateLimitAuthPerMinute=1 configured value) -- catches a refactor reading the wrong config knob (e.g. rateLimitSubmitsPerMinute instead of rateLimitAuthPerMinute) which would silently emit the wrong cap value; got: $rateLimitLine")
+          // (vii) WARN + service-tag
+          assert(rateLimitLine.contains("[WARN]"),
+            clue = s"auth-bucket rate-limit line must be WARN-level matching 47d91dd/82bca42 submit-bucket variants; got: $rateLimitLine")
+          assert(rateLimitLine.contains("[hand-history-review]"),
+            clue = s"auth-bucket rate-limit line must carry the [hand-history-review] service-tag prefix; got: $rateLimitLine")
+        }
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
