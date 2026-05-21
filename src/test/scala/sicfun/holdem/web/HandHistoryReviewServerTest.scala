@@ -14186,6 +14186,133 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented DELETE-RESPONSE FIELD-SET-SHAPE at
+  // HandHistoryReviewServerApi.scala line 221 -- the
+  // FIELD-SET-CARDINALITY pin for the DELETE (cancellation)
+  // response body which has a documented 2-field closed set
+  // {jobId, status} where status is ALWAYS the literal
+  // string "cancelled"; the DELETE response is DISTINCT from
+  // the subsequent status-poll-CANCELLED response (188fe91)
+  // -- the DELETE response is the IMMEDIATE acknowledgement
+  // (returned by the DELETE handler at line 220-221's
+  // CancelOutcome.Accepted branch) while the status-poll
+  // response is the LATER terminal-state observation; both
+  // have status="cancelled" but DIFFERENT shapes (2 fields
+  // vs 8 fields with full lifecycle metadata); NINETEENTH
+  // per-emission-site SHAPE pin overall; the DELETE-response
+  // shape is OPERATIONALLY CRITICAL because: (a) the
+  // frontend at site.js uses the DELETE response as the
+  // IMMEDIATE feedback for the user's cancel-button click
+  // (the cancellation handshake is async -- the worker is
+  // still draining but the user gets the DELETE response
+  // synchronously), the 2-field shape is intentionally
+  // MINIMAL so the response is fast + the subsequent status-
+  // poll provides the full lifecycle metadata, (b) generic
+  // HTTP-client implementations (curl scripts, Postman, REST
+  // libraries) consume the DELETE response body to confirm
+  // the cancel was accepted -- a refactor changing the shape
+  // would silently break these clients while leaving our
+  // bundled frontend (which keys on status code alone)
+  // unaffected, (c) the documented "status MUST be exactly
+  // 'cancelled' (UK double-L)" matches the AnalysisJobState
+  // enum value at line 143's documented spelling -- a
+  // refactor renaming to "canceled" US single-L would
+  // silently desync from the 822a0df enum pin's
+  // documented spelling; per-format regression vectors
+  // uniquely caught: (i) refactor ADDING fields to the
+  // DELETE response (e.g. `cancelledAt` timestamp OR
+  // `pendingTermination: true` for in-flight indicator)
+  // would silently widen the contract from the documented
+  // 2-field shape, (ii) refactor RENAMING the status
+  // field's value to "canceled" US-single-L would silently
+  // desync from the 822a0df enum pin's UK-double-L
+  // spelling, (iii) refactor REMOVING jobId would silently
+  // break clients that key on the field for correlation,
+  // (iv) refactor making the DELETE response mirror the
+  // status-poll-CANCELLED shape would silently expand the
+  // response from 2 fields to 8+ fields, increasing
+  // bandwidth on every cancellation; test approach: same
+  // as 188fe91's CANCELLED-state pin -- BlockingPlaying
+  // HallBackend pauses worker, submit job, wait for
+  // started signal, DELETE the job, extract the DELETE
+  // response body field name set, assert it equals
+  // exactly the documented 2-field closed set + verify
+  // the field values match the documented contract
+  // (jobId matches submission, status == "cancelled" UK
+  // spelling).
+  test("DELETE /api/playing-hall/jobs/<id> response body MUST emit EXACTLY the documented 2-field closed set {jobId, status} where status='cancelled' (UK double-L spelling) per HandHistoryReviewServerApi.scala line 221 -- the FIELD-SET-CARDINALITY pin for the DELETE acknowledgement response, distinct from the subsequent status-poll-CANCELLED response (188fe91) which has 8 fields") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, playingHallBackend = backend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Submit + wait for worker to start (needed for the
+        // cancellation handshake at the JobQueue layer)
+        val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(submit.statusCode(), 202,
+          clue = "playing-hall submission must return 202 for the DELETE-response pin to inspect")
+        val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+        val submittedJobId = jsonBody(submit)("jobId").str
+        assert(backend.started.await(3, TimeUnit.SECONDS),
+          "playing-hall backend never started -- the DELETE handshake requires the worker to be running for the Accepted outcome at HandHistoryReviewServerApi.scala line 220's CancelOutcome.Accepted branch")
+
+        // DELETE the job -- this is the response under test
+        val cancelResponse = delete(statusUri)
+        assertEquals(cancelResponse.statusCode(), 200,
+          clue = "DELETE on a running playing-hall job must return 200 per the documented CancelOutcome.Accepted -> 200 mapping at HandHistoryReviewServerApi.scala line 221's JsonResponse(200, ...) constructor")
+
+        val cancelBody = jsonBody(cancelResponse)
+        val cancelFields = cancelBody.obj.keys.toSet
+
+        // The documented 2-field closed set per HandHistory
+        // ReviewServerApi.scala line 221's
+        // `Obj("jobId" -> Str(jobId), "status" -> Str("cancelled"))`
+        // construction
+        val expectedFields = Set("jobId", "status")
+
+        // (i) CARDINALITY
+        assertEquals(cancelFields.size, expectedFields.size,
+          clue = s"DELETE response body MUST have exactly ${expectedFields.size} fields per HandHistoryReviewServerApi.scala line 221's `Obj(\"jobId\" -> ..., \"status\" -> ...)` -- a refactor ADDING fields would silently widen the contract; got actual=${cancelFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- cancelFields).toVector.sorted.mkString(", ")}, extra=${(cancelFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(cancelFields, expectedFields,
+          clue = s"DELETE response body's field NAME SET MUST equal exactly the documented 2-field closed set {jobId, status} per HandHistoryReviewServerApi.scala line 221 -- a refactor RENAMING any field would silently break HTTP clients keying on the documented names; got actual=${cancelFields.toVector.sorted.mkString(", ")}; expected=${expectedFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- cancelFields).toVector.sorted.mkString(", ")}; extra=${(cancelFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) VALUE assertion: jobId MUST match the
+        // submission's jobId (correlation contract)
+        assertEquals(cancelBody("jobId").str, submittedJobId,
+          clue = s"DELETE response body's jobId MUST match the SAME jobId from the 202 submission response -- this is the correlation contract that lets clients confirm which job was cancelled; got DELETE jobId=${cancelBody("jobId").str}, submission jobId=$submittedJobId")
+
+        // (iv) VALUE assertion: status MUST be EXACTLY
+        // 'cancelled' (UK double-L spelling matching the
+        // 822a0df AnalysisJobState enum + line 221's
+        // hardcoded `Str("cancelled")` literal)
+        assertEquals(cancelBody("status").str, "cancelled",
+          clue = "DELETE response body's status MUST be EXACTLY 'cancelled' (UK double-L spelling per HandHistoryReviewServerApi.scala line 221's hardcoded `Str(\"cancelled\")` literal AND the 822a0df AnalysisJobState enum pin's documented spelling at JobQueue.scala line 143) -- a refactor renaming to US single-L 'canceled' would silently desync from the enum's documented spelling that the entire family of tests depends on")
+
+        // (v) ABSENCE: terminal-payload-fields MUST NOT be
+        // present (DELETE response is intentionally MINIMAL,
+        // not the same as the status-poll-CANCELLED response
+        // at 188fe91 which has the full lifecycle metadata)
+        assert(!cancelFields.contains("statusUrl"),
+          clue = s"DELETE response MUST NOT contain `statusUrl` -- the response is intentionally minimal (2-field acknowledgement, NOT the full status-poll shape); got: ${cancelFields.toVector.sorted.mkString(", ")}")
+        assert(!cancelFields.contains("submittedAtEpochMs"),
+          clue = s"DELETE response MUST NOT contain `submittedAtEpochMs` -- the response is the MINIMAL acknowledgement; got: ${cancelFields.toVector.sorted.mkString(", ")}")
+        assert(!cancelFields.contains("startedAtEpochMs"),
+          clue = s"DELETE response MUST NOT contain `startedAtEpochMs`; got: ${cancelFields.toVector.sorted.mkString(", ")}")
+        assert(!cancelFields.contains("completedAtEpochMs"),
+          clue = s"DELETE response MUST NOT contain `completedAtEpochMs`; got: ${cancelFields.toVector.sorted.mkString(", ")}")
+        assert(!cancelFields.contains("result"),
+          clue = s"DELETE response MUST NOT contain `result`; got: ${cancelFields.toVector.sorted.mkString(", ")}")
+        assert(!cancelFields.contains("durationMs"),
+          clue = s"DELETE response MUST NOT contain `durationMs`; got: ${cancelFields.toVector.sorted.mkString(", ")}")
+
+        // Release backend so the worker can drain cleanly
+        backend.release.countDown()
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
