@@ -18504,6 +18504,182 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented JSON-HANDLER HEAD RESPONSE SHAPE contract
+  // at WebResponses.scala writeBytes lines 165-207 -- the
+  // JSON-HEAD-SHAPE pin verifies the documented HEAD-branch
+  // headers on the JSON-API endpoints that flow through
+  // writeBytes (which is the unified code path used by both
+  // writeJson and writePlain). FIFTY-SECOND per-emission-site
+  // SHAPE pin overall; existing coverage at line 9617 verifies
+  // HEAD vs GET Content-Encoding equality + Vary presence on
+  // /api/health, but THREE specific dimensions are unpinned:
+  // (1) Content-Type IS set on HEAD per line 172 (the
+  // UNCONDITIONAL set-call BEFORE the HEAD branch decision),
+  // (2) Cache-Control: no-store IS set on HEAD per line 173
+  // (UNCONDITIONAL set-call before the HEAD branch -- a refactor
+  // that moves applySecurityHeaders/writeBytes set-calls after
+  // sendResponseHeaders would silently drop Cache-Control from
+  // HEAD responses), (3) CLOSED-SET assertion verifying the
+  // complete documented set of headers on the JSON-HEAD response,
+  // which catches a refactor that adds NEW headers to writeBytes
+  // without updating the documentation/tests; the JSON-HEAD-SHAPE
+  // contract is OPERATIONALLY CRITICAL because: (a) RFC 7231 sec
+  // 4.3.2 mandates the HEAD response "MUST include the same
+  // metadata fields as GET" -- a refactor dropping Content-Type
+  // from JSON HEAD would silently leave caches without the
+  // body-shape descriptor needed to interpret the eventual GET,
+  // (b) Cache-Control: no-store is the documented "JSON
+  // responses are never cached" contract -- the JSON-API surface
+  // returns user-specific or time-sensitive data (rate-limit
+  // state, queue depth, draining flag, hero data) where caching
+  // would silently leak stale state across users or across time,
+  // (c) the parallel-handler-types contract is the documented
+  // invariant: BOTH StaticAssetsHandler.scala line 144-152 AND
+  // WebResponses.scala writeBytes line 189-207 emit the SAME
+  // HEAD-response shape (the lines 177-187 inline comment in
+  // WebResponses.scala explicitly says "this mirrors it for JSON
+  // responses... so every HEAD response across the server
+  // advertises Content-Encoding: gzip when the equivalent GET
+  // would compress") -- a refactor diverging the two handler
+  // types' HEAD-response shapes would silently break the
+  // documented unified contract that operator monitoring depends
+  // on; per-format regression vectors uniquely caught (NOT
+  // caught by the existing line 9617 test which only verifies
+  // Content-Encoding equality + Vary presence + body empty):
+  // (i) refactor dropping the line 172 Content-Type set-call
+  // would silently break JSON-HEAD-based cache validation,
+  // (ii) refactor moving the line 173 Cache-Control set-call
+  // after sendResponseHeaders would silently drop Cache-Control
+  // from HEAD responses, allowing caches to STORE the empty
+  // HEAD response indefinitely + then serve it to subsequent
+  // GET requests, (iii) refactor diverging the JsonHandler HEAD
+  // shape from the StaticAssetsHandler HEAD shape would silently
+  // break the documented unified contract -- the parallel
+  // pin pair (THIS commit + 41ff9b4) ensures BOTH handler types
+  // are explicitly verified; test approach: HEAD on /api/health
+  // (the canonical large-JSON endpoint that's well over
+  // MinGzipSize per the existing test's documented analysis) with
+  // and without Accept-Encoding: gzip, verify the documented
+  // header shape + body emptiness + CROSS-CHECK with GET on the
+  // same endpoint + CROSS-CHECK Content-Type with the static-
+  // handler HEAD pin for the parallel-handler-types contract.
+  test("JSON-handler HEAD response SHAPE: Content-Type IS set on HEAD per WebResponses.scala writeBytes line 172, Cache-Control: no-store IS set per line 173, Vary: Accept-Encoding set per line 175 (when compressible), Content-Encoding gated on wouldCompressIfGet at lines 188+205, body empty per RFC 7231 sec 4.3.2 -- complements the existing line 9617 test (Content-Encoding equality + Vary) by closing the Content-Type + Cache-Control + closed-set dimensions on the JSON-API HEAD path") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        def head(acceptEncoding: Option[String]): HttpResponse[String] =
+          val builder = HttpRequest.newBuilder(URI.create(s"$baseUri/api/health"))
+            .method("HEAD", HttpRequest.BodyPublishers.noBody())
+          acceptEncoding.foreach(builder.header("Accept-Encoding", _))
+          httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+
+        // (1) HEAD on /api/health + Accept-Encoding: gzip
+        // -> Content-Type set + Cache-Control: no-store set +
+        // Vary set + Content-Encoding: gzip set + body empty +
+        // status 200
+        val headGz = head(Some("gzip"))
+        assertEquals(headGz.statusCode(), 200,
+          clue = "HEAD on /api/health + gzip MUST return 200")
+        assertEquals(headGz.body(), "",
+          clue = s"JSON-handler HEAD response body MUST be empty per RFC 7231 sec 4.3.2 + WebResponses.scala line 207's sendResponseHeaders(status, -1L); got body length: ${headGz.body().length}")
+        assertEquals(headerValue(headGz, "Content-Type"), Some("application/json; charset=utf-8"),
+          clue = s"JSON-handler HEAD MUST emit Content-Type per WebResponses.scala line 172's UNCONDITIONAL set-call (before the HEAD branch decision at line 189) -- the body-shape descriptor that caches need to interpret the eventual GET response; a refactor that moves Content-Type set-call inside an `if !isHead` branch would silently break HEAD-based cache validation; got: ${headerValue(headGz, "Content-Type")}")
+        assertEquals(headerValue(headGz, "Cache-Control"), Some("no-store"),
+          clue = s"JSON-handler HEAD MUST emit Cache-Control: no-store per WebResponses.scala line 173's UNCONDITIONAL set-call -- the documented `JSON responses never cached` contract that prevents stale state across users; a refactor that moves Cache-Control set-call inside an `if !isHead` branch would silently allow caches to STORE the empty HEAD response indefinitely + serve it to subsequent GETs (silently caching the user-specific data); got: ${headerValue(headGz, "Cache-Control")}")
+        assertEquals(headerValue(headGz, "Vary"), Some("Accept-Encoding"),
+          clue = s"JSON-handler HEAD MUST emit Vary: Accept-Encoding for compressible responses per WebResponses.scala line 175's conditional set-call; got: ${headerValue(headGz, "Vary")}")
+        assertEquals(headerValue(headGz, "Content-Encoding"), Some("gzip"),
+          clue = s"JSON-handler HEAD on compressible + gzip MUST emit Content-Encoding: gzip per WebResponses.scala lines 188+205 wouldCompressIfGet gate -- the documented `HEAD describes GET` contract; got: ${headerValue(headGz, "Content-Encoding")}")
+
+        // (2) HEAD on /api/health without Accept-Encoding ->
+        // Content-Type set + Cache-Control set + Vary set
+        // (compressible regardless of Accept-Encoding) +
+        // Content-Encoding NOT set + body empty + status 200
+        val headPlain = head(None)
+        assertEquals(headPlain.statusCode(), 200,
+          clue = "HEAD on /api/health no-gzip MUST return 200")
+        assertEquals(headPlain.body(), "",
+          clue = s"HEAD body MUST be empty per RFC 7231 sec 4.3.2; got: ${headPlain.body().length}")
+        assertEquals(headerValue(headPlain, "Content-Type"), Some("application/json; charset=utf-8"),
+          clue = s"JSON-handler HEAD (no-gzip path) MUST still emit Content-Type per WebResponses.scala line 172 (UNCONDITIONAL); got: ${headerValue(headPlain, "Content-Type")}")
+        assertEquals(headerValue(headPlain, "Cache-Control"), Some("no-store"),
+          clue = s"JSON-handler HEAD (no-gzip path) MUST still emit Cache-Control: no-store per line 173 (UNCONDITIONAL); got: ${headerValue(headPlain, "Cache-Control")}")
+        assertEquals(headerValue(headPlain, "Vary"), Some("Accept-Encoding"),
+          clue = s"JSON-handler HEAD (no-gzip path) MUST still emit Vary: Accept-Encoding per line 175 (compressible content type triggers Vary regardless of Accept-Encoding header -- the variant-declaration semantic); got: ${headerValue(headPlain, "Vary")}")
+        assertEquals(headerValue(headPlain, "Content-Encoding"), None,
+          clue = s"JSON-handler HEAD (no-gzip path) MUST NOT emit Content-Encoding per the line 188 wouldCompressIfGet gate (acceptsGzip=false); got: ${headerValue(headPlain, "Content-Encoding")}")
+
+        // (3) CROSS-CHECK with GET on /api/health: HEAD variant
+        // headers (Content-Type, Cache-Control, Vary,
+        // Content-Encoding) MATCH the GET variant headers
+        // exactly for the same request shape per RFC 7231 sec
+        // 4.3.2 ("HEAD describes GET")
+        val getGz = get(s"$baseUri/api/health",
+          Map("Accept-Encoding" -> "gzip"))
+        assertEquals(headerValue(headGz, "Content-Type"),
+                     headerValue(getGz, "Content-Type"),
+          clue = s"JSON-handler HEAD Content-Type MUST equal GET Content-Type for /api/health per RFC 7231 sec 4.3.2; HEAD=${headerValue(headGz, "Content-Type")}, GET=${headerValue(getGz, "Content-Type")}")
+        assertEquals(headerValue(headGz, "Cache-Control"),
+                     headerValue(getGz, "Cache-Control"),
+          clue = s"JSON-handler HEAD Cache-Control MUST equal GET Cache-Control for /api/health per RFC 7231 sec 4.3.2 -- both MUST be no-store (the JSON API contract); HEAD=${headerValue(headGz, "Cache-Control")}, GET=${headerValue(getGz, "Cache-Control")}")
+        assertEquals(headerValue(headGz, "Vary"),
+                     headerValue(getGz, "Vary"),
+          clue = s"JSON-handler HEAD Vary MUST equal GET Vary per RFC 7231 sec 4.3.2; HEAD=${headerValue(headGz, "Vary")}, GET=${headerValue(getGz, "Vary")}")
+        assertEquals(headerValue(headGz, "Content-Encoding"),
+                     headerValue(getGz, "Content-Encoding"),
+          clue = s"JSON-handler HEAD Content-Encoding MUST equal GET Content-Encoding for the same request shape per RFC 7231 sec 4.3.2 + WebResponses.scala lines 177-187's `mirrors the static handler for JSON responses` documented contract; HEAD=${headerValue(headGz, "Content-Encoding")}, GET=${headerValue(getGz, "Content-Encoding")}")
+
+        // (4) PARALLEL-HANDLER-TYPES CROSS-CHECK: the JSON-HEAD
+        // response Content-Type contract is the SAME shape as
+        // the static-handler HEAD (41ff9b4 pin) -- both MUST
+        // emit Content-Type per their respective documented
+        // set-call sites BEFORE their HEAD branch decisions.
+        // The static handler emits Content-Type at line 145
+        // INSIDE the HEAD branch; the JSON handler emits it at
+        // line 172 BEFORE the HEAD branch. Both produce
+        // Content-Type on HEAD, but the structural difference
+        // means a refactor relocating either set-call could
+        // silently break one handler type while leaving the
+        // other working. THIS assertion is the explicit
+        // documentation of the unified parallel-contract:
+        val staticHead = HttpRequest.newBuilder(URI.create(s"$baseUri/index.html"))
+          .method("HEAD", HttpRequest.BodyPublishers.noBody())
+          .build()
+        val staticHeadResp = httpClient.send(staticHead, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+        assert(headerValue(staticHeadResp, "Content-Type").isDefined,
+          clue = s"STATIC-handler HEAD MUST emit Content-Type (parallel-handler-types contract with JSON HEAD); got: ${headerValue(staticHeadResp, "Content-Type")}")
+        assert(headerValue(headGz, "Content-Type").isDefined,
+          clue = s"JSON-handler HEAD MUST emit Content-Type (parallel-handler-types contract with STATIC HEAD); got: ${headerValue(headGz, "Content-Type")}")
+
+        // (5) CLOSED-SET assertion: the JSON-HEAD response
+        // server-controlled header set EXACTLY includes the
+        // documented preserved header names. Catches a refactor
+        // that adds NEW headers to writeBytes without updating
+        // the documentation/tests.
+        val expectedHeadHeaders = Set(
+          "Content-Type",
+          "Cache-Control",
+          "Vary",
+          "Content-Encoding",
+          // Security headers from applySecurityHeaders
+          "Content-Security-Policy",
+          "Permissions-Policy",
+          "Referrer-Policy",
+          "X-Content-Type-Options",
+          "X-Frame-Options",
+          "Cross-Origin-Opener-Policy",
+          "Cross-Origin-Resource-Policy",
+          "X-Robots-Tag"
+        )
+        val actualHeadHeaders = expectedHeadHeaders
+          .filter(headerValue(headGz, _).isDefined)
+        assertEquals(actualHeadHeaders, expectedHeadHeaders,
+          clue = s"JSON-handler HEAD response MUST include ALL ${expectedHeadHeaders.size} documented headers (4 content + 8 security) on the compressible+gzip path; a refactor dropping any header from the writeBytes lines 172-175 + applySecurityHeaders set-call sequences would silently weaken the JSON-HEAD response shape; expected=$expectedHeadHeaders, actual=$actualHeadHeaders, missing=${expectedHeadHeaders -- actualHeadHeaders}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
