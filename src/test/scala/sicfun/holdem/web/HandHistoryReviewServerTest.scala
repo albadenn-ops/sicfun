@@ -6662,6 +6662,162 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented sanitizeLogMessage CR (carriage-return)
+  // escape rule END-TO-END -- the SANITIZATION-INVARIANT pin
+  // covering the SECOND of the 5 explicit escape rules documented
+  // at HandHistoryReviewServerRuntime.scala lines 488-492; the
+  // 4db713d sibling pin covered ONLY the newline (0x0A → \\n)
+  // rule at line 489, but the helper documents 5 explicit
+  // escape rules (\\, \\n, \\r, \\0, \\t) plus a general
+  // \\x<hex> fallback for any other control char; this CR pin
+  // is the natural extension of the 4db713d family -- per the
+  // 4db713d future-fire flag "(c) sanitization variants for
+  // OTHER control characters (\\r carriage return, \\t tab, \\0
+  // null byte, 0x7F DEL, arbitrary control chars 0x01-0x1F)";
+  // CR (0x0D) is the OPERATIONALLY HIGHEST-RISK escape rule
+  // after newline because Windows-origin log aggregators
+  // (Splunk on Windows, ELK with Windows agents) treat the CRLF
+  // pair as a line terminator, and a LONE CR can confuse
+  // aggregators that handle Unix-style LF-only line endings --
+  // an attacker submitting an email containing a raw CR could
+  // potentially split log lines on Windows-targeted aggregators
+  // even if the Unix LF case is sanitized; the documented
+  // threat is IDENTICAL to the newline case: an attacker who
+  // can influence a field value (e.g. submit an email
+  // containing a CR via the auth.login.failure path) could
+  // otherwise inject FAKE LOG LINES into the operator's audit
+  // stream on aggregators that split on CR; the sanitization
+  // is OPERATIONALLY CRITICAL on Windows deployments
+  // specifically; this commit's END-TO-END test verifies the
+  // sanitization applies at the log() emission layer by:
+  // (1) configuring platformAuth, (2) submitting POST /api/auth/
+  // login with email containing a literal \\r character (valid
+  // JSON escape sequence that parses to a string with an
+  // embedded CR byte = 0x0D), (3) the login fails validation +
+  // emits auth.login.failure logWarn with the user-submitted
+  // email in the email= field, (4) the log() helper's
+  // sanitizeLogMessage wrapping at line 512 catches the CR +
+  // escapes it to `\\r` (the 2-character backslash-r sequence)
+  // via the line 490 `replace("\\r", "\\\\r")` rule, (5) the
+  // captured stderr SHOULD contain the escaped form
+  // `email=alice\\rbob@example.com` (with literal backslash-r,
+  // NOT a physical CR character); per-format regression
+  // vectors: (i) refactor dropping the line 490 CR escape
+  // (e.g. "newline alone is sufficient since the line 512
+  // template uses println which appends LF") would silently
+  // let user-controlled CR bytes through and enable
+  // log-injection attacks on Windows aggregators, (ii)
+  // refactor changing the CR escape format (e.g. \\r → %0D
+  // like a uri-style escape) would silently break log
+  // aggregator parsers that expect the documented \\<char>
+  // backslash-escape form, (iii) refactor swapping CR/LF
+  // escapes (e.g. CR → \\n, LF → \\r) would silently confuse
+  // the operator's grep workflow even though both escape
+  // rules are technically applied; this test's emission via
+  // the auth.login.failure path exercises the END-TO-END
+  // sanitization specifically on a USER-CONTROLLED field that
+  // the formatSubmittedEmailForLog helper does NOT itself
+  // escape CR (only spaces → %20); the sanitization happens
+  // at the log() layer catching ALL control chars regardless
+  // of which field they appear in; 4-tier format check: (i)
+  // the auth.login.failure line exists in captured stderr,
+  // (ii) the line contains BOTH halves of the email (alice +
+  // bob@example.com -- if CR sanitization is broken, the raw
+  // CR would split the line on Windows-style aggregators
+  // and/or confuse the captured.split('\\n') iterator if the
+  // 0x0D byte gets emitted before the line's terminating LF),
+  // (iii) the email field contains the ESCAPED form
+  // `alice\\rbob@example.com` (literal backslash followed by
+  // literal 'r') per HandHistoryReviewServerRuntime.scala
+  // line 490's `replace("\\r", "\\\\r")` escape rule, (iv)
+  // EXCLUSION of raw 0x0D CR byte in the line (defense-in-
+  // depth catch via Char.toString('\\r') conversion).
+  test("log() helper's sanitizeLogMessage wrapping at HandHistoryReviewServerRuntime.scala line 512 escapes user-controlled CR (carriage-return) bytes end-to-end via the line 490 escape rule -- the SANITIZATION-INVARIANT pin for the SECOND escape rule complements 4db713d's newline-only pin; on Windows-targeted log aggregators a raw CR can confuse line-boundary detection and enable LOG INJECTION even if Unix-style LF is sanitized") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture stderr around the malicious login attempt.
+          // The submitted email contains a JSON escape \r which
+          // parses to an embedded CR character (1 byte = 0x0D).
+          // The login fails validation + emits
+          // auth.login.failure logWarn at AuthStack.scala line
+          // 192 with formatSubmittedEmailForLog'd submitted
+          // email in the email= field; formatSubmittedEmailForLog
+          // ONLY escapes spaces, NOT control characters; the CR
+          // flows into the message s-string, then log() at line
+          // 512 calls sanitizeLogMessage which catches the CR +
+          // escapes to \\r via line 490's replace rule.
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          try
+            val rejected = postJson(s"$baseUri/api/auth/login",
+              """{"email":"alice\rbob@example.com","password":"some-password"}""")
+            assertEquals(rejected.statusCode(), 401,
+              clue = "malformed-email login MUST return 401 (the email fails validateEmail's regex check because CR is not in the [A-Za-z0-9_.+-] local-part character class; loginLocal returns Left -> 401)")
+          finally
+            System.setErr(originalErr)
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.login.failure"))
+            .getOrElse(fail(s"no `auth.login.failure` line in captured stderr; got: ${captured.take(800)}"))
+
+          // (i) the auth.login.failure line exists
+          assert(failureLine.contains("auth.login.failure"),
+            clue = s"auth.login.failure line must be present (the rejected login path at AuthStack.scala line 192 emits this on every invalid-credentials rejection); got: $failureLine")
+
+          // (ii) the line contains BOTH halves of the email --
+          // if the line 490 CR escape rule is broken, the raw
+          // CR byte would flow through into the printed line.
+          // The line 512 println terminates with LF (the
+          // println contract), so captured.split('\n') groups
+          // the full line correctly -- BUT if a CR ends up
+          // embedded in the line BEFORE the LF terminator, the
+          // CR could trigger an early line-boundary on the
+          // captured ByteArrayOutputStream's String conversion
+          // and split('\n') may yield two pieces. More
+          // critically, even if split('\n') keeps the line
+          // together, the raw CR byte INSIDE the line is the
+          // exact log-injection vulnerability on Windows
+          // aggregators that treat CRLF as the line
+          // terminator. Check that the line contains BOTH
+          // halves of the email AFTER the prefix.
+          assert(failureLine.contains("alice") && failureLine.contains("bob@example.com"),
+            clue = s"auth.login.failure line MUST be a SINGLE physical line containing BOTH halves of the email (alice + bob@example.com) -- if CR sanitization is broken at line 490, the raw CR in the email could confuse line-boundary handling and 'bob@example.com' might appear on the NEXT line (not in this find() result); got: $failureLine; full captured stream: ${captured.take(1500)}")
+
+          // (iii) the email contains the ESCAPED form with
+          // literal backslash-r
+          assert(failureLine.contains("alice\\rbob@example.com"),
+            clue = s"auth.login.failure line MUST carry the escaped form `alice\\\\rbob@example.com` (literal backslash followed by literal 'r') per HandHistoryReviewServerRuntime.scala line 490's `replace(\"\\\\r\", \"\\\\\\\\r\")` escape rule; the raw 0x0D CR byte in the submitted email gets caught by sanitizeLogMessage AT THE LOG LAYER (NOT at formatSubmittedEmailForLog which only escapes spaces); a refactor dropping the line 490 CR escape would silently let the CR through, enabling LOG INJECTION attacks on Windows-style log aggregators that split lines on CRLF; got: $failureLine")
+
+          // (iv) EXCLUSION: the line must NOT contain a raw CR
+          // byte INSIDE the log line content (the threat is
+          // CR injection in field values, NOT the line
+          // terminator). On Windows, println at
+          // HandHistoryReviewServerRuntime.scala line 512 uses
+          // the platform line.separator (CRLF) so
+          // captured.split('\n') leaves a trailing CR on each
+          // piece; strip that trailing CR before the EXCLUSION
+          // check so we only assert on the actual line
+          // content. Use Char.toString conversion of the raw
+          // 0x0D byte to avoid Scala 3 multi-line-string-in-
+          // test parse issues (same defensive idiom as
+          // 4db713d's newline EXCLUSION used '\n'.toString).
+          val rawCrByte: String = '\r'.toString
+          val failureLineNoTerminator = failureLine.stripSuffix(rawCrByte)
+          assert(!failureLineNoTerminator.contains(rawCrByte),
+            clue = s"auth.login.failure line MUST NOT contain a raw 0x0D CR byte INSIDE the log content (the platform-line-separator trailing CR is stripped before this check) -- catches a refactor that escaped CR to a DIFFERENT visible form (e.g. %0D) but still allowed raw CR bytes through in some field positions, OR a refactor swapping the CR/LF escape rules; got line (after stripping trailing CR if any): $failureLineNoTerminator")
+        }
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
