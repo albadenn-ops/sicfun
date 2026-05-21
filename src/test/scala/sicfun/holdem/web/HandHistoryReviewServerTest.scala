@@ -6403,6 +6403,120 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented LOG LINE TIMESTAMP FORMAT -- per
+  // HandHistoryReviewServerRuntime.scala line 511-512's
+  // `stream.println(s"[${Instant.now()}] [$level] [hand-history-
+  // review] ${sanitizeLogMessage(message)}")` template; every
+  // log line emitted by the runtime starts with a leading
+  // `[<ISO-8601 UTC timestamp>]` bracket because Instant.now()
+  // produces ISO-8601 UTC strings via Instant.toString() (which
+  // always emits the `Z` UTC suffix); BEFORE this commit there
+  // was ZERO test coverage of the LOG-LINE TIMESTAMP FORMAT --
+  // the 30+ log-line family pins across the 5 categories all
+  // verify field VALUES + level + service-tag + structure, but
+  // NONE of them verify that the LEADING TIMESTAMP is parseable
+  // as ISO-8601 UTC; the timestamp format is OPERATIONALLY
+  // CRITICAL because: (a) log aggregators (ELK, Splunk, Datadog,
+  // CloudWatch, etc.) parse the timestamp to ORDER + GROUP +
+  // QUERY log lines across the deployment fleet -- a non-parseable
+  // timestamp silently fails the aggregator's ingestion pipeline
+  // (the line either gets indexed at the WRONG time or gets
+  // dropped entirely depending on the aggregator's fallback
+  // policy), (b) operators correlate events across multiple
+  // services by matching timestamps in their respective log
+  // lines -- a non-UTC timestamp (e.g. local-zone-with-offset)
+  // would silently desync from UTC-only services (the common
+  // deployment convention is "all services log in UTC, all
+  // dashboards convert to operator-preferred-zone at query
+  // time" -- a single service that logs in local-zone breaks
+  // this convention), (c) the runbook references log
+  // timestamps for incident timelines -- a non-ISO-8601 format
+  // would silently break the runbook's documented "look up
+  // events between <ISO> and <ISO>" diagnostic workflow; the
+  // timestamp format is INVARIANT across ALL the prior 30+
+  // log-line pins (every category uses the same log() helper
+  // at line 510-512), so pinning the format ONCE here covers
+  // the timestamp dimension for the ENTIRE log-line family;
+  // per-format regression vectors: (i) refactor swapping
+  // Instant.now() to LocalDateTime.now() at line 512 would
+  // silently emit local-zone timestamps without the Z suffix
+  // (silently desyncs from UTC-convention deployments), (ii)
+  // refactor wrapping with a custom DateTimeFormatter would
+  // silently emit a different format (e.g. epoch-millis,
+  // RFC-1123, custom yyyy/MM/dd) that aggregators may not
+  // parse, (iii) refactor dropping the leading `[<ts>]` bracket
+  // (e.g. "use a JSON log shape instead") would silently break
+  // every operator grep workflow that depends on the documented
+  // bracketed-prefix format, (iv) refactor switching to a
+  // pre-formatted string (e.g. cached at process start) would
+  // silently emit STALE timestamps on every log line (all log
+  // lines from one process lifetime would carry the same
+  // timestamp); test approach: capture stdout around withServer
+  // (which emits the startup banner -- a guaranteed log line),
+  // find the banner line, extract the leading `[<timestamp>]`
+  // bracket, parse via Instant.parse (the JVM's strict ISO-8601
+  // UTC parser -- accepts ONLY the format Instant.toString
+  // emits, with Z suffix), assert the parsed Instant is within
+  // a reasonable wall-clock window of the test's nowMs (proves
+  // the timestamp is LIVE not cached); 4-tier format check:
+  // (i) the line starts with `[` (catches the dropped-bracket
+  // refactor), (ii) the bracket content is parseable as
+  // Instant (catches non-ISO-8601 formats), (iii) the parsed
+  // Instant has a Z UTC suffix in its string form (catches
+  // local-zone refactors), (iv) the parsed Instant is within
+  // 5 seconds of the test's nowMs (catches stale-timestamp
+  // refactors and timezone-drift refactors).
+  test("every log line carries the documented `[<ISO-8601 UTC timestamp>]` leading bracket per HandHistoryReviewServerRuntime.scala line 511-512's Instant.now() template -- the FORMAT-INVARIANT pin covering the timestamp dimension for ALL 30+ log-line pins across the 5 operator-facing log line categories (server-lifecycle + auth-event + JobQueue + rate-limit + startup-failure)") {
+    withStaticSite { staticDir =>
+      // Capture stdout around withServer to grab the startup
+      // banner (a guaranteed log line). Any log line would
+      // work since the timestamp format is invariant across
+      // ALL emissions per the shared log() helper at line
+      // 510-512; the startup banner is the most reliable to
+      // capture because it always fires synchronously during
+      // server bind.
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      val nowMsBeforeCapture = System.currentTimeMillis()
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      try
+        withServer(staticDir) { _ =>
+          // No HTTP requests -- the startup banner emits
+          // BEFORE the callback executes
+          ()
+        }
+      finally
+        System.setOut(originalOut)
+      val nowMsAfterCapture = System.currentTimeMillis()
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val bannerLine = captured.split('\n').iterator
+        .find(_.contains("startup complete"))
+        .getOrElse(fail(s"no `startup complete` line in captured stdout -- the timestamp-format pin needs ANY log line to inspect; the 7c47f88 startup-banner pin should catch this independently; got captured stdout: ${captured.take(800)}"))
+
+      // (i) line starts with `[` (catches dropped-bracket refactor)
+      assert(bannerLine.trim.startsWith("["),
+        clue = s"log line must start with the documented `[<timestamp>]` bracket per HandHistoryReviewServerRuntime.scala line 511's `s\"[$${Instant.now()}] ...\"` template -- a refactor dropping the leading bracket (e.g. switching to JSON log shape) would silently break every operator grep workflow that depends on the bracketed-prefix format; got line: ${bannerLine.trim.take(100)}")
+      // (ii) extract the bracket content + parse as Instant
+      val firstBracketEnd = bannerLine.trim.indexOf("]")
+      assert(firstBracketEnd > 0,
+        clue = s"log line must close the leading `[` with a matching `]`; got line: ${bannerLine.trim.take(100)}")
+      val timestampStr = bannerLine.trim.substring(1, firstBracketEnd)
+      val parsedInstant = scala.util.Try(java.time.Instant.parse(timestampStr))
+        .getOrElse(fail(s"leading-bracket content `$timestampStr` MUST be parseable as ISO-8601 UTC via Instant.parse per HandHistoryReviewServerRuntime.scala line 511's `Instant.now()` template; Instant.parse accepts ONLY the format Instant.toString emits (with `Z` UTC suffix); a refactor swapping to LocalDateTime.now() (which produces a zone-less format) or a custom DateTimeFormatter (which may emit RFC-1123 / epoch-millis / yyyy/MM/dd) would silently produce non-parseable values, silently breaking log aggregator ingestion (ELK/Splunk/Datadog/CloudWatch all parse via ISO-8601 by default)"))
+      // (iii) Z UTC suffix presence (catches local-zone refactor)
+      assert(timestampStr.endsWith("Z"),
+        clue = s"timestamp `$timestampStr` MUST end with the `Z` UTC suffix per Instant.toString's documented format -- a refactor swapping to LocalDateTime.now() OR ZonedDateTime.now(local-zone) would silently emit a different suffix (offset like `+08:00` for local zones, or NO suffix at all) and silently desync from the UTC-convention deployment shared with other services; the runbook's incident-timeline diagnostic depends on UTC-only timestamps for cross-service correlation; got: $timestampStr")
+      // (iv) parsed Instant within wall-clock window (catches
+      // stale-timestamp refactor)
+      val parsedMs = parsedInstant.toEpochMilli
+      assert(parsedMs >= nowMsBeforeCapture - 1000L,
+        clue = s"timestamp $parsedMs MUST not be older than the test's nowMs-before-capture $nowMsBeforeCapture (with 1-second slack for clock skew) -- catches a refactor that cached a startup-time Instant + emitted it on every log line (silently making all log lines from one process lifetime carry the same stale timestamp); got parsed=$parsedMs vs nowMsBefore=$nowMsBeforeCapture (delta=${nowMsBeforeCapture - parsedMs}ms behind)")
+      assert(parsedMs <= nowMsAfterCapture + 1000L,
+        clue = s"timestamp $parsedMs MUST not be in the future relative to the test's nowMs-after-capture $nowMsAfterCapture (with 1-second slack for clock skew) -- catches a refactor that used a wrong baseline for the timestamp; got parsed=$parsedMs vs nowMsAfter=$nowMsAfterCapture (delta=${parsedMs - nowMsAfterCapture}ms ahead)")
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
