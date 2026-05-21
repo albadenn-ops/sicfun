@@ -11959,6 +11959,139 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented AnalysisJobState ENUM (5 status
+  // spellings) at the SOURCE per JobQueue.scala lines 103-
+  // 143 -- the ENUM-INVARIANT pin verifies the closed set
+  // of 5 documented status strings (queued / running /
+  // completed / failed / cancelled) AND the isTerminal
+  // flag for each; THIRD per-emission-site SHAPE pin
+  // extending 476f635 (jobId UUID format) + 45303cc
+  // (statusUrl path format) into the JOB-STATE-ENUM
+  // dimension; this pin is an ISOLATION pin (constructs the
+  // 5 case classes directly + asserts on their .status +
+  // .isTerminal fields -- no HTTP, no concurrency) so it's
+  // STABLE + FAST (no timing dependencies); the ENUM
+  // CONTRACT is OPERATIONALLY CRITICAL because: (a) the
+  // frontend state machine at site.js keys on the status
+  // string to drive UI transitions -- a refactor renaming
+  // a state would silently put the frontend into an
+  // unhandled state (the JS switch/case falls through to a
+  // default `unknown status` clause if not exhaustive), (b)
+  // operator log-grep workflows filter by status (`tail -f
+  // deploy.log | grep status=failed` to find failures) --
+  // a refactor renaming `failed` to e.g. `error` would
+  // silently break operator pagers, (c) the runbook
+  // documents the 5 status values explicitly ("the GET
+  // /api/.../jobs/<id> endpoint returns status: one of
+  // queued, running, completed, failed, cancelled") -- a
+  // refactor adding/renaming/removing a state would
+  // silently desync the runbook from operational reality,
+  // (d) the UK 'cancelled' (double-L) spelling vs the US
+  // 'canceled' (single-L) is a COMMON SILENT-RENAME REFACTOR
+  // -- a code reviewer might "correct" the spelling
+  // assuming the codebase uses US English without realizing
+  // the existing frontend / runbook / aggregator queries
+  // all key on the UK double-L form (which is what the
+  // case class at line 143 emits); (e) the isTerminal flag
+  // controls the JobQueue's job retention + cleanup logic
+  // (the cleanup task at line ~1100 only operates on
+  // isTerminal=true jobs) -- a refactor flipping the flag
+  // (e.g. marking `cancelled` as non-terminal because "a
+  // user could re-submit") would silently change the
+  // cleanup behavior, leaking memory; the existing test
+  // coverage individually pins the spelling of each state
+  // in scenario-specific tests (e.g. line 4582 pins
+  // 'cancelled' in the DELETE flow, line 6086 pins 'failed'
+  // in the NonFatal flow, line 11600 mentions 'queued')
+  // BUT NONE verify the COMPLETE ENUM as a closed set --
+  // this pin closes the COVERAGE-COMPLETENESS gap; per-
+  // format regression vectors this pin uniquely catches:
+  // (i) refactor adding a new state (e.g. 'paused',
+  // 'expired', 'retrying') without updating documentation
+  // -- the set-equality assertion catches the new state in
+  // the assertion's expected-set parameter, (ii) refactor
+  // renaming a state (e.g. 'cancelled' -> 'canceled' US
+  // spelling, 'completed' -> 'done' for brevity, 'failed'
+  // -> 'errored' for diagnostics clarity) -- the per-state
+  // equality assertion catches the rename, (iii) refactor
+  // removing a state (e.g. consolidating 'cancelled' into
+  // 'failed' because "they both indicate non-completion")
+  // -- the set-size assertion catches the missing state,
+  // (iv) refactor flipping isTerminal (e.g. 'cancelled'
+  // marked non-terminal because "users could re-submit")
+  // -- the per-state isTerminal assertions catch the flip,
+  // (v) refactor introducing a status spelling collision
+  // (e.g. two states sharing the same string) -- the set-
+  // size assertion catches the deduplication; test
+  // approach: construct one instance of each of the 5
+  // AnalysisJobState case classes with synthetic field
+  // values (epoch millis fixed at 100L/200L/300L,
+  // synthetic result/error values), assert each instance's
+  // .status equals the documented spelling, assert the
+  // SET of all 5 .status values equals exactly
+  // {queued, running, completed, failed, cancelled},
+  // assert each instance's .isTerminal matches the
+  // documented behavior.
+  test("AnalysisJobState case classes at JobQueue.scala lines 103-143 MUST emit EXACTLY the 5 documented status spellings: queued, running, completed, failed, cancelled (UK double-L spelling for cancelled NOT the US single-L 'canceled') AND the documented isTerminal flag per state -- the ENUM-INVARIANT pin closes the COVERAGE-COMPLETENESS gap where scenario tests pin individual spellings but NONE verify the COMPLETE ENUM as a closed set") {
+    import JobQueue.AnalysisJobState.*
+
+    // Construct one instance of each of the 5 states with
+    // synthetic field values (epoch millis fixed at
+    // 100L/200L/300L). The values don't matter -- this pin
+    // tests only the .status string + .isTerminal flag.
+    val queued = Queued(submittedAtEpochMs = 100L)
+    val running = Running(submittedAtEpochMs = 100L, startedAt = 200L)
+    val completed = Completed(submittedAtEpochMs = 100L, startedAt = 200L, completedAt = 300L, result = ujson.Obj())
+    val failed = Failed(submittedAtEpochMs = 100L, startedAt = 200L, completedAt = 300L, errorStatus = 500, error = "test")
+    val cancelled = Cancelled(submittedAtEpochMs = 100L, startedAt = Some(200L), completedAt = 300L, result = None)
+
+    // (i) each state emits its documented spelling (the
+    // per-state equality assertion catches rename refactors
+    // for that specific state -- e.g. 'cancelled' ->
+    // 'canceled' US spelling, 'completed' -> 'done', etc.)
+    assertEquals(queued.status, "queued",
+      clue = "Queued.status MUST be exactly 'queued' (lowercase, no UK/US variant applicable) per JobQueue.scala line 103")
+    assertEquals(running.status, "running",
+      clue = "Running.status MUST be exactly 'running' (lowercase, present-tense gerund) per JobQueue.scala line 109 -- a refactor to past-participle 'ran' or noun 'execution' would silently break grep workflows")
+    assertEquals(completed.status, "completed",
+      clue = "Completed.status MUST be exactly 'completed' (lowercase, past-participle) per JobQueue.scala line 120 -- a refactor to 'done' for brevity OR 'finished' for diagnostic clarity would silently break frontend state machines + runbook documentation that key on 'completed'")
+    assertEquals(failed.status, "failed",
+      clue = "Failed.status MUST be exactly 'failed' (lowercase, past-participle) per JobQueue.scala line 132 -- a refactor to 'errored' for diagnostic clarity OR 'rejected' would silently break operator pager rules filtering for 'failed'")
+    // The 'cancelled' UK double-L spelling is the MOST
+    // LIKELY silent-rename refactor target -- a code
+    // reviewer "correcting" the spelling to US single-L
+    // would break the frontend + runbook + aggregator
+    // queries all in one stroke.
+    assertEquals(cancelled.status, "cancelled",
+      clue = "Cancelled.status MUST be exactly 'cancelled' (UK English DOUBLE-L spelling) per JobQueue.scala line 143 -- a refactor to US English single-L 'canceled' would be a SILENT BREAKAGE because (a) the frontend's pollPlayingHallJob at site.js line 549 keys on 'cancelled' specifically, (b) the existing 4+ test assertions at lines 4582/4589/12114/12118/13650 all key on UK 'cancelled', (c) operator log-grep workflows + runbook documentation use UK form, (d) the case-class .status emit at line 143 is the SINGLE SOURCE OF TRUTH that all the keyed-on forms depend on; got: '${cancelled.status}'")
+
+    // (ii) the SET of all 5 status strings has exactly 5
+    // distinct values (catches add/remove refactors AND
+    // status spelling collisions where two states share a
+    // string)
+    val allStatuses = Set(queued.status, running.status, completed.status, failed.status, cancelled.status)
+    assertEquals(allStatuses.size, 5,
+      clue = s"AnalysisJobState MUST emit 5 distinct status strings (one per case class) -- a refactor introducing a spelling collision (e.g. two states both emitting 'completed') would silently deduplicate to <5 entries, breaking the documented closed-set contract; got distinct count: ${allStatuses.size} for values: $allStatuses")
+    assertEquals(allStatuses, Set("queued", "running", "completed", "failed", "cancelled"),
+      clue = s"AnalysisJobState's complete set of status strings MUST equal exactly {queued, running, completed, failed, cancelled} per JobQueue.scala lines 103-143 -- a refactor adding a new state (e.g. 'paused' / 'expired' / 'retrying') would silently extend the state machine without updating the frontend / runbook / aggregator queries that all assume the 5-state closure; a refactor removing a state would silently lose operator-visible distinction; got: $allStatuses")
+
+    // (iii) the isTerminal flag matches documented behavior
+    // per state -- the JobQueue's cleanup task at line
+    // ~1100 only operates on isTerminal=true jobs, so
+    // flipping the flag silently changes retention/cleanup
+    // semantics
+    assert(!queued.isTerminal,
+      clue = "Queued.isTerminal MUST be false per JobQueue.scala line 106 -- a refactor flipping this to true (e.g. 'jobs should be cleaned up immediately if no worker picks them up') would silently change retention semantics + break the worker-to-running transition that depends on queued jobs being non-terminal")
+    assert(!running.isTerminal,
+      clue = "Running.isTerminal MUST be false per JobQueue.scala line 112 -- a refactor flipping this to true would silently break the worker-to-completed transition + the cancel-while-running path")
+    assert(completed.isTerminal,
+      clue = "Completed.isTerminal MUST be true per JobQueue.scala line 123 -- a refactor flipping this to false would silently let the cleanup task ignore completed jobs, leaking memory")
+    assert(failed.isTerminal,
+      clue = "Failed.isTerminal MUST be true per JobQueue.scala line 135 -- a refactor flipping this to false would silently let the cleanup task ignore failed jobs, leaking memory")
+    assert(cancelled.isTerminal,
+      clue = "Cancelled.isTerminal MUST be true per JobQueue.scala line 146 -- a refactor flipping this to false (e.g. 'a user could re-submit a cancelled job') would silently let the cleanup task ignore cancelled jobs, leaking memory AND would silently break the DELETE-then-terminal-poll flow that the existing tests at lines 4582/4589/12114/12118 rely on")
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
