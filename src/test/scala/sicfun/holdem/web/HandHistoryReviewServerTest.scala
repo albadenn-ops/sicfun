@@ -5083,6 +5083,134 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `request rate limited ... client=user:<id>`
+  // PLATFORM-AUTH variant -- the AUTHENTICATED-CLIENT mirror to
+  // 47d91dd's UNAUTHENTICATED-CLIENT pin (which used basic-auth
+  // and produced client=remote:<addr>); the rate-limit client-key
+  // path at AuthStack.scala line 663-668 takes principalKey FIRST,
+  // falling back to the IP-based key only when principalKey is
+  // None: `principalKey = authenticatedUser(exchange).map(user =>
+  // s"user:${user.userId}")` then `RateLimit.scala line 58's
+  // val clientKey = principalKey.getOrElse(rateLimitClientKey(...
+  // ))`; for platform-auth requests authenticatedUser is non-empty
+  // so principalKey returns Some("user:<uuid>") -- the rejection's
+  // clientKey becomes "user:<uuid>" rather than "remote:<addr>";
+  // operators distinguish per-user-bucketing from per-IP-bucketing
+  // by this prefix to know whether to investigate the user's
+  // account (credential abuse, automation attack, etc.) vs the IP
+  // (botnet, scraper, etc.) -- two operationally distinct triage
+  // workflows; together with 47d91dd this commit forms an
+  // asymmetric pin pair on the rate-limit client-key prefix
+  // (`remote:` vs `user:`), catching refactors that consolidate
+  // the two paths into a single prefix (e.g. "always emit
+  // remote: for consistency") which would silently break the
+  // documented per-user-bucketing visibility; per-field
+  // regression vectors that 47d91dd's remote: variant doesn't
+  // catch: (i) the principalKey-vs-rateLimitClientKey fallback
+  // order -- a refactor that swapped the order (rateLimitClientKey
+  // first, principalKey as fallback) would silently emit
+  // remote: for authenticated requests when the authenticatedUser
+  // resolution returns Some, breaking the documented "user:
+  // takes precedence" semantics; (ii) the "user:" prefix itself
+  // -- a refactor renaming to e.g. "principal:" / "uid:" /
+  // "user-" (hyphen) would silently break operator dashboards
+  // filtering by the documented exact prefix; (iii) the userId
+  // value MUST be the registered user's UUID -- a refactor that
+  // emitted the user's email or displayName instead would silently
+  // leak PII into operator logs (the documented privacy contract
+  // says the user identifier in audit logs is the
+  // PSEUDONYMOUS userId, NOT the personally-identifying email);
+  // 8-tier format check mirroring 47d91dd's pattern with the
+  // platform-auth-distinctive client value: (i) `request rate
+  // limited` prefix (same as 47d91dd), (ii) path=/api/analyze-
+  // hand-history (same), (iii) `client=user:` prefix presence
+  // (THE platform-auth distinctive marker -- pins the documented
+  // "user:<userId>" format from AuthStack.scala line 666), (iv)
+  // EXCLUSION of `client=remote:` (the 47d91dd-pinned remote:
+  // variant -- catches a refactor that emitted BOTH prefixes
+  // OR fell back to remote: for authenticated requests; the
+  // EXCLUSION is the load-bearing asymmetric-pair catch), (v)
+  // bucket=submit (same as 47d91dd), (vi) limitPerMinute=1
+  // (same), (vii) retryAfterMs= field presence, (viii) [WARN] +
+  // [hand-history-review].
+  test("rate-limit rejected analyze submission under PLATFORM-USER authentication emits the documented `client=user:<userId>` variant of the rate-limit log line (per AuthStack.scala line 666's principalKey=authenticatedUser path) -- the AUTHENTICATED-CLIENT companion to 47d91dd's unauthenticated `client=remote:<addr>` variant") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath)),
+          rateLimitSubmitsPerMinute = 1,
+          rateLimitStatusPerMinute = 0
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Register + extract the user's userId for the
+          // expected `client=user:<uuid>` log assertion. The
+          // 5ae0603 commit pinned that the response carries a
+          // UUID-format userId; we use that field directly here.
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"ratelimit@example.com","password":"correct-horse-battery","displayName":"RateLimit"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the platform-auth rate-limit variant can be exercised")
+          val userId = jsonBody(register)("user")("userId").str
+          val sessionHeaders = authSessionHeaders(register, jsonBody(register)("csrfToken").str)
+
+          // Submission 1: accepted (consumes the rateLimitSubmits
+          // PerMinute=1 slot keyed by user:<userId>)
+          val accepted = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, sessionHeaders)
+          assertEquals(accepted.statusCode(), 202,
+            clue = "first authenticated submission must accept (202) to consume the user-keyed rate-limit slot before the second triggers rejection")
+
+          // Submission 2: rejected with 429 + emits rate-limit
+          // log line with user:<userId> client key
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          try
+            val rejected = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload, sessionHeaders)
+            assertEquals(rejected.statusCode(), 429,
+              clue = "second authenticated submission MUST be rate-limited (429) -- the per-user rate-limit cap of 1 should be enforced by the same principalKey path as the unauthenticated variant in 47d91dd")
+          finally
+            System.setErr(originalErr)
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val rateLimitLine = captured.split('\n').iterator
+            .find(_.contains("request rate limited"))
+            .getOrElse(fail(s"no `request rate limited` line in captured stderr for the platform-auth variant -- AuthStack.scala line 674's logWarn should fire identically for both unauthenticated (47d91dd) and authenticated (this test) rate-limit rejections; if missing, either the platform-auth code path bypassed the shared rate-limit checker OR the principalKey resolution failed; got captured stderr: ${captured.take(2000)}"))
+
+          // (i) prefix (same as 47d91dd)
+          assert(rateLimitLine.contains("request rate limited"),
+            clue = s"platform-auth rate-limit line must carry the SAME `request rate limited` prefix as the unauthenticated variant (47d91dd); the prefix is auth-mode-invariant per AuthStack.scala line 674's shared emission template; got: $rateLimitLine")
+          // (ii) path (same as 47d91dd)
+          assert(rateLimitLine.contains("path=/api/analyze-hand-history"),
+            clue = s"platform-auth rate-limit line must carry the request path matching the unauthenticated variant; got: $rateLimitLine")
+          // (iii) THE LOAD-BEARING CHANGE: client=user:<userId>
+          // (NOT client=remote:<addr> like 47d91dd). This is the
+          // pin that catches the principalKey-resolution path
+          // breaking.
+          assert(rateLimitLine.contains(s"client=user:$userId"),
+            clue = s"platform-auth rate-limit line MUST carry `client=user:$userId` per AuthStack.scala line 666's `principalKey = authenticatedUser(exchange).map(user => s\"user:$${user.userId}\")` -- the principalKey-first fallback order at RateLimit.scala line 58 ensures authenticated requests get the user: prefix instead of the remote: prefix (the unauthenticated 47d91dd variant); a refactor swapping the fallback order, renaming the prefix, or emitting email/displayName instead of userId would silently break operator per-user-bucketing visibility AND silently leak PII (if email was emitted) into operator logs; got: $rateLimitLine")
+          // (iv) EXCLUSION of remote: prefix (the 47d91dd-pinned
+          // unauthenticated variant) -- the LOAD-BEARING
+          // ASYMMETRIC-PAIR catch
+          assert(!rateLimitLine.contains("client=remote:"),
+            clue = s"platform-auth rate-limit line MUST NOT contain `client=remote:` (the 47d91dd-pinned unauthenticated client-key prefix) -- a refactor that emitted BOTH prefixes OR fell back to remote: for authenticated requests would silently break the documented per-user-bucketing visibility; the EXCLUSION pin is the load-bearing asymmetric-pair catch matching the pattern from b4b828f (state_cookie_mismatch vs missing_state_cookie); got: $rateLimitLine")
+          // (v-viii) shared fields (same as 47d91dd)
+          assert(rateLimitLine.contains("bucket=submit"),
+            clue = s"platform-auth rate-limit line must carry bucket=submit matching the unauthenticated variant; got: $rateLimitLine")
+          assert(rateLimitLine.contains("limitPerMinute=1"),
+            clue = s"platform-auth rate-limit line must carry limitPerMinute=1 (the test's configured cap); got: $rateLimitLine")
+          assert(rateLimitLine.contains("retryAfterMs="),
+            clue = s"platform-auth rate-limit line must carry retryAfterMs= field; got: $rateLimitLine")
+          assert(rateLimitLine.contains("[WARN]"),
+            clue = s"platform-auth rate-limit line must be WARN-level matching the unauthenticated variant; got: $rateLimitLine")
+          assert(rateLimitLine.contains("[hand-history-review]"),
+            clue = s"platform-auth rate-limit line must carry the [hand-history-review] service-tag prefix; got: $rateLimitLine")
+        }
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
