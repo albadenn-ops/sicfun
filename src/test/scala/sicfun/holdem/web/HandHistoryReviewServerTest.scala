@@ -6951,6 +6951,156 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented sanitizeLogMessage DEL (0x7F) escape
+  // rule END-TO-END -- the SANITIZATION-INVARIANT pin covering
+  // the GENERIC FALLBACK BRANCH at HandHistoryReviewServerRuntime
+  // .scala lines 494-497 (NOT one of the 5 explicit
+  // .replace(...) rules at lines 488-492); the family
+  // previously covered ONLY the explicit-rules branch (4db713d
+  // newline, a696f57 CR, 7aeaa8d TAB -- all 3 hit lines 488-
+  // 492's chained .replace calls); this commit hits the
+  // OTHER half of sanitizeLogMessage's escape logic -- the
+  // foreach loop at lines 494-497 that handles ANY ctrl byte
+  // < 0x20 (caught by the explicit chain or this loop) AND
+  // the 0x7F DEL byte (caught ONLY by this loop because the
+  // explicit chain at lines 488-492 has no rule for 0x7F);
+  // structural significance: the explicit chain emits
+  // `\<char>` form (2 chars: backslash + ascii letter) while
+  // the generic fallback emits `\x<hex>` form (4 chars:
+  // backslash + 'x' + 2 lowercase hex digits); a refactor
+  // could break ONE branch without breaking the OTHER, so
+  // pinning both branches separately is essential; DEL is
+  // OPERATIONALLY RELEVANT because: (i) some terminals
+  // interpret DEL as a destructive char that erases the
+  // previous char (the same way backspace does), so a raw
+  // DEL in a log line could VISUALLY hide preceding chars in
+  // operator tail/less workflows -- an attacker could submit
+  // `email=aliceadversary@evil.com` and
+  // visually overwrite `alice` with `adv` in the operator's
+  // terminal view, making the log line LOOK like the
+  // attacker's email was something else, (ii) DEL is the
+  // ONLY non-control-block byte caught by the foreach
+  // fallback (lines 488-492's chained replaces handle the 5
+  // common control chars, then the foreach catches "any byte
+  // < 0x20" AND "0x7F"); without sanitization, raw DEL
+  // bytes would flow through to operator logs and confuse
+  // forensics; the sanitizeLogMessage helper at lines 494-
+  // 497 catches DEL via the `ch.toInt == 0x7F` clause and
+  // escapes to `\x7f` via the `"\\x%02x".format(ch.toInt)`
+  // format string; this commit's END-TO-END test verifies
+  // the sanitization applies at the log() emission layer by:
+  // (1) configuring platformAuth, (2) constructing the JSON
+  // unicode escape `` at RUNTIME via Char(0x5C) ('\')
+  // + "u007f" concatenation to AVOID Scala source-level
+  // unicode escape processing (the safest construction --
+  // 'a'.toString + ... ensures the source reader cannot
+  // accidentally process a `` literal at source level
+  // before lexing reaches the string), (3) submitting POST
+  // /api/auth/login with the constructed body containing
+  // the literal 6-char `` sequence in the email
+  // field, (4) ujson parses this as the JSON unicode
+  // escape -> 0x7F byte at JSON-decode time, (5) the login
+  // fails validateEmail (DEL is not in the [A-Za-z0-9_.+-]
+  // local-part character class) + emits auth.login.failure
+  // logWarn with the user-submitted email containing the
+  // raw 0x7F byte, (6) the log() helper's sanitizeLogMessage
+  // wrapping at line 512 catches the DEL via the foreach
+  // loop's `ch.toInt == 0x7F` clause + escapes it to the
+  // 4-char `\x7f` sequence; per-format regression vectors:
+  // (i) refactor dropping the foreach loop entirely (e.g.
+  // "the 5 explicit replaces cover all common cases") would
+  // silently let DEL + arbitrary ctrl chars 0x01-0x1F
+  // through, (ii) refactor changing the `\x%02x` format
+  // (e.g. dropping the `\x` prefix or using uppercase hex
+  // `\X%02X`) would silently break log aggregator parsers
+  // that expect the documented lowercase `\x<hex>` form,
+  // (iii) refactor consolidating the foreach with the
+  // explicit chain into a single regex-based replacement
+  // would risk format drift between the two branches; 4-
+  // tier format check: (i) the auth.login.failure line
+  // exists in captured stderr, (ii) the line contains BOTH
+  // halves of the email (alice + bob@example.com), (iii)
+  // the email field contains the ESCAPED form
+  // `alice\x7fbob@example.com` (literal 4-char escape
+  // sequence) per HandHistoryReviewServerRuntime.scala line
+  // 496's `\\x%02x` format with the LOWERCASE `7f` hex
+  // (catches a refactor changing the hex case to uppercase
+  // `7F`), (iv) EXCLUSION of raw 0x7F DEL byte in the line
+  // (no stripSuffix workaround needed -- DEL is not part of
+  // any common OS line.separator).
+  test("log() helper's sanitizeLogMessage wrapping at HandHistoryReviewServerRuntime.scala line 512 escapes user-controlled DEL (0x7F) bytes end-to-end via the GENERIC FALLBACK branch at lines 494-497 -- the SANITIZATION-INVARIANT pin for the FALLBACK branch complements 4db713d/a696f57/7aeaa8d's explicit-replace-chain pins; DEL injection in field values could VISUALLY hide preceding chars in operator terminal workflows (terminals interpret DEL like backspace), enabling an attacker to mask the audit trail of their submitted credentials") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Construct the JSON unicode escape `` as a
+          // 6-char literal sequence at RUNTIME via backslash-
+          // char + "u007f" concatenation. The Scala source
+          // reader processes `\uXXXX` unicode escapes BEFORE
+          // lexing, even inside raw triple-quoted strings, so
+          // a naive `""""""` literal would be replaced
+          // with a single 0x7F char at compile time --
+          // breaking the test's intent of letting ujson parse
+          // the JSON unicode escape at runtime. Using runtime
+          // concatenation of a single backslash Char (0x5C)
+          // with the literal "u007f" String guarantees the
+          // resulting 6-char sequence reaches ujson VERBATIM.
+          val backslash: String = 0x5C.toChar.toString
+          val jsonUnicodeEscapeForDel: String = backslash + "u007f"
+          val maliciousBody = s"""{"email":"alice${jsonUnicodeEscapeForDel}bob@example.com","password":"some-password"}"""
+
+          val errBuf = new java.io.ByteArrayOutputStream()
+          val originalErr = System.err
+          System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+          try
+            val rejected = postJson(s"$baseUri/api/auth/login", maliciousBody)
+            assertEquals(rejected.statusCode(), 401,
+              clue = "malformed-email login MUST return 401 (the email fails validateEmail's regex check because DEL is not in the [A-Za-z0-9_.+-] local-part character class; loginLocal returns Left -> 401)")
+          finally
+            System.setErr(originalErr)
+
+          val captured = errBuf.toString(StandardCharsets.UTF_8)
+          val failureLine = captured.split('\n').iterator
+            .find(_.contains("auth.login.failure"))
+            .getOrElse(fail(s"no `auth.login.failure` line in captured stderr; got: ${captured.take(800)}"))
+
+          // (i) the auth.login.failure line exists
+          assert(failureLine.contains("auth.login.failure"),
+            clue = s"auth.login.failure line must be present (the rejected login path at AuthStack.scala line 192 emits this on every invalid-credentials rejection); got: $failureLine")
+
+          // (ii) the line contains BOTH halves of the email
+          assert(failureLine.contains("alice") && failureLine.contains("bob@example.com"),
+            clue = s"auth.login.failure line MUST contain BOTH halves of the email (alice + bob@example.com); got: $failureLine; full captured stream: ${captured.take(1500)}")
+
+          // (iii) the email contains the ESCAPED form
+          // `alice\x7fbob@example.com` -- 4-char escape
+          // sequence (backslash + 'x' + '7' + 'f'). The
+          // LOWERCASE hex is part of the documented contract
+          // (line 496's `\\x%02x` uses %02x which produces
+          // lowercase; a refactor to `\\x%02X` would silently
+          // change the form to uppercase `\x7F`).
+          assert(failureLine.contains("alice\\x7fbob@example.com"),
+            clue = s"auth.login.failure line MUST carry the escaped form `alice\\\\x7fbob@example.com` (literal 4-char sequence: backslash + 'x' + '7' + 'f' in LOWERCASE hex) per HandHistoryReviewServerRuntime.scala line 496's `\"\\\\x%02x\".format(ch.toInt)` format string; the 0x7F DEL byte in the submitted email gets caught by sanitizeLogMessage's foreach fallback (lines 494-497) AT THE LOG LAYER; a refactor dropping the foreach fallback would silently let DEL + arbitrary ctrl chars through, enabling LOG INJECTION attacks where raw DEL bytes confuse operator terminal workflows (terminals interpret DEL like backspace); a refactor changing the hex case to uppercase (`\\X%02X`) would silently break log aggregator parsers expecting the documented lowercase form; got: $failureLine")
+
+          // (iv) EXCLUSION: the line must NOT contain a raw
+          // 0x7F DEL byte. DEL is not part of any common OS
+          // line.separator (Windows CRLF, Unix LF, classic
+          // Mac CR), so no stripSuffix workaround is needed.
+          // Use Char unicode escape '' (processed at
+          // source-reader level into the single 0x7F Char) to
+          // construct the raw byte for the EXCLUSION check.
+          val rawDelByte: String = ''.toString
+          assert(!failureLine.contains(rawDelByte),
+            clue = s"auth.login.failure line MUST NOT contain a raw 0x7F DEL byte -- catches a refactor that escaped DEL to a DIFFERENT visible form (e.g. `%7F` uri-style or dropped escape entirely on the assumption that DEL is harmless); got line: $failureLine")
+        }
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
