@@ -16438,6 +16438,108 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/auth/me SHAPE-INVARIANCE
+  // contract between no-auth + platform-auth modes per
+  // AuthStack.scala lines 69-77 (no-auth) + PlatformUserAuth
+  // .scala lines 332-341 (platform-auth) -- the CROSS-MODE
+  // SHAPE-INVARIANCE pin extends 6346c2b's no-auth-only
+  // pin with the platform-auth-mode mirror + the
+  // ARCHITECTURAL-CONTRACT assertion that the SHAPE
+  // (field NAMES + cardinality) is IDENTICAL across both
+  // modes (only the field VALUES differ); the documented
+  // SHAPE-INVARIANCE is what lets the frontend at site.js
+  // use ONE code path for ALL deployment modes -- if the
+  // shapes diverged between modes, the frontend would
+  // need per-mode branching logic; THIRTY-SIXTH per-
+  // emission-site SHAPE pin overall; the cross-mode
+  // SHAPE-INVARIANCE is OPERATIONALLY CRITICAL because:
+  // (a) operators deploy the same server binary across
+  // multiple environments (dev, staging, prod) with
+  // DIFFERENT auth modes per environment -- a refactor
+  // diverging shapes would silently break the same
+  // frontend bundle's compatibility across environments,
+  // (b) the documented design is "the shape is part of
+  // the contract; values reflect mode-specific state" --
+  // a refactor that mode-conditionalized the shape would
+  // silently break the documented invariant, (c)
+  // operator monitoring tools that probe /api/auth/me
+  // across multiple instances assume the same shape --
+  // a refactor would silently force per-instance shape
+  // detection; per-format regression vectors uniquely
+  // caught (NOT caught by 6346c2b which covers no-auth
+  // only): (i) refactor adding a field to ONE mode only
+  // (e.g. `sessionAge` only in platform-auth mode) would
+  // silently break the SHAPE-INVARIANCE contract, (ii)
+  // refactor removing a field from ONE mode only would
+  // silently break frontend compatibility for that mode,
+  // (iii) refactor renaming a field in ONE mode would
+  // silently desync the modes; test approach: configure
+  // a server with platformAuth enabled, GET /api/auth/me,
+  // verify the field set is IDENTICAL to the documented
+  // 7-field closed set + verify the mode-specific VALUES
+  // (authenticationMode="users", authenticationEnabled=
+  // true) + verify the SAME nullable fields (user +
+  // csrfToken null when not signed in).
+  test("/api/auth/me response body SHAPE-INVARIANCE: the field SET is IDENTICAL across no-auth + platform-auth modes per the documented architectural contract that lets the frontend at site.js use ONE code path for ALL deployment modes -- the CROSS-MODE SHAPE-INVARIANCE pin extends 6346c2b's no-auth-only coverage to the platform-auth-mode mirror") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val meResp = getJson(s"$baseUri/api/auth/me")
+          val meFields = meResp.obj.keys.toSet
+
+          val expectedFields = Set(
+            "authenticationEnabled",
+            "authenticationMode",
+            "authenticated",
+            "allowLocalRegistration",
+            "providers",
+            "user",
+            "csrfToken"
+          )
+
+          // (i) CARDINALITY: platform-auth mode emits the
+          // SAME 7-field set as no-auth mode (the documented
+          // SHAPE-INVARIANCE)
+          assertEquals(meFields.size, expectedFields.size,
+            clue = s"/api/auth/me platform-auth mode MUST emit the SAME 7 fields as no-auth mode (6346c2b) per the documented SHAPE-INVARIANCE contract; got actual=${meFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- meFields).toVector.sorted.mkString(", ")}, extra=${(meFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+          // (ii) SET EQUALITY (the CORE SHAPE-INVARIANCE
+          // assertion)
+          assertEquals(meFields, expectedFields,
+            clue = s"/api/auth/me platform-auth mode's field NAME SET MUST equal exactly the documented 7-field closed set (SAME as no-auth mode per 6346c2b) -- the SHAPE-INVARIANCE between modes is the ARCHITECTURAL CONTRACT that lets the frontend at site.js use ONE code path for ALL deployment modes; a refactor adding/removing/renaming a field in ONE mode only would silently break frontend compatibility across mode-different environments (e.g. dev=no-auth + prod=platform-auth); got actual=${meFields.toVector.sorted.mkString(", ")}")
+
+          // (iii) VALUE assertions: platform-auth mode emits
+          // DIFFERENT values than no-auth mode
+          assertEquals(meResp("authenticationEnabled").bool, true,
+            clue = s"platform-auth mode: authenticationEnabled MUST be true per PlatformUserAuth.scala line 334's `Bool(true)` -- distinguishes from no-auth's false value (the per-mode VALUES differ even when the SHAPE is identical); got: ${meResp("authenticationEnabled").bool}")
+          assertEquals(meResp("authenticationMode").str, "users",
+            clue = s"platform-auth mode: authenticationMode MUST be exactly 'users' per PlatformUserAuth.scala line 335's `Str(\"users\")` -- distinguishes from no-auth's 'no-auth'/'none' value; a refactor renaming the mode string would silently break operator monitoring tools that filter by mode; got: ${meResp("authenticationMode").str}")
+          assertEquals(meResp("authenticated").bool, false,
+            clue = s"platform-auth mode (no session): authenticated MUST be false (no user signed in via this request); got: ${meResp("authenticated").bool}")
+
+          // (iv) NULLABLE fields MUST still be PRESENT (with
+          // null value when not signed in) -- the SAME
+          // contract as 6346c2b's no-auth-mode tier (iv),
+          // verifying the SHAPE-INVARIANCE holds across the
+          // nullable-field encoding
+          assertEquals(meResp("user"), ujson.Null,
+            clue = "platform-auth mode (no session): user field MUST be PRESENT and equal to null (per PlatformUserAuth.scala line 339's `currentUser.map(...).getOrElse(ujson.Null)`) -- the SAME nullable-field encoding as no-auth mode (6346c2b tier iv) maintains the SHAPE-INVARIANCE contract; a refactor making the field absent in unauthenticated platform-auth contexts would silently diverge the modes")
+          assertEquals(meResp("csrfToken"), ujson.Null,
+            clue = "platform-auth mode (no session): csrfToken field MUST be PRESENT and equal to null -- the SAME encoding as no-auth mode; a refactor that omitted csrfToken when null (e.g. for 'cleaner JSON') would silently break the SHAPE-INVARIANCE")
+
+          // (v) providers MUST be PRESENT as ujson.Arr in
+          // BOTH modes (in platform-auth mode it may have
+          // configured OIDC providers; in this test there
+          // are none so the array is empty)
+          assert(meResp("providers").isInstanceOf[ujson.Arr],
+            clue = s"platform-auth mode: providers MUST be ujson.Arr (NOT null) per PlatformUserAuth.scala line 338's `Arr.from(...)` -- the SAME type-contract as no-auth mode (6346c2b tier v); got type: ${meResp("providers").getClass.getSimpleName}")
+        }
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
