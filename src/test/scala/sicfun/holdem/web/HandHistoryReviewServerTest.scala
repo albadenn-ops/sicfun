@@ -13195,6 +13195,139 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the STRICT-SUBSET RELATIONSHIP between /api/ready
+  // and /api/health JSON field sets at Readiness.scala lines
+  // 73-112 (renderHealth) vs lines 129-153 (renderReadiness)
+  // -- the CROSS-ENDPOINT FIELD-SHARE pin verifies that the
+  // /api/ready field set (after normalizing `reason` ->
+  // `readyReason`) is a STRICT SUBSET of /api/health's field
+  // set, complementing 08b35f1 (/api/health 34-field
+  // closure) + c0e75ca (/api/ready 23-field closure) with a
+  // CROSS-ENDPOINT CONSISTENCY assertion that catches DRIFT
+  // between the two endpoints' SHARED fields; TWELFTH per-
+  // emission-site SHAPE pin overall extending the JSON
+  // CARDINALITY family from single-endpoint pins (08b35f1 +
+  // c0e75ca) to a CROSS-ENDPOINT pin (THIS commit) that
+  // verifies the documented STRICT-SUBSET architectural
+  // contract; the strict-subset relationship is
+  // OPERATIONALLY CRITICAL because: (a) dashboards built
+  // for /api/health can FALL BACK to /api/ready when
+  // /api/health returns 503 (the orchestrator-facing
+  // endpoint always returns 200 even when ready=false) --
+  // this fallback ASSUMES the field names match between
+  // the two endpoints for the SHARED fields, a refactor
+  // renaming a shared field on ONE endpoint but NOT the
+  // OTHER (e.g. renaming `acceptingAnalysisJobs` on
+  // /api/health while keeping the old name on /api/ready)
+  // would silently break the fallback parsing on the
+  // renamed side, (b) test infrastructure that exercises
+  // BOTH endpoints (e.g. for parity tests) can use
+  // identical field-extraction code only if the shared
+  // fields have identical names, (c) operator
+  // documentation that lists "fields available on either
+  // endpoint" depends on the strict-subset relationship
+  // to enumerate the union without contradiction, (d)
+  // OPERATOR_RUNBOOK.md schema definitions that document
+  // each field ONCE (with a note about which endpoint(s)
+  // emit it) depend on the shared-fields naming
+  // consistency; per-format regression vectors uniquely
+  // caught (NOT caught by 08b35f1 + c0e75ca individually):
+  // (i) refactor renaming a SHARED field on /api/health
+  // but NOT /api/ready (e.g. `acceptingAnalysisJobs` ->
+  // `acceptsAnalysis` on /api/health only) -- the
+  // 08b35f1 pin catches the /api/health rename (expected
+  // field set changes), the c0e75ca pin catches nothing
+  // (the /api/ready set is unchanged), BUT the resulting
+  // SHAPE has the two endpoints with INCONSISTENT names
+  // for the same conceptual field; this strict-subset
+  // pin catches the inconsistency, (ii) refactor adding a
+  // new field to /api/ready that doesn't exist on
+  // /api/health (violating the strict-subset contract --
+  // /api/ready should NEVER have operator-only fields
+  // that /api/health lacks since /api/health is the
+  // SUPERSET endpoint), (iii) refactor renaming the
+  // `reason` <-> `readyReason` mapping in either
+  // direction would change the normalization function the
+  // test applies -- catches a subtle drift in the
+  // documented asymmetric naming; test approach: query
+  // both endpoints, extract field name sets, normalize
+  // /api/ready's `reason` -> `readyReason` (the documented
+  // asymmetry), assert the normalized /api/ready set is a
+  // STRICT SUBSET of /api/health's set, AND assert the
+  // /api/ready-omitted fields (operator-only fields) are
+  // present in /api/health, AND assert the cardinality
+  // delta (34 - 23 = 11 fields omitted from /api/ready).
+  test("/api/ready field set (after normalizing `reason` -> `readyReason`) MUST be a STRICT SUBSET of /api/health's field set per the documented architectural contract that /api/ready is the orchestrator-facing subset of /api/health -- the CROSS-ENDPOINT FIELD-SHARE pin catches drift between SHARED fields that single-endpoint cardinality pins (08b35f1 + c0e75ca) would miss") {
+    withStaticSite { staticDir =>
+      val (healthBody, readyBody) =
+        withServer(staticDir) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          (getJson(s"$baseUri/api/health"), getJson(s"$baseUri/api/ready"))
+        }
+
+      val healthFields = healthBody.obj.keys.toSet
+      val readyFields = readyBody.obj.keys.toSet
+
+      // Normalize /api/ready's `reason` to `readyReason` so
+      // the strict-subset comparison aligns the SHARED
+      // fields' names (the documented asymmetry between the
+      // two endpoints' "reason" field).
+      val normalizedReadyFields =
+        if readyFields.contains("reason") then (readyFields - "reason") + "readyReason"
+        else readyFields
+
+      // (i) STRICT SUBSET: normalized /api/ready set is a
+      // subset of /api/health set (every field on /api/ready
+      // -- after rename normalization -- MUST exist on
+      // /api/health)
+      val fieldsOnlyOnReady = normalizedReadyFields -- healthFields
+      assertEquals(fieldsOnlyOnReady, Set.empty[String],
+        clue = s"/api/ready field set (after normalizing `reason` -> `readyReason`) MUST be a STRICT SUBSET of /api/health's field set per the documented architectural contract that /api/ready is the orchestrator-facing subset of /api/health -- a refactor adding a new field to /api/ready that doesn't exist on /api/health would silently violate the strict-subset contract; if this assertion fails, EITHER add the missing field to /api/health (preserving subset) OR document the new asymmetry explicitly in OPERATOR_RUNBOOK.md + update this test; got fieldsOnlyOnReady=$fieldsOnlyOnReady; normalized-ready=${normalizedReadyFields.toVector.sorted.mkString(", ")}; health=${healthFields.toVector.sorted.mkString(", ")}")
+
+      // (ii) CARDINALITY DELTA: the documented 11-field
+      // operator-only set on /api/health that /api/ready
+      // omits (the documented "subset" relationship has a
+      // documented delta of exactly 11 fields)
+      val operatorOnlyFields = healthFields -- normalizedReadyFields
+      val expectedOperatorOnlyFields = Set(
+        "ok",
+        "userAuthMaxUsers",
+        "userAuthStoredUsers",
+        "userAuthActiveSessions",
+        "userAuthPendingOidcFlows",
+        "startedAtEpochMs",
+        "uptimeMs",
+        "modelConfigured",
+        "modelSource",
+        "maxUploadBytes",
+        "retainedTerminalJobs"
+      )
+      assertEquals(operatorOnlyFields, expectedOperatorOnlyFields,
+        clue = s"the operator-only delta between /api/health (34 fields) and /api/ready (23 fields after rename normalization) MUST equal exactly the documented 11-field set {ok, userAuth*, startedAtEpochMs, uptimeMs, modelConfigured, modelSource, maxUploadBytes, retainedTerminalJobs} -- these fields are operator-side concerns (process lifecycle, user-auth capacity, model-config audit, upload limits, retained-job count) that the orchestrator-facing /api/ready endpoint doesn't need; a refactor adding a new operator-only field to /api/health would shift this delta + need this test updated; a refactor MOVING one of these fields to /api/ready would silently violate the documented asymmetric scoping (orchestrator endpoint stays minimal); got operatorOnlyFields=$operatorOnlyFields; expected=$expectedOperatorOnlyFields; missing-from-actual=${(expectedOperatorOnlyFields -- operatorOnlyFields).toVector.sorted.mkString(", ")}; extra-in-actual=${(operatorOnlyFields -- expectedOperatorOnlyFields).toVector.sorted.mkString(", ")}")
+
+      // (iii) CARDINALITY ARITHMETIC: |health| - |ready| ==
+      // |operator-only| (the cardinalities must add up
+      // properly -- defense-in-depth catch if (ii) is
+      // updated incorrectly)
+      assertEquals(healthFields.size - normalizedReadyFields.size, expectedOperatorOnlyFields.size,
+        clue = s"the cardinality arithmetic MUST hold: |health| - |normalized-ready| == ${expectedOperatorOnlyFields.size} (the documented operator-only delta size); a refactor adding a new field to /api/health WITHOUT adding it to /api/ready AND WITHOUT updating tier (ii) would silently shift this arithmetic; got |health|=${healthFields.size}, |normalized-ready|=${normalizedReadyFields.size}, delta=${healthFields.size - normalizedReadyFields.size}, expected-delta=${expectedOperatorOnlyFields.size}")
+
+      // (iv) RENAME ASSERTION: the rename normalization
+      // succeeded -- both `reason` (on /api/ready) and
+      // `readyReason` (on /api/health) are present in
+      // their respective endpoints, demonstrating the
+      // documented asymmetric naming
+      assert(readyFields.contains("reason"),
+        clue = s"/api/ready MUST contain `reason` field for the rename normalization to apply correctly; got readyFields=${readyFields.toVector.sorted.mkString(", ")}")
+      assert(healthFields.contains("readyReason"),
+        clue = s"/api/health MUST contain `readyReason` field for the rename normalization to apply correctly; got healthFields=${healthFields.toVector.sorted.mkString(", ")}")
+      assert(!healthFields.contains("reason"),
+        clue = s"/api/health MUST NOT contain bare `reason` -- the documented asymmetry is `readyReason` on /api/health; if /api/health also has `reason`, the rename has drifted; got healthFields=${healthFields.toVector.sorted.mkString(", ")}")
+      assert(!readyFields.contains("readyReason"),
+        clue = s"/api/ready MUST NOT contain `readyReason` -- the documented asymmetry is bare `reason` on /api/ready; if /api/ready also has `readyReason`, the rename has drifted; got readyFields=${readyFields.toVector.sorted.mkString(", ")}")
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
