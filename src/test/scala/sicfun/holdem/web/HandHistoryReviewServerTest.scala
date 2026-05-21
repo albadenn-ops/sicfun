@@ -12208,6 +12208,145 @@ class HandHistoryReviewServerTest extends FunSuite:
       clue = s"RateLimitBucket.values MUST have exactly 3 entries per RateLimit.scala line 15's `case Submit, JobStatus, Auth` declaration -- a refactor adding a new case (e.g. 'Upload') would silently extend the rate-limit surface AND the per-case .id + .description assertions above would NOT catch it (they only verify the 3 KNOWN cases emit the right values); this assertion catches the add-case refactor via Scala 3's reflective enum.values introspection; got length: ${RateLimitBucket.values.length}")
   }
 
+  // Pin the documented classifyAnalysisError +
+  // classifyPlayingHallError CLASSIFIER FUNCTIONS at
+  // JobQueue.scala lines 763-771 -- the CLASSIFIER-INVARIANT
+  // pin verifies the closed set of 3 returned HTTP status
+  // codes (400 / 500 / 504) AND the prefix-matching branch
+  // logic AND the ASYMMETRY between the analyze + hall
+  // classifiers (each rejects the OTHER endpoint's prefix
+  // form); THIRD enum-style isolation pin extending the
+  // 822a0df / 99466be pattern to a SECOND DIMENSION (the
+  // 822a0df + 99466be pins target Scala 3 enum types; this
+  // pin targets pure FUNCTIONS that return enumerable
+  // values); FIFTH per-emission-site SHAPE pin overall;
+  // the classifier functions are OPERATIONALLY CRITICAL
+  // because: (a) the returned status code becomes the
+  // Failed.errorStatus field at JobQueue.scala line 291's
+  // `Failed(..., classifyAnalysisError(error), error)` --
+  // this status flows DIRECTLY into the HTTP response on
+  // status-poll AND into the `errorStatus=<n>` field of the
+  // `job failed` audit log line; operator pager rules
+  // typically distinguish by errorStatus value (a 504 is
+  // an infrastructure issue worth paging on at 3am, a 400
+  // is a user-input issue worth a daytime ticket, a 500 is
+  // an ungraceful-exception worth a priority-medium ticket)
+  // -- a refactor changing the classifier output (e.g.
+  // returning 503 instead of 504 for timeouts, or 422
+  // instead of 400 for bad input) would silently break the
+  // documented pager-rule mapping, (b) the prefix-matching
+  // logic encodes the GROUND TRUTH about which error
+  // categories map to which HTTP status -- a refactor
+  // changing the prefix check (e.g. case-insensitive
+  // matching, or `contains` instead of `startsWith`) would
+  // silently demote ungraceful exceptions to 400 if the
+  // exception message HAPPENED to start with something
+  // other than the documented prefix, (c) the ASYMMETRY
+  // between analyze + hall classifiers (each has its own
+  // documented prefix form) is INTENTIONAL -- the analyze
+  // classifier rejects "playing hall ..." prefixed
+  // messages and vice versa, which preserves
+  // category-purity in the audit log (an analyze error
+  // categorized as 504 must actually be an analyze timeout,
+  // not a stray hall message); a refactor consolidating
+  // the two classifiers into a single shared function
+  // (e.g. "both endpoints use the same logic, just inline
+  // both prefix checks") would silently let cross-endpoint
+  // prefixes match incorrectly, breaking the audit-log
+  // category-purity invariant; per-format regression
+  // vectors this pin catches: (i) refactor changing any
+  // returned status (e.g. timeout 504 -> 503) -- per-
+  // branch equality assertions catch the rename, (ii)
+  // refactor changing the prefix-match semantics (e.g.
+  // startsWith -> contains, case-sensitive -> case-
+  // insensitive) -- the prefix-specificity + case-
+  // sensitivity assertions catch the change, (iii) refactor
+  // consolidating analyze + hall classifiers into a single
+  // shared function -- the asymmetric-drift assertions
+  // (analyze classifier on hall prefix returns 400, NOT
+  // 504) catch this, (iv) refactor extending the closed
+  // set of returned statuses (e.g. adding 503 / 422 / 429
+  // for new categories) -- the set-equality assertion
+  // catches the new value, (v) refactor narrowing the
+  // closed set (e.g. consolidating 500 + 504 into a single
+  // 500 because "both are server errors") -- the set-
+  // equality assertion catches the missing value.
+  test("classifyAnalysisError + classifyPlayingHallError at JobQueue.scala lines 763-771 MUST return exactly {400, 500, 504} based on prefix-matching the documented strings (analysis timed out / analysis failed: + playing hall timed out / playing hall failed:); the CLASSIFIER-INVARIANT pin catches refactors changing status values, prefix-match semantics, OR consolidating the asymmetric per-endpoint classifiers into a shared function") {
+    import JobQueue.{classifyAnalysisError, classifyPlayingHallError}
+
+    // (i) ANALYZE per-branch return values
+    assertEquals(classifyAnalysisError("analysis timed out after 100ms"), 504,
+      clue = s"classifyAnalysisError on the documented timeout-prefix `analysis timed out after` MUST return 504 per JobQueue.scala line 764 -- 504 is the HTTP status for `Gateway Timeout` and is the operationally-meaningful signal for operators that a worker exceeded its deadline (which is the infrastructure issue worth paging on); a refactor returning 503 (Service Unavailable) would silently misclassify timeouts as availability issues; a refactor returning 408 (Request Timeout) would silently misclassify a SERVER timeout as a CLIENT-side timeout; got: ${classifyAnalysisError("analysis timed out after 100ms")}")
+    assertEquals(classifyAnalysisError("analysis failed: boom"), 500,
+      clue = s"classifyAnalysisError on the documented failure-prefix `analysis failed:` MUST return 500 per JobQueue.scala line 765 -- 500 is the HTTP status for `Internal Server Error` and signals an ungraceful exception that escaped the backend's Either-based error handling; the prefix is constructed by JobQueue.scala line 297 s-string wrapping of NonFatal exceptions; a refactor returning 502 / 503 / 504 would silently misclassify exceptions as transport/availability/timeout issues; got: ${classifyAnalysisError("analysis failed: boom")}")
+    assertEquals(classifyAnalysisError("invalid hand history format"), 400,
+      clue = s"classifyAnalysisError on an unmatched-prefix message MUST return 400 per JobQueue.scala line 766's default-case branch -- 400 is the HTTP status for `Bad Request` and signals a user-input issue (the backend returned Left with a domain-specific error message that DIDN'T match the timeout or failure prefixes); a refactor returning 422 (Unprocessable Entity) would silently downgrade the error category from input-validation to semantic-validation; got: ${classifyAnalysisError("invalid hand history format")}")
+
+    // (ii) HALL per-branch return values (symmetric with
+    // analyze; the asymmetric-drift catch comes in tier (iv))
+    assertEquals(classifyPlayingHallError("playing hall timed out after 100ms"), 504,
+      clue = "classifyPlayingHallError on the documented hall timeout-prefix `playing hall timed out after` MUST return 504 per JobQueue.scala line 769 -- symmetric with analyze's 504 timeout classification; got: ${classifyPlayingHallError(\"playing hall timed out after 100ms\")}")
+    assertEquals(classifyPlayingHallError("playing hall failed: boom"), 500,
+      clue = "classifyPlayingHallError on the documented hall failure-prefix `playing hall failed:` MUST return 500 per JobQueue.scala line 770 -- symmetric with analyze's 500 failure classification; the prefix is constructed by JobQueue.scala line 595's `s\"playing hall failed: $${e.getMessage}\"` wrapping; got: ${classifyPlayingHallError(\"playing hall failed: boom\")}")
+    assertEquals(classifyPlayingHallError("invalid playing hall config"), 400,
+      clue = "classifyPlayingHallError on an unmatched-prefix message MUST return 400 per JobQueue.scala line 771's default-case branch -- symmetric with analyze's 400 default; got: ${classifyPlayingHallError(\"invalid playing hall config\")}")
+
+    // (iii) the set of all returned values per classifier
+    // equals {400, 500, 504} (closed-set assertion catches
+    // refactors that extend the set with new categories OR
+    // narrow it by consolidating two values into one)
+    val analyzeStatusSet = Set(
+      classifyAnalysisError("analysis timed out after 1ms"),
+      classifyAnalysisError("analysis failed: x"),
+      classifyAnalysisError("unmatched default")
+    )
+    assertEquals(analyzeStatusSet, Set(400, 500, 504),
+      clue = s"classifyAnalysisError MUST emit exactly the closed set {400, 500, 504} across its 3 branches -- a refactor extending the set (e.g. adding 503 for a new 'analysis paused' category, or 422 for 'analysis rejected by validation') would silently change the operator-visible status taxonomy without updating pager rules; a refactor narrowing the set (e.g. consolidating 500 + 504 into a single 500 because 'both are server errors') would silently lose the operationally-meaningful distinction between exception failures and infrastructure timeouts; got: $analyzeStatusSet")
+    val hallStatusSet = Set(
+      classifyPlayingHallError("playing hall timed out after 1ms"),
+      classifyPlayingHallError("playing hall failed: x"),
+      classifyPlayingHallError("unmatched default")
+    )
+    assertEquals(hallStatusSet, Set(400, 500, 504),
+      clue = s"classifyPlayingHallError MUST emit exactly the closed set {400, 500, 504} -- symmetric with analyze; got: $hallStatusSet")
+
+    // (iv) ASYMMETRIC-DRIFT catch: each classifier rejects
+    // the OTHER endpoint's prefix form. This catches a
+    // refactor consolidating the two classifiers into a
+    // single shared function (e.g. "both endpoints can
+    // share the prefix matching, just inline both prefix
+    // checks into one function") -- if the shared function
+    // accepted EITHER prefix, then analyze errors would be
+    // mis-classified by hall prefixes (and vice versa),
+    // breaking the audit-log category-purity invariant.
+    assertEquals(classifyAnalysisError("playing hall timed out after 100ms"), 400,
+      clue = "classifyAnalysisError on a HALL-prefix message MUST return 400 (NOT 504) -- the analyze classifier MUST NOT recognize the hall's `playing hall timed out after` prefix; a refactor consolidating the two classifiers into a shared function that accepted EITHER prefix would silently break the audit-log category-purity invariant (an analyze error categorized as 504 must actually be an analyze timeout, not a stray hall message); got: ${classifyAnalysisError(\"playing hall timed out after 100ms\")}")
+    assertEquals(classifyAnalysisError("playing hall failed: boom"), 400,
+      clue = "classifyAnalysisError on a HALL-failure-prefix message MUST return 400 (NOT 500) -- symmetric asymmetric-drift catch; got: ${classifyAnalysisError(\"playing hall failed: boom\")}")
+    assertEquals(classifyPlayingHallError("analysis timed out after 100ms"), 400,
+      clue = "classifyPlayingHallError on an ANALYZE-prefix message MUST return 400 (NOT 504) -- the hall classifier MUST NOT recognize the analyze's `analysis timed out after` prefix; symmetric with the analyze-classifier-on-hall-prefix assertion; got: ${classifyPlayingHallError(\"analysis timed out after 100ms\")}")
+    assertEquals(classifyPlayingHallError("analysis failed: boom"), 400,
+      clue = "classifyPlayingHallError on an ANALYZE-failure-prefix message MUST return 400 (NOT 500) -- symmetric; got: ${classifyPlayingHallError(\"analysis failed: boom\")}")
+
+    // (v) PREFIX-SPECIFICITY catch: the prefix MUST appear
+    // at the START of the string (per startsWith semantics).
+    // A refactor swapping startsWith -> contains would
+    // silently let any message containing the prefix
+    // ANYWHERE match the timeout/failure branches.
+    assertEquals(classifyAnalysisError("backend returned: analysis timed out after 100ms"), 400,
+      clue = "classifyAnalysisError on a message where the timeout-prefix appears IN THE MIDDLE (not at the start) MUST return 400 per startsWith semantics -- a refactor swapping startsWith -> contains would silently match this and return 504, mis-classifying wrapped/quoted error messages as direct timeouts; got: ${classifyAnalysisError(\"backend returned: analysis timed out after 100ms\")}")
+
+    // (vi) CASE-SENSITIVITY catch: the prefix MUST match in
+    // the documented lowercase form. A refactor making the
+    // prefix-match case-insensitive (e.g. for "more
+    // forgiving error categorization") would silently
+    // accept variants like "Analysis Timed Out" that
+    // wouldn't be emitted by the documented wrapping at
+    // line 297.
+    assertEquals(classifyAnalysisError("Analysis timed out after 100ms"), 400,
+      clue = "classifyAnalysisError on a CAPITALIZED-PREFIX message MUST return 400 (NOT 504) per Scala's String.startsWith case-sensitive semantics -- the documented prefix at line 764 is the lowercase form `analysis timed out after` matching what line 297's wrapping emits; a refactor making the match case-insensitive (e.g. `.toLowerCase.startsWith(...)`) would silently accept variants that the documented wrapping never emits, increasing the surface for mis-classification of operator-typed test messages; got: ${classifyAnalysisError(\"Analysis timed out after 100ms\")}")
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
