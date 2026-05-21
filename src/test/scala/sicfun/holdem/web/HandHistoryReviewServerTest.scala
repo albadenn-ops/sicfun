@@ -13859,6 +13859,163 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented STATUS-POLL-RESPONSE FIELD-SET-SHAPE
+  // for the QUEUED non-terminal state at JobQueue.scala
+  // lines 393-400 -- the FIELD-SET-CARDINALITY pin for the
+  // FIRST non-terminal state extending b3c343f + df98f1f +
+  // 188fe91's 3-terminal-state closure to the 4th of the
+  // 5 documented states (the 5-state closure is now
+  // QUEUED + RUNNING + COMPLETED + FAILED + CANCELLED;
+  // this commit pins QUEUED, leaving RUNNING for a future
+  // fire to complete the 5-state closure); SEVENTEENTH
+  // per-emission-site SHAPE pin overall; the QUEUED-state
+  // shape is OPERATIONALLY CRITICAL because: (a) the
+  // frontend at site.js polls the QUEUED state during the
+  // initial submission-to-running transition window and
+  // uses the `message` field for human-readable rendering
+  // ("Queued for analysis" visible to the user while
+  // waiting), a refactor renaming the message would
+  // silently change user-visible text without a UI
+  // review, (b) the `pollAfterMs` field is the documented
+  // server-suggested polling cadence (the frontend reads
+  // this value to decide the next poll delay) -- a
+  // refactor dropping it would silently force the
+  // frontend to busy-spin OR fall back to a hardcoded
+  // default that desyncs from server-side knobs, (c) the
+  // QUEUED state has startedAtEpochMs = null + completedAt
+  // EpochMs = null per the documented partial-shape
+  // (worker hasn't picked up the job yet) -- a refactor
+  // emitting NON-null values for those fields on QUEUED
+  // state would silently violate the documented
+  // lifecycle: the field-presence indicates the lifecycle
+  // phase (null+null = queued, started+null = running,
+  // started+completed = terminal); per-format regression
+  // vectors uniquely caught: (i) refactor ADDING result /
+  // errorStatus / error / durationMs to QUEUED state
+  // would silently violate the documented "non-terminal-
+  // state means no terminal-payload-fields" invariant,
+  // (ii) refactor RENAMING `message` -> `description` or
+  // `humanMessage` would silently break frontend
+  // rendering at site.js, (iii) refactor RENAMING
+  // `pollAfterMs` -> `nextPollDelayMs` would silently
+  // break frontend polling cadence, (iv) refactor
+  // changing the `message` value text would silently
+  // change user-visible text (the test pins the EXACT
+  // documented text "Queued for analysis" matching line
+  // 395's emission), (v) refactor emitting non-null
+  // values for startedAtEpochMs / completedAtEpochMs on
+  // QUEUED state would silently violate the documented
+  // lifecycle-field-presence contract; test approach:
+  // configure server with maxConcurrentJobs = 1 +
+  // BlockingBackend so the FIRST submission saturates
+  // the worker capacity (worker enters analyze + blocks
+  // on the latch), then submit a SECOND job which is
+  // guaranteed to stay QUEUED (no worker available),
+  // query the second job's status URL, extract the
+  // response body field name set, assert it equals
+  // exactly the documented 8-field closed set + verify
+  // the specific (null startedAtEpochMs, null completedAt
+  // EpochMs, "queued" status, "Queued for analysis"
+  // message) field values; release backend after test
+  // for cleanup.
+  test("status-poll response body for /api/analyze-hand-history/jobs/<id> in the QUEUED non-terminal state MUST emit EXACTLY the documented 8-field closed set {jobId, status, statusUrl, submittedAtEpochMs, startedAtEpochMs, completedAtEpochMs, pollAfterMs, message} per JobQueue.scala lines 393-400 -- the FIELD-SET-CARDINALITY pin for the FIRST non-terminal state extends the 3-terminal-state closure to 4-of-5 documented states (RUNNING remains for a future fire)") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      // maxConcurrentJobs = 1 saturates the worker pool with
+      // the first submission so the second stays QUEUED
+      withServer(staticDir, backend = backend, maxConcurrentJobs = 1) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // First job saturates the worker capacity
+        val firstSubmit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(firstSubmit.statusCode(), 202,
+          clue = "first analyze submission must return 202 to saturate the worker pool")
+        assert(backend.started.await(3, TimeUnit.SECONDS),
+          "BlockingBackend never started -- the first job must enter the analyze call to saturate the worker pool BEFORE the second job is submitted (otherwise the second job races the first to the running state)")
+
+        // Second job stays QUEUED because the first is
+        // blocking the only worker slot (maxConcurrentJobs=1)
+        val secondSubmit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(secondSubmit.statusCode(), 202,
+          clue = "second analyze submission must return 202 -- gets QUEUED because the first job has saturated the worker pool")
+        val secondStatusUri = s"$baseUri${jsonBody(secondSubmit)("statusUrl").str}"
+
+        // Query the second job's status -- must be QUEUED
+        val queuedBody = getJson(secondStatusUri)
+        assertEquals(queuedBody("status").str, "queued",
+          clue = "the second job MUST be in QUEUED state (worker pool saturated by first job at maxConcurrentJobs=1); if RUNNING instead, the worker pool is over-provisioned OR the worker is racing the test")
+
+        val queuedFields = queuedBody.obj.keys.toSet
+
+        // The documented 8-field closed set per JobQueue.scala
+        // lines 393-400 (baseStatus 6 mandatory fields +
+        // pollAfterMs at line 394's `Some(DefaultPollAfterMs)`
+        // argument triggering line 441's conditional emission
+        // + message at line 395's explicit `Str("Queued for
+        // analysis")` emission).
+        val expectedFields = Set(
+          "jobId",
+          "status",
+          "statusUrl",
+          "submittedAtEpochMs",
+          "startedAtEpochMs",
+          "completedAtEpochMs",
+          "pollAfterMs",
+          "message"
+        )
+
+        // (i) CARDINALITY
+        assertEquals(queuedFields.size, expectedFields.size,
+          clue = s"status-poll response for QUEUED state MUST have exactly ${expectedFields.size} fields per JobQueue.scala lines 393-400; got actual=${queuedFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- queuedFields).toVector.sorted.mkString(", ")}, extra=${(queuedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(queuedFields, expectedFields,
+          clue = s"status-poll response field NAME SET for QUEUED state MUST equal exactly the documented 8-field closed set per JobQueue.scala lines 393-400; got actual=${queuedFields.toVector.sorted.mkString(", ")}; expected=${expectedFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- queuedFields).toVector.sorted.mkString(", ")}; extra=${(queuedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) ABSENCE: terminal-payload-fields MUST NOT be
+        // present (no result, no errorStatus, no error, no
+        // durationMs -- all of those are terminal-state-only
+        // payloads per b3c343f/df98f1f/188fe91's documented
+        // ASYMMETRY)
+        assert(!queuedFields.contains("result"),
+          clue = s"QUEUED state MUST NOT contain `result` (Completed-state-only payload); got: ${queuedFields.toVector.sorted.mkString(", ")}")
+        assert(!queuedFields.contains("errorStatus"),
+          clue = s"QUEUED state MUST NOT contain `errorStatus` (Failed-state-only payload); got: ${queuedFields.toVector.sorted.mkString(", ")}")
+        assert(!queuedFields.contains("error"),
+          clue = s"QUEUED state MUST NOT contain `error` (Failed-state-only payload); got: ${queuedFields.toVector.sorted.mkString(", ")}")
+        assert(!queuedFields.contains("durationMs"),
+          clue = s"QUEUED state MUST NOT contain `durationMs` (terminal-state-only -- the worker hasn't started yet, so there's no duration to compute); got: ${queuedFields.toVector.sorted.mkString(", ")}")
+
+        // (iv) VALUE assertions: the message text MUST be
+        // exactly "Queued for analysis" per line 395
+        assertEquals(queuedBody("message").str, "Queued for analysis",
+          clue = "QUEUED state's message field MUST be EXACTLY 'Queued for analysis' per JobQueue.scala line 395's hardcoded literal -- a refactor changing the text (e.g. to 'Waiting in queue' or 'Pending analysis' for clarity) would silently change user-visible text without UI review; got: ${queuedBody(\"message\").str}")
+
+        // (v) startedAtEpochMs MUST be null (worker hasn't
+        // picked up the job) -- the field is present but
+        // null, encoding the "queued lifecycle phase" per
+        // line 438's `startedAt.map(...).getOrElse(ujson.Null)`
+        assertEquals(queuedBody("startedAtEpochMs"), ujson.Null,
+          clue = "QUEUED state's startedAtEpochMs MUST be null per JobQueue.scala line 438's None-getOrElse-Null pattern -- the field-presence-but-null encoding indicates 'queued lifecycle phase' (vs RUNNING which has a numeric value); a refactor emitting 0 or omitting the field on QUEUED state would silently violate the documented field-presence-encodes-lifecycle-phase contract")
+
+        // (vi) completedAtEpochMs MUST be null (job not
+        // completed)
+        assertEquals(queuedBody("completedAtEpochMs"), ujson.Null,
+          clue = "QUEUED state's completedAtEpochMs MUST be null per the same None-getOrElse-Null pattern at line 439")
+
+        // (vii) pollAfterMs MUST be a positive integer (the
+        // server-suggested polling cadence)
+        val pollAfterMs = queuedBody("pollAfterMs").num.toInt
+        assert(pollAfterMs > 0,
+          clue = s"QUEUED state's pollAfterMs MUST be a positive integer per JobQueue.scala's `DefaultPollAfterMs` constant -- a refactor emitting 0 would silently force the frontend into a busy-spin; got: $pollAfterMs")
+
+        // Release backend so the first job can complete +
+        // worker pool drains cleanly
+        backend.release.countDown()
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
