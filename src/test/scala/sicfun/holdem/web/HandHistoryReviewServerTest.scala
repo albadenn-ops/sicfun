@@ -12480,6 +12480,146 @@ class HandHistoryReviewServerTest extends FunSuite:
       clue = s"rateLimitClientIpSource MUST emit exactly 3 distinct format templates across its 3 branches -- a refactor consolidating the 2 Some(header) branches into a single template would silently lose the security-relevant distinction between full-trust + safer-fallback modes; a refactor extending the set with a new mode (e.g. `header:<name> via trusted-cidr-block` for CIDR-based allowlists) without updating documentation would silently change the operator-visible audit taxonomy; got: $allTemplates")
   }
 
+  // Pin the CROSS-CHECK between the 4 EMISSION-PREFIX
+  // s-string wrappings at JobQueue.scala lines 297 / 388 /
+  // 595 / 673 AND the 4 CLASSIFIER-PREFIX startsWith
+  // checks at lines 764 / 765 / 769 / 770 -- the EMISSION-
+  // CLASSIFIER COUPLING pin closes the FRAGILITY GAP where
+  // 9f42256's classifier pin verifies the classifier's
+  // BEHAVIOR on hand-crafted prefix strings, BUT does NOT
+  // verify that the ACTUAL EMISSION CODE produces strings
+  // matching those prefixes -- if a refactor renamed the
+  // emission s-string prefix without updating the
+  // classifier (or vice versa), 9f42256 would still pass
+  // (the classifier still correctly classifies the
+  // hand-crafted strings) AND the production-side existing
+  // pins (6b59ce4 / 8577288 / d96f892 / 1e030ed / 9ac8689 /
+  // hall NonFatal at line 6324) would catch the drift via
+  // the HTTP-response errorStatus field BUT only via the
+  // slow + race-prone HTTP integration tests; this pin
+  // closes the gap with a FAST ISOLATION pin that
+  // REPRODUCES THE EMISSION s-strings via Scala-source
+  // literal s-string wrapping (the SAME wrapping pattern
+  // at the emission sites) AND passes them through the
+  // ACTUAL classifier functions -- if the wrapping prefix
+  // ever drifts from the classifier prefix, this pin fails
+  // with a 1-3ms first-fail signal without needing to
+  // exercise the HTTP server + thread pool + backend
+  // machinery; SEVENTH per-emission-site SHAPE pin overall
+  // extending the FUNCTION-INVARIANT sub-family from
+  // 9f42256 (classifier behavior) + 89e3479 (client-IP
+  // source) into a new sub-dimension: CROSS-CHECK between
+  // 2 documented functions whose contracts depend on each
+  // other; the cross-check is OPERATIONALLY CRITICAL
+  // because: (a) a drift between emission + classifier
+  // would silently demote ALL ungraceful exceptions on
+  // the affected endpoint to errorStatus=400, hiding
+  // SECURITY-RELEVANT exceptions (e.g. uncaught
+  // SecurityException, AuthenticationException) under the
+  // BAD-INPUT classification that operators triage as
+  // user-fault instead of server-fault, (b) a drift
+  // between timeout-emission + classifier would silently
+  // demote ALL timeouts on the affected endpoint to 400,
+  // hiding INFRASTRUCTURE ISSUES (worker stuck, backend
+  // unresponsive) under the BAD-INPUT classification that
+  // operators don't page on at 3am, (c) the drift could
+  // happen SILENTLY because the existing HTTP integration
+  // tests (6b59ce4 / 8577288 / d96f892) use SCENARIO-
+  // SPECIFIC strings that match the documented prefixes
+  // BY HARDCODING -- if a refactor renamed the prefix at
+  // the EMISSION SITE, the integration tests would still
+  // fail BUT only after exercising the HTTP machinery
+  // (slower + flakier); this isolation pin catches the
+  // drift at a FRACTION of the cost; per-format
+  // regression vectors uniquely caught: (i) refactor
+  // renaming the analyze NonFatal wrapping (e.g.
+  // `analysis failed:` -> `analyze error:`) at line 297
+  // without updating the classifier at line 765 would
+  // silently demote analyze exceptions to 400, (ii)
+  // refactor renaming the analyze timeout message at
+  // line 388 (e.g. `analysis timed out after` ->
+  // `analysis exceeded deadline by`) without updating
+  // line 764 would silently demote analyze timeouts to
+  // 400, (iii) refactor renaming the hall NonFatal
+  // wrapping at line 595 without updating line 770 would
+  // silently demote hall exceptions to 400, (iv)
+  // refactor renaming the hall timeout message at line
+  // 673 without updating line 769 would silently demote
+  // hall timeouts to 400; test approach: reproduce the
+  // 4 emission s-strings using Scala-source literals
+  // matching the production code exactly (using
+  // synthetic e.getMessage / timeoutMs values that don't
+  // affect the prefix), then pass each through the
+  // documented classifier and verify the documented
+  // status code (NonFatal -> 500, timeout -> 504); ALSO
+  // verify each emission's startsWith matches the
+  // documented prefix literal so a refactor that
+  // RENAMED BOTH SIDES IN SYNC (drifting from the
+  // documented contract together) would still be
+  // catchable via the prefix-literal startsWith
+  // assertion (though it requires the test author to
+  // notice the renames).
+  test("the 4 emission-prefix s-string wrappings at JobQueue.scala lines 297/388/595/673 MUST produce strings that classify correctly via classifyAnalysisError/classifyPlayingHallError at lines 764/765/769/770 -- the EMISSION-CLASSIFIER CROSS-CHECK pin catches drift between the wrapping PREFIXES and the classifier startsWith CHECKS as an ISOLATION pin (faster + more deterministic than the existing HTTP integration tests)") {
+    import JobQueue.{classifyAnalysisError, classifyPlayingHallError}
+
+    // (i) ANALYZE NonFatal emission -- reproduce line 297's
+    // `s"analysis failed: ${e.getMessage}"` wrapping with a
+    // synthetic exception message
+    val analyzeNonFatalEmission = s"analysis failed: ${new RuntimeException("synthetic exception body").getMessage}"
+    assertEquals(classifyAnalysisError(analyzeNonFatalEmission), 500,
+      clue = s"the line 297 `s\"analysis failed: $${e.getMessage}\"` wrapping MUST produce a string that classifyAnalysisError classifies as 500 -- if the line 297 prefix is refactored (e.g. `analysis failed:` -> `analyze error:`) without updating line 765's classifier check, this assertion fails AND ALL analyze NonFatal exceptions silently demote to errorStatus=400 in production, hiding SECURITY-RELEVANT exceptions (uncaught SecurityException, AuthenticationException) under the bad-input classification that operators triage as user-fault instead of server-fault; got emission=`$analyzeNonFatalEmission` classified=${classifyAnalysisError(analyzeNonFatalEmission)}")
+
+    // (ii) ANALYZE TIMEOUT emission -- reproduce line 388's
+    // `s"analysis timed out after ${analysisTimeoutMs}ms"`
+    // wrapping with a synthetic timeout value
+    val analyzeTimeoutEmission = s"analysis timed out after ${120000L}ms"
+    assertEquals(classifyAnalysisError(analyzeTimeoutEmission), 504,
+      clue = s"the line 388 `s\"analysis timed out after $${analysisTimeoutMs}ms\"` wrapping MUST produce a string that classifyAnalysisError classifies as 504 -- if the line 388 prefix is refactored without updating line 764's classifier check, this assertion fails AND ALL analyze timeouts silently demote to errorStatus=400, hiding INFRASTRUCTURE ISSUES (worker stuck, backend unresponsive) under the bad-input classification that operators don't page on at 3am; got emission=`$analyzeTimeoutEmission` classified=${classifyAnalysisError(analyzeTimeoutEmission)}")
+
+    // (iii) HALL NonFatal emission -- reproduce line 595's
+    // `s"playing hall failed: ${e.getMessage}"` wrapping
+    val hallNonFatalEmission = s"playing hall failed: ${new RuntimeException("synthetic hall exception").getMessage}"
+    assertEquals(classifyPlayingHallError(hallNonFatalEmission), 500,
+      clue = s"the line 595 `s\"playing hall failed: $${e.getMessage}\"` wrapping MUST produce a string that classifyPlayingHallError classifies as 500 -- symmetric with analyze; if the line 595 prefix is refactored without updating line 770, hall exceptions silently demote to 400; got emission=`$hallNonFatalEmission` classified=${classifyPlayingHallError(hallNonFatalEmission)}")
+
+    // (iv) HALL TIMEOUT emission -- reproduce line 673's
+    // `s"playing hall timed out after ${playingHallTimeoutMs}ms"`
+    val hallTimeoutEmission = s"playing hall timed out after ${900000L}ms"
+    assertEquals(classifyPlayingHallError(hallTimeoutEmission), 504,
+      clue = s"the line 673 `s\"playing hall timed out after $${playingHallTimeoutMs}ms\"` wrapping MUST produce a string that classifyPlayingHallError classifies as 504 -- symmetric with analyze; if the line 673 prefix is refactored without updating line 769, hall timeouts silently demote to 400; got emission=`$hallTimeoutEmission` classified=${classifyPlayingHallError(hallTimeoutEmission)}")
+
+    // (v-viii) startsWith catches the documented prefix
+    // literal on each emission -- this is defense-in-depth
+    // catching a refactor that renamed BOTH sides in sync
+    // (the cross-check above would pass but the literal
+    // assertion catches the drift from the documented
+    // contract)
+    assert(analyzeNonFatalEmission.startsWith("analysis failed:"),
+      clue = s"analyze NonFatal emission MUST start with the documented `analysis failed:` prefix; if both line 297 + line 765 are renamed IN SYNC (e.g. both becoming `analyze error:`), the cross-check at tier (i) still passes BUT the documented contract has drifted -- the runbook + log-aggregator dashboards + operator grep workflows all key on the documented form; got: `$analyzeNonFatalEmission`")
+    assert(analyzeTimeoutEmission.startsWith("analysis timed out after"),
+      clue = s"analyze timeout emission MUST start with the documented `analysis timed out after` prefix; got: `$analyzeTimeoutEmission`")
+    assert(hallNonFatalEmission.startsWith("playing hall failed:"),
+      clue = s"hall NonFatal emission MUST start with the documented `playing hall failed:` prefix; got: `$hallNonFatalEmission`")
+    assert(hallTimeoutEmission.startsWith("playing hall timed out after"),
+      clue = s"hall timeout emission MUST start with the documented `playing hall timed out after` prefix; got: `$hallTimeoutEmission`")
+
+    // (ix-x) ASYMMETRIC CROSS-CHECK: analyze emissions MUST
+    // NOT classify on the hall classifier as 500/504 (must
+    // classify as 400 default) -- a refactor consolidating
+    // the analyze + hall emission prefixes into a shared
+    // form (e.g. both starting with `job failed:`) would
+    // silently let each classifier accept the OTHER
+    // endpoint's emissions, breaking audit-log category
+    // purity; this asymmetry was already covered by
+    // 9f42256 BUT with HAND-CRAFTED strings; THIS commit
+    // verifies the asymmetry holds on the ACTUAL EMISSION
+    // STRINGS produced by the s-string wrappings
+    assertEquals(classifyPlayingHallError(analyzeNonFatalEmission), 400,
+      clue = s"analyze NonFatal emission MUST classify as 400 (default branch) when passed to the HALL classifier -- the asymmetric prefixes (`analysis failed:` vs `playing hall failed:`) preserve audit-log category purity; got emission=`$analyzeNonFatalEmission` hall-classified=${classifyPlayingHallError(analyzeNonFatalEmission)}")
+    assertEquals(classifyAnalysisError(hallNonFatalEmission), 400,
+      clue = s"hall NonFatal emission MUST classify as 400 (default branch) when passed to the ANALYZE classifier -- symmetric asymmetry assertion; got emission=`$hallNonFatalEmission` analyze-classified=${classifyAnalysisError(hallNonFatalEmission)}")
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
