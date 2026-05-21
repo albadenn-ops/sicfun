@@ -13328,6 +13328,131 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented 202-RESPONSE-BODY FIELD-SET-SHAPE
+  // at HandHistoryReviewServerApi.scala lines 100-114
+  // (analyze) + lines 145-159 (renderAcceptedJobResponse,
+  // used by hall) -- the FIELD-SET-CARDINALITY pin for
+  // submission 202 responses with the SYMMETRIC contract
+  // (both analyze AND hall emit IDENTICAL 5-field bodies),
+  // closing the 202-shape gap left by the existing
+  // 202-body-shape pin at line ~11598 (which verifies
+  // INDIVIDUAL fields are present but doesn't pin the
+  // COMPLETE field set as closed); THIRTEENTH per-emission-
+  // site SHAPE pin overall extending the JSON CARDINALITY
+  // family from JSON ENDPOINTS (08b35f1 /api/health,
+  // c0e75ca /api/ready, 1f57ed6 strict-subset) to JSON
+  // RESPONSE BODIES on SUBMISSION endpoints (THIS commit
+  // for analyze + hall 202 bodies); the 202-response shape
+  // is OPERATIONALLY CRITICAL because: (a) the frontend at
+  // site.js reads ALL 5 fields after submission (jobId for
+  // status tracking + statusUrl for polling + status to
+  // confirm queued state + submittedAtEpochMs for client-
+  // side display + pollAfterMs as the initial poll delay)
+  // -- a refactor adding a new field would silently appear
+  // in the frontend's response parsing but NOT be
+  // rendered (silent feature-flag implicitly), a refactor
+  // removing a field would silently break frontend logic
+  // (e.g. polling falls back to a default delay if
+  // pollAfterMs is missing), (b) generic HTTP-202-aware
+  // clients (Postman 'follow Location' toggle, REST
+  // library auto-poll-with-retry) parse the body for
+  // status/retry hints, (c) the documented SYMMETRY
+  // between analyze + hall 202 bodies is an architectural
+  // contract -- both endpoints emit the SAME shape so
+  // consumers can reuse parsing code; a refactor that
+  // added a field to ONE endpoint but not the OTHER
+  // (e.g. an `estimatedDurationMs` field on hall only
+  // because hall computations take longer) would silently
+  // break the SYMMETRIC contract; per-format regression
+  // vectors uniquely caught: (i) refactor ADDING a field
+  // to either endpoint (e.g. `requestId` for trace
+  // correlation OR `priority` for queue ordering) without
+  // updating documentation OR frontend parsing would
+  // silently widen the contract, (ii) refactor REMOVING a
+  // field (e.g. dropping `submittedAtEpochMs` because the
+  // statusUrl response includes it) would silently break
+  // frontend display + saved Postman collections, (iii)
+  // refactor RENAMING a field (e.g. `pollAfterMs` ->
+  // `nextPollDelayMs` for clarity) would silently break
+  // frontend polling logic, (iv) refactor ADDING the
+  // field to ONE endpoint but not the OTHER (asymmetric
+  // drift between analyze + hall) would silently break
+  // the symmetric-shape contract -- THIS PIN is uniquely
+  // positioned to catch asymmetric drift because it
+  // queries BOTH endpoints + asserts EQUALITY of field
+  // sets, (v) refactor changing the `status` field's
+  // hardcoded "queued" literal (e.g. to "accepted" or
+  // "pending") would silently break the documented
+  // initial-state contract; test approach mirrors 08b35f1
+  // / c0e75ca: configure BlockingBackend pause so 202
+  // returns reliably, submit one analyze + one hall job,
+  // extract response bodies' field name sets, assert each
+  // set equals the documented 5-field closed set, AND
+  // assert the two sets are EQUAL (symmetric contract).
+  test("submission 202 response bodies for /api/analyze-hand-history + /api/playing-hall MUST emit EXACTLY the documented 5-field closed set {jobId, status, statusUrl, submittedAtEpochMs, pollAfterMs} per HandHistoryReviewServerApi.scala lines 102-107 (analyze) + 149-153 (renderAcceptedJobResponse for hall) -- the FIELD-SET-CARDINALITY pin for submission 202s closes the 202-shape gap AND the SYMMETRY assertion catches asymmetric drift between the two endpoints") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      val playingHallBackend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, backend = backend, playingHallBackend = playingHallBackend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Submit both endpoints + capture 202 response bodies.
+        // BlockingBackend pauses the worker AT the analyze/run
+        // call so the 202 returns immediately with the full
+        // documented body shape (no race with worker
+        // completing the job).
+        val analyzeResp = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(analyzeResp.statusCode(), 202,
+          clue = "analyze submission must return 202 for the 202-shape pin to inspect")
+        val analyzeFields = jsonBody(analyzeResp).obj.keys.toSet
+
+        val hallResp = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(hallResp.statusCode(), 202,
+          clue = "hall submission must return 202 for the symmetric 202-shape pin to inspect")
+        val hallFields = jsonBody(hallResp).obj.keys.toSet
+
+        // The documented 5-field closed set per HandHistory
+        // ReviewServerApi.scala lines 102-107 (analyze) +
+        // 149-153 (renderAcceptedJobResponse for hall).
+        val expectedFields = Set(
+          "jobId",
+          "status",
+          "statusUrl",
+          "submittedAtEpochMs",
+          "pollAfterMs"
+        )
+
+        // (i) ANALYZE CARDINALITY: exact field count
+        assertEquals(analyzeFields.size, expectedFields.size,
+          clue = s"analyze 202 body MUST have exactly ${expectedFields.size} fields per HandHistoryReviewServerApi.scala lines 102-107 -- a refactor ADDING/REMOVING a field would silently widen/narrow the contract; if this fails after an intentional schema change, BOTH the test AND OPERATOR_RUNBOOK.md schema MUST be updated together; got actual=${analyzeFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- analyzeFields).toVector.sorted.mkString(", ")}, extra=${(analyzeFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) ANALYZE SET EQUALITY
+        assertEquals(analyzeFields, expectedFields,
+          clue = s"analyze 202 body's field NAME SET MUST equal exactly the documented 5-field closed set per HandHistoryReviewServerApi.scala lines 102-107 -- a refactor renaming any field (e.g. `pollAfterMs` -> `nextPollDelayMs` for clarity) would silently break frontend polling logic at site.js; got actual=${analyzeFields.toVector.sorted.mkString(", ")}; expected=${expectedFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- analyzeFields).toVector.sorted.mkString(", ")}; extra=${(analyzeFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) HALL CARDINALITY: exact field count
+        // (symmetric with analyze -- a refactor adding a
+        // field to hall but not analyze would silently break
+        // the symmetric-shape contract)
+        assertEquals(hallFields.size, expectedFields.size,
+          clue = s"hall 202 body MUST have exactly ${expectedFields.size} fields per HandHistoryReviewServerApi.scala lines 149-153 (renderAcceptedJobResponse) -- symmetric with analyze; got actual=${hallFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- hallFields).toVector.sorted.mkString(", ")}, extra=${(hallFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iv) HALL SET EQUALITY
+        assertEquals(hallFields, expectedFields,
+          clue = s"hall 202 body's field NAME SET MUST equal exactly the documented 5-field closed set per HandHistoryReviewServerApi.scala lines 149-153; symmetric with analyze; got actual=${hallFields.toVector.sorted.mkString(", ")}; expected=${expectedFields.toVector.sorted.mkString(", ")}")
+
+        // (v) SYMMETRY: both endpoints emit IDENTICAL field
+        // sets (the documented architectural contract that
+        // 202-aware clients can use shared parsing code)
+        assertEquals(analyzeFields, hallFields,
+          clue = s"analyze + hall 202 body field sets MUST be EQUAL per the documented architectural symmetry (both endpoints emit IDENTICAL 5-field bodies via renderAcceptedJobResponse at HandHistoryReviewServerApi.scala line 145 OR inline equivalent at line 100) -- a refactor adding a field to ONE endpoint but not the OTHER (e.g. `estimatedDurationMs` on hall only because hall computations take longer) would silently break the symmetric contract that lets consumers reuse parsing code; if a divergence is intentional (a new endpoint-specific field is required), the symmetric pattern can be preserved by extending BOTH endpoints; got analyze=${analyzeFields.toVector.sorted.mkString(", ")}, hall=${hallFields.toVector.sorted.mkString(", ")}, only-on-analyze=${(analyzeFields -- hallFields).toVector.sorted.mkString(", ")}, only-on-hall=${(hallFields -- analyzeFields).toVector.sorted.mkString(", ")}")
+
+        backend.release.countDown()
+        playingHallBackend.release.countDown()
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
