@@ -14576,6 +14576,138 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented 429 RATE-LIMIT-REJECTION FIELD-SET-
+  // SHAPE at AuthStack.scala lines 677-686 -- the FIELD-SET-
+  // CARDINALITY pin for the rate-limit 429 response body
+  // with the documented 4-field closed set {error,
+  // rateLimitBucket, limitPerMinute, retryAfterSeconds};
+  // this is DISTINCT from 97fd354's UNIVERSAL 1-field
+  // {error} shape covering most 4xx/5xx responses -- the
+  // 429 rate-limit response is the ONLY documented error-
+  // response that has a NON-MINIMAL shape with additional
+  // structured metadata for HTTP-aware clients to implement
+  // intelligent backoff; TWENTY-SECOND per-emission-site
+  // SHAPE pin overall extending the JSON CARDINALITY
+  // family from 97fd354's universal error pin to a SECOND
+  // error-response shape with the documented exception to
+  // the 1-field minimal contract; the 429 shape is
+  // OPERATIONALLY CRITICAL because: (a) HTTP-aware clients
+  // implement different retry strategies based on the rate-
+  // limit metadata (rateLimitBucket for per-category
+  // backoff, limitPerMinute for capacity planning,
+  // retryAfterSeconds for the exact wait duration), (b) the
+  // documented departure from the 1-field minimal shape is
+  // INTENTIONAL because rate-limit responses need MORE
+  // metadata than other 4xx errors (the retry advice must
+  // be both human-readable AND machine-parseable for
+  // automated backoff), (c) the retryAfterSeconds field is
+  // REDUNDANT with the Retry-After header but is included
+  // in the body for clients that don't parse headers (e.g.
+  // browser fetch() without response.headers access in
+  // some legacy configurations); per-format regression
+  // vectors uniquely caught (NOT caught by 97fd354's
+  // universal-error pin): (i) refactor consolidating the
+  // 429 shape with the universal 1-field shape (e.g.
+  // "simplify by removing the metadata") would silently
+  // break HTTP-aware backoff logic that depends on
+  // structured metadata, (ii) refactor RENAMING any of
+  // the 4 metadata fields would silently break clients
+  // keying on the documented names, (iii) refactor
+  // CHANGING the retryAfterSeconds value to disagree with
+  // the Retry-After header would silently let body-
+  // reading and header-reading clients see DIFFERENT
+  // retry hints, (iv) refactor ADDING fields (e.g.
+  // `rateLimitWindowMs` for capacity-window correlation)
+  // would silently widen the contract; test approach:
+  // configure server with rateLimitSubmitsPerMinute = 1,
+  // submit ONE job (consumes the slot), submit SECOND
+  // job (rejected with 429), extract the response body
+  // field name set, assert it equals exactly the
+  // documented 4-field closed set + verify all 4 field
+  // values match the documented contract.
+  test("429 RATE-LIMIT-REJECTION response body MUST emit EXACTLY the documented 4-field closed set {error, rateLimitBucket, limitPerMinute, retryAfterSeconds} per AuthStack.scala lines 677-686 -- the FIELD-SET-CARDINALITY pin for the SECOND error-response shape (the documented 429 exception to the 1-field minimal universal-error shape pinned in 97fd354)") {
+    withStaticSite { staticDir =>
+      withServer(
+        staticDir,
+        rateLimitSubmitsPerMinute = 1
+      ) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // First submission consumes the rate-limit slot
+        val firstSubmit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(firstSubmit.statusCode(), 202,
+          clue = "first submission must return 202 to consume the rate-limit slot before the second triggers 429")
+
+        // Second submission is rate-limited (429)
+        val rateLimited = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(rateLimited.statusCode(), 429,
+          clue = "second submission MUST return 429 (rate limited) for this pin to inspect the documented 4-field shape")
+
+        val rateLimitBody = jsonBody(rateLimited)
+        val rateLimitFields = rateLimitBody.obj.keys.toSet
+
+        // The documented 4-field closed set per AuthStack.scala
+        // lines 677-686
+        val expectedFields = Set(
+          "error",
+          "rateLimitBucket",
+          "limitPerMinute",
+          "retryAfterSeconds"
+        )
+
+        // (i) CARDINALITY
+        assertEquals(rateLimitFields.size, expectedFields.size,
+          clue = s"429 rate-limit response body MUST have exactly ${expectedFields.size} fields per AuthStack.scala lines 677-686; got actual=${rateLimitFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- rateLimitFields).toVector.sorted.mkString(", ")}, extra=${(rateLimitFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(rateLimitFields, expectedFields,
+          clue = s"429 rate-limit response body's field NAME SET MUST equal exactly the documented 4-field closed set per AuthStack.scala lines 677-686 -- a refactor RENAMING any field would silently break HTTP-aware backoff clients keying on the documented names; got actual=${rateLimitFields.toVector.sorted.mkString(", ")}; expected=${expectedFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- rateLimitFields).toVector.sorted.mkString(", ")}; extra=${(rateLimitFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) error VALUE format: contains "rate limit
+        // exceeded" + bucket description
+        assert(rateLimitBody("error").str.contains("rate limit exceeded"),
+          clue = s"429 response's error field MUST contain 'rate limit exceeded' per AuthStack.scala line 681's `s\"$${rejection.bucket.description} rate limit exceeded; retry later\"` template -- a refactor changing the documented message would silently break operator log-grep workflows + HTTP-client human-readable display; got: ${rateLimitBody("error").str}")
+
+        // (iv) rateLimitBucket VALUE: matches the
+        // RateLimitBucket.id per the 99466be enum pin (this
+        // is the cross-check between this pin's 429-shape
+        // documentation and the 99466be enum's documented
+        // values {submit, job-status, auth}); for /api/analyze
+        // -hand-history submissions, the bucket is Submit so
+        // .id is "submit"
+        assertEquals(rateLimitBody("rateLimitBucket").str, "submit",
+          clue = s"429 response's rateLimitBucket field MUST equal 'submit' for /api/analyze-hand-history submissions per the RateLimitBucket.Submit.id documented at RateLimit.scala line 18 (cross-check with the 99466be ENUM pin) -- a refactor desyncing the bucket-id emission from the enum's documented values would silently break HTTP-aware backoff logic; got: ${rateLimitBody("rateLimitBucket").str}")
+
+        // (v) limitPerMinute VALUE: matches the configured
+        // value (the test set rateLimitSubmitsPerMinute = 1)
+        assertEquals(rateLimitBody("limitPerMinute").num.toInt, 1,
+          clue = s"429 response's limitPerMinute field MUST equal the configured rateLimitSubmitsPerMinute=1 from withServer per AuthStack.scala line 683's `ujson.Num(rejection.limitPerMinute.toDouble)` emission -- a refactor emitting a stale value (e.g. server-start-cached vs read from the rejection) would silently mislead operators about the actual cap that fired; got: ${rateLimitBody("limitPerMinute").num.toInt}")
+
+        // (vi) retryAfterSeconds VALUE: matches the
+        // Retry-After header value (the cross-check between
+        // the body field and the header value -- both come
+        // from the same retryAfterSeconds(rejection.retryAfterMs)
+        // call at line 672)
+        val retryAfterHeader = headerValue(rateLimited, "Retry-After")
+          .getOrElse(fail("429 response MUST include Retry-After header per AuthStack.scala line 676's `set(\"Retry-After\", retryAfter)`"))
+        val retryAfterBody = rateLimitBody("retryAfterSeconds").num.toLong
+        assertEquals(retryAfterHeader, retryAfterBody.toString,
+          clue = s"429 response's body.retryAfterSeconds MUST EQUAL the Retry-After header value per AuthStack.scala line 684's `ujson.Num(retryAfter.toLong.toDouble)` deriving from the SAME `retryAfter` variable as line 676's header emission -- a refactor desyncing the body field from the header value would silently let body-reading and header-reading clients see DIFFERENT retry hints; got header=`$retryAfterHeader`, body=$retryAfterBody")
+
+        // (vii) ABSENCE: this shape is DISTINCT from the
+        // universal 1-field error shape (97fd354) -- it has
+        // 4 fields, not 1; defense-in-depth assertion that
+        // no extra fields slipped in beyond the documented 4
+        assert(!rateLimitFields.contains("code"),
+          clue = s"429 response MUST NOT contain `code` (no machine-readable error code field documented for the rate-limit response shape; adding one would silently widen the contract); got: ${rateLimitFields.toVector.sorted.mkString(", ")}")
+        assert(!rateLimitFields.contains("traceId"),
+          clue = s"429 response MUST NOT contain `traceId` (no trace correlation field documented; adding one would silently widen the contract AND potentially leak internal trace identifiers); got: ${rateLimitFields.toVector.sorted.mkString(", ")}")
+        assert(!rateLimitFields.contains("rateLimitWindowMs"),
+          clue = s"429 response MUST NOT contain `rateLimitWindowMs` (the rate-limit WINDOW is documented as 60 seconds fixed at RateLimit.scala line 11's `WindowMs` constant -- not exposed in the 429 response shape; adding it would silently widen the contract); got: ${rateLimitFields.toVector.sorted.mkString(", ")}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
