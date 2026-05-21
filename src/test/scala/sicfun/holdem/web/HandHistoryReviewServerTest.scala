@@ -16037,6 +16037,165 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented STATUS-POLL-RESPONSE FIELD-SET-SHAPE
+  // for the PLAYING-HALL QUEUED non-terminal state at
+  // JobQueue.scala lines 699-706 -- the hall-side mirror of
+  // 016d138's analyze QUEUED pin verifying the documented
+  // SYMMETRY between the analyze + hall status-poll QUEUED
+  // shapes, with the documented playing-hall-specific
+  // message text "Queued for playing hall" (vs analyze's
+  // "Queued for analysis"); this is the FINAL piece of the
+  // HALL-SIDE 5-STATE MIRROR -- with this commit ALL 5
+  // documented states are pinned on BOTH endpoints (10
+  // individual state pins): analyze side has b3c343f
+  // COMPLETED + df98f1f FAILED + 016d138 QUEUED + 65b46f6
+  // RUNNING + 188fe91 CANCELLED, hall side has 191da3e
+  // COMPLETED + 01295d1 FAILED + THIS QUEUED + d1af0e6
+  // RUNNING + 188fe91 CANCELLED; THIRTY-THIRD per-emission-
+  // site SHAPE pin overall + 🎯 the 5-STATE CLOSURE IS NOW
+  // FULLY MIRRORED ACROSS BOTH ENDPOINTS; the hall-QUEUED
+  // shape is OPERATIONALLY CRITICAL because: (a) the
+  // frontend at site.js polls the hall QUEUED state during
+  // the initial submission-to-running transition window and
+  // uses the `message` field for human-readable rendering
+  // ("Queued for playing hall" visible to the user during
+  // the wait), a refactor renaming the message would
+  // silently change user-visible text, (b) the QUEUED
+  // state has startedAtEpochMs = null + completedAtEpochMs
+  // = null per the documented partial-shape (worker hasn't
+  // picked up the job -- mirrors 016d138's lifecycle-phase
+  // encoding), (c) the DIFFERENCE between hall QUEUED's
+  // "Queued for playing hall" + analyze QUEUED's "Queued
+  // for analysis" message texts is INTENTIONAL -- the
+  // frontend renders DIFFERENT UI hints based on which
+  // simulation is queued (hall takes 15 min so the UI
+  // can show a longer-wait affordance); per-format
+  // regression vectors uniquely caught (NOT caught by
+  // 016d138's analyze pin): (i) refactor consolidating
+  // hall + analyze message texts to a single string would
+  // silently lose the documented per-endpoint user signal,
+  // (ii) refactor changing hall QUEUED's message text
+  // would silently change user-visible text, (iii)
+  // refactor diverging the hall QUEUED shape from analyze
+  // would silently break the SYMMETRY contract; test
+  // approach mirrors 016d138 exactly but uses
+  // /api/playing-hall + BlockingPlayingHallBackend (the
+  // shared maxConcurrentJobs=1 saturation pattern from
+  // 016d138 works because PlayingHallJobStore + Analysis
+  // JobStore SHARE the same executor per HandHistory
+  // ReviewServerRuntime.scala lines 51-62, so submitting
+  // ONE blocking hall job + then a SECOND hall job that
+  // stays QUEUED deterministically reaches the hall
+  // QUEUED state).
+  test("status-poll response body for /api/playing-hall/jobs/<id> in the QUEUED non-terminal state MUST emit EXACTLY the documented 8-field closed set {jobId, status, statusUrl, submittedAtEpochMs, startedAtEpochMs, completedAtEpochMs, pollAfterMs, message} per JobQueue.scala lines 699-706 -- the hall-side mirror of 016d138's analyze QUEUED pin AND the FINAL piece of the HALL-SIDE 5-STATE MIRROR closing the entire 5-state closure on BOTH endpoints (10 individual state pins)") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, playingHallBackend = backend, maxConcurrentJobs = 1) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // First hall job saturates the shared worker pool
+        // (maxConcurrentJobs = 1 + PlayingHallJobStore shares
+        // executor with AnalysisJobStore per the runtime
+        // setup at lines 51-62)
+        val firstSubmit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(firstSubmit.statusCode(), 202,
+          clue = "first hall submission must return 202 to saturate the worker pool")
+        assert(backend.started.await(3, TimeUnit.SECONDS),
+          "BlockingPlayingHallBackend never started -- the first job must enter the run call to saturate the worker pool BEFORE the second job is submitted")
+
+        // Second hall job stays QUEUED because the first
+        // is blocking the only worker slot
+        val secondSubmit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(secondSubmit.statusCode(), 202,
+          clue = "second hall submission must return 202 -- gets QUEUED because the first job saturated the worker pool")
+        val secondStatusUri = s"$baseUri${jsonBody(secondSubmit)("statusUrl").str}"
+
+        val queuedBody = getJson(secondStatusUri)
+        assertEquals(queuedBody("status").str, "queued",
+          clue = "the second hall job MUST be in QUEUED state (worker pool saturated by first job at maxConcurrentJobs=1)")
+
+        val queuedFields = queuedBody.obj.keys.toSet
+
+        // The documented 8-field closed set (mirrors analyze
+        // QUEUED at lines 393-400)
+        val expectedFields = Set(
+          "jobId",
+          "status",
+          "statusUrl",
+          "submittedAtEpochMs",
+          "startedAtEpochMs",
+          "completedAtEpochMs",
+          "pollAfterMs",
+          "message"
+        )
+
+        // (i) CARDINALITY
+        assertEquals(queuedFields.size, expectedFields.size,
+          clue = s"hall QUEUED state MUST have exactly ${expectedFields.size} fields per JobQueue.scala lines 699-706 (mirrors analyze lines 393-400); got actual=${queuedFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- queuedFields).toVector.sorted.mkString(", ")}, extra=${(queuedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(queuedFields, expectedFields,
+          clue = s"hall QUEUED state field NAME SET MUST equal exactly the documented 8-field closed set per JobQueue.scala lines 699-706 (mirrors the analyze QUEUED state at lines 393-400 per the documented SYMMETRY contract); got actual=${queuedFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- queuedFields).toVector.sorted.mkString(", ")}; extra=${(queuedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) ABSENCE: terminal-payload fields
+        assert(!queuedFields.contains("result"),
+          clue = s"hall QUEUED state MUST NOT contain `result`; got: ${queuedFields.toVector.sorted.mkString(", ")}")
+        assert(!queuedFields.contains("errorStatus"),
+          clue = s"hall QUEUED state MUST NOT contain `errorStatus`; got: ${queuedFields.toVector.sorted.mkString(", ")}")
+        assert(!queuedFields.contains("error"),
+          clue = s"hall QUEUED state MUST NOT contain `error`; got: ${queuedFields.toVector.sorted.mkString(", ")}")
+        assert(!queuedFields.contains("durationMs"),
+          clue = s"hall QUEUED state MUST NOT contain `durationMs`; got: ${queuedFields.toVector.sorted.mkString(", ")}")
+
+        // (iv) VALUE assertion: hall QUEUED's message MUST
+        // be EXACTLY "Queued for playing hall" per line 701
+        // (DIFFERS from analyze QUEUED's "Queued for
+        // analysis" at line 395)
+        assertEquals(queuedBody("message").str, "Queued for playing hall",
+          clue = "hall QUEUED state's message field MUST be EXACTLY 'Queued for playing hall' per JobQueue.scala line 701's hardcoded literal -- DIFFERS from analyze QUEUED's 'Queued for analysis' at line 395, the INTENTIONAL per-endpoint user-visible text that drives different frontend UI hints (hall takes 15 min so longer-wait affordances are shown)")
+
+        // (v) startedAtEpochMs == null (lifecycle-phase
+        // encoding for QUEUED -- worker hasn't started)
+        assertEquals(queuedBody("startedAtEpochMs"), ujson.Null,
+          clue = "hall QUEUED state's startedAtEpochMs MUST be null per line 700's None argument (mirrors 016d138's analyze QUEUED assertion)")
+
+        // (vi) completedAtEpochMs == null
+        assertEquals(queuedBody("completedAtEpochMs"), ujson.Null,
+          clue = "hall QUEUED state's completedAtEpochMs MUST be null")
+
+        // (vii) pollAfterMs > 0
+        assert(queuedBody("pollAfterMs").num.toInt > 0,
+          clue = s"hall QUEUED state's pollAfterMs MUST be > 0; got: ${queuedBody("pollAfterMs").num.toInt}")
+
+        // (viii) SYMMETRY ASSERTION: hall QUEUED field set
+        // MUST EQUAL analyze QUEUED field set (the CORE
+        // SYMMETRIC-MIRROR assertion -- spawns second
+        // analyze withServer with the SAME saturation
+        // pattern + asserts identical field sets)
+        val analyzeBackend = new BlockingBackend(Right(sampleAnalysisResult))
+        val analyzeQueuedFields = withServer(staticDir, backend = analyzeBackend, maxConcurrentJobs = 1) { analyzeServer =>
+          val analyzeBase = s"http://${analyzeServer.binding.host}:${analyzeServer.binding.port}"
+          val firstAnalyzeSubmit = postJson(s"$analyzeBase/api/analyze-hand-history", validUploadPayload)
+          assertEquals(firstAnalyzeSubmit.statusCode(), 202)
+          assert(analyzeBackend.started.await(3, TimeUnit.SECONDS))
+          val secondAnalyzeSubmit = postJson(s"$analyzeBase/api/analyze-hand-history", validUploadPayload)
+          assertEquals(secondAnalyzeSubmit.statusCode(), 202)
+          val analyzeStatusUri = s"$analyzeBase${jsonBody(secondAnalyzeSubmit)("statusUrl").str}"
+          val analyzeQueued = getJson(analyzeStatusUri)
+          assertEquals(analyzeQueued("status").str, "queued")
+          val fields = analyzeQueued.obj.keys.toSet
+          analyzeBackend.release.countDown()
+          fields
+        }
+        assertEquals(queuedFields, analyzeQueuedFields,
+          clue = s"hall QUEUED field set MUST EQUAL analyze QUEUED field set per the documented architectural symmetry (the FINAL piece of the 5-state mirror closing the entire closure on BOTH endpoints; mirrors 191da3e + 01295d1 + d1af0e6 patterns); got hall=${queuedFields.toVector.sorted.mkString(", ")}, analyze=${analyzeQueuedFields.toVector.sorted.mkString(", ")}")
+
+        // Release backend so the worker pool drains cleanly
+        backend.release.countDown()
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
