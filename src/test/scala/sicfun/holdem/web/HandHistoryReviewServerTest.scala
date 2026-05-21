@@ -11655,6 +11655,159 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented jobId UUID FORMAT on BOTH submission
+  // endpoints' 202 responses per JobQueue.scala line 182's
+  // `UUID.randomUUID().toString` (analyze) + line 483's same
+  // call (playing-hall) -- the SHAPE-INVARIANT pin covering
+  // the JOBID-FORMAT DIMENSION that the existing
+  // 202-body-shape pin (line ~11598) covers in PRESENCE but
+  // NOT in FORMAT (the existing pin verifies jobId is non-
+  // empty + DIFFERENT across endpoints, but does NOT pin the
+  // UUID shape itself); the jobId format is OPERATIONALLY
+  // CRITICAL because: (a) operator log-grep workflows key on
+  // UUID-shape patterns -- a tail-and-grep pipeline like
+  // `tail -f deploy.log | grep -E '[0-9a-f]{8}-' | sort` to
+  // extract jobIds for a postmortem depends on the documented
+  // UUID shape; a refactor swapping `UUID.randomUUID().
+  // toString` to e.g. `AtomicLong.getAndIncrement.toString`
+  // (sequential), `Random.nextLong.toHexString` (short
+  // random), `Instant.now().toEpochMilli.toString` (epoch
+  // millis), or `UUID.randomUUID().toString.substring(0, 8)`
+  // (truncated for "log brevity") would silently break the
+  // grep pipeline AND multiple downstream contracts: (b)
+  // UUID's NON-GUESSABILITY -- v4 UUIDs are 122 bits of
+  // randomness (effectively unguessable), but sequential ids
+  // are trivially guessable (`grep job-1234` -> try `grep
+  // job-1235`) -- a refactor to sequential ids would silently
+  // enable cross-user job-status enumeration attacks (the
+  // attacker who knows their own jobId can probe the next
+  // sequence number to harvest other users' job results);
+  // the existing JobQueue per-user ownership check (the GET
+  // /api/analysis/<id> endpoint rejects mismatched-owner
+  // accesses) provides defense-in-depth, BUT the UUID
+  // unguessability is the FIRST LINE OF DEFENSE because it
+  // prevents the attacker from even ATTEMPTING the request
+  // (a 404 / 403 access-denied for a guessable id is a
+  // signal; a 404 for an unguessable UUID is noise to the
+  // attacker), (c) UUID's UNIQUENESS across restarts -- v4
+  // UUIDs are unique with effectively zero collision
+  // probability (2^-61 per pair); a refactor to sequential
+  // ids that reset on restart would silently let two
+  // different processes (e.g. blue-green deploy) emit
+  // OVERLAPPING ids, breaking aggregator-level dedup +
+  // operator audit-trail uniqueness, (d) UUID's LOWERCASE
+  // CONVENTION via UUID.toString -- the JDK's UUID.toString
+  // emits all-lowercase hex per the RFC 4122 recommendation;
+  // a refactor wrapping with `.toUpperCase` (for "visual
+  // distinction") would silently break case-sensitive log-
+  // aggregator field extraction patterns matching `[0-9a-f]`
+  // (the aggregator would index the UPPERCASE form which
+  // grep workflows using lowercase regex would miss); the
+  // jobId format is enforced at the SOURCE (UUID.randomUUID
+  // ().toString call) which feeds BOTH the HTTP 202 response
+  // body AND every downstream log line; pinning the format
+  // at the 202 response covers the HTTP-response-shape
+  // dimension; per-format regression vectors that this pin
+  // catches: (i) refactor swapping the id generator (e.g. to
+  // sequential AtomicLong, random hex, epoch millis,
+  // truncated UUID) would silently break UUID-shape grep
+  // workflows + non-guessability + uniqueness, (ii) refactor
+  // wrapping with .toUpperCase would silently break case-
+  // sensitive aggregator extraction, (iii) refactor padding
+  // the UUID (e.g. with a prefix like `job-<uuid>` for
+  // visual distinction in logs) would silently break grep
+  // patterns expecting bare UUID, (iv) refactor truncating
+  // the UUID (e.g. to first 8 chars for log brevity) would
+  // silently destroy uniqueness + non-guessability; test
+  // approach mirrors the userId UUID pin at line 10379:
+  // submit one analyze job, submit one hall job (both
+  // produce 202 responses with jobIds from the same
+  // UUID.randomUUID().toString call, just at different
+  // JobQueue.scala lines), extract both jobIds, apply
+  // 5-tier format check: (i) analyze jobId matches the
+  // UUID 8-4-4-4-12 hex-with-dashes regex
+  // `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+  // (the SAME regex used at line 10379 for userId so format
+  // drift across the two emission sites is detectable),
+  // (ii) hall jobId matches the same UUID regex (symmetric
+  // pin -- catches a refactor that swapped ONE endpoint's
+  // id generator independently of the other), (iii) analyze
+  // jobId is LOWERCASE (catches .toUpperCase wrapping --
+  // the regex's [0-9a-f] character class ALREADY enforces
+  // this but the explicit assertion makes the contract
+  // intent clearer), (iv) hall jobId is LOWERCASE (symmetric
+  // catch), (v) the two jobIds are DISTINCT (uniqueness
+  // sanity -- the existing 202-body-shape pin also catches
+  // this, but the symmetric assertion belongs in this
+  // SHAPE-FOCUSED pin to make the contract self-contained).
+  test("submission 202 responses for analyze + playing-hall MUST carry jobIds in the documented UUID 8-4-4-4-12 hex-with-dashes shape (lowercase) per JobQueue.scala lines 182/483's UUID.randomUUID().toString call -- the SHAPE-INVARIANT pin verifies the format contract that the existing 202-body-shape pin covers in PRESENCE-only; UUID v4 unguessability is the FIRST LINE OF DEFENSE against cross-user job enumeration attacks") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      val playingHallBackend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, backend = backend, playingHallBackend = playingHallBackend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val uuidRegex = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+
+        // Submit analyze + hall; capture the 202 response
+        // bodies. The blocking backends pause the worker AT
+        // the analyze/run call site, so the 202 returns
+        // immediately + reliably without the test needing to
+        // synchronize against the worker thread.
+        val analyzeResp = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(analyzeResp.statusCode(), 202,
+          clue = "analyze submission must return 202 for the jobId-format pin to inspect the response body")
+        val analyzeJobId = jsonBody(analyzeResp)("jobId").str
+
+        val hallResp = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(hallResp.statusCode(), 202,
+          clue = "hall submission must return 202 for the symmetric jobId-format pin to inspect the response body")
+        val hallJobId = jsonBody(hallResp)("jobId").str
+
+        // (i) analyze jobId matches the UUID shape regex
+        // (mirrors the userId UUID pin at line 10379's
+        // regex -- consistent format-check pattern across
+        // the codebase's UUID-shape pins)
+        assert(analyzeJobId.matches(uuidRegex),
+          clue = s"analyze 202 body.jobId MUST match the UUID 8-4-4-4-12 hex-with-dashes shape `$uuidRegex` per JobQueue.scala line 182's `UUID.randomUUID().toString` call -- a refactor swapping the id generator (e.g. AtomicLong sequential, Random hex, epoch millis, truncated UUID) would silently break UUID-shape grep workflows + unguessability (sequential ids are trivially enumerable, enabling cross-user job-status probing attacks before the per-user ownership check rejects them) + uniqueness across restarts (sequential ids reset; UUIDs do not); a refactor wrapping with .toUpperCase would silently break case-sensitive log-aggregator field extraction; got jobId: '$analyzeJobId'")
+
+        // (ii) hall jobId matches the same UUID shape
+        // (symmetric pin -- catches a refactor that swapped
+        // ONE endpoint's id generator independently of the
+        // other; the asymmetric-drift catch matching the
+        // 1e030ed/817dd08/9ac8689 pattern from the JobQueue
+        // audit log family)
+        assert(hallJobId.matches(uuidRegex),
+          clue = s"hall 202 body.jobId MUST match the UUID 8-4-4-4-12 hex-with-dashes shape `$uuidRegex` per JobQueue.scala line 483's `UUID.randomUUID().toString` call -- symmetric with analyze; a refactor that swapped the hall-side id generator independently of the analyze-side (e.g. via inconsistent refactoring of the parallel JobQueue functions) would silently desync the two endpoints' id formats, breaking operator workflows that expect uniform jobId shape across endpoints; got jobId: '$hallJobId'")
+
+        // (iii) analyze jobId is LOWERCASE -- the regex's
+        // [0-9a-f] class already enforces this, but the
+        // explicit assertion makes the contract intent
+        // clearer + catches an "intentionally inconsistent"
+        // refactor that emits LOWERCASE-but-not-UUID-shape
+        // (some bytes valid hex, some not) -- the regex
+        // would catch shape but a separate case assertion
+        // hardens the documented UUID.toString lowercase
+        // convention
+        assert(analyzeJobId == analyzeJobId.toLowerCase,
+          clue = s"analyze 202 body.jobId MUST be LOWERCASE per java.util.UUID.toString's RFC 4122 lowercase convention -- a refactor wrapping `UUID.randomUUID().toString.toUpperCase` would silently emit UPPERCASE hex breaking case-sensitive log aggregator field extraction; got jobId: '$analyzeJobId'")
+
+        // (iv) hall jobId is LOWERCASE (symmetric catch)
+        assert(hallJobId == hallJobId.toLowerCase,
+          clue = s"hall 202 body.jobId MUST be LOWERCASE per java.util.UUID.toString's RFC 4122 lowercase convention -- symmetric with analyze; got jobId: '$hallJobId'")
+
+        // (v) the two jobIds are DISTINCT (uniqueness
+        // sanity -- ALSO covered by the existing 202-body-
+        // shape pin, but inclusion here makes this pin
+        // self-contained as a SHAPE-focused assertion suite)
+        assert(analyzeJobId != hallJobId,
+          clue = s"analyze + hall jobIds MUST be DISTINCT (each from a separate UUID.randomUUID() call at JobQueue.scala lines 182/483) -- catches a refactor that shared a single id generator with state leak between endpoints; got analyzeJobId='$analyzeJobId' hallJobId='$hallJobId'")
+
+        backend.release.countDown()
+        playingHallBackend.release.countDown()
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
