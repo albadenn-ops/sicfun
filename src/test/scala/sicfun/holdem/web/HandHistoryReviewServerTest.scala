@@ -14956,6 +14956,141 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented applySecurityHeaders UNIVERSAL
+  // SECURITY-HEADER SET emitted on every JSON response per
+  // WebResponses.scala lines 113-139 -- the SECURITY-HEADER
+  // FAMILY pin verifies all 6 documented security headers
+  // are present with the documented values on a
+  // representative JSON endpoint (/api/health), making the
+  // applySecurityHeaders contract verifiable in one pin;
+  // TWENTY-FIFTH per-emission-site SHAPE pin overall
+  // extending the HEADER-INVARIANT family from 989ce10
+  // (Retry-After) + 3322984 (Allow) to a UNIVERSAL
+  // SECURITY-HEADER FAMILY (6 headers in one pin); the
+  // security-header set is OPERATIONALLY CRITICAL because:
+  // (a) Cache-Control: no-store prevents browser caching
+  // of sensitive responses (job statuses, auth tokens,
+  // user data) -- a refactor allowing caching would
+  // silently let shared-browser scenarios leak data
+  // across users, (b) Content-Security-Policy restricts
+  // what the frontend can load/execute (only 'self' for
+  // most directives) -- a refactor weakening the CSP
+  // would silently widen the XSS attack surface, (c)
+  // X-Content-Type-Options: nosniff prevents MIME-sniffing
+  // attacks where browsers re-interpret response bodies
+  // (e.g. user-uploaded data classified as HTML) -- a
+  // refactor dropping the header would silently enable
+  // content-type confusion attacks, (d) X-Frame-Options:
+  // DENY blocks clickjacking via iframe embedding -- the
+  // documented design pairs this LEGACY header with CSP
+  // frame-ancestors 'none' for defense-in-depth, a
+  // refactor dropping the legacy header would silently
+  // narrow the defense to CSP-only (vulnerable to CSP-
+  // parser bugs), (e) Referrer-Policy: no-referrer
+  // prevents the browser from leaking the source URL when
+  // navigating away, (f) Permissions-Policy restricts
+  // browser-API access (camera, microphone, geolocation,
+  // etc.) -- the documented policy denies ALL such APIs
+  // by default, a refactor enabling any of them would
+  // silently widen the browser-API attack surface; per-
+  // format regression vectors uniquely caught: (i)
+  // refactor REMOVING any of the 6 security headers from
+  // applySecurityHeaders would silently affect EVERY
+  // JsonHandler response simultaneously (this pin catches
+  // ANY of the 6), (ii) refactor changing the
+  // Cache-Control value from `no-store` to `no-cache` or
+  // `private` would silently allow some caching (those
+  // values are MORE permissive), (iii) refactor changing
+  // X-Frame-Options from `DENY` to `SAMEORIGIN` would
+  // silently allow same-origin framing, (iv) refactor
+  // weakening the CSP (e.g. adding `unsafe-inline` to
+  // script-src) would silently widen XSS attack surface,
+  // (v) refactor changing X-Content-Type-Options from
+  // `nosniff` to anything else (or omitting it) would
+  // silently enable MIME-sniffing attacks; test approach:
+  // GET /api/health (the simplest JSON endpoint accessible
+  // without auth), verify ALL 6 documented headers are
+  // present with the documented values (exact-match for
+  // 4 simple headers + substring-match for the 2
+  // multi-directive headers CSP + Permissions-Policy).
+  test("applySecurityHeaders at WebResponses.scala lines 113-139 MUST emit ALL 6 documented security headers on every JSON response (Cache-Control: no-store, Content-Security-Policy with frame-ancestors 'none', Permissions-Policy denying all browser APIs, Referrer-Policy: no-referrer, X-Content-Type-Options: nosniff, X-Frame-Options: DENY) -- the SECURITY-HEADER FAMILY pin verifies all 6 in one place via the /api/health representative endpoint") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        val response = get(s"$baseUri/api/health")
+        assertEquals(response.statusCode(), 200,
+          clue = "/api/health must return 200 for the security-header pin to inspect the documented header set")
+
+        // (i) Cache-Control: no-store -- prevents browser
+        // caching of sensitive JSON responses
+        assertEquals(headerValue(response, "Cache-Control"), Some("no-store"),
+          clue = "/api/health response MUST emit `Cache-Control: no-store` per WebResponses.scala line 115's `headers.set(\"Cache-Control\", \"no-store\")` in applySecurityHeaders -- a refactor changing to `no-cache` (revalidate on each request but caching still allowed) or `private` (proxies can't cache but browsers can) would silently allow some caching, leaking sensitive data across shared-browser sessions")
+
+        // (ii) X-Content-Type-Options: nosniff -- prevents
+        // MIME-sniffing attacks
+        assertEquals(headerValue(response, "X-Content-Type-Options"), Some("nosniff"),
+          clue = "/api/health response MUST emit `X-Content-Type-Options: nosniff` per WebResponses.scala line 119's emission -- a refactor dropping the header would silently enable browsers to re-interpret response bodies as different content types (e.g. user-uploaded JSON classified as HTML), enabling content-type-confusion attacks")
+
+        // (iii) X-Frame-Options: DENY -- blocks clickjacking
+        // via iframe embedding
+        assertEquals(headerValue(response, "X-Frame-Options"), Some("DENY"),
+          clue = "/api/health response MUST emit `X-Frame-Options: DENY` per WebResponses.scala line 139's emission -- a refactor changing to `SAMEORIGIN` would silently allow same-origin framing (e.g. an attacker who compromised a same-origin page could clickjack the API endpoints); the documented design pairs this LEGACY header with CSP frame-ancestors 'none' for defense-in-depth -- a refactor dropping the legacy header would silently narrow the defense to CSP-only (vulnerable to CSP-parser bugs)")
+
+        // (iv) Referrer-Policy: no-referrer -- prevents URL
+        // leakage on navigation
+        assertEquals(headerValue(response, "Referrer-Policy"), Some("no-referrer"),
+          clue = "/api/health response MUST emit `Referrer-Policy: no-referrer` per WebResponses.scala line 118's emission -- a refactor weakening to `strict-origin` or `origin-when-cross-origin` would silently let the browser leak the source URL when navigating away from the page (the source URL could contain sensitive query parameters)")
+
+        // (v) Content-Security-Policy -- must contain key
+        // directives (substring match because the full CSP
+        // is a long multi-directive string)
+        val csp = headerValue(response, "Content-Security-Policy")
+          .getOrElse(fail("/api/health response MUST include Content-Security-Policy header per WebResponses.scala line 116's emission"))
+        assert(csp.contains("default-src 'self'"),
+          clue = s"CSP MUST contain `default-src 'self'` per WebResponses.scala line 53's documented directive -- a refactor weakening to `default-src *` would silently widen the XSS attack surface; got CSP: $csp")
+        assert(csp.contains("frame-ancestors 'none'"),
+          clue = s"CSP MUST contain `frame-ancestors 'none'` per the documented clickjacking-defense pairing with X-Frame-Options: DENY -- a refactor changing to `frame-ancestors 'self'` would silently allow same-origin framing; got CSP: $csp")
+        assert(csp.contains("object-src 'none'"),
+          clue = s"CSP MUST contain `object-src 'none'` per the documented design (plugins disabled) -- a refactor allowing object-src would silently enable plugin-based attack vectors; got CSP: $csp")
+        assert(!csp.contains("unsafe-inline"),
+          clue = s"CSP MUST NOT contain `unsafe-inline` (a refactor adding it for `easier inline scripts` would silently widen the XSS attack surface by allowing inline event handlers + inline script tags); got CSP: $csp")
+        assert(!csp.contains("unsafe-eval"),
+          clue = s"CSP MUST NOT contain `unsafe-eval` (a refactor adding it for `dynamic code execution` would silently widen the XSS attack surface by allowing eval() / Function() constructor); got CSP: $csp")
+
+        // (vi) Permissions-Policy -- must contain key
+        // browser-API denials (substring match because the
+        // full policy is a long multi-directive string)
+        val permissionsPolicy = headerValue(response, "Permissions-Policy")
+          .getOrElse(fail("/api/health response MUST include Permissions-Policy header per WebResponses.scala line 117's emission"))
+        assert(permissionsPolicy.contains("camera=()"),
+          clue = s"Permissions-Policy MUST deny camera access via `camera=()` -- a refactor enabling camera (e.g. for a hypothetical future feature) without proper consent UI would silently widen the browser-API attack surface; got Permissions-Policy: $permissionsPolicy")
+        assert(permissionsPolicy.contains("microphone=()"),
+          clue = s"Permissions-Policy MUST deny microphone access via `microphone=()`; got: $permissionsPolicy")
+        assert(permissionsPolicy.contains("geolocation=()"),
+          clue = s"Permissions-Policy MUST deny geolocation access via `geolocation=()`; got: $permissionsPolicy")
+
+        // (vii) DEFENSE-IN-DEPTH catch: ALL 6 headers
+        // present together (a refactor dropping
+        // applySecurityHeaders entirely would silently
+        // drop ALL 6 headers; this assertion lists them
+        // explicitly so a regression on ANY individual
+        // header is caught by the per-header tier above
+        // AND the count by this aggregate)
+        val securityHeaderNames = Set(
+          "Cache-Control",
+          "Content-Security-Policy",
+          "Permissions-Policy",
+          "Referrer-Policy",
+          "X-Content-Type-Options",
+          "X-Frame-Options"
+        )
+        val presentHeaders = securityHeaderNames.filter(name => headerValue(response, name).isDefined)
+        assertEquals(presentHeaders, securityHeaderNames,
+          clue = s"applySecurityHeaders MUST emit ALL 6 documented security headers (Cache-Control, Content-Security-Policy, Permissions-Policy, Referrer-Policy, X-Content-Type-Options, X-Frame-Options) per WebResponses.scala lines 113-139 -- a refactor REMOVING any header from the helper would silently affect EVERY JsonHandler response simultaneously; got present=${presentHeaders.toVector.sorted.mkString(", ")}, missing=${(securityHeaderNames -- presentHeaders).toVector.sorted.mkString(", ")}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
