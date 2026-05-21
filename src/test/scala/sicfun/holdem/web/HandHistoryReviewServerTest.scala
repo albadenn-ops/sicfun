@@ -6119,6 +6119,151 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented PLAYING-HALL TIMEOUT-PATH variant of the
+  // `playing hall job failed` audit log line: errorStatus=504 +
+  // error=playing%20hall%20timed%20out%20after%20<N>ms -- the
+  // ANALYZE-SIDE timeout pin (8577288) applied to the
+  // PLAYING-HALL emission site at JobQueue.scala line 614-616;
+  // 817dd08 pinned the playing-hall failure path's
+  // classifyPlayingHallError DEFAULT branch (errorStatus=400 via
+  // backend Left), THIS commit closes the TIMEOUT branch
+  // (errorStatus=504) on the playing-hall side; with this commit
+  // 2 of 3 classifyPlayingHallError branches are pinned on the
+  // hall side (400 from 817dd08 + 504 from THIS), matching the
+  // analyze-side coverage progression (6b59ce4 400 + 8577288
+  // 504); the operationally-distinct ASPECT of the hall-side
+  // timeout vs analyze-side timeout: hall jobs have a longer
+  // default timeout (15 min vs 2 min per 61e49a8) so timeouts
+  // are MORE OPERATIONALLY MEANINGFUL on the hall side (a
+  // timeout means the hall worker exceeded 15 min, which is
+  // long enough that operators investigate; analyze 2-min
+  // timeouts are more frequently "user submitted a huge upload"
+  // vs hall 15-min timeouts which are "the worker is stuck OR
+  // the hall config is too aggressive"); the %20-escape on
+  // "playing hall timed out after 100ms" is the LOAD-BEARING
+  // contract this pin uniquely verifies (mirrors 8577288's
+  // analyze-side %20-escape on the analogous timeout-message
+  // category); per-field regression vectors SPECIFIC to the
+  // hall timeout path that the analyze-side pins don't catch:
+  // (i) the hall-side prefix `playing hall job failed` (NOT
+  // `job failed` like 8577288 -- the asymmetric-drift catch
+  // from 1e030ed/817dd08), (ii) errorStatus=504 via
+  // classifyPlayingHallError's hall-side branch at line 769's
+  // `if error.startsWith("playing hall timed out after") then
+  // 504` -- a refactor that broke the HALL-side classifier
+  // independently of the analyze-side (e.g. via inconsistent
+  // refactoring of the parallel functions) would silently
+  // demote hall timeouts to the 400 default branch on the
+  // hall-side ONLY, leaving analyze-side timeouts correctly
+  // 504, (iii) the EXACT timeout-message `playing hall timed
+  // out after <N>ms` from JobQueue.scala line 673 -- catches a
+  // refactor renaming the hall-side timeout message
+  // independently of the analyze-side which would silently
+  // break the prefix-match in classifyPlayingHallError; 8-tier
+  // format check at WARN level matching 8577288's + 817dd08's
+  // patterns: (i) `playing hall job failed` prefix (catches
+  // hall-side rename + asymmetric drift to analyze prefix),
+  // (ii) jobId, (iii) errorStatus=504 (hall-timeout classifier
+  // branch), (iv) error=playing%20hall%20timed%20out%20after
+  // %20100ms (THE LOAD-BEARING hall-timeout-message +
+  // %20-escape pin), (v) EXCLUSION of unescaped form, (vi)
+  // [WARN] level, (vii) [hand-history-review] service-tag,
+  // (viii) the test ALSO inline-pins the HTTP-response-shape
+  // errorStatus=504 at the wire layer.
+  test("playing-hall worker that times out emits the documented `playing hall job failed ... errorStatus=504 error=playing%20hall%20timed%20out%20after%20<N>ms` WARN audit log line per JobQueue.scala line 614-616 -- the HALL-SIDE TIMEOUT-PATH variant of 8577288's analyze-side timeout pin (exercises classifyPlayingHallError's 504 branch + the hall-distinctive prefix)") {
+    withStaticSite { staticDir =>
+      val backend = new BusyPlayingHallBackend(runForMs = 2000L, result = Right(samplePlayingHallResult))
+      withServer(
+        staticDir,
+        playingHallBackend = backend,
+        maxConcurrentJobs = 1,
+        maxQueuedJobs = 1,
+        playingHallTimeoutMs = 100L
+      ) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Capture stderr around the playing-hall submit +
+        // terminal-poll. The BusyPlayingHallBackend runs for
+        // 2000ms while playingHallTimeoutMs=100L, so the
+        // worker is interrupted at 100ms with the timeoutFailure
+        // state.
+        val errBuf = new java.io.ByteArrayOutputStream()
+        val originalErr = System.err
+        System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+        val submitJobId =
+          try
+            val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+            assertEquals(submit.statusCode(), 202,
+              clue = "playing-hall submission must return 202 before the worker can be timed out")
+            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+            val capturedJobId = jsonBody(submit)("jobId").str
+            assert(backend.started.await(3, TimeUnit.SECONDS),
+              "busy playing hall backend never started -- the test depends on the worker reaching the analyze call so the timeout interrupts it")
+            val terminal = awaitTerminalJob(statusUri)
+            assertEquals(terminal("status").str, "failed",
+              clue = "playing-hall worker must reach 'failed' terminal state via the timeout path")
+            assertEquals(terminal("errorStatus").num.toInt, 504,
+              clue = "terminal-state errorStatus must be 504 (classifyPlayingHallError's timeout branch) -- this is the HTTP-response-shape pin matching the existing line ~10984 test, complementing this commit's audit-log-shape pin")
+            // Wait for the busy backend to finish its 2-second
+            // run so the test cleanup doesn't race the
+            // not-yet-decremented timedOutWorkersInFlight counter
+            assert(backend.finished.await(5, TimeUnit.SECONDS),
+              "busy playing hall backend never finished -- the test cleanup needs the worker thread to exit before withServer's close()")
+            // After backend.finished, the worker still has to
+            // reach line 615's logWarn emission -- between
+            // backend.finished.countDown (the backend's finally
+            // block fires BEFORE the function returns to the
+            // worker) and the worker's post-return finalState
+            // match. Poll readiness as a proxy for "worker
+            // finished post-processing" -- when
+            // timedOutWorkersInFlight decrements (line 606,
+            // which fires BEFORE the logWarn at line 615), the
+            // readiness flips back to 200. After awaitReady
+            // returns we're confident the worker is at OR PAST
+            // the logWarn line, so the captured stderr has the
+            // emission. Without awaitReady, the worker race
+            // between backend.finished and logWarn would
+            // sometimes leave the captured stderr empty.
+            awaitReady(s"$baseUri/api/ready")
+            capturedJobId
+          finally
+            System.setErr(originalErr)
+
+        val captured = errBuf.toString(StandardCharsets.UTF_8)
+        val failedLine = captured.split('\n').iterator
+          .find(line => line.contains("playing hall job failed") && line.contains(s"jobId=$submitJobId"))
+          .getOrElse(fail(s"no `playing hall job failed jobId=$submitJobId` line in captured stderr for the hall-timeout path; got captured stderr: ${captured.take(2000)}"))
+
+        // (i) hall-side prefix (catches asymmetric drift to analyze)
+        assert(failedLine.contains("playing hall job failed"),
+          clue = s"hall-timeout failed line must carry `playing hall job failed` prefix per JobQueue.scala line 615's hardcoded literal -- distinct from the analyze-side `job failed` prefix (pinned by 8577288); a refactor consolidating both timeout-path prefixes would silently break operator per-endpoint failure dashboards; got: $failedLine")
+        // EXCLUSION of standalone `job failed` (asymmetric-drift catch
+        // matching 1e030ed/817dd08 pattern)
+        val withoutHallPrefix = failedLine.replace("playing hall job failed", "")
+        assert(!withoutHallPrefix.contains("job failed"),
+          clue = s"hall-timeout failed line must NOT also contain a standalone `job failed` prefix in a position other than the `playing hall job failed` substring -- catches a refactor that emitted both prefixes for the same event; got line after stripping hall prefix: '$withoutHallPrefix'")
+        // (ii) jobId
+        assert(failedLine.contains(s"jobId=$submitJobId"),
+          clue = s"hall-timeout failed line must carry the submission's jobId; got: $failedLine")
+        // (iii) errorStatus=504
+        assert(failedLine.contains("errorStatus=504"),
+          clue = s"hall-timeout failed line MUST carry errorStatus=504 per JobQueue.scala line 769's classifyPlayingHallError check `if error.startsWith(\"playing hall timed out after\") then 504` -- the TIMEOUT classifier branch on the HALL side complementing 8577288's analyze-side 504 pin; a refactor that broke the hall-side classifier independently of the analyze-side (e.g. via inconsistent refactoring of the parallel functions) would silently demote hall timeouts to the 400 default branch on the hall-side ONLY; got: $failedLine")
+        // (iv) error= field with %20-escaped hall-timeout message
+        assert(failedLine.contains("error=playing%20hall%20timed%20out%20after%20100ms"),
+          clue = s"hall-timeout failed line MUST carry the EXACT %20-escaped error string `playing%20hall%20timed%20out%20after%20100ms` per JobQueue.scala line 673's `s\"playing hall timed out after $${playingHallTimeoutMs}ms\"` template + line 615 %20-escape; the 100ms reflects the test's playingHallTimeoutMs=100L; a refactor renaming the hall-side timeout message independently of the analyze-side would silently break both the classifyPlayingHallError prefix-match AND operator dashboards filtering by the exact wording; got: $failedLine")
+        // (v) EXCLUSION of unescaped form (catches escape-dropped refactor)
+        assert(!failedLine.contains("playing hall timed out after 100ms"),
+          clue = s"hall-timeout failed line MUST NOT contain the UNESCAPED form `playing hall timed out after 100ms` (with literal spaces) -- catches a refactor that dropped the %20-escape on the HALL-side timeout path specifically while keeping analyze-side timeouts (8577288) escaped; got: $failedLine")
+        // (vi) WARN level
+        assert(failedLine.contains("[WARN]"),
+          clue = s"hall-timeout failed line must be WARN-level matching 8577288's analyze-side timeout; got: $failedLine")
+        // (vii) service-tag
+        assert(failedLine.contains("[hand-history-review]"),
+          clue = s"hall-timeout failed line must carry the [hand-history-review] service-tag prefix; got: $failedLine")
+      }
+    }
+  }
+
   // Pin the documented `shutdown complete` companion banner log
   // line format -- the SHUTDOWN HALF of the startup/shutdown
   // banner pair the 7c47f88 startup pin established the FIRST
