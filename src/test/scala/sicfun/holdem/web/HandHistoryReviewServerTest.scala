@@ -16933,6 +16933,135 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/auth/profile response SHAPE-
+  // INVARIANCE with /api/auth/me + login + register +
+  // logout per AuthStack.scala line 239's `JsonResponse(200,
+  // service.authenticationState(Some(refreshedUser)))` --
+  // profile-update returns the SAME 7-field shape as the
+  // OTHER auth endpoints, with authenticated=true + user
+  // populated with the UPDATED profile fields; the pin
+  // extends 845393c's AUTH STATE-CHANGE SHAPE-INVARIANCE
+  // coverage to the SIXTH and FINAL member of the family;
+  // FORTIETH per-emission-site SHAPE pin overall;
+  // documented contract: ALL 6 auth-state response
+  // surfaces emit the SAME 7-field closed set, allowing
+  // the frontend to use ONE parser for ALL auth state
+  // transitions including profile updates; the profile-
+  // update SHAPE-INVARIANCE is OPERATIONALLY CRITICAL
+  // because: (a) the profile-update response IS the
+  // post-update /api/auth/me response (saving an extra
+  // round trip; the frontend immediately renders the
+  // updated profile from the profile-update response
+  // without polling /api/auth/me again), (b) the
+  // documented architectural contract is that EVERY auth
+  // state-change response is SHAPE-INVARIANT with
+  // /api/auth/me -- a refactor introducing a different
+  // shape for profile (e.g. returning just the updated
+  // fields {displayName, heroName, ...} as a delta)
+  // would silently break the frontend's ONE-PARSER
+  // contract, (c) the documented user-field-populated
+  // response means the frontend gets the FULL updated
+  // profile (including the UPDATED + UNCHANGED fields)
+  // -- a refactor returning only the changed fields
+  // would silently break frontend rendering of the
+  // unchanged fields; per-format regression vectors
+  // uniquely caught (NOT caught by 845393c + 064d28a):
+  // (i) refactor returning a delta-shape {updatedFields:
+  // {...}} would silently break the SHAPE-INVARIANCE,
+  // (ii) refactor returning just the user object (NOT
+  // wrapped in the 7-field auth-state envelope) would
+  // silently force frontend refetch of auth state, (iii)
+  // refactor returning a different shape on profile
+  // updates vs profile reads would silently force per-
+  // operation frontend logic; test approach: register a
+  // user, capture session + CSRF, POST /api/auth/profile
+  // with a displayName update, verify the response has
+  // the documented 7-field shape + the updated
+  // displayName in the user field.
+  test("/api/auth/profile response body MUST emit the SAME 7-field shape as /api/auth/me + login + register + logout per AuthStack.scala line 239's authenticationState(Some(refreshedUser)) -- the SIXTH and FINAL member of the AUTH STATE-CHANGE SHAPE-INVARIANCE family closing the full 6-endpoint coverage") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Register a user
+          val registerResp = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"profile-shape@example.com","password":"correct-horse-battery","displayName":"Original Name"}"""
+          )
+          assertEquals(registerResp.statusCode(), 201)
+          val csrfToken = jsonBody(registerResp)("csrfToken").str
+          val sessionCookieValue = sessionCookie(registerResp)
+
+          // POST /api/auth/profile with a displayName update
+          val profileResp = httpClient.send(
+            HttpRequest.newBuilder()
+              .uri(URI.create(s"$baseUri/api/auth/profile"))
+              .method("POST", HttpRequest.BodyPublishers.ofString("""{"displayName":"Updated Name"}"""))
+              .header("Content-Type", "application/json")
+              .header("Cookie", sessionCookieValue)
+              .header("X-CSRF-Token", csrfToken)
+              .build(),
+            HttpResponse.BodyHandlers.ofString()
+          )
+          assertEquals(profileResp.statusCode(), 200,
+            clue = s"profile update MUST return 200 with session cookie + CSRF token per AuthStack.scala line 239's `JsonResponse(200, ...)`; got: ${profileResp.statusCode()}, body: ${profileResp.body()}")
+
+          val profileBody = ujson.read(profileResp.body())
+          val profileFields = profileBody.obj.keys.toSet
+
+          val expectedFields = Set(
+            "authenticationEnabled",
+            "authenticationMode",
+            "authenticated",
+            "allowLocalRegistration",
+            "providers",
+            "user",
+            "csrfToken"
+          )
+
+          // (i) CARDINALITY: same 7-field set as the OTHER 5
+          // auth-state surfaces (the AUTH STATE-CHANGE
+          // SHAPE-INVARIANCE)
+          assertEquals(profileFields, expectedFields,
+            clue = s"/api/auth/profile response body MUST emit the SAME 7-field set as /api/auth/me + login + register + logout per the documented SHAPE-INVARIANCE -- ALL 6 auth-state surfaces flow through PlatformUserAuth.scala line 332's authenticationState helper; a refactor returning a delta-shape (e.g. just the updated fields) would silently break the frontend's ONE-PARSER contract + force a post-update refetch of /api/auth/me; got profile=${profileFields.toVector.sorted.mkString(", ")}, expected=${expectedFields.toVector.sorted.mkString(", ")}")
+
+          // (ii) VALUE: authenticated == true (user still
+          // signed in after profile update)
+          assertEquals(profileBody("authenticated").bool, true,
+            clue = s"profile response: authenticated MUST be true (profile updates don't end the session); got: ${profileBody("authenticated").bool}")
+
+          // (iii) VALUE: user populated (NOT null)
+          assert(profileBody("user").objOpt.nonEmpty,
+            clue = s"profile response: user field MUST be an Obj (NOT null) -- the updated user's profile is populated per line 239's `authenticationState(Some(refreshedUser))`; got: ${profileBody("user")}")
+
+          // (iv) VALUE: user.displayName MUST reflect the
+          // UPDATED value (NOT the original) -- the CORE
+          // semantic assertion that the response carries
+          // the POST-update state
+          val updatedDisplayName = profileBody("user").obj.get("displayName").map(_.str).getOrElse("")
+          assertEquals(updatedDisplayName, "Updated Name",
+            clue = s"profile response: user.displayName MUST reflect the UPDATED value 'Updated Name' (NOT the original 'Original Name' from registration) -- the response carries the POST-update state per line 238's `refreshedUser = user.copy(profile = updated)`; a refactor returning the PRE-update state would silently force the frontend to refetch + the user would see stale UI for the moment between the response + the subsequent /api/auth/me poll; got: $updatedDisplayName")
+
+          // (v) VALUE: csrfToken populated (session still
+          // active)
+          assert(profileBody("csrfToken").strOpt.exists(_.nonEmpty),
+            clue = s"profile response: csrfToken MUST be a non-empty string (session still active after profile update); got: ${profileBody("csrfToken")}")
+
+          // (vi) SHAPE-INVARIANCE assertion: profile field
+          // set EQUALS /api/auth/me field set (the CORE
+          // architectural-contract assertion mirroring
+          // 845393c's tier vi for logout + 064d28a's tier
+          // viii for login)
+          val meResp = getJsonWithHeaders(s"$baseUri/api/auth/me", Map("Cookie" -> sessionCookieValue))
+          val meFields = meResp.obj.keys.toSet
+          assertEquals(profileFields, meFields,
+            clue = s"profile response field set MUST EQUAL /api/auth/me response field set per the documented AUTH-STATE SHAPE-INVARIANCE -- both flow through authenticationState helper; a refactor making profile's shape diverge from /api/auth/me would silently break the frontend's ONE-PARSER contract that lets it use the profile-update response directly without refetching /api/auth/me; got profile=${profileFields.toVector.sorted.mkString(", ")}, me=${meFields.toVector.sorted.mkString(", ")}")
+        }
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
