@@ -19087,6 +19087,136 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented Retry-After: 5 FALLBACK contract for 503
+  // responses at AuthStack.scala lines 572-573 -- the
+  // RETRY-AFTER-FALLBACK pin verifies the documented RFC 7231
+  // sec 6.6.4 defense-in-depth where EVERY 503 response from the
+  // JsonHandler that doesn't already carry a Retry-After header
+  // (i.e., the handler didn't compute a more-specific value)
+  // gets the universal fallback "5" seconds added by the
+  // post-fold Retry-After defense at lines 572-573:
+  //     if response.status == 503 &&
+  //        exchange.getResponseHeaders.getFirst("Retry-After") == null then
+  //       exchange.getResponseHeaders.add("Retry-After", "5")
+  // FIFTY-FIFTH per-emission-site SHAPE pin overall; the
+  // RETRY-AFTER-FALLBACK contract is OPERATIONALLY CRITICAL
+  // because: (a) RFC 7231 sec 6.6.4 explicitly says 503
+  // responses SHOULD include Retry-After so clients back off
+  // intelligently rather than guessing -- without the fallback,
+  // any handler path that returns 503 via the Left-fold
+  // (Left(503 -> "...")) would silently omit Retry-After
+  // (the Left-fold at line 561 only produces the body, not
+  // headers), forcing CDNs + clients to either retry
+  // immediately (overloading the server) or back off
+  // exponentially without coordination, (b) the documented
+  // "5 seconds" fallback is the CONSERVATIVE default chosen
+  // such that any caller can retry safely without overloading
+  // even a marginally-recovering server -- a refactor changing
+  // the value (e.g. to 1 or 60) would silently alter the
+  // documented backoff behavior, (c) the documented design
+  // explicitly REUSES the same fallback across ALL 503
+  // emission sites (health/ready/analyze-submit/hall-submit
+  // queue-full + draining) -- a refactor that moved the
+  // fallback INSIDE per-handler logic would silently risk
+  // skipping it on a new 503 path; per-format regression
+  // vectors uniquely caught: (i) refactor dropping the lines
+  // 572-573 fallback would silently OMIT Retry-After from any
+  // 503 the handler didn't explicitly set (most/all current
+  // paths), (ii) refactor changing the fallback value from
+  // "5" to a different number would silently alter the
+  // documented backoff cadence, (iii) refactor changing the
+  // condition `response.status == 503` to broader (e.g.
+  // `response.status >= 500`) would silently add Retry-After
+  // to 5xx responses that don't document a retry contract
+  // (500/501/504 etc.), (iv) refactor changing the
+  // `getFirst("Retry-After") == null` guard to
+  // `headers.contains("Retry-After")` (or similar) would
+  // silently override handler-set Retry-After values; test
+  // approach: trigger 3 distinct 503 paths (ready endpoint
+  // while draining + analyze submit while draining + hall
+  // submit while draining), verify ALL 3 carry Retry-After: 5
+  // from the fallback, then verify NEGATIVE cases where 200
+  // responses (ready when accepting + health always-200) do
+  // NOT have Retry-After.
+  test("503 responses MUST carry Retry-After: 5 fallback header per AuthStack.scala lines 572-573's documented RFC 7231 sec 6.6.4 defense-in-depth -- the UNIVERSAL fallback applies to ALL 503 emission sites (ready + analyze-submit + hall-submit while draining) where the handler didn't compute a more-specific value, while 200 responses do NOT inherit the fallback") {
+    withStaticSite { staticDir =>
+      val root = java.nio.file.Files.createTempDirectory("retry-after-fallback-")
+      try
+        val drainSignalFile = root.resolve("deploy-drain.signal")
+        withServer(staticDir, drainSignalFile = Some(drainSignalFile)) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // (0) PRE-DRAIN: verify 200 /api/ready does NOT
+          // carry Retry-After (handler didn't set it + status
+          // is not 503 so fallback doesn't fire)
+          val preDrainReady = get(s"$baseUri/api/ready")
+          assertEquals(preDrainReady.statusCode(), 200,
+            clue = "pre-drain /api/ready MUST return 200 -- the test setup baseline")
+          assertEquals(headerValue(preDrainReady, "Retry-After"), None,
+            clue = s"PRE-DRAIN: 200 /api/ready MUST NOT carry Retry-After (the fallback at lines 572-573 ONLY fires on 503 responses, NEVER on 2xx); a refactor relaxing the `response.status == 503` guard would silently add Retry-After to 200 responses, confusing clients into delaying their next request unnecessarily; got: ${headerValue(preDrainReady, "Retry-After")}")
+
+          // (0.5) PRE-DRAIN: 200 /api/health does NOT carry
+          // Retry-After
+          val preDrainHealth = get(s"$baseUri/api/health")
+          assertEquals(preDrainHealth.statusCode(), 200,
+            clue = "pre-drain /api/health MUST return 200")
+          assertEquals(headerValue(preDrainHealth, "Retry-After"), None,
+            clue = s"PRE-DRAIN: 200 /api/health MUST NOT carry Retry-After; got: ${headerValue(preDrainHealth, "Retry-After")}")
+
+          // Flip to draining state via the drain signal file
+          java.nio.file.Files.writeString(drainSignalFile, "draining", StandardCharsets.UTF_8)
+
+          // (1) 503 /api/ready (draining) -> Retry-After: 5
+          // fallback fires per lines 572-573
+          val drainingReady = get(s"$baseUri/api/ready")
+          assertEquals(drainingReady.statusCode(), 503,
+            clue = s"draining /api/ready MUST return 503 to drive the Retry-After fallback test; got: ${drainingReady.statusCode()}")
+          assertEquals(headerValue(drainingReady, "Retry-After"), Some("5"),
+            clue = s"FALLBACK FIRES: 503 /api/ready MUST carry Retry-After: 5 per the AuthStack.scala lines 572-573 documented fallback -- a refactor dropping the fallback would silently omit Retry-After from this 503, violating RFC 7231 sec 6.6.4's SHOULD-clause + breaking client backoff coordination; got: ${headerValue(drainingReady, "Retry-After")}")
+
+          // (2) 503 /api/analyze-hand-history submit (draining)
+          // -> Retry-After: 5 fallback (this is the Left-fold
+          // 503 path at HandHistoryReviewServerApi.scala line
+          // 83's `Left(503 -> admissionRejectedMessage(...))`)
+          val drainingAnalyze = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(drainingAnalyze.statusCode(), 503,
+            clue = s"draining /api/analyze-hand-history submit MUST return 503 to drive the Left-fold-path Retry-After fallback test; got: ${drainingAnalyze.statusCode()}")
+          assertEquals(headerValue(drainingAnalyze, "Retry-After"), Some("5"),
+            clue = s"FALLBACK FIRES (Left-fold): 503 analyze submission MUST carry Retry-After: 5 -- the Left-fold at AuthStack.scala line 561 only produces the body (1-field `{error}` shape), so the universal fallback at lines 572-573 is the ONLY source of Retry-After on this path; a refactor dropping the fallback would silently violate the RFC 7231 sec 6.6.4 SHOULD-clause for ALL analyze-submit 503 responses; got: ${headerValue(drainingAnalyze, "Retry-After")}")
+
+          // (3) 503 /api/playing-hall submit (draining) ->
+          // Retry-After: 5 fallback (symmetric with analyze
+          // path at HandHistoryReviewServerApi.scala line 127)
+          val drainingHall = postJson(s"$baseUri/api/playing-hall", validUploadPayload)
+          assertEquals(drainingHall.statusCode(), 503,
+            clue = s"draining /api/playing-hall submit MUST return 503 to drive the symmetric hall-path Retry-After fallback test; got: ${drainingHall.statusCode()}")
+          assertEquals(headerValue(drainingHall, "Retry-After"), Some("5"),
+            clue = s"FALLBACK FIRES (hall Left-fold): 503 hall submission MUST carry Retry-After: 5; got: ${headerValue(drainingHall, "Retry-After")}")
+
+          // (4) UNIVERSAL FALLBACK VALUE CROSS-CHECK: ALL 3
+          // 503 emission sites carry IDENTICAL Retry-After
+          // values (the "5" constant from line 573)
+          val retryAfterValues = Set(drainingReady, drainingAnalyze, drainingHall)
+            .map(r => headerValue(r, "Retry-After"))
+            .flatten
+          assertEquals(retryAfterValues, Set("5"),
+            clue = s"UNIVERSAL FALLBACK CROSS-CHECK: ALL 503 responses (ready + analyze-submit + hall-submit) MUST carry the SAME `5` Retry-After value per the lines 572-573 fallback's universal constant -- a refactor that diverged the value across emission sites (e.g. per-endpoint override of the fallback) would silently break the documented universal behavior + force operators to monitor each endpoint's Retry-After separately; got distinct values: $retryAfterValues")
+
+          // (5) HEALTH ENDPOINT NEGATIVE CHECK: /api/health
+          // remains 200 even while draining (it just reports
+          // the draining state), so it does NOT trigger the
+          // 503 fallback
+          val drainingHealth = get(s"$baseUri/api/health")
+          assertEquals(drainingHealth.statusCode(), 200,
+            clue = s"draining /api/health MUST still return 200 (only /api/ready flips to 503 on drain); got: ${drainingHealth.statusCode()}")
+          assertEquals(headerValue(drainingHealth, "Retry-After"), None,
+            clue = s"NEGATIVE CHECK: draining 200 /api/health MUST NOT carry Retry-After (status != 503 so fallback doesn't fire); a refactor that broadened the fallback to 5xx OR added it unconditionally would silently emit Retry-After here; got: ${headerValue(drainingHealth, "Retry-After")}")
+        }
+      finally
+        deleteRecursively(root)
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
