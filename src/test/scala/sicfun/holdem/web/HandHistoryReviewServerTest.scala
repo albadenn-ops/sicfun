@@ -15748,6 +15748,142 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented STATUS-POLL-RESPONSE FIELD-SET-SHAPE
+  // for the PLAYING-HALL FAILED terminal state at JobQueue
+  // .scala lines 720-725 -- the hall-side mirror of
+  // df98f1f's analyze FAILED pin verifying the documented
+  // SYMMETRY between the analyze + hall status-poll FAILED
+  // shapes; with this commit the HALL-SIDE TERMINAL-STATES
+  // PAIR is CLOSED (191da3e COMPLETED + THIS FAILED), and
+  // the hall side now has 3 of 5 states pinned (188fe91
+  // CANCELLED + 191da3e COMPLETED + THIS FAILED), leaving
+  // RUNNING + QUEUED for future fires; THIRTY-FIRST per-
+  // emission-site SHAPE pin overall; the hall-FAILED shape
+  // is OPERATIONALLY CRITICAL because: (a) the frontend at
+  // site.js renders hall failures with the SAME failure UI
+  // as analyze failures (errorStatus-based color coding) --
+  // a refactor diverging the hall FAILED shape from the
+  // analyze FAILED shape would silently break the
+  // frontend's shared failure-rendering code, (b) operator
+  // pager rules filter by `body.errorStatus` numeric
+  // comparison across BOTH endpoints -- a refactor
+  // emitting errorStatus as a string only on the hall side
+  // would silently break numeric comparison semantics for
+  // hall failures while leaving analyze failures
+  // unaffected, (c) the documented SYMMETRY contract
+  // (mirrors 191da3e's COMPLETED pin's rationale) is what
+  // lets dashboards parse BOTH endpoints' failures with
+  // ONE code path; per-format regression vectors uniquely
+  // caught (NOT caught by df98f1f's analyze pin): (i)
+  // refactor diverging the hall FAILED shape from analyze
+  // (e.g. adding a `hallFailureCategory` field only on
+  // hall) would silently break the symmetric design, (ii)
+  // refactor changing the errorStatus type on hall (e.g.
+  // wrapping as `{value: 400, category: "input"}`) would
+  // silently break the symmetric numeric-comparison
+  // contract, (iii) refactor consolidating both endpoints'
+  // FAILED responses but introducing hall-specific fields
+  // would silently widen the contract; test approach
+  // mirrors df98f1f exactly but uses /api/playing-hall +
+  // immediatePlayingHallBackend(Left("invalid playing hall
+  // config")) for the FAILED state -- the message string
+  // does NOT match classifyPlayingHallError's timeout/
+  // failure prefixes per 9f42256, so the classifier
+  // returns 400 (the default branch).
+  test("status-poll response body for /api/playing-hall/jobs/<id> in the FAILED state MUST emit EXACTLY the documented 9-field closed set {jobId, status, statusUrl, submittedAtEpochMs, startedAtEpochMs, completedAtEpochMs, durationMs, errorStatus, error} per JobQueue.scala lines 720-725 -- the hall-side mirror of df98f1f's analyze FAILED pin; with this commit the HALL-SIDE TERMINAL-STATES PAIR is CLOSED (191da3e COMPLETED + THIS FAILED) -- the SYMMETRY assertion catches a refactor diverging the hall failure shape from analyze") {
+    withStaticSite { staticDir =>
+      // Left-returning hall backend triggers the FAILED
+      // terminal state; the string "invalid playing hall
+      // config" doesn't match classifyPlayingHallError's
+      // timeout/failure prefixes per 9f42256, so the
+      // classifier returns 400 (default branch)
+      withServer(staticDir, playingHallBackend = immediatePlayingHallBackend(Left("invalid playing hall config"))) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(submit.statusCode(), 202,
+          clue = "playing-hall submission must return 202 -- the FAILED state happens at WORKER level, not submission")
+        val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+        val terminal = awaitTerminalJob(statusUri)
+        assertEquals(terminal("status").str, "failed",
+          clue = "the immediatePlayingHallBackend(Left(...)) configuration must reach the FAILED terminal state for this pin to inspect the documented 9-field shape")
+
+        val failedFields = terminal.obj.keys.toSet
+
+        // The documented 9-field closed set per JobQueue.scala
+        // lines 720-725 (mirrors the analyze FAILED state at
+        // lines 414-419 -- the SYMMETRY contract)
+        val expectedFields = Set(
+          "jobId",
+          "status",
+          "statusUrl",
+          "submittedAtEpochMs",
+          "startedAtEpochMs",
+          "completedAtEpochMs",
+          "durationMs",
+          "errorStatus",
+          "error"
+        )
+
+        // (i) CARDINALITY
+        assertEquals(failedFields.size, expectedFields.size,
+          clue = s"hall status-poll response for FAILED state MUST have exactly ${expectedFields.size} fields per JobQueue.scala lines 720-725 (mirrors analyze lines 414-419); got actual=${failedFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- failedFields).toVector.sorted.mkString(", ")}, extra=${(failedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(failedFields, expectedFields,
+          clue = s"hall status-poll response field NAME SET for FAILED state MUST equal exactly the documented 9-field closed set per JobQueue.scala lines 720-725 (mirrors the analyze FAILED state at lines 414-419 per the documented SYMMETRY contract); got actual=${failedFields.toVector.sorted.mkString(", ")}; expected=${expectedFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- failedFields).toVector.sorted.mkString(", ")}; extra=${(failedFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) ABSENCE: pollAfterMs (terminal-state purity)
+        assert(!failedFields.contains("pollAfterMs"),
+          clue = s"hall FAILED state MUST NOT contain `pollAfterMs` (terminal-state purity matching df98f1f); got: ${failedFields.toVector.sorted.mkString(", ")}")
+
+        // (iv) ABSENCE: result (Completed-state-only payload
+        // per the terminal-state ASYMMETRY between Completed
+        // + Failed)
+        assert(!failedFields.contains("result"),
+          clue = s"hall FAILED state MUST NOT contain `result` (Completed-state-only per JobQueue.scala line 718) -- the documented terminal-state ASYMMETRY between Completed (result payload) + Failed (errorStatus + error payload) is INTENTIONAL; got: ${failedFields.toVector.sorted.mkString(", ")}")
+
+        // (v) PRESENCE: errorStatus + error PAIR (the
+        // failure-payload contract -- mirrors df98f1f's
+        // explicit assertion)
+        assert(failedFields.contains("errorStatus"),
+          clue = s"hall FAILED state MUST contain `errorStatus` per JobQueue.scala line 723's emission; got: ${failedFields.toVector.sorted.mkString(", ")}")
+        assert(failedFields.contains("error"),
+          clue = s"hall FAILED state MUST contain `error` per JobQueue.scala line 724's emission; got: ${failedFields.toVector.sorted.mkString(", ")}")
+
+        // (vi) TYPE INVARIANT: errorStatus MUST be ujson.Num
+        // (NOT a string) -- mirrors df98f1f's tier (vi)
+        val errorStatusValue = terminal("errorStatus")
+        assert(errorStatusValue.isInstanceOf[ujson.Num],
+          clue = s"hall FAILED state's errorStatus MUST be ujson.Num (NOT string) per line 723's emission (mirrors analyze line 417); got type: ${errorStatusValue.getClass.getSimpleName}")
+        // (vii) CROSS-CHECK with 9f42256: errorStatus == 400
+        // for the Left('invalid playing hall config') backend
+        // (mirrors df98f1f's tier (vii) for analyze)
+        assertEquals(errorStatusValue.num.toInt, 400,
+          clue = s"hall FAILED state's errorStatus MUST be 400 for the Left('invalid playing hall config') backend (classifyPlayingHallError default branch returns 400 for non-prefix-matching strings per JobQueue.scala line 771) -- this is the CROSS-CHECK between the classifier pin (9f42256) and the hall status-poll FAILED pin; got: ${errorStatusValue.num.toInt}")
+
+        // (viii) SYMMETRY ASSERTION: hall FAILED field set
+        // MUST EQUAL analyze FAILED field set (mirrors
+        // 191da3e's SYMMETRY tier vi for COMPLETED). This
+        // is the CORE SYMMETRIC-MIRROR assertion. Submit
+        // an analyze job too, get its FAILED shape, and
+        // compare field sets.
+        val analyzeBackend = immediateBackend(Left("invalid hand history format"))
+        val analyzeFailedFields = withServer(staticDir, backend = analyzeBackend) { analyzeServer =>
+          val analyzeBase = s"http://${analyzeServer.binding.host}:${analyzeServer.binding.port}"
+          val analyzeSubmit = postJson(s"$analyzeBase/api/analyze-hand-history", validUploadPayload)
+          assertEquals(analyzeSubmit.statusCode(), 202)
+          val analyzeStatusUri = s"$analyzeBase${jsonBody(analyzeSubmit)("statusUrl").str}"
+          val analyzeTerminal = awaitTerminalJob(analyzeStatusUri)
+          assertEquals(analyzeTerminal("status").str, "failed")
+          analyzeTerminal.obj.keys.toSet
+        }
+        assertEquals(failedFields, analyzeFailedFields,
+          clue = s"hall FAILED field set MUST EQUAL analyze FAILED field set per the documented architectural symmetry between the two endpoints' renderStatus functions (JobQueue.scala lines 414-419 analyze vs 720-725 hall use the SAME baseStatus helper + SAME final-fields {durationMs, errorStatus, error}); a refactor diverging the hall FAILED shape from analyze (e.g. adding a `hallFailureCategory` field only on hall) would silently break the SYMMETRY contract; got hall=${failedFields.toVector.sorted.mkString(", ")}, analyze=${analyzeFailedFields.toVector.sorted.mkString(", ")}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
