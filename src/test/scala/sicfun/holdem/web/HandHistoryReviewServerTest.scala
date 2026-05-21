@@ -14313,6 +14313,131 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented 4xx/5xx ERROR-RESPONSE FIELD-SET-
+  // SHAPE at AuthStack.scala line 561's JsonHandler Left-
+  // fold -- the FIELD-SET-CARDINALITY pin for the UNIVERSAL
+  // error-response shape used by ALL JsonHandler error
+  // returns (404 not-found, 405 method-not-allowed, 401
+  // auth-required, 403 csrf-required, 409 already-terminal,
+  // 503 admission-rejected, 500 internal-server-error);
+  // the documented closed set is 1 field {error} where the
+  // value is the human-readable error message string; the
+  // 1-field shape is INTENTIONAL because JsonHandler emits
+  // a single canonical error format for ALL Left-returning
+  // handlers via the line 561 fold `{ case (status, error)
+  // => JsonResponse(status, Obj("error" -> Str(error))) }`;
+  // TWENTIETH per-emission-site SHAPE pin overall extending
+  // the JSON CARDINALITY family from per-endpoint pins
+  // (08b35f1 + c0e75ca + 1f57ed6 + c696482 + b3c343f +
+  // df98f1f + 188fe91 + 016d138 + 65b46f6 + 05c911c) to
+  // the UNIVERSAL error-response shape covering ALL error
+  // paths; the error-response shape is OPERATIONALLY
+  // CRITICAL because: (a) ALL JsonHandler errors go through
+  // the line 561 fold -- a refactor changing the shape
+  // would silently affect EVERY error endpoint
+  // simultaneously (auth, admission, status, cancel, etc.),
+  // (b) generic HTTP-client error-handling code keys on the
+  // `error` field name for human-readable display (curl
+  // scripts, Postman tests, REST library auto-retry
+  // patterns) -- a refactor renaming to `message` or
+  // `detail` would silently break those clients, (c) the
+  // documented 1-field shape is INTENTIONALLY MINIMAL --
+  // additional fields (e.g. `code` for machine-readable
+  // error codes, `details` for nested error structures)
+  // are deliberately omitted to keep the error contract
+  // simple; a refactor adding them would silently expand
+  // the contract that ALL error paths share; per-format
+  // regression vectors uniquely caught: (i) refactor
+  // RENAMING the field from `error` to `message` /
+  // `detail` / `errorMessage` would silently break HTTP
+  // clients keying on the documented field name, (ii)
+  // refactor ADDING fields (e.g. `code` for an internal
+  // error code, `traceId` for trace correlation) would
+  // silently widen the contract that ALL error endpoints
+  // share via the line 561 fold, (iii) refactor changing
+  // the value type from string to object (e.g. wrapping
+  // in `{message, code}`) would silently break clients
+  // expecting a flat string, (iv) refactor adding HTTP-
+  // status-specific fields (e.g. `retryAfter` only on 503
+  // responses) would silently make the shape conditional
+  // instead of universal; test approach: exercise multiple
+  // error endpoints across different 4xx status codes to
+  // verify the SHARED line 561 fold consistently emits
+  // the 1-field {error} shape; uses two scenarios: (a)
+  // 404 from GET /api/playing-hall/jobs/nonexistent, (b)
+  // 405 from DELETE /api/analyze-hand-history/jobs/<id>
+  // (analyze endpoint supports GET/HEAD only per the
+  // 188fe91 commit's documented architectural decision);
+  // both responses MUST have the same 1-field shape with
+  // `error` as the only key.
+  test("4xx/5xx ERROR-RESPONSE body MUST emit EXACTLY the documented 1-field closed set {error} per AuthStack.scala line 561's JsonHandler universal Left-fold `{ case (status, error) => JsonResponse(status, Obj(\"error\" -> Str(error))) }` -- the FIELD-SET-CARDINALITY pin verifies the universal error-response shape used by ALL JsonHandler error paths") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // (A) 404 from GET /api/playing-hall/jobs/nonexistent
+        val notFoundResp = get(s"$baseUri/api/playing-hall/jobs/00000000-0000-0000-0000-000000000000")
+        assertEquals(notFoundResp.statusCode(), 404,
+          clue = "GET on a non-existent playing-hall jobId MUST return 404 per the handler's toRight(404 -> ...) at line 202")
+        val notFoundBody = jsonBody(notFoundResp)
+        val notFoundFields = notFoundBody.obj.keys.toSet
+        val expectedFields = Set("error")
+
+        assertEquals(notFoundFields.size, expectedFields.size,
+          clue = s"404 error-response body MUST have exactly 1 field per AuthStack.scala line 561's `Obj(\"error\" -> Str(error))` fold; got actual=${notFoundFields.size} expected=1, missing=${(expectedFields -- notFoundFields).toVector.sorted.mkString(", ")}, extra=${(notFoundFields -- expectedFields).toVector.sorted.mkString(", ")}")
+        assertEquals(notFoundFields, expectedFields,
+          clue = s"404 error-response body's field NAME SET MUST equal exactly {error} per AuthStack.scala line 561 -- a refactor RENAMING the field (e.g. `message` or `detail`) would silently break HTTP clients keying on the documented field name; got actual=${notFoundFields.toVector.sorted.mkString(", ")}")
+        assert(notFoundBody("error").str.contains("not found"),
+          clue = s"404 error message MUST contain 'not found' per the handler's `s\"playing hall job not found: $$jobId\"` message; got: ${notFoundBody("error").str}")
+
+        // (B) 405 from DELETE on analyze endpoint (the
+        // analyze status endpoint at HandHistoryReviewServer
+        // Api.scala lines 172-174 supports GET/HEAD only --
+        // documented constraint discovered in 188fe91)
+        val methodNotAllowedResp = delete(s"$baseUri/api/analyze-hand-history/jobs/00000000-0000-0000-0000-000000000000")
+        assertEquals(methodNotAllowedResp.statusCode(), 405,
+          clue = "DELETE on /api/analyze-hand-history/jobs/<id> MUST return 405 per HandHistoryReviewServerApi.scala lines 172-174's methodNotAllowed branch (analyze endpoint supports GET/HEAD only, cancellation is hall-only per the documented architectural decision)")
+        val methodNotAllowedBody = jsonBody(methodNotAllowedResp)
+        val methodNotAllowedFields = methodNotAllowedBody.obj.keys.toSet
+
+        assertEquals(methodNotAllowedFields.size, 1,
+          clue = s"405 error-response body MUST have exactly 1 field {error} per AuthStack.scala line 561 -- DEFENSE-IN-DEPTH CROSS-CHECK that the SAME universal 1-field shape applies across BOTH 404 and 405 status codes; got actual=${methodNotAllowedFields.size}")
+        assertEquals(methodNotAllowedFields, expectedFields,
+          clue = s"405 error-response body's field NAME SET MUST equal exactly {error} -- catches a refactor that diverged the error shape between 4xx status codes; got actual=${methodNotAllowedFields.toVector.sorted.mkString(", ")}")
+
+        // (C) CROSS-CHECK: BOTH responses MUST have IDENTICAL
+        // field sets (the universality contract -- ALL
+        // JsonHandler errors flow through the SAME line 561
+        // fold)
+        assertEquals(notFoundFields, methodNotAllowedFields,
+          clue = s"4xx error-response field sets MUST be IDENTICAL across different status codes per AuthStack.scala line 561's universal fold -- a refactor that customized the shape per-status (e.g. adding `methodAllowed` only to 405 responses) would silently break the universality contract that lets HTTP clients use ONE error-parsing code path for ALL non-2xx responses; got 404-fields=${notFoundFields.toVector.sorted.mkString(", ")}, 405-fields=${methodNotAllowedFields.toVector.sorted.mkString(", ")}")
+
+        // (D) TYPE assertion: the `error` field MUST be a
+        // ujson.Str (NOT object or array) -- a refactor
+        // wrapping the error as `{message, code}` object
+        // would silently break clients expecting a flat
+        // string
+        assert(notFoundBody("error").isInstanceOf[ujson.Str],
+          clue = s"404 error-response's `error` field MUST be a ujson.Str (NOT object/array) per line 561's `Str(error)` emission -- a refactor wrapping as `{message, code}` would silently break clients expecting a flat string; got type: ${notFoundBody("error").getClass.getSimpleName}")
+        assert(methodNotAllowedBody("error").isInstanceOf[ujson.Str],
+          clue = s"405 error-response's `error` field MUST be a ujson.Str (symmetric with 404 -- universal contract); got type: ${methodNotAllowedBody("error").getClass.getSimpleName}")
+
+        // (E) ABSENCE: common alternative error-field names
+        // MUST NOT be present (defense-in-depth catches if
+        // someone introduces a parallel field while leaving
+        // the canonical `error` field)
+        assert(!notFoundFields.contains("message"),
+          clue = s"404 error-response MUST NOT contain `message` (the canonical field is `error` per line 561 -- a refactor adding a parallel `message` field for clarity would silently widen the contract); got: ${notFoundFields.toVector.sorted.mkString(", ")}")
+        assert(!notFoundFields.contains("code"),
+          clue = s"404 error-response MUST NOT contain `code` (the HTTP status code IS the machine-readable error code; adding a body `code` field would silently widen the contract); got: ${notFoundFields.toVector.sorted.mkString(", ")}")
+        assert(!notFoundFields.contains("detail"),
+          clue = s"404 error-response MUST NOT contain `detail` (the canonical field is `error`); got: ${notFoundFields.toVector.sorted.mkString(", ")}")
+        assert(!notFoundFields.contains("traceId"),
+          clue = s"404 error-response MUST NOT contain `traceId` (no trace correlation field is documented for the error response; adding one would silently widen the contract AND potentially leak internal trace identifiers to clients); got: ${notFoundFields.toVector.sorted.mkString(", ")}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
