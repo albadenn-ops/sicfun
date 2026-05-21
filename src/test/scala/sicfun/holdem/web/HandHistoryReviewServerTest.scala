@@ -14016,6 +14016,176 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented STATUS-POLL-RESPONSE FIELD-SET-SHAPE
+  // for the RUNNING non-terminal state at JobQueue.scala
+  // lines 401-408 -- the FIELD-SET-CARDINALITY pin for the
+  // SECOND non-terminal state CLOSING THE 5-STATE CLOSURE
+  // (queued + running + completed + failed + cancelled all
+  // individually pinned across the family: 016d138 QUEUED +
+  // THIS commit RUNNING + b3c343f COMPLETED + df98f1f
+  // FAILED + 188fe91 CANCELLED); EIGHTEENTH per-emission-
+  // site SHAPE pin overall AND the FINAL piece of the
+  // 5-STATE CLOSURE -- with this commit every documented
+  // state at JobQueue.scala AnalysisJobState (lines 103-
+  // 143's case class declarations) has BOTH (a) an ENUM
+  // closed-set pin (822a0df verifying the 5 strings exist)
+  // AND (b) an individual SHAPE-CARDINALITY pin verifying
+  // the per-state JSON field set; the RUNNING-state shape
+  // is OPERATIONALLY CRITICAL because: (a) the frontend at
+  // site.js polls the RUNNING state during the worker
+  // execution window (the LONGEST-DURATION poll state for
+  // most jobs) and uses the `message` field for human-
+  // readable rendering ("Analysis in progress" visible to
+  // the user while the worker runs), a refactor renaming
+  // the message would silently change user-visible text
+  // during the most-visible polling window, (b) the
+  // RUNNING state has startedAtEpochMs = Some + completed
+  // AtEpochMs = null per the documented partial-shape
+  // (worker is active but hasn't finished) -- this is the
+  // SECOND documented lifecycle-phase encoding (after
+  // QUEUED's null + null) and BEFORE the terminal phase's
+  // Some + Some; the documented field-presence-encoding
+  // is "null+null = queued, Some+null = running, Some+Some
+  // = terminal" -- a refactor emitting null for startedAt
+  // EpochMs on RUNNING state would silently violate the
+  // lifecycle-phase-encoding contract, (c) the difference
+  // between RUNNING's "Analysis in progress" and QUEUED's
+  // "Queued for analysis" message texts is INTENTIONAL --
+  // the frontend renders DIFFERENT UI states (spinner vs
+  // queue position) based on the message; a refactor
+  // consolidating to a single "In queue" text would
+  // silently break the visual distinction; per-format
+  // regression vectors uniquely caught: (i) refactor
+  // emitting `null` for startedAtEpochMs on RUNNING state
+  // would silently violate the lifecycle-phase encoding,
+  // (ii) refactor changing the `message` text from
+  // "Analysis in progress" would silently change
+  // user-visible text without UI review, (iii) refactor
+  // ADDING completedAtEpochMs as a numeric value on
+  // RUNNING state would silently turn the partial-state
+  // encoding into a misleading "already terminal" signal,
+  // (iv) refactor ADDING result / errorStatus / error /
+  // durationMs to RUNNING would silently violate the
+  // non-terminal-no-terminal-payload-fields invariant
+  // (already pinned for QUEUED in 016d138 -- this commit
+  // extends to RUNNING); test approach: BlockingBackend
+  // pauses the worker AT the analyze call so the state
+  // transitions to RUNNING (the `started` latch flips
+  // when the worker enters analyze, indicating the worker
+  // has picked up the job and started executing) but
+  // never reaches COMPLETED (latch keeps the worker
+  // blocked), then poll the status URL while the worker
+  // is in this RUNNING-and-blocked state, verify the
+  // 8-field shape with message="Analysis in progress" +
+  // startedAtEpochMs = Num (NOT null, distinguishing from
+  // QUEUED) + completedAtEpochMs = null; release backend
+  // for cleanup.
+  test("status-poll response body for /api/analyze-hand-history/jobs/<id> in the RUNNING non-terminal state MUST emit EXACTLY the documented 8-field closed set {jobId, status, statusUrl, submittedAtEpochMs, startedAtEpochMs, completedAtEpochMs, pollAfterMs, message} per JobQueue.scala lines 401-408 -- the FIELD-SET-CARDINALITY pin for the SECOND non-terminal state CLOSES the 5-STATE CLOSURE (queued + running + completed + failed + cancelled all individually pinned)") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      withServer(staticDir, backend = backend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Submit job; worker picks up + enters analyze;
+        // backend.started latch flips when the worker is in
+        // the analyze call (state transitioned to RUNNING)
+        // but stays blocked on the release latch (never
+        // reaches COMPLETED)
+        val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+        assertEquals(submit.statusCode(), 202,
+          clue = "analyze submission must return 202 for the RUNNING-state pin to inspect")
+        val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+
+        // Wait for worker to enter analyze (state is now
+        // RUNNING). Without this synchronization, the test
+        // would race the worker-pool's job-pickup latency.
+        assert(backend.started.await(3, TimeUnit.SECONDS),
+          "BlockingBackend.started latch never flipped -- the worker must enter the analyze call for the state to transition from QUEUED to RUNNING")
+
+        // Poll while RUNNING (worker is blocked, state
+        // won't transition to COMPLETED until we release
+        // the latch)
+        val runningBody = getJson(statusUri)
+        assertEquals(runningBody("status").str, "running",
+          clue = s"job state MUST be `running` after backend.started flipped -- if not running, either the worker hasn't actually started OR the state transitioned past RUNNING; got: ${runningBody("status").str}")
+
+        val runningFields = runningBody.obj.keys.toSet
+
+        // The documented 8-field closed set per JobQueue.scala
+        // lines 401-408 (baseStatus 6 mandatory fields +
+        // pollAfterMs at line 402's `Some(DefaultPollAfterMs)`
+        // argument triggering line 441's conditional emission
+        // + message at line 403's explicit `Str("Analysis in
+        // progress")` emission).
+        val expectedFields = Set(
+          "jobId",
+          "status",
+          "statusUrl",
+          "submittedAtEpochMs",
+          "startedAtEpochMs",
+          "completedAtEpochMs",
+          "pollAfterMs",
+          "message"
+        )
+
+        // (i) CARDINALITY
+        assertEquals(runningFields.size, expectedFields.size,
+          clue = s"status-poll response for RUNNING state MUST have exactly ${expectedFields.size} fields per JobQueue.scala lines 401-408; got actual=${runningFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- runningFields).toVector.sorted.mkString(", ")}, extra=${(runningFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(runningFields, expectedFields,
+          clue = s"status-poll response field NAME SET for RUNNING state MUST equal exactly the documented 8-field closed set per JobQueue.scala lines 401-408; got actual=${runningFields.toVector.sorted.mkString(", ")}; expected=${expectedFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- runningFields).toVector.sorted.mkString(", ")}; extra=${(runningFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) ABSENCE: terminal-payload-fields MUST NOT be
+        // present (mirrors 016d138's QUEUED-state non-
+        // terminal-shape contract)
+        assert(!runningFields.contains("result"),
+          clue = s"RUNNING state MUST NOT contain `result` (Completed-state-only payload); got: ${runningFields.toVector.sorted.mkString(", ")}")
+        assert(!runningFields.contains("errorStatus"),
+          clue = s"RUNNING state MUST NOT contain `errorStatus` (Failed-state-only payload); got: ${runningFields.toVector.sorted.mkString(", ")}")
+        assert(!runningFields.contains("error"),
+          clue = s"RUNNING state MUST NOT contain `error` (Failed-state-only payload); got: ${runningFields.toVector.sorted.mkString(", ")}")
+        assert(!runningFields.contains("durationMs"),
+          clue = s"RUNNING state MUST NOT contain `durationMs` (terminal-state-only -- the worker is still running, so there's no final duration to compute); got: ${runningFields.toVector.sorted.mkString(", ")}")
+
+        // (iv) VALUE assertion: message text MUST be exactly
+        // "Analysis in progress" per line 403 (distinct
+        // from QUEUED's "Queued for analysis" at line 395
+        // -- the frontend renders DIFFERENT UI states based
+        // on the message)
+        assertEquals(runningBody("message").str, "Analysis in progress",
+          clue = "RUNNING state's message field MUST be EXACTLY 'Analysis in progress' per JobQueue.scala line 403's hardcoded literal -- a refactor changing the text (e.g. to 'Processing' or 'Working') would silently change user-visible text without UI review; the distinction from QUEUED's 'Queued for analysis' is INTENTIONAL because the frontend renders different UI states (spinner vs queue position) based on the message text")
+
+        // (v) startedAtEpochMs MUST be Num (NOT null) --
+        // distinguishing from QUEUED's null+null state per
+        // the documented lifecycle-phase encoding
+        val startedAtValue = runningBody("startedAtEpochMs")
+        assert(startedAtValue.isInstanceOf[ujson.Num],
+          clue = s"RUNNING state's startedAtEpochMs MUST be a ujson.Num (NOT null) per JobQueue.scala line 402's `Some(startedAt)` argument triggering line 438's `startedAt.map(value => ujson.Num(value.toDouble))` branch -- the field-presence (Num vs null) is the documented lifecycle-phase encoding: QUEUED has null+null, RUNNING has Some+null, terminal states have Some+Some; got type: ${startedAtValue.getClass.getSimpleName}")
+        // The value must be a positive epoch-ms timestamp
+        // (defense-in-depth catch for a refactor that emitted
+        // 0 or negative)
+        val startedAtMs = startedAtValue.num.toLong
+        assert(startedAtMs > 0L,
+          clue = s"RUNNING state's startedAtEpochMs MUST be a positive epoch-ms timestamp; got: $startedAtMs")
+
+        // (vi) completedAtEpochMs MUST be null (worker is
+        // still running, not yet completed)
+        assertEquals(runningBody("completedAtEpochMs"), ujson.Null,
+          clue = "RUNNING state's completedAtEpochMs MUST be null per line 402's `None` argument for completedAt -- a refactor emitting a non-null value would silently turn the partial-state encoding into a misleading 'already terminal' signal")
+
+        // (vii) pollAfterMs MUST be > 0 (mirrors 016d138's
+        // QUEUED-state assertion)
+        val pollAfterMs = runningBody("pollAfterMs").num.toInt
+        assert(pollAfterMs > 0,
+          clue = s"RUNNING state's pollAfterMs MUST be > 0 -- a refactor emitting 0 would silently force the frontend into a busy-spin; got: $pollAfterMs")
+
+        // Release backend so the job can complete cleanly
+        backend.release.countDown()
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
