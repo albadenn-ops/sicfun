@@ -16540,6 +16540,138 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/auth/me BASIC-AUTH MODE shape
+  // -- the THIRD MODE in the 3-MODE SHAPE-INVARIANCE
+  // CONTRACT closing the cross-mode coverage (6346c2b
+  // no-auth + 4f74798 platform-auth + THIS basic-auth);
+  // per AuthStack.scala lines 60-78 (the basic-auth + no-
+  // auth paths SHARE the `case None =>` branch at line 68
+  // since basicAuth is NOT inside the
+  // `platformAuth match` -- the basic-auth mode emits the
+  // SAME body shape as no-auth except for the
+  // authenticationEnabled + authenticationMode field
+  // VALUES); line 812's `if basicAuth.nonEmpty then
+  // "basic"` is the documented authenticationMode value
+  // distinguishing this third mode from no-auth's "none"
+  // + platform-auth's "users"; THIRTY-SEVENTH per-emission-
+  // site SHAPE pin overall + THE FINAL PIECE OF THE
+  // 3-MODE SHAPE-INVARIANCE for /api/auth/me; the
+  // basic-auth mode SHAPE coverage is OPERATIONALLY
+  // CRITICAL because: (a) basic-auth is a documented
+  // operator-facing deployment mode (the
+  // simplest password-protected deployment that some
+  // operators choose for internal tools without the
+  // overhead of platform-user setup) -- a refactor
+  // breaking the basic-auth mode's /api/auth/me would
+  // silently fail in those deployments while leaving
+  // no-auth + platform-auth deployments unaffected, (b)
+  // the documented 3-MODE SHAPE-INVARIANCE is the
+  // ARCHITECTURAL CONTRACT (extends 4f74798's 2-mode
+  // assertion to the third documented mode) that lets
+  // the frontend use ONE code path across ALL deployment
+  // modes -- a refactor breaking basic-auth's shape
+  // would silently force per-mode frontend logic, (c)
+  // the documented `authenticationMode = "basic"` value
+  // is what operator monitoring tools key on to display
+  // mode-specific health indicators -- a refactor
+  // renaming the value would silently break those tools;
+  // per-format regression vectors uniquely caught (NOT
+  // caught by 6346c2b or 4f74798): (i) refactor breaking
+  // the SHAPE specifically in basic-auth mode would
+  // silently fail in basic-auth deployments only, (ii)
+  // refactor renaming the "basic" mode string would
+  // silently break monitoring tool integration, (iii)
+  // refactor changing the authenticationEnabled value
+  // for basic-auth from true to false (e.g. "basic-auth
+  // is deprecated, mark as not-really-enabled") would
+  // silently break operator audit-state displays; test
+  // approach: configure server with basicAuth (username
+  // + password), GET /api/auth/me WITHOUT credentials
+  // (the authRequirement at HandHistoryReviewServer
+  // Runtime.scala line 221 is Optional so anonymous
+  // requests reach the handler), verify the response
+  // has the same 7-field closed set + the mode-specific
+  // VALUES (authenticationEnabled=true,
+  // authenticationMode="basic"); ALSO assert the
+  // 3-MODE SHAPE-INVARIANCE by comparing the field set
+  // against a no-auth server's response collected in
+  // the same test.
+  test("/api/auth/me basic-auth mode response shape MUST match the 7-field closed set with authenticationMode='basic' per AuthStack.scala line 812 -- the THIRD MODE in the 3-MODE SHAPE-INVARIANCE coverage closing 6346c2b (no-auth) + 4f74798 (platform-auth) + THIS (basic-auth) for the documented architectural contract that the frontend uses ONE code path across ALL deployment modes") {
+    withStaticSite { staticDir =>
+      val basicConfig = HandHistoryReviewServer.BasicAuthConfig(username = "operator", password = "correct-horse-battery")
+      withServer(staticDir, basicAuth = Some(basicConfig)) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // GET /api/auth/me WITHOUT credentials -- the
+        // authRequirement is Optional per the runtime
+        // setup, so anonymous requests reach the handler
+        // (the basic-auth gate doesn't fire on this
+        // specific endpoint per its Optional auth
+        // requirement)
+        val meResp = getJson(s"$baseUri/api/auth/me")
+        val meFields = meResp.obj.keys.toSet
+
+        val expectedFields = Set(
+          "authenticationEnabled",
+          "authenticationMode",
+          "authenticated",
+          "allowLocalRegistration",
+          "providers",
+          "user",
+          "csrfToken"
+        )
+
+        // (i) CARDINALITY: basic-auth mode MUST emit the
+        // SAME 7 fields as no-auth (6346c2b) + platform-
+        // auth (4f74798) -- the 3-MODE SHAPE-INVARIANCE
+        assertEquals(meFields.size, expectedFields.size,
+          clue = s"/api/auth/me basic-auth mode MUST emit the SAME 7 fields as no-auth (6346c2b) + platform-auth (4f74798) per the documented 3-MODE SHAPE-INVARIANCE contract; got actual=${meFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- meFields).toVector.sorted.mkString(", ")}, extra=${(meFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY -- the CORE 3-MODE SHAPE-
+        // INVARIANCE assertion (a refactor breaking basic-
+        // auth's shape would silently fail in basic-auth
+        // deployments only)
+        assertEquals(meFields, expectedFields,
+          clue = s"/api/auth/me basic-auth mode's field NAME SET MUST equal exactly the documented 7-field closed set (SAME as no-auth + platform-auth) per the 3-MODE SHAPE-INVARIANCE -- a refactor breaking the SHAPE specifically in basic-auth mode would silently fail in basic-auth deployments only while leaving no-auth + platform-auth unaffected; got actual=${meFields.toVector.sorted.mkString(", ")}")
+
+        // (iii) VALUE assertions: basic-auth mode emits
+        // DIFFERENT values than no-auth + platform-auth
+        assertEquals(meResp("authenticationEnabled").bool, true,
+          clue = s"basic-auth mode: authenticationEnabled MUST be true (basicAuth is configured) per the helper at line 816+; a refactor that marked basic-auth as 'not really enabled' would silently break operator audit-state displays; got: ${meResp("authenticationEnabled").bool}")
+        assertEquals(meResp("authenticationMode").str, "basic",
+          clue = s"basic-auth mode: authenticationMode MUST be exactly 'basic' per AuthStack.scala line 812's `if basicAuth.nonEmpty then \"basic\"` -- distinguishes from no-auth's 'none' (6346c2b) + platform-auth's 'users' (4f74798); a refactor renaming this string would silently break operator monitoring tools that filter by mode; got: ${meResp("authenticationMode").str}")
+        assertEquals(meResp("authenticated").bool, false,
+          clue = s"basic-auth mode (no credentials): authenticated MUST be false; got: ${meResp("authenticated").bool}")
+        assertEquals(meResp("allowLocalRegistration").bool, false,
+          clue = s"basic-auth mode: allowLocalRegistration MUST be false (basic-auth has no user-store like platform-auth does) per AuthStack.scala line 73's hardcoded `Bool(false)` in the no-auth-or-basic-auth path; got: ${meResp("allowLocalRegistration").bool}")
+
+        // (iv) Nullable fields MUST be PRESENT (with null
+        // value) -- the SAME contract as 6346c2b + 4f74798
+        assertEquals(meResp("user"), ujson.Null,
+          clue = "basic-auth mode (no credentials): user field MUST be PRESENT and equal to null (the SAME nullable-field encoding as no-auth + platform-auth modes); a refactor making the field absent would silently break the 3-MODE SHAPE-INVARIANCE")
+        assertEquals(meResp("csrfToken"), ujson.Null,
+          clue = "basic-auth mode: csrfToken field MUST be PRESENT and equal to null (no CSRF gate in basic-auth mode); same encoding as no-auth + platform-auth")
+
+        // (v) providers MUST be PRESENT as ujson.Arr
+        assert(meResp("providers").isInstanceOf[ujson.Arr],
+          clue = s"basic-auth mode: providers MUST be ujson.Arr type (the SAME type-contract as no-auth + platform-auth); got type: ${meResp("providers").getClass.getSimpleName}")
+
+        // (vi) 3-MODE SHAPE-INVARIANCE explicit assertion:
+        // basic-auth's field set EQUALS no-auth's field set
+        // (collected in the same test) -- this closes the
+        // 3-mode coverage by explicitly verifying the
+        // shape-invariance holds across the THIRD mode pair
+        val noAuthFields = withServer(staticDir) { noAuthServer =>
+          val noAuthBase = s"http://${noAuthServer.binding.host}:${noAuthServer.binding.port}"
+          val noAuthResp = getJson(s"$noAuthBase/api/auth/me")
+          noAuthResp.obj.keys.toSet
+        }
+        assertEquals(meFields, noAuthFields,
+          clue = s"basic-auth mode field set MUST EQUAL no-auth mode field set per the documented 3-MODE SHAPE-INVARIANCE -- this CROSS-MODE assertion verifies the SAME architectural contract that 4f74798 verified between platform-auth + no-auth, now applied to the basic-auth + no-auth pair; a refactor breaking basic-auth's shape independently of the other modes would silently desync this mode pair; got basic-auth=${meFields.toVector.sorted.mkString(", ")}, no-auth=${noAuthFields.toVector.sorted.mkString(", ")}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
