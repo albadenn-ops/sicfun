@@ -15474,6 +15474,148 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented OPTIONS-PREFLIGHT response shape for
+  // the 4 AUTH endpoints per AuthStack.scala lines 61
+  // (/api/auth/me), 84 (/api/auth/register), 149
+  // (/api/auth/login), 201 (/api/auth/logout) -- the
+  // FIELD-SET-CARDINALITY pin for AUTH-endpoint OPTIONS
+  // responses with the documented READ-vs-WRITE asymmetry:
+  // /api/auth/me is the READ endpoint (Allow: "GET, HEAD,
+  // OPTIONS") while /api/auth/login + /api/auth/logout +
+  // /api/auth/register are WRITE endpoints (Allow: "POST,
+  // OPTIONS"); the 3 WRITE endpoints emit IDENTICAL OPTIONS
+  // responses (the symmetric-write contract); 22671ec
+  // pinned STATUS endpoints (ASYMMETRIC: hall has DELETE)
+  // and 345a2f7 pinned SUBMIT endpoints (SYMMETRIC: both
+  // POST-only), but the 4 AUTH endpoints were partially
+  // covered (existing test at line 9379+ verifies just the
+  // /api/auth/me + /api/auth/login Allow headers, NOT the
+  // body shape NOR /api/auth/logout NOR /api/auth/register
+  // OPTIONS at all); TWENTY-NINTH per-emission-site SHAPE
+  // pin overall extending the OPTIONS-preflight coverage
+  // from job-lifecycle endpoints (22671ec + 345a2f7) to
+  // auth-lifecycle endpoints (THIS commit) -- with this
+  // commit ALL 8 documented OPTIONS preflight responses
+  // for the documented API surface are pinned (job submit
+  // analyze + hall = 2, job status analyze + hall = 2,
+  // auth me/login/logout/register = 4); the AUTH-endpoint
+  // OPTIONS shape is OPERATIONALLY CRITICAL because: (a)
+  // browser-based auth flows (sign-in form, register
+  // form, sign-out button) trigger CORS preflight on
+  // every state-changing auth action -- if the OPTIONS
+  // response misses Allow or has wrong methods, browsers
+  // refuse to send the actual auth request, breaking
+  // sign-in / register / sign-out entirely, (b) the
+  // documented READ vs WRITE asymmetry is INTENTIONAL:
+  // /api/auth/me is a READ (status introspection) so
+  // GET/HEAD are appropriate, while login/logout/register
+  // are STATE-CHANGING so POST is appropriate -- a
+  // refactor making /api/auth/me a POST (e.g. "for
+  // consistency with the other auth endpoints") would
+  // silently break the documented semantic distinction,
+  // (c) the SYMMETRY between login/logout/register is
+  // INTENTIONAL: all 3 are state-changing auth actions +
+  // share the same documented "POST-only" contract --
+  // diverging one would silently break the symmetric
+  // design; per-format regression vectors uniquely caught:
+  // (i) refactor making /api/auth/me a POST would
+  // silently change the semantic distinction (read vs
+  // write), (ii) refactor adding GET to login/logout/
+  // register (e.g. "for cross-domain logout via
+  // top-level navigation") would silently widen the CSRF
+  // attack surface (POST endpoints get CSRF protection;
+  // GET endpoints don't), (iii) refactor diverging the
+  // 3 write-endpoints' OPTIONS would silently break the
+  // documented symmetric design, (iv) refactor adding
+  // OPTIONS methods to any auth endpoint would silently
+  // widen the contract; test approach: send OPTIONS to
+  // ALL 4 documented auth endpoints, verify (a) all 4
+  // return status 200, (b) all 4 emit 1-field body
+  // {allow}, (c) all 4 have body.allow EQUALS Allow
+  // header (body-header CROSS-CHECK), (d) /api/auth/me
+  // emits "GET, HEAD, OPTIONS" (READ form), (e)
+  // login/logout/register emit "POST, OPTIONS" (WRITE
+  // form), (f) login/logout/register emit IDENTICAL
+  // responses (symmetric-write contract), (g) /api/auth/
+  // me's OPTIONS contains GET/HEAD but NOT POST + the
+  // write endpoints' OPTIONS contain POST but NOT GET/
+  // HEAD (read-vs-write boundary catch).
+  test("OPTIONS-preflight responses on ALL 4 AUTH endpoints (/api/auth/me + /api/auth/login + /api/auth/logout + /api/auth/register) MUST emit the documented READ-vs-WRITE asymmetric Allow values per AuthStack.scala lines 61/84/149/201 -- the FIELD-SET-CARDINALITY pin closes the auth-endpoint OPTIONS coverage that the existing line 9379+ test partially covers (Allow headers only on me + login, NOT bodies NOR logout NOR register)") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Helper to send OPTIONS via the standard HTTP client
+        def sendOptions(path: String) =
+          httpClient.send(
+            HttpRequest.newBuilder()
+              .uri(URI.create(s"$baseUri$path"))
+              .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+              .build(),
+            HttpResponse.BodyHandlers.ofString()
+          )
+
+        // Send OPTIONS to all 4 auth endpoints
+        val meOptions = sendOptions("/api/auth/me")
+        val loginOptions = sendOptions("/api/auth/login")
+        val logoutOptions = sendOptions("/api/auth/logout")
+        val registerOptions = sendOptions("/api/auth/register")
+
+        // (i) All 4 return status 200
+        for ((name, resp) <- Seq(("me", meOptions), ("login", loginOptions), ("logout", logoutOptions), ("register", registerOptions))) do
+          assertEquals(resp.statusCode(), 200,
+            clue = s"/api/auth/$name OPTIONS MUST return 200 per AuthStack.scala's optionsResponse emission; got: ${resp.statusCode()}")
+
+        val meBody = ujson.read(meOptions.body())
+        val loginBody = ujson.read(loginOptions.body())
+        val logoutBody = ujson.read(logoutOptions.body())
+        val registerBody = ujson.read(registerOptions.body())
+
+        // (ii) All 4 emit 1-field body {allow}
+        for ((name, body) <- Seq(("me", meBody), ("login", loginBody), ("logout", logoutBody), ("register", registerBody))) do
+          assertEquals(body.obj.keys.toSet, Set("allow"),
+            clue = s"/api/auth/$name OPTIONS body MUST have exactly 1 field `allow` per AuthStack.scala's optionsResponse helper; got: ${body.obj.keys.toVector.sorted.mkString(", ")}")
+
+        // (iii) All 4 have body-header CROSS-CHECK
+        for ((name, resp, body) <- Seq(("me", meOptions, meBody), ("login", loginOptions, loginBody), ("logout", logoutOptions, logoutBody), ("register", registerOptions, registerBody))) do
+          val header = headerValue(resp, "Allow")
+            .getOrElse(fail(s"/api/auth/$name OPTIONS response MUST include Allow header"))
+          assertEquals(body("allow").str, header,
+            clue = s"/api/auth/$name OPTIONS body.allow MUST EQUAL Allow header (body-header CROSS-CHECK); got body=${body("allow").str}, header=$header")
+
+        // (iv) /api/auth/me: READ form "GET, HEAD, OPTIONS"
+        assertEquals(meBody("allow").str, "GET, HEAD, OPTIONS",
+          clue = s"/api/auth/me OPTIONS body.allow MUST be exactly `GET, HEAD, OPTIONS` per AuthStack.scala line 61's `optionsResponse(\"GET, HEAD\")` -- the READ form (introspection endpoint with HEAD support like /api/health); a refactor making /api/auth/me a POST endpoint would silently change the documented semantic distinction (read vs write); got: ${meBody("allow").str}")
+
+        // (v) login/logout/register: WRITE form "POST, OPTIONS"
+        for ((name, body) <- Seq(("login", loginBody), ("logout", logoutBody), ("register", registerBody))) do
+          assertEquals(body("allow").str, "POST, OPTIONS",
+            clue = s"/api/auth/$name OPTIONS body.allow MUST be exactly `POST, OPTIONS` per AuthStack.scala line 84/149/201's optionsResponse with POST argument -- the WRITE form (state-changing actions); a refactor adding GET to write endpoints would silently widen the CSRF attack surface (POST endpoints get CSRF protection; GET endpoints don't); got: ${body("allow").str}")
+
+        // (vi) SYMMETRIC-WRITE contract: login + logout +
+        // register emit IDENTICAL bodies (the CORE
+        // assertion -- a refactor diverging one would
+        // silently break the documented symmetric design)
+        assertEquals(loginBody, logoutBody,
+          clue = s"/api/auth/login + /api/auth/logout OPTIONS bodies MUST be IDENTICAL per the documented symmetric-write contract; got login=$loginBody, logout=$logoutBody")
+        assertEquals(logoutBody, registerBody,
+          clue = s"/api/auth/logout + /api/auth/register OPTIONS bodies MUST be IDENTICAL per the documented symmetric-write contract; got logout=$logoutBody, register=$registerBody")
+
+        // (vii) READ-vs-WRITE BOUNDARY: me's methods do NOT
+        // contain POST + write endpoints' methods do NOT
+        // contain GET/HEAD (catches refactor swapping the
+        // optionsResponse arguments between read + write
+        // auth endpoints)
+        val meMethods = meBody("allow").str.split(",").map(_.trim).toSet
+        val loginMethods = loginBody("allow").str.split(",").map(_.trim).toSet
+        assert(!meMethods.contains("POST"),
+          clue = s"/api/auth/me OPTIONS MUST NOT contain POST (the READ form) -- a refactor swapping me with one of the write endpoints would silently break the documented semantic distinction; got: ${meMethods.toVector.sorted.mkString(", ")}")
+        assert(!loginMethods.contains("GET") && !loginMethods.contains("HEAD"),
+          clue = s"/api/auth/login OPTIONS MUST NOT contain GET or HEAD (the WRITE form) -- a refactor adding GET would silently widen the CSRF attack surface (state-changing endpoints get CSRF protection only on POST); got: ${loginMethods.toVector.sorted.mkString(", ")}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
