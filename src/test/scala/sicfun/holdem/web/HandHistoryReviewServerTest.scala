@@ -6517,6 +6517,147 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented `[<level>]` bracket on every log line
+  // per HandHistoryReviewServerRuntime.scala line 512's
+  // `stream.println(s"[$${Instant.now()}] [$$level] [hand-
+  // history-review] $${sanitizeLogMessage(message)}")` template
+  // -- the FORMAT-INVARIANT pin covering the LEVEL DIMENSION
+  // for ALL log-line emission sites; this commit COMPLEMENTS
+  // b9fc4d4's TIMESTAMP-dimension pin -- both pins verify
+  // properties enforced at the log() helper itself (line 510-
+  // 512) so a single pin covers ALL 30+ log-line emission
+  // sites in the codebase that funnel through this helper;
+  // the LEVEL DIMENSION is OPERATIONALLY CRITICAL because:
+  // (a) operator grep workflows filter log lines by level --
+  // a tail-and-grep pipeline like `tail -f deploy.log | grep
+  // ERROR` depends on the documented `[ERROR]` bracket form
+  // appearing on each ERROR-level line; a refactor changing
+  // the form (e.g. `<ERROR>`, `[level=ERROR]`, unbracketed
+  // `ERROR:`, lowercase `error`) would silently break the
+  // operator's saved grep pipelines, (b) log aggregator
+  // parsers (Splunk, ELK, Datadog) extract the level via
+  // regex like `\[\w+\] \[hand-history-review\]` -- the
+  // documented brackets enable structured indexing into the
+  // aggregator's level field; a refactor changing the bracket
+  // shape would silently desync the aggregator's level field,
+  // breaking dashboards that filter by `level:ERROR` query,
+  // (c) the runbook documents the level field via the
+  // bracketed form (e.g. "search for `[ERROR]` lines to
+  // identify recent failures"); a refactor would silently
+  // break the runbook's diagnostic workflows; the level
+  // values are emitted by logInfo/logWarn/logError at lines
+  // 417-424's helper trio -- each calls `log(level, ...)`
+  // with a fixed string `"INFO"` / `"WARN"` / `"ERROR"`; per-
+  // format regression vectors that this pin catches:
+  // (i) refactor changing the bracket shape from `[` `]` to
+  // `<` `>` or `{` `}` or `(` `)` would silently break grep
+  // workflows + aggregator field extraction, (ii) refactor
+  // dropping the brackets entirely (e.g. swap to
+  // `s"$$level " + ...`) would silently break ALL bracket-
+  // dependent parsing, (iii) refactor changing the level
+  // form to `[level=INFO]` (key=value) instead of bare
+  // `[INFO]` would silently break grep patterns expecting
+  // bare-bracket form, (iv) refactor changing the level case
+  // to lowercase `[info]` / `[warn]` / `[error]` would
+  // silently break case-sensitive grep workflows, (v)
+  // refactor injecting padding inside the brackets like
+  // `[ INFO ]` would silently break tight grep patterns,
+  // (vi) refactor swapping the position of the level bracket
+  // (e.g. emitting it FIRST before the timestamp) would
+  // silently break operator workflows that scan from left to
+  // right; test approach mirrors b9fc4d4: capture stdout
+  // around withServer (which emits the startup banner -- a
+  // guaranteed `[INFO]` log line), find the banner line,
+  // extract the SECOND bracketed field via string position
+  // arithmetic (the FIRST bracket is the timestamp, already
+  // pinned by b9fc4d4; the SECOND bracket is the level);
+  // apply 5-tier format check: (i) the level bracket starts
+  // with `[` immediately after the timestamp's `] ` separator
+  // (catches non-bracket shapes + dropped-bracket refactors),
+  // (ii) the level bracket closes with `]` (catches
+  // open-bracket-only refactors), (iii) the level content is
+  // EXACTLY one of `INFO`/`WARN`/`ERROR` (catches arbitrary
+  // values, lowercase variants, key=value forms), (iv) the
+  // level content has NO padding spaces (catches
+  // `[ INFO ]`), (v) the third bracket (service-tag) follows
+  // the level bracket with a single space separator (catches
+  // a refactor that changed the separator OR reordered the
+  // brackets).
+  test("log line format pins the documented `[<level>]` bracket on every log line per HandHistoryReviewServerRuntime.scala line 512's template -- the FORMAT-INVARIANT pin covering the LEVEL DIMENSION for ALL 30+ log-line emission sites; complements b9fc4d4's timestamp pin (BOTH verify properties at the log() helper itself so single pins cover the entire family)") {
+    withStaticSite { staticDir =>
+      val outBuf = new java.io.ByteArrayOutputStream()
+      val originalOut = System.out
+      System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+      try
+        withServer(staticDir) { _ =>
+          // No HTTP requests -- the startup banner emits
+          // BEFORE the callback executes (the banner uses
+          // logInfo at HandHistoryReviewServerRuntime.scala
+          // lines 349-350, so the level field is `INFO`).
+          ()
+        }
+      finally
+        System.setOut(originalOut)
+
+      val captured = outBuf.toString(StandardCharsets.UTF_8)
+      val bannerLine = captured.split('\n').iterator
+        .find(_.contains("startup complete"))
+        .getOrElse(fail(s"no `startup complete` line in captured stdout -- the level-format pin needs ANY log line to inspect; the 7c47f88 startup-banner pin should catch this independently; got captured stdout: ${captured.take(800)}"))
+
+      val trimmed = bannerLine.trim
+
+      // Locate the timestamp bracket's closing `]` -- the
+      // level bracket starts immediately after the space
+      // separator following the timestamp bracket.
+      val firstBracketEnd = trimmed.indexOf("]")
+      assert(firstBracketEnd > 0,
+        clue = s"log line must close the leading `[<timestamp>]` bracket with `]`; got line: ${trimmed.take(100)}")
+
+      // (i) the level bracket starts with `[` immediately
+      // after the timestamp's `] ` separator (catches non-
+      // bracket shapes + dropped-bracket refactors)
+      assert(trimmed.length > firstBracketEnd + 2,
+        clue = s"log line must extend past the timestamp bracket + separator; got line: ${trimmed.take(100)}")
+      assert(trimmed.charAt(firstBracketEnd + 1) == ' ',
+        clue = s"the timestamp's `]` MUST be followed by a single space (the documented field separator per line 512's `s\"[...] [...]\"` template); got char `${trimmed.charAt(firstBracketEnd + 1)}` (codepoint ${trimmed.charAt(firstBracketEnd + 1).toInt}) at position ${firstBracketEnd + 1}; line: ${trimmed.take(100)}")
+      val secondBracketStart = firstBracketEnd + 2
+      assert(trimmed.charAt(secondBracketStart) == '[',
+        clue = s"the level field MUST start with `[` immediately after the timestamp's `] ` separator per line 512's template; a refactor changing the level brackets to `<` `>` or `{` `}` or `(` `)` would silently break operator grep workflows expecting square brackets; got char `${trimmed.charAt(secondBracketStart)}` (codepoint ${trimmed.charAt(secondBracketStart).toInt}) at position $secondBracketStart; line: ${trimmed.take(100)}")
+
+      // (ii) the level bracket closes with `]` (catches
+      // open-bracket-only refactors)
+      val secondBracketEnd = trimmed.indexOf("]", secondBracketStart + 1)
+      assert(secondBracketEnd > secondBracketStart,
+        clue = s"the level field MUST close with `]`; a refactor leaving the bracket open (e.g. swap to a `[` `:` `=` form) would silently break grep patterns; got line: ${trimmed.take(100)}")
+      val levelStr = trimmed.substring(secondBracketStart + 1, secondBracketEnd)
+
+      // (iii) the level content is EXACTLY one of
+      // INFO/WARN/ERROR (catches arbitrary values, lowercase
+      // variants, key=value forms)
+      val validLevels = Set("INFO", "WARN", "ERROR")
+      assert(validLevels.contains(levelStr),
+        clue = s"level content `$levelStr` MUST be exactly one of $validLevels per HandHistoryReviewServerRuntime.scala lines 417-424's logInfo/logWarn/logError helpers (each calls `log(level, ...)` with a fixed uppercase string `\"INFO\"` / `\"WARN\"` / `\"ERROR\"`); regression vectors caught: lowercase variants (`info`/`warn`/`error`), key=value form (`level=INFO`), arbitrary level names (`DEBUG`/`TRACE`/`FATAL` that the codebase does NOT emit), padded forms (` INFO `), or unrelated strings; got: `$levelStr`; line: ${trimmed.take(100)}")
+
+      // (iv) the level content has NO padding spaces
+      // (defensive -- catches `[ INFO ]` even though (iii)'s
+      // exact-match would also catch it; the explicit
+      // assertion makes the contract intent clearer)
+      assert(levelStr.trim == levelStr,
+        clue = s"level content `$levelStr` MUST have NO padding spaces inside the brackets -- catches a refactor injecting whitespace padding (e.g. for visual alignment) like `[ INFO ]` which would silently break tight grep patterns expecting `[INFO]` exactly; got: `$levelStr`")
+
+      // (v) the third bracket (service-tag) follows the
+      // level bracket with a single space separator (catches
+      // a refactor that changed the separator OR reordered
+      // the brackets)
+      assert(trimmed.length > secondBracketEnd + 2,
+        clue = s"log line must extend past the level bracket + separator; got line: ${trimmed.take(100)}")
+      assert(trimmed.charAt(secondBracketEnd + 1) == ' ',
+        clue = s"the level field's `]` MUST be followed by a single space (the documented field separator before `[hand-history-review]`); a refactor changing the separator would silently break grep patterns; got char `${trimmed.charAt(secondBracketEnd + 1)}` at position ${secondBracketEnd + 1}; line: ${trimmed.take(100)}")
+      assert(trimmed.charAt(secondBracketEnd + 2) == '[',
+        clue = s"the service-tag field MUST start with `[` immediately after the level's `] ` separator -- catches a refactor reordering the brackets (e.g. emitting the service-tag BEFORE the level); got char `${trimmed.charAt(secondBracketEnd + 2)}` at position ${secondBracketEnd + 2}; line: ${trimmed.take(100)}")
+    }
+  }
+
   // Pin the documented sanitizeLogMessage END-TO-END escape
   // contract -- the SANITIZATION-INVARIANT pin covering the
   // CONTROL-CHARACTER DIMENSION for ALL log lines that flow
