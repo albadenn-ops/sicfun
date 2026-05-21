@@ -17848,6 +17848,143 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented If-Modified-Since FALLBACK SEMANTICS
+  // contract at StaticAssetsHandler.scala lines 132-141 -- the
+  // IMS-FALLBACK pin verifies the documented per-branch behaviors
+  // when ifModifiedSince is parsed and compared but If-None-Match
+  // is absent (the RFC 7232 sec 3.3 fallback branch). Two
+  // specific behaviors are NOT covered by the existing line 10108
+  // test (which pins basic same-time -> 304 + past-time -> 200)
+  // or the line 10129 test (which pins ETag-takes-priority):
+  // (1) MALFORMED dates fall through to 200 via the line 140
+  //     `case NonFatal(_) => false` catch -- this is the documented
+  //     robustness contract that prevents misbehaving clients
+  //     (older browsers, broken proxies sending ISO-8601 or other
+  //     non-RFC-1123 formats) from triggering 500 errors and log
+  //     amplification on every request, AND
+  // (2) FUTURE-DATED clientMs values STILL return 304 because the
+  //     line 138 comparison is `lastModifiedSecond <= clientMs`
+  //     (not `==`) -- this is the documented defense for CDN-skewed
+  //     clocks where a CDN with a clock running slightly fast could
+  //     legitimately send If-Modified-Since values in the future
+  //     for a file whose mtime is in the past; if the comparison
+  //     were `==` (strict equality), such requests would silently
+  //     fail revalidation forcing full-body re-fetches on every
+  //     poll.
+  // FORTY-EIGHTH per-emission-site SHAPE pin overall; the IMS
+  // FALLBACK behaviors are OPERATIONALLY CRITICAL because:
+  // (a) the parse-error fallback is the documented defense
+  //     against log-amplification + client-induced 500 errors --
+  //     a refactor swallowing the catch (or re-throwing on
+  //     parse failure) would silently amplify per-request log
+  //     volume + return 500s for legitimate but old client
+  //     date-format submissions, (b) the `<=` semantics handle
+  //     the documented CDN-clock-skew scenario where a strict
+  //     `==` would silently break revalidation through CDNs that
+  //     cache headers with their own clock, (c) the documented
+  //     fall-through-to-full-200-on-error path ensures the
+  //     server NEVER fails closed on malformed conditional
+  //     headers -- it gracefully serves the resource instead;
+  // per-format regression vectors uniquely caught (NOT caught
+  // by the existing 10108/10129 IMS tests OR the c8cae25
+  // Last-Modified format pin which targets EMISSION not
+  // PARSING): (i) refactor switching from `NonFatal(_) => false`
+  // to `case e => throw e` would silently propagate parse
+  // failures up to the outer NonFatal handler at line 193,
+  // returning 500 instead of 200, (ii) refactor switching from
+  // `NonFatal(_) => false` to `NonFatal(_) => true` would
+  // silently grant 304 (don't-send-body) on every parse failure
+  // -- effectively allowing clients to skip body downloads by
+  // sending garbage IMS values, (iii) refactor switching the
+  // line 138 comparison from `<=` to `==` would silently break
+  // revalidation for CDN-skewed-forward clocks, (iv) refactor
+  // switching `<=` to `>=` (inverse direction) would silently
+  // invert the cache semantics -- 304 only when the file IS
+  // newer than the client's stored copy, the exact opposite of
+  // the documented contract; test approach: GET /index.html ->
+  // 200 to capture the file's Last-Modified, then issue 3
+  // separate requests covering the 3 uncovered behaviors:
+  // (1) If-Modified-Since: "not-a-valid-date" -> 200 (parse
+  // error fallback), (2) If-Modified-Since: future-dated RFC
+  // 1123 value -> 304 (the `<=` semantics), (3) verify the 304
+  // response from the IMS path includes the Last-Modified
+  // header per RFC 7232 sec 4.1.
+  test("static handler If-Modified-Since FALLBACK SEMANTICS: malformed dates fall through to 200 (NonFatal catch at line 140) and future-dated values still return 304 (the `<=` comparison at line 138) per StaticAssetsHandler.scala lines 132-141's documented parse-error robustness + CDN-clock-skew tolerance contracts -- complements the existing line 10108 test (same-time -> 304, past-time -> 200) + line 10129 test (ETag-takes-priority) by closing the parse-error + future-date dimensions") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Capture the file's documented Last-Modified value
+        val initial = get(s"$baseUri/index.html")
+        assertEquals(initial.statusCode(), 200,
+          clue = "initial GET MUST return 200 to capture the Last-Modified value")
+        val emittedLastModified = headerValue(initial, "Last-Modified")
+          .getOrElse(fail("server MUST emit Last-Modified on the initial 200 response"))
+
+        // (i) MALFORMED date string -> 200 with full body via
+        // the line 140 `case NonFatal(_) => false` catch (parse
+        // error treated as "no match" -> not-modified=false ->
+        // 200 full response)
+        val malformedResp = get(s"$baseUri/index.html",
+          Map("If-Modified-Since" -> "not-a-valid-date"))
+        assertEquals(malformedResp.statusCode(), 200,
+          clue = s"GET with MALFORMED If-Modified-Since MUST return 200 with full body via the line 140 NonFatal catch -- a refactor that re-throws on parse failure would silently return 500 + amplify per-request log volume for legitimate but malformed client dates; got status: ${malformedResp.statusCode()}")
+        assert(malformedResp.body().nonEmpty,
+          clue = s"200 response from malformed-IMS path MUST include the full body (catches a refactor that returns 200 but with empty body); got body length: ${malformedResp.body().length}")
+
+        // (ii) ISO-8601 format date (which the RFC 1123 parser
+        // rejects with DateTimeParseException) -> 200 with full
+        // body -- documents that the parser is strictly RFC 1123
+        // and does NOT accept ISO-8601 as a fallback (this
+        // catches a refactor that broadens the accepted formats
+        // and silently weakens the server's strict contract)
+        val iso8601Resp = get(s"$baseUri/index.html",
+          Map("If-Modified-Since" -> "2026-05-21T14:11:00Z"))
+        assertEquals(iso8601Resp.statusCode(), 200,
+          clue = s"GET with ISO-8601 If-Modified-Since (which the strict RFC 1123 parser rejects) MUST return 200 with full body via the line 140 NonFatal catch; got status: ${iso8601Resp.statusCode()}")
+
+        // (iii) FUTURE-DATED value -> 304 via the line 138 `<=`
+        // semantics: lastModifiedSecond <= clientMs evaluates
+        // true when clientMs is in the future, returning
+        // not-modified=true -> 304 -- the documented CDN-clock-
+        // skew tolerance contract
+        val futureDateHttp = java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
+          .format(java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC).plusYears(10))
+        val futureResp = get(s"$baseUri/index.html",
+          Map("If-Modified-Since" -> futureDateHttp))
+        assertEquals(futureResp.statusCode(), 304,
+          clue = s"GET with FUTURE-DATED If-Modified-Since MUST return 304 Not Modified per the line 138 `lastModifiedSecond <= clientMs` semantics -- a refactor switching from `<=` to `==` would silently break revalidation through CDNs with skewed-forward clocks (legitimate CDN scenario); got status: ${futureResp.statusCode()}, IMS sent: $futureDateHttp")
+
+        // (iv) 304 response body MUST be empty per RFC 7232 sec 4.1
+        assertEquals(futureResp.body(), "",
+          clue = s"304 response (from IMS path) MUST be body-less per RFC 7232 sec 4.1 (304 MUST NOT include a message-body); got body length: ${futureResp.body().length}")
+
+        // (v) 304 response from IMS path MUST include the
+        // Last-Modified header per RFC 7232 sec 4.1's "SHOULD
+        // generate the same headers as a 200 OK would have"
+        // contract (and the static handler does so unconditionally
+        // since the headers are set BEFORE the 304 branch
+        // decision is made at lines 97-99)
+        assertEquals(headerValue(futureResp, "Last-Modified"), Some(emittedLastModified),
+          clue = s"304 response from IMS path MUST include the Last-Modified header (matching the original 200's value) per RFC 7232 sec 4.1; a refactor that strips Last-Modified on 304 would silently break clients that update their cached Last-Modified to the new value on each successful revalidation; got: ${headerValue(futureResp, "Last-Modified")}, expected: $emittedLastModified")
+
+        // (vi) NEGATIVE: empty If-Modified-Since value -- the
+        // ifModifiedSince.exists check at line 132 returns false
+        // when the value exists but parsing fails -> 200 with
+        // full body (NOT 304). This is a separate edge case
+        // from "header absent" (which short-circuits exists()
+        // before parsing).
+        val emptyImsResp = get(s"$baseUri/index.html",
+          Map("If-Modified-Since" -> ""))
+        // RFC 7232 sec 3.3 implies a missing IMS header should
+        // be ignored, and Java's HttpClient passes through the
+        // empty header; the empty-string fails parse -> 200.
+        assertEquals(emptyImsResp.statusCode(), 200,
+          clue = s"GET with EMPTY If-Modified-Since value MUST return 200 via the line 140 NonFatal catch (empty-string fails RFC 1123 parse); got status: ${emptyImsResp.statusCode()}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
