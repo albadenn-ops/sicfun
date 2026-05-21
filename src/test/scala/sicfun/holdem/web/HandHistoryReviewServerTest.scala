@@ -13705,6 +13705,160 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented STATUS-POLL-RESPONSE FIELD-SET-SHAPE
+  // for the CANCELLED terminal state (cancelled-after-start
+  // variant) at JobQueue.scala lines 420-423 -- the FIELD-
+  // SET-CARDINALITY pin for the 3rd terminal state in the
+  // documented quintet (queued/running/completed/failed/
+  // cancelled), CLOSING the 3-state TERMINAL CLOSURE
+  // (b3c343f COMPLETED 8 fields + df98f1f FAILED 9 fields +
+  // THIS CANCELLED 7 fields) with the documented terminal-
+  // state ASYMMETRIES explicitly verified across all 3
+  // payload shapes; SIXTEENTH per-emission-site SHAPE pin
+  // overall; the CANCELLED-state shape is OPERATIONALLY
+  // CRITICAL because: (a) the frontend at site.js renders
+  // cancellation UI distinct from completion + failure --
+  // a refactor consolidating to a single terminal-shape
+  // would silently lose the visual distinction operators
+  // rely on (cancelled = neutral gray, completed = green,
+  // failed = red), (b) operator pager rules treat
+  // cancellation as USER-INITIATED (no page) while failure
+  // is SYSTEM-INITIATED (page on 5xx) -- a refactor
+  // mistakenly emitting errorStatus + error on CANCELLED
+  // state would silently trigger pager false-positives by
+  // making cancellations look like failures to numeric-
+  // comparison pager rules, (c) the documented CANCELLED-
+  // AFTER-START variant has 7 fields (vs CANCELLED-BEFORE-
+  // START's 6 fields when startedAt = None) -- the
+  // durationMs field is CONDITIONALLY emitted via
+  // `startedAt.foreach(...)` at line 422, which is the
+  // documented partial-shape: durationMs only meaningful
+  // when there's a started time to subtract from -- a
+  // refactor emitting durationMs unconditionally (e.g.
+  // defaulting to 0 when startedAt is None) would silently
+  // produce misleading "instant cancellation" displays
+  // for jobs that never started; per-format regression
+  // vectors uniquely caught (NOT caught by b3c343f or
+  // df98f1f): (i) refactor ADDING errorStatus + error to
+  // CANCELLED state would silently turn cancellations
+  // into FALSE-POSITIVE failures from operator pager
+  // perspective, (ii) refactor ADDING result to CANCELLED
+  // state would silently confuse frontend rendering that
+  // discriminates cancellation from completion by absence
+  // of result, (iii) refactor RENAMING durationMs ->
+  // cancelledAfterMs for clarity would silently break
+  // dashboards expecting consistent durationMs naming
+  // across all 3 terminal states, (iv) refactor making
+  // durationMs unconditional on CANCELLED state would
+  // silently emit durationMs=0 (or NaN) for cancelled-
+  // before-start jobs, breaking dashboards expecting
+  // either a valid number or absence; test approach:
+  // BlockingBackend pauses worker AT analyze call so we
+  // can DELETE the job AFTER the worker has started
+  // (startedAt becomes Some), then RELEASE the latch so
+  // the worker reaches Cancelled terminal state via the
+  // documented cancellation handshake, poll until
+  // terminal, extract response body field name set,
+  // assert it equals exactly the documented 7-field
+  // closed set; THIS variant exercises the CANCELLED-
+  // AFTER-START sub-shape (the most common scenario --
+  // a job that was running when the user cancelled).
+  test("status-poll response body for /api/playing-hall/jobs/<id> in the CANCELLED state (after-start-with-result variant) MUST emit EXACTLY the documented 8-field closed set {jobId, status, statusUrl, submittedAtEpochMs, startedAtEpochMs, completedAtEpochMs, durationMs, result} per JobQueue.scala lines 726-730 -- the FIELD-SET-CARDINALITY pin for the THIRD terminal state CLOSES the 3-terminal-state closure (b3c343f COMPLETED + df98f1f FAILED + THIS CANCELLED); NOTE: cancellation is ONLY supported on the playing-hall endpoint (analyze endpoint at HandHistoryReviewServerApi.scala lines 172-174 supports GET/HEAD only), AND the playing-hall cancelled state's result field at line 729 is the documented playing-hall-specific behavior preserving partial results across cancellation (differs from analyze CANCELLED at line 420-423)") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, playingHallBackend = backend) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // Submit + wait for worker to start (so startedAt
+        // becomes Some -- this triggers the cancelled-
+        // after-start variant with the 7-field shape)
+        val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(submit.statusCode(), 202,
+          clue = "playing-hall submission must return 202 for the cancelled-state pin to inspect")
+        val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+        assert(backend.started.await(3, TimeUnit.SECONDS),
+          "playing-hall backend never started before cancel test could trigger -- the cancelled-after-start variant needs startedAt to be Some")
+
+        // Cancel the job (DELETE)
+        val cancelResponse = delete(statusUri)
+        assertEquals(cancelResponse.statusCode(), 200,
+          clue = "DELETE on a running playing-hall job must return 200 with the Cancelled state")
+
+        // Release backend so worker reaches terminal state
+        backend.release.countDown()
+        val terminal = awaitTerminalJob(statusUri)
+        assertEquals(terminal("status").str, "cancelled",
+          clue = "playing-hall job must reach 'cancelled' terminal state for this pin to inspect the 7-field shape")
+
+        val cancelledFields = terminal.obj.keys.toSet
+
+        // The documented 8-field closed set for the
+        // PLAYING-HALL CANCELLED-AFTER-START-WITH-RESULT
+        // variant per JobQueue.scala lines 726-730: baseStatus
+        // 6 mandatory fields + durationMs at line 728
+        // (conditional emission, present when startedAt is
+        // Some) + result at line 729 (conditional emission,
+        // present when the Cancelled state's result field is
+        // Some -- happens when the worker had returned a
+        // Right(value) before/during cancellation, which is
+        // the scenario this test exercises via the
+        // BlockingPlayingHallBackend(Right(...)) configuration
+        // releasing AFTER the DELETE installed the Cancelled
+        // state).
+        val expectedFields = Set(
+          "jobId",
+          "status",
+          "statusUrl",
+          "submittedAtEpochMs",
+          "startedAtEpochMs",
+          "completedAtEpochMs",
+          "durationMs",
+          "result"
+        )
+
+        // (i) CARDINALITY
+        assertEquals(cancelledFields.size, expectedFields.size,
+          clue = s"status-poll response for PLAYING-HALL CANCELLED state (after-start-with-result variant) MUST have exactly ${expectedFields.size} fields per JobQueue.scala lines 726-730 (base 6 + durationMs at 728 + result at 729); got actual=${cancelledFields.size} expected=${expectedFields.size}, missing=${(expectedFields -- cancelledFields).toVector.sorted.mkString(", ")}, extra=${(cancelledFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (ii) SET EQUALITY
+        assertEquals(cancelledFields, expectedFields,
+          clue = s"status-poll response field NAME SET for PLAYING-HALL CANCELLED state (after-start-with-result variant) MUST equal exactly the documented 8-field closed set per JobQueue.scala lines 726-730; got actual=${cancelledFields.toVector.sorted.mkString(", ")}; expected=${expectedFields.toVector.sorted.mkString(", ")}; missing=${(expectedFields -- cancelledFields).toVector.sorted.mkString(", ")}; extra=${(cancelledFields -- expectedFields).toVector.sorted.mkString(", ")}")
+
+        // (iii) ABSENCE: pollAfterMs MUST NOT be present
+        // (terminal-state purity catch matching b3c343f +
+        // df98f1f patterns)
+        assert(!cancelledFields.contains("pollAfterMs"),
+          clue = s"status-poll response for CANCELLED state MUST NOT contain `pollAfterMs` (terminal-state purity); got: ${cancelledFields.toVector.sorted.mkString(", ")}")
+
+        // (iv) ABSENCE: errorStatus + error MUST NOT be
+        // present -- THE CRITICAL ASSERTION distinguishing
+        // CANCELLED from FAILED state; a refactor that
+        // mistakenly emitted errorStatus + error on CANCELLED
+        // state would silently turn user-initiated
+        // cancellations into FALSE-POSITIVE failures from
+        // operator pager perspective
+        assert(!cancelledFields.contains("errorStatus"),
+          clue = s"status-poll response for CANCELLED state MUST NOT contain `errorStatus` (the field is Failed-state-only per JobQueue.scala line 723) -- this is THE CRITICAL ASSERTION distinguishing CANCELLED from FAILED state; a refactor emitting errorStatus on CANCELLED would silently turn user-initiated cancellations into FALSE-POSITIVE failures from operator pager perspective; got: ${cancelledFields.toVector.sorted.mkString(", ")}")
+        assert(!cancelledFields.contains("error"),
+          clue = s"status-poll response for CANCELLED state MUST NOT contain `error` (the field is Failed-state-only per JobQueue.scala line 724); got: ${cancelledFields.toVector.sorted.mkString(", ")}")
+
+        // (v) PRESENCE: durationMs (the after-start variant
+        // emits it via line 728's `startedAt.foreach`)
+        assert(cancelledFields.contains("durationMs"),
+          clue = s"status-poll response for CANCELLED state (after-start variant) MUST contain `durationMs` per JobQueue.scala line 728's `startedAt.foreach(...)` conditional emission; got: ${cancelledFields.toVector.sorted.mkString(", ")}")
+
+        // (vi) PRESENCE: result (the playing-hall-specific
+        // line 729 emission -- when the Cancelled state's
+        // result field is Some, the result IS emitted in the
+        // response; this is the documented playing-hall-
+        // specific behavior that differentiates from analyze
+        // cancelled which has NO result field at line 422)
+        assert(cancelledFields.contains("result"),
+          clue = s"status-poll response for PLAYING-HALL CANCELLED state (after-start-with-result variant) MUST contain `result` per JobQueue.scala line 729's conditional emission `result.foreach(r => json(\"result\") = r)` -- this is the documented playing-hall-specific behavior preserving partial results across cancellation (the worker returned a Right value before/during cancellation, so the result is attached to the Cancelled state); differs from the analyze CANCELLED state at line 420-423 which has NO result field; got: ${cancelledFields.toVector.sorted.mkString(", ")}")
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
