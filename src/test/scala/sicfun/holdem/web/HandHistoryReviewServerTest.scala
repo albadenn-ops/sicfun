@@ -8509,6 +8509,134 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented validateEmail CONTRACT at
+  // PlatformUserAuth.scala lines 1097-1110 -- the
+  // VALIDATE-EMAIL pin verifies the 3 documented validation
+  // gates that run (on the NORMALIZED email per line 504's
+  // `validateEmail(normalizedEmail)`) during registration:
+  // (1) MAX-LENGTH cap of 254 chars (line 1098-1099, the RFC
+  // 5321 max email length) -> "email must be at most 254
+  // characters", (2) WHITESPACE/CONTROL rejection (line
+  // 1105-1106: `email.exists(ch => ch.isWhitespace || ch.toInt
+  // < 0x20 || ch.toInt == 0x7F)`) -> "email must not contain
+  // whitespace or control characters", (3) FORMAT check (line
+  // 1107-1110: `at <= 0 || dot <= at + 1 || dot ==
+  // email.length - 1` where at=indexOf('@'), dot=lastIndexOf
+  // ('.')) -> "email must be a valid address". SIXTY-THIRD
+  // per-emission-site SHAPE pin overall; the validateEmail
+  // contract is OPERATIONALLY CRITICAL because (per the
+  // documented inline comments): (a) the 254-char cap bounds
+  // the storage + bounds the PBKDF2 cost (a register with a
+  // megabyte email would otherwise burn server CPU), (b) the
+  // whitespace/control rejection keeps the key=value audit-log
+  // lines PARSEABLE -- an email with an embedded space would
+  // split as two tokens for any line-oriented log parser
+  // (RFC 5321 sec 4.1.2 also forbids unquoted whitespace in
+  // local-part), (c) the format check rejects structurally
+  // invalid addresses before they reach the store; the
+  // validateEmail gates run on the NORMALIZED email (after
+  // normalizeEmail strips zero-width + trims edges +
+  // lowercases), so ONLY internal whitespace/controls survive
+  // to trigger gate (2) -- edge whitespace is already trimmed
+  // by the time validateEmail sees the value; per-format
+  // regression vectors uniquely caught: (i) refactor changing
+  // the MaxEmailLength constant would shift the length
+  // boundary (the 254/255 exact-boundary pair brackets it),
+  // (ii) refactor dropping the whitespace/control check would
+  // silently allow audit-log-corrupting emails, (iii) refactor
+  // weakening any of the 3 format sub-conditions (at<=0 ||
+  // dot<=at+1 || dot==length-1) would silently accept
+  // malformed addresses, (iv) refactor changing any error-
+  // message string would break UIs surfacing the text; test
+  // approach: register a valid minimal email (positive), then
+  // exercise each gate's rejection with the documented message
+  // + the 254/255 exact-length boundary; NOTE:
+  // rateLimitAuthPerMinute=0 disables the Auth bucket so the
+  // ~10 register attempts don't trip the default 10/minute cap.
+  test("validateEmail CONTRACT: enforces the 254-char max-length, rejects internal whitespace/control chars, and rejects malformed addresses (no local-part / no @ / no domain dot / empty TLD / empty domain segment) with the documented per-gate error messages per PlatformUserAuth.scala lines 1097-1110") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath)),
+                   rateLimitAuthPerMinute = 0) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          def register(email: String): HttpResponse[String] =
+            postJson(s"$baseUri/api/auth/register", ujson.write(ujson.Obj(
+              "email" -> ujson.Str(email),
+              "password" -> ujson.Str("correcthorse"),
+              "displayName" -> ujson.Str("V")
+            )))
+
+          // (1) POSITIVE: a minimal valid email `a@b.c` -> 201
+          // (at=1>0, dot=3>at+1=2, dot=3 != length-1=4)
+          val minimalValid = register("a@b.c")
+          assertEquals(minimalValid.statusCode(), 201,
+            clue = s"minimal valid email `a@b.c` MUST 201 (at>0, dot>at+1, dot!=length-1); got: ${minimalValid.statusCode()}, body: ${minimalValid.body()}")
+
+          // (2) MAX-LENGTH boundary: 254 chars accepted, 255
+          // rejected. The local part is `a`*N + `@example.com`
+          // (12 chars); pure-lowercase ASCII so normalizeEmail
+          // is identity (no length change before validateEmail).
+          val email254 = ("a" * (254 - 12)) + "@example.com"
+          assertEquals(email254.length, 254, clue = "test setup: email254 MUST be exactly 254 chars")
+          val at254 = register(email254)
+          assertEquals(at254.statusCode(), 201,
+            clue = s"email at EXACTLY 254 chars MUST 201 (the inclusive boundary: length > 254 rejects) per line 1098's `> MaxEmailLength`; got: ${at254.statusCode()}, body: ${at254.body()}")
+
+          val email255 = ("a" * (255 - 12)) + "@example.com"
+          assertEquals(email255.length, 255, clue = "test setup: email255 MUST be exactly 255 chars")
+          val over255 = register(email255)
+          assertEquals(over255.statusCode(), 400,
+            clue = s"email at 255 chars MUST 400 per line 1098-1099's max-length gate; got: ${over255.statusCode()}")
+          assertEquals(jsonBody(over255).obj.keys.toSet, Set("error"),
+            clue = "255-char email 400 MUST emit the universal 1-field {error} shape")
+          assertEquals(jsonBody(over255)("error").str, "email must be at most 254 characters",
+            clue = s"255-char email 400 message MUST be the documented `email must be at most 254 characters`; got: ${jsonBody(over255)("error").str}")
+
+          // (3) WHITESPACE rejection: an INTERNAL space survives
+          // normalizeEmail's edge-trim + triggers gate (2)'s
+          // ch.isWhitespace check
+          val internalSpace = register("al ice@example.com")
+          assertEquals(internalSpace.statusCode(), 400,
+            clue = s"email with INTERNAL space MUST 400 per line 1105's ch.isWhitespace check (edge whitespace would be trimmed by normalizeEmail, but internal survives); got: ${internalSpace.statusCode()}")
+          assertEquals(jsonBody(internalSpace)("error").str, "email must not contain whitespace or control characters",
+            clue = s"internal-space 400 message MUST be the documented `email must not contain whitespace or control characters`; got: ${jsonBody(internalSpace)("error").str}")
+
+          // (4) CONTROL rejection: an INTERNAL BEL (0x07, < 0x20)
+          // survives normalizeEmail (not zero-width, not edge) +
+          // triggers gate (2)'s `ch.toInt < 0x20` check. Built
+          // via codepoint to keep the source clean.
+          val internalControl = register("al" + 0x07.toChar.toString + "ice@example.com")
+          assertEquals(internalControl.statusCode(), 400,
+            clue = s"email with INTERNAL control char (BEL 0x07) MUST 400 per line 1105's `ch.toInt < 0x20` check; got: ${internalControl.statusCode()}")
+          assertEquals(jsonBody(internalControl)("error").str, "email must not contain whitespace or control characters",
+            clue = s"internal-control 400 message MUST match the documented whitespace/control message; got: ${jsonBody(internalControl)("error").str}")
+
+          // (5) FORMAT rejections: each malformed address ->
+          // 400 "email must be a valid address". The 5 cases
+          // exercise the distinct sub-conditions of line 1109's
+          // `at <= 0 || dot <= at + 1 || dot == email.length - 1`.
+          val formatCases = Vector(
+            ("@example.com", "no local-part (at <= 0)"),
+            ("aliceexample.com", "no @ (at == -1 <= 0)"),
+            ("alice@examplecom", "no dot in domain (dot <= at+1)"),
+            ("alice@example.", "empty TLD (dot == length-1)"),
+            ("alice@.com", "empty domain segment (dot <= at+1)")
+          )
+          formatCases.foreach { case (email, reason) =>
+            val resp = register(email)
+            assertEquals(resp.statusCode(), 400,
+              clue = s"malformed email `$email` ($reason) MUST 400 per line 1107-1110's format check; got: ${resp.statusCode()}, body: ${resp.body()}")
+            assertEquals(jsonBody(resp).obj.keys.toSet, Set("error"),
+              clue = s"malformed email `$email` 400 MUST emit the 1-field {error} shape")
+            assertEquals(jsonBody(resp)("error").str, "email must be a valid address",
+              clue = s"malformed email `$email` ($reason) 400 message MUST be the documented `email must be a valid address`; got: ${jsonBody(resp)("error").str}")
+          }
+        }
+      }
+    }
+  }
+
   test("registration and login reject passwords beyond the max-length cap") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
