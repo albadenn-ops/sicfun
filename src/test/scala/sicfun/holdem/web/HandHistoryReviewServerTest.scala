@@ -1296,6 +1296,115 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented logout SERVER-SIDE REVOCATION + the
+  // FULL clear-cookie ATTRIBUTE SET at AuthStack.scala
+  // handleAuthLogout lines 209-216 + PlatformUserAuth.scala
+  // line 1335's clearSessionCookieHeader -- the LOGOUT-
+  // REVOCATION pin complements the existing line 1252 test
+  // (which pins the cookie WIRE FORM: empty value + Max-Age=0)
+  // by closing TWO unpinned dimensions: (1) the remaining
+  // clear-cookie attributes Path=/ + HttpOnly + SameSite=Lax
+  // (the line 1337-1341 builder emits all of them), and (2)
+  // the SERVER-SIDE session REVOCATION -- handleAuthLogout
+  // line 209's `service.revokeSession(cookieHeader(exchange))`
+  // INVALIDATES the server-side session record, NOT just the
+  // browser cookie. SIXTY-EIGHTH per-emission-site SHAPE pin
+  // overall; the SERVER-SIDE REVOCATION is the most
+  // OPERATIONALLY CRITICAL part because: (a) clearing the
+  // browser cookie ALONE only affects the user's own browser
+  // -- an attacker who captured the session token (XSS,
+  // network capture, shared-computer browser history) could
+  // keep using it indefinitely if the server-side record
+  // weren't revoked; the documented revokeSession call is what
+  // makes logout a TRUE sign-out (the captured token dies
+  // server-side), (b) the Path=/ attribute is LOAD-BEARING for
+  // the cookie-clear: RFC 6265 keys cookies by name+domain+
+  // PATH, so a clear cookie with a path DIFFERENT from the
+  // original login cookie's Path=/ would NOT match + the
+  // browser would KEEP the original cookie (silent clear
+  // failure) -- the original session cookie is set with Path=/
+  // so the clear MUST also use Path=/, (c) HttpOnly +
+  // SameSite=Lax on the clear keep the wire form consistent
+  // with the install (defense-in-depth + avoids a cookie-jar
+  // mismatch where the browser treats differently-attributed
+  // cookies as distinct); per-format regression vectors
+  // uniquely caught (NOT caught by the 1252 wire-form pin
+  // which only checks empty-value + Max-Age=0, NOR by the
+  // auth-state SHAPE pins which check the 7-field BODY): (i)
+  // refactor dropping the line 209 revokeSession call would
+  // silently leave the server-side session ALIVE after logout
+  // -- the browser cookie clears but a captured token still
+  // authenticates (the catastrophic silent regression this pin
+  // uniquely catches), (ii) refactor changing the clear
+  // cookie's Path from / would silently break the browser-side
+  // clear (path mismatch -> cookie retained), (iii) refactor
+  // dropping HttpOnly/SameSite from the clear would diverge the
+  // clear from the install wire form; test approach: register
+  // -> capture session cookie + csrf, confirm /api/auth/me
+  // shows authenticated=true (baseline), POST /logout, assert
+  // the clear-cookie attributes, then re-hit /api/auth/me with
+  // the SAME OLD cookie -> authenticated=false (the server-side
+  // revocation proof).
+  test("POST /api/auth/logout REVOKES the server-side session (the old session cookie no longer authenticates afterward) AND emits the full clear-cookie attribute set (Path=/ + HttpOnly + SameSite=Lax) per AuthStack.scala line 209's revokeSession + clearSessionCookieHeader -- complements the line 1252 wire-form pin with the server-side-revocation + cookie-attribute dimensions") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"revoke@example.com","password":"correct-horse-battery","displayName":"Revoke"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the logout revocation can be checked")
+          val sessionCookieValue = sessionCookie(register)
+          val csrfToken = jsonBody(register)("csrfToken").str
+
+          // (1) BASELINE: the session cookie authenticates
+          // BEFORE logout (/api/auth/me shows authenticated=true)
+          val meBefore = get(s"$baseUri/api/auth/me", Map("Cookie" -> sessionCookieValue))
+          assertEquals(meBefore.statusCode(), 200,
+            clue = s"/api/auth/me MUST 200 before logout; got: ${meBefore.statusCode()}")
+          assertEquals(jsonBody(meBefore)("authenticated").bool, true,
+            clue = s"BASELINE: /api/auth/me MUST show authenticated=true with the live session cookie BEFORE logout (else the revocation test below is meaningless -- it would pass trivially); got: ${jsonBody(meBefore)("authenticated").bool}")
+
+          // (2) LOGOUT
+          val logout = postJson(s"$baseUri/api/auth/logout", "{}",
+            Map("Cookie" -> sessionCookieValue, "X-CSRF-Token" -> csrfToken))
+          assertEquals(logout.statusCode(), 200,
+            clue = s"logout MUST 200; got: ${logout.statusCode()}")
+
+          // (3) CLEAR-COOKIE ATTRIBUTE SET (the gaps the 1252
+          // wire-form pin leaves: Path=/ + HttpOnly + SameSite)
+          val clearCookie = headerValue(logout, "Set-Cookie")
+            .getOrElse(fail("logout MUST emit a Set-Cookie clear header"))
+          assert(clearCookie.contains("Path=/"),
+            clue = s"logout clear-cookie MUST carry Path=/ per clearSessionCookieHeader line 1338 -- RFC 6265 keys cookies by name+domain+PATH, so a clear with a path DIFFERENT from the original Path=/ login cookie would NOT match + the browser would KEEP the original cookie (silent clear failure); got: $clearCookie")
+          assert(clearCookie.contains("HttpOnly"),
+            clue = s"logout clear-cookie MUST carry HttpOnly per clearSessionCookieHeader line 1340 (consistent with the install wire form); got: $clearCookie")
+          assert(clearCookie.contains("SameSite=Lax"),
+            clue = s"logout clear-cookie MUST carry SameSite=Lax per clearSessionCookieHeader line 1341 (consistent with the install wire form); got: $clearCookie")
+
+          // (4) SERVER-SIDE REVOCATION: the SAME OLD session
+          // cookie no longer authenticates AFTER logout. This
+          // proves revokeSession (line 209) invalidated the
+          // server-side record -- NOT just the browser cookie.
+          // The OLD cookie value is replayed verbatim (as a
+          // captured-token attacker would), and the server MUST
+          // reject it.
+          val meAfter = get(s"$baseUri/api/auth/me", Map("Cookie" -> sessionCookieValue))
+          assertEquals(meAfter.statusCode(), 200,
+            clue = s"/api/auth/me MUST 200 (it's optional-auth, returning authenticated=false for an invalid session) even after logout; got: ${meAfter.statusCode()}")
+          assertEquals(jsonBody(meAfter)("authenticated").bool, false,
+            clue = s"SERVER-SIDE REVOCATION: re-hitting /api/auth/me with the SAME OLD session cookie AFTER logout MUST show authenticated=false -- this proves AuthStack.scala line 209's revokeSession INVALIDATED the server-side session record, so a captured token (XSS / network / shared-computer) is DEAD after logout; a refactor dropping revokeSession would silently leave the session ALIVE (the browser cookie clears but the captured token still authenticates -- a catastrophic silent regression); got authenticated=${jsonBody(meAfter)("authenticated").bool}")
+
+          // (5) user field is null on the post-logout auth state
+          // (the authenticationState(None) per line 214)
+          assert(jsonBody(meAfter)("user").isNull,
+            clue = s"post-logout /api/auth/me user field MUST be null (no authenticated user); got: ${jsonBody(meAfter)("user")}")
+        }
+      }
+    }
+  }
+
   // Pin the documented `auth.logout` audit log line format per deploy
   // doc line 218: "Auth events emit structured log lines: ...
   // auth.logout ... INFO level for success/expected events ... Each
