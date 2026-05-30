@@ -14451,6 +14451,129 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented CSRF WRONG-TOKEN rejection at
+  // AuthStack.scala ensurePlatformCsrf lines 789-795 -- the
+  // CSRF-WRONG-TOKEN pin verifies the gate compares the
+  // X-CSRF-Token VALUE (via secureEquals against
+  // user.csrfToken) and REJECTS a token that is PRESENT but
+  // MISMATCHED -- distinct from the existing CSRF test family
+  // (21496/21576/21645/21711/21774) which all exercise the
+  // MISSING-token (cookie-only) path. SEVENTY-SECOND
+  // per-emission-site SHAPE pin overall; the WRONG-TOKEN
+  // rejection is OPERATIONALLY CRITICAL because: (a) it is the
+  // assertion that proves the gate checks the token VALUE, not
+  // just its PRESENCE -- a refactor that degraded the gate to
+  // `header.isDefined` (presence-only, e.g. while "simplifying"
+  // the secureEquals call) would PASS every missing-token test
+  // (absent header -> still rejected) BUT would be a
+  // CATASTROPHIC CSRF BYPASS: any cross-origin attacker who can
+  // get the victim's browser to send ANY X-CSRF-Token value
+  // (even a guessed/garbage one, which a cross-site form can
+  // trivially include) would defeat the gate, (b) the
+  // secureEquals constant-time comparison (line 792-795) is the
+  // documented timing-oracle defense -- the wrong-token path is
+  // what exercises it; per-format regression vectors uniquely
+  // caught (NOT caught by the 5 missing-token tests which only
+  // send cookie-only requests): (i) refactor degrading the gate
+  // to presence-only (`getFirst("X-CSRF-Token") != null`) would
+  // silently accept ANY non-empty token -- the wrong-token +
+  // almost-right-token assertions catch it, (ii) refactor
+  // switching secureEquals to a PREFIX/startsWith match would
+  // silently accept a token that starts with the correct value
+  // -- the almost-right (correct+suffix) assertion catches it,
+  // (iii) refactor that trimmed+emptied the token to None
+  // (treating empty as absent) is already covered, but the
+  // empty-token assertion confirms empty -> 403 too; test
+  // approach: register a user, then POST /api/auth/profile with
+  // the session cookie + (a) a completely-wrong token, (b) an
+  // empty token, (c) the correct token + an extra char (prefix-
+  // match probe) -- all MUST 403 + mention csrf; then the
+  // CORRECT token MUST 200 (sanity that the 403s were
+  // specifically wrong-token, not a broken route); then a
+  // CROSS-ROUTE spot-check (wrong token -> 403 on /api/auth/
+  // logout + /api/analyze-hand-history) proving the value-
+  // comparison gate is UNIVERSAL, not profile-specific. NOTE:
+  // the wrong-token requests 403 at the CSRF gate (line 203/225)
+  // BEFORE any state change (logout's revokeSession at line 209,
+  // analyze's submit), so the session stays live across the
+  // cross-route checks.
+  test("CSRF WRONG-TOKEN rejection: a PRESENT-but-MISMATCHED X-CSRF-Token (wrong value / empty / correct+suffix) is rejected with 403 per AuthStack.scala ensurePlatformCsrf's secureEquals VALUE comparison -- complements the missing-token CSRF family (21496 et al) by proving the gate checks the token VALUE not just PRESENCE (catching a catastrophic presence-only refactor)") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val register = postJson(s"$baseUri/api/auth/register",
+            """{"email":"csrf-wrong@example.com","password":"correct-horse-battery","displayName":"CW"}""")
+          assertEquals(register.statusCode(), 201,
+            clue = "registration must succeed before the CSRF wrong-token gate can be exercised")
+          val cookie = sessionCookie(register)
+          val correctToken = jsonBody(register)("csrfToken").str
+          assert(correctToken.nonEmpty,
+            clue = "the issued csrfToken must be non-empty for the wrong-token comparison to be meaningful")
+
+          val profileBody = """{"displayName":"Updated"}"""
+          def profileWithToken(token: String): HttpResponse[String] =
+            postJson(s"$baseUri/api/auth/profile", profileBody,
+              Map("Cookie" -> cookie, "X-CSRF-Token" -> token))
+
+          // (a) completely WRONG token -> 403 (the core
+          // value-comparison signal: a present-but-wrong token
+          // is rejected, proving secureEquals compares VALUES)
+          val wrong = profileWithToken("totally-wrong-csrf-token-value")
+          assertEquals(wrong.statusCode(), 403,
+            clue = s"POST /api/auth/profile with a PRESENT-but-WRONG X-CSRF-Token MUST 403 per ensurePlatformCsrf's secureEquals VALUE comparison -- a refactor degrading the gate to presence-only (header != null) would silently accept this garbage token, a CATASTROPHIC CSRF bypass (any cross-site form can include a garbage token); got: ${wrong.statusCode()}")
+          assert(jsonBody(wrong)("error").str.toLowerCase.contains("csrf"),
+            clue = s"wrong-token 403 error MUST mention csrf per SessionCsrfRequiredMessage; got: ${jsonBody(wrong)("error").str}")
+
+          // (b) EMPTY token -> 403 (empty string is present but
+          // mismatched)
+          val empty = profileWithToken("")
+          assertEquals(empty.statusCode(), 403,
+            clue = s"POST /api/auth/profile with an EMPTY X-CSRF-Token MUST 403 (empty != the issued token); got: ${empty.statusCode()}")
+
+          // (c) ALMOST-right token (correct + extra suffix) ->
+          // 403 (the PREFIX-MATCH probe: secureEquals requires
+          // EXACT equality, NOT a startsWith/prefix match)
+          val almost = profileWithToken(correctToken + "x")
+          assertEquals(almost.statusCode(), 403,
+            clue = s"POST /api/auth/profile with the correct token + an extra char MUST 403 -- a refactor switching secureEquals to a PREFIX/startsWith match would silently accept this (the attacker only needs a prefix of the real token); secureEquals requires EXACT equality; got: ${almost.statusCode()}")
+
+          // (d) CORRECT token -> 200 (sanity: the 403s above
+          // were SPECIFICALLY the wrong-token rejection, NOT a
+          // broken route or a missing-session 401)
+          val correct = profileWithToken(correctToken)
+          assertEquals(correct.statusCode(), 200,
+            clue = s"POST /api/auth/profile with the CORRECT X-CSRF-Token MUST 200 -- this sanity-check proves the 403s above were specifically the wrong-token rejection (not a broken route); got: ${correct.statusCode()}, body: ${correct.body()}")
+
+          // (e) CROSS-ROUTE: the value-comparison gate is
+          // UNIVERSAL -- a wrong token -> 403 on logout +
+          // analyze too (NOT profile-specific). These 403 at
+          // the CSRF gate BEFORE any state change (logout's
+          // revokeSession / analyze's submit), so the session
+          // stays live.
+          val logoutWrong = postJson(s"$baseUri/api/auth/logout", "{}",
+            Map("Cookie" -> cookie, "X-CSRF-Token" -> "wrong-for-logout"))
+          assertEquals(logoutWrong.statusCode(), 403,
+            clue = s"POST /api/auth/logout with a WRONG X-CSRF-Token MUST 403 (the value-comparison gate is universal across routes, not profile-specific); got: ${logoutWrong.statusCode()}")
+
+          val analyzeWrong = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload,
+            Map("Cookie" -> cookie, "X-CSRF-Token" -> "wrong-for-analyze"))
+          assertEquals(analyzeWrong.statusCode(), 403,
+            clue = s"POST /api/analyze-hand-history with a WRONG X-CSRF-Token MUST 403 (the value-comparison gate is universal); got: ${analyzeWrong.statusCode()}")
+
+          // (f) SESSION STILL LIVE: the wrong-token logout above
+          // 403'd BEFORE revokeSession, so the correct-token
+          // session still authenticates (proves the CSRF gate
+          // short-circuits before the state change)
+          val meStillLive = get(s"$baseUri/api/auth/me", Map("Cookie" -> cookie))
+          assertEquals(jsonBody(meStillLive)("authenticated").bool, true,
+            clue = s"the session MUST still be authenticated after the wrong-token logout attempt -- the CSRF gate 403'd BEFORE revokeSession (line 203 check precedes line 209 revoke), so a failed-CSRF logout does NOT revoke the session; got authenticated=${jsonBody(meStillLive)("authenticated").bool}")
+        }
+      }
+    }
+  }
+
   // Pin the STRICT-SUBSET RELATIONSHIP between /api/ready
   // and /api/health JSON field sets at Readiness.scala lines
   // 73-112 (renderHealth) vs lines 129-153 (renderReadiness)
