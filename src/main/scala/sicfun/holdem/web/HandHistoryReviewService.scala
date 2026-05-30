@@ -59,12 +59,12 @@ final class HandHistoryReviewService private (
     if normalizedRequest.handHistoryText.trim.isEmpty then Left("handHistoryText must be non-empty")
     else
       for
-        imported <- HandHistoryImport.parseText(
+        outcome <- HandHistoryImport.parseTextOutcome(
           text = normalizedRequest.handHistoryText,
           site = normalizedRequest.site,
           heroName = normalizedRequest.heroName
         )
-        response <- buildResponse(imported, normalizedRequest, requestTrace)
+        response <- buildResponse(outcome.hands, outcome.skipped, normalizedRequest, requestTrace)
       yield response
 
   /** Serialize an AnalysisResponse to a ujson Value for HTTP response rendering. */
@@ -94,22 +94,56 @@ final class HandHistoryReviewService private (
     */
   private def buildResponse(
       imported: Vector[ImportedHand],
+      parseSkipped: Vector[HandHistoryImport.SkippedHand],
       request: AnalysisRequest,
       requestTrace: RequestTrace
   ): Either[String, AnalysisResponse] =
-    if imported.isEmpty then Left("no hands were imported from the uploaded text")
+    if imported.isEmpty then
+      Left(
+        if parseSkipped.nonEmpty then
+          s"all ${parseSkipped.length} hand(s) failed to parse; first error: ${parseSkipped.head.reason}"
+        else "no hands were imported from the uploaded text"
+      )
     else
       try
         val warnings = mutable.ArrayBuffer.empty[String]
         val rng = new Random(config.seed)
 
-        val handResults = imported.map { hand =>
+        val analyzedResults = imported.map { hand =>
           analyzeHand(hand, request.heroName, warnings, rng)
         }
+        // Surface hands that FAILED TO PARSE as skipped (with a reason +
+        // warning) rather than silently dropping them, so every uploaded
+        // hand is accounted for. A parse failure produces no ImportedHand,
+        // so its trace entry is built directly here.
+        val parseFailedResults = parseSkipped.map { failure =>
+          val handLabel = s"#${failure.handOrdinal}"
+          val warning = s"hand $handLabel: skipped because it could not be parsed (${failure.reason})"
+          warnings += warning
+          HandResult(
+            handId = handLabel,
+            decisions = Vector.empty,
+            trace = HandTrace(
+              handId = handLabel,
+              status = "skipped",
+              playerCount = 0,
+              heroNameResolved = None,
+              heroCardsPresent = false,
+              decisionsAnalyzed = 0,
+              skipReason = Some("parse_failed"),
+              warning = Some(warning)
+            )
+          )
+        }
+        val handResults = analyzedResults ++ parseFailedResults
         val analyzedHands = handResults.filter(_.trace.status == "analyzed")
         val allDecisions = handResults.flatMap(_.decisions)
         val handsAnalyzed = analyzedHands.length
-        val handsSkipped = math.max(0, imported.length - handsAnalyzed)
+        // Count every hand block found (parsed + parse-failed) so the
+        // invariant handsImported == handsAnalyzed + handsSkipped holds and
+        // the operator sees the bad hands reflected in the totals.
+        val handsImported = imported.length + parseSkipped.length
+        val handsSkipped = math.max(0, handsImported - handsAnalyzed)
         val effectiveHero = request.heroName.orElse(resolveHeroName(imported))
         val excludedHeroes = request.heroName.toSet ++ imported.flatMap(_.heroName).toSet
         val profiles = OpponentProfile.fromImportedHands(
@@ -127,14 +161,14 @@ final class HandHistoryReviewService private (
         val trace = AnalysisTrace(
           request = requestTrace,
           importStage = ImportTrace(
-            handsImported = imported.length,
+            handsImported = handsImported,
             siteResolved = imported.headOption.map(_.site.toString),
             heroNameResolved = effectiveHero,
             distinctPlayersObserved = imported.iterator.flatMap(_.players.iterator.map(_.name)).toSet.size
           ),
           hands = handResults.map(_.trace),
           summary = SummaryTrace(
-            handsImported = imported.length,
+            handsImported = handsImported,
             handsAnalyzed = handsAnalyzed,
             handsSkipped = handsSkipped,
             decisionsAnalyzed = allDecisions.length,
@@ -150,7 +184,7 @@ final class HandHistoryReviewService private (
           AnalysisResponse(
             site = imported.head.site.toString,
             heroName = effectiveHero,
-            handsImported = imported.length,
+            handsImported = handsImported,
             handsAnalyzed = handsAnalyzed,
             handsSkipped = handsSkipped,
             decisionsAnalyzed = allDecisions.length,

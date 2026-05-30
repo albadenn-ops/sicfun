@@ -191,6 +191,15 @@ object HandHistoryImport:
     * @param heroName optional hero screen name for hole card extraction
     * @return Right(hands) on success, Left(error) on failure
     */
+  /** A hand block that could not be parsed, retained so callers can REPORT
+    * it (count + reason) instead of silently dropping it from the upload. */
+  final case class SkippedHand(handOrdinal: Int, reason: String)
+
+  /** Outcome of a resilient parse ([[parseTextOutcome]]): the hands that
+    * parsed successfully plus the per-hand failures (each with its 1-based
+    * ordinal and the parser's error message). */
+  final case class ImportOutcome(hands: Vector[ImportedHand], skipped: Vector[SkippedHand])
+
   def parseFile(
       path: Path,
       site: Option[HandHistorySite] = None,
@@ -217,6 +226,26 @@ object HandHistoryImport:
       site: Option[HandHistorySite],
       heroName: Option[String]
   ): Either[String, Vector[ImportedHand]] =
+    // Strict variant: any per-hand parse failure aborts with the first
+    // error, preserving the historical contract for CLI / validation
+    // callers whose input is controlled and where a bad hand is a hard error.
+    parseTextOutcome(text, site, heroName).flatMap { outcome =>
+      outcome.skipped.headOption match
+        case Some(failure) => Left(failure.reason)
+        case None => Right(outcome.hands)
+    }
+
+  /** Resilient variant of [[parseText]]: parses every hand block and returns
+    * BOTH the successfully-parsed hands and the per-hand parse failures
+    * (instead of aborting on the first bad hand). Returns Left only when the
+    * site cannot be resolved or the input contains no hand blocks at all.
+    * The web upload path uses this so one malformed hand in a large upload
+    * does not discard the analysis of every other hand. */
+  def parseTextOutcome(
+      text: String,
+      site: Option[HandHistorySite],
+      heroName: Option[String]
+  ): Either[String, ImportOutcome] =
     val normalizedHeroName = heroName.map(normalizePlayerName).filter(_.nonEmpty)
     val resolvedSiteEither = site match
       case Some(value) => Right(value)
@@ -236,7 +265,7 @@ object HandHistoryImport:
   private def parsePokerStars(
       text: String,
       heroName: Option[String]
-  ): Either[String, Vector[ImportedHand]] =
+  ): Either[String, ImportOutcome] =
     parseSite(text, heroName, "PokerStars", _.startsWith(PokerStarsHeaderPrefix))(
       parsePokerStarsHand
     )
@@ -244,7 +273,7 @@ object HandHistoryImport:
   private def parseWinamax(
       text: String,
       heroName: Option[String]
-  ): Either[String, Vector[ImportedHand]] =
+  ): Either[String, ImportOutcome] =
     parseSite(text, heroName, "Winamax", _.startsWith(WinamaxHeaderPrefix))(
       parseWinamaxHand
     )
@@ -252,7 +281,7 @@ object HandHistoryImport:
   private def parseGGPoker(
       text: String,
       heroName: Option[String]
-  ): Either[String, Vector[ImportedHand]] =
+  ): Either[String, ImportOutcome] =
     parseSite(text, heroName, "GGPoker", isGGPokerHeaderLine)(
       parseGGPokerHand
     )
@@ -264,16 +293,23 @@ object HandHistoryImport:
       isHeaderLine: String => Boolean
   )(
       parseHand: (Vector[String], Int, Option[String]) => Either[String, ImportedHand]
-  ): Either[String, Vector[ImportedHand]] =
+  ): Either[String, ImportOutcome] =
     val blocks = splitHands(text, isHeaderLine)
     if blocks.isEmpty then Left(s"no $siteLabel hands found in input")
     else
+      // Resilient aggregation: parse every hand block, collecting the
+      // successfully-parsed hands AND the per-hand failures separately
+      // instead of aborting the whole batch on the first bad hand. A single
+      // malformed hand in a large upload must not discard the analysis of
+      // every other hand. Strict callers (parseText) still fail fast on the
+      // first failure; the web upload path uses parseTextOutcome to
+      // skip-and-report the bad hands.
       val parsed = blocks.zipWithIndex.map { case (block, idx) =>
-        parseHand(block, idx + 1, heroName)
+        (idx + 1, parseHand(block, idx + 1, heroName))
       }
-      parsed.collectFirst { case Left(err) => err } match
-        case Some(err) => Left(err)
-        case None => Right(parsed.collect { case Right(hand) => hand })
+      val hands = parsed.collect { case (_, Right(hand)) => hand }
+      val skipped = parsed.collect { case (ordinal, Left(err)) => SkippedHand(ordinal, err) }
+      Right(ImportOutcome(hands, skipped))
 
   private def splitHands(
       text: String,
