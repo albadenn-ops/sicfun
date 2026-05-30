@@ -88,6 +88,8 @@ final case class ImportedPlayer(
   * @param heroHoleCards        hero's hole cards (if dealt and visible)
   * @param events               normalized poker event sequence
   * @param showdownCards        map of player name -> hole cards revealed at showdown
+  * @param bigBlind             big-blind size posted this hand (0.0 if none observed),
+  *                             retained for chip-EV -> bb/100 conversion across mixed stakes
   */
 final case class ImportedHand(
     site: HandHistorySite,
@@ -99,7 +101,8 @@ final case class ImportedHand(
     heroName: Option[String],
     heroHoleCards: Option[HoleCards],
     events: Vector[PokerEvent],
-    showdownCards: Map[String, HoleCards] = Map.empty
+    showdownCards: Map[String, HoleCards] = Map.empty,
+    bigBlind: Double = 0.0
 ):
   require(handId.trim.nonEmpty, "handId must be non-empty")
   require(tableName.trim.nonEmpty, "tableName must be non-empty")
@@ -403,7 +406,8 @@ object HandHistoryImport:
           heroName = heroName,
           heroHoleCards = heroCards,
           events = state.events,
-          showdownCards = showdownMap.toMap
+          showdownCards = showdownMap.toMap,
+          bigBlind = state.bigBlind
         )
       )
     catch
@@ -430,9 +434,13 @@ object HandHistoryImport:
     private var pot = 0.0
     private var sequenceInHand = 0L
     private var betHistory = Vector.empty[BetAction]
+    private var bigBlindAmount = 0.0
     private val builtEvents = Vector.newBuilder[PokerEvent]
 
     def events: Vector[PokerEvent] = builtEvents.result()
+
+    /** Big-blind size captured from the "posts big blind" line (0.0 if none observed). */
+    def bigBlind: Double = bigBlindAmount
 
     def beginStreet(nextStreet: Street, nextBoard: Board): Unit =
       street = nextStreet
@@ -455,6 +463,7 @@ object HandHistoryImport:
           Some(())
         else if lower.startsWith("posts big blind ") then
           val amount = parseLeadingAmount(suffix.drop("posts big blind ".length))
+          bigBlindAmount = amount
           postForcedBet(playerName, amount)
           Some(())
         else None
