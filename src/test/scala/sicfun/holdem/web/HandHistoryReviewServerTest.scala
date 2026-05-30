@@ -8895,6 +8895,150 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented OIDC /callback SUCCESS-REDIRECT SHAPE at
+  // AuthStack.scala handleOidcCallback lines 383-395 +
+  // PlatformUserAuth.scala line 64's `/?auth=success` constant
+  // -- the OIDC-SUCCESS-SHAPE pin completes the OIDC callback
+  // response-shape coverage (1197ffa pinned the FAILURE
+  // redirect; THIS pins the SUCCESS redirect). On a successful
+  // OIDC round-trip the handler emits a 302 RedirectResponse to
+  // the documented `/?auth=success` landing WITH exactly TWO
+  // Set-Cookie headers (lines 390-393): (1) the session cookie
+  // INSTALL (result.cookieHeader -> `sicfun_session=<token>;
+  // ...`) and (2) the state cookie CLEAR
+  // (oidcStateClearCookieHeader -> `sicfun_oidc_state=;
+  // Max-Age=0; ...` since the state was just consumed).
+  // SIXTY-SIXTH per-emission-site SHAPE pin overall; the
+  // OIDC-SUCCESS-SHAPE contract is OPERATIONALLY CRITICAL
+  // because: (a) the `/?auth=success` landing is what the
+  // frontend SPA reads to know the OIDC round-trip completed +
+  // transition to the signed-in UI -- a refactor changing the
+  // landing would silently strand the user at a blank page
+  // despite a successful auth, (b) the session-cookie INSTALL
+  // is what actually signs the user in -- a refactor dropping
+  // it would silently complete the OIDC flow WITHOUT
+  // establishing a session (the user would land on
+  // /?auth=success but be unauthenticated, an infinite
+  // sign-in loop), (c) the state-cookie CLEAR is the
+  // documented cleanup that prevents the consumed single-use
+  // state from lingering (the lines 386-389 comment documents
+  // the two-Set-Cookie design) -- a refactor dropping it would
+  // leave a stale state cookie that a subsequent /start would
+  // have to overwrite; per-format regression vectors uniquely
+  // caught (NOT caught by the 1999-family audit-log success
+  // pins which read stdout not the HTTP response, NOR by the
+  // 1197ffa failure-shape pin which covers the failure path):
+  // (i) refactor changing the success Location from
+  // `/?auth=success` would silently break the frontend's
+  // signed-in transition, (ii) refactor dropping the session
+  // Set-Cookie would silently complete OIDC without signing
+  // in, (iii) refactor dropping the state-clear Set-Cookie
+  // would leave a stale consumed-state cookie, (iv) refactor
+  // collapsing the two Set-Cookie headers into one (e.g. only
+  // installing the session) would silently lose the cleanup;
+  // test approach: drive the full FakeOidcProvider handshake
+  // (start -> extract state + state cookie -> callback with
+  // matching state + cookie + code), then assert the 302 +
+  // Location `/?auth=success` + the TWO Set-Cookie headers
+  // (session install + state clear) + body-less + security
+  // headers + CROSS-CHECK that the success Location differs
+  // from the failure prefix. NOTE: stdout+stderr are
+  // captured+discarded around the calls so the auth.oidc.start
+  // + auth.oidc.success INFO lines don't clutter the test
+  // stream (their CONTENT is pinned by the 976d7ad + 1999
+  // tests; this pin targets the RESPONSE only).
+  test("OIDC /callback SUCCESS-REDIRECT SHAPE: a successful round-trip emits a 302 to the documented `/?auth=success` landing WITH two Set-Cookie headers (session install + state clear), body-less + security headers, per AuthStack.scala lines 383-395 -- completes the OIDC callback response-shape coverage alongside the 1197ffa failure-shape pin") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(
+            storePath = storePath,
+            oidcProviders = Vector(provider)
+          ))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture+discard both streams so the auth.oidc.start
+          // + auth.oidc.success INFO lines don't clutter output.
+          def quiet[A](thunk: => A): A =
+            val outBuf = new java.io.ByteArrayOutputStream()
+            val errBuf = new java.io.ByteArrayOutputStream()
+            val (oo, oe) = (System.out, System.err)
+            System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+            System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+            try thunk finally { System.setOut(oo); System.setErr(oe) }
+
+          // (handshake) /start -> 302 with state in the Location
+          // query param + the state cookie in Set-Cookie
+          val start = quiet { get(s"$baseUri${provider.startPath}") }
+          assertEquals(start.statusCode(), 302,
+            clue = s"OIDC /start MUST 302 to drive the success handshake; got: ${start.statusCode()}")
+          val redirect = headerValue(start, "Location").getOrElse(fail("missing OIDC /start Location header"))
+          val state = queryParam(redirect, "state").getOrElse(fail("missing OIDC state query parameter in /start Location"))
+          val stateCookie = headerValue(start, "Set-Cookie")
+            .map(_.takeWhile(_ != ';'))
+            .getOrElse(fail("missing OIDC state cookie in /start Set-Cookie"))
+
+          // (callback) /callback?state=<state>&code=... WITH the
+          // state cookie -> SUCCESS
+          val callback = quiet {
+            get(
+              s"$baseUri${provider.callbackPath}?state=$state&code=test-success-code",
+              Map("Cookie" -> stateCookie)
+            )
+          }
+
+          // (1) 302 status (RedirectResponse default)
+          assertEquals(callback.statusCode(), 302,
+            clue = s"successful OIDC /callback MUST 302 (a non-302 means the handler exited via a failure path); got: ${callback.statusCode()}, Location: ${headerValue(callback, "Location")}")
+
+          // (2) Location == /?auth=success
+          assertEquals(headerValue(callback, "Location"), Some("/?auth=success"),
+            clue = s"successful OIDC /callback Location MUST be `/?auth=success` per PlatformUserAuth.scala line 64's OidcSuccessRedirect -- the frontend reads this to transition to the signed-in UI; got: ${headerValue(callback, "Location")}")
+
+          // (3) body-less
+          assertEquals(callback.body(), "",
+            clue = s"successful OIDC /callback 302 MUST be body-less per writeRedirect's sendResponseHeaders(status, -1L); got body length: ${callback.body().length}")
+
+          // (4) TWO Set-Cookie headers: session install + state
+          // clear (lines 390-393's documented two-cookie design)
+          val setCookies = callback.headers().allValues("Set-Cookie").asScala.toVector
+          assertEquals(setCookies.size, 2,
+            clue = s"successful OIDC /callback MUST emit EXACTLY 2 Set-Cookie headers (session install + state clear) per AuthStack.scala lines 390-393; got ${setCookies.size}: $setCookies")
+
+          // (4a) session INSTALL: sicfun_session=<non-empty token>
+          val sessionInstall = setCookies.find(_.startsWith("sicfun_session="))
+            .getOrElse(fail(s"successful OIDC /callback MUST emit a session-install Set-Cookie (sicfun_session=<token>); got: $setCookies"))
+          assert(!sessionInstall.startsWith("sicfun_session=;") && !sessionInstall.startsWith("sicfun_session=; "),
+            clue = s"the session-install Set-Cookie MUST carry a NON-EMPTY token (it signs the user in) -- a refactor dropping it OR emitting an empty value would silently complete OIDC without establishing a session; got: $sessionInstall")
+
+          // (4b) state CLEAR: sicfun_oidc_state= (empty) with
+          // Max-Age=0
+          val stateClear = setCookies.find(_.startsWith("sicfun_oidc_state="))
+            .getOrElse(fail(s"successful OIDC /callback MUST emit a state-clear Set-Cookie (sicfun_oidc_state=; Max-Age=0); got: $setCookies"))
+          assert(stateClear.contains("Max-Age=0"),
+            clue = s"the state-clear Set-Cookie MUST carry Max-Age=0 to expire the consumed single-use state cookie per oidcStateClearCookieHeader; a refactor dropping it would leave a stale consumed-state cookie; got: $stateClear")
+
+          // (5) SECURITY HEADERS on the success 302 (the
+          // applySecurityHeaders at RedirectHandler line 594)
+          assert(headerValue(callback, "Content-Security-Policy").isDefined,
+            clue = s"successful OIDC /callback 302 MUST carry Content-Security-Policy per RedirectHandler line 594; got: ${headerValue(callback, "Content-Security-Policy")}")
+          assertEquals(headerValue(callback, "Referrer-Policy"), Some("no-referrer"),
+            clue = s"successful OIDC /callback 302 MUST carry Referrer-Policy: no-referrer (so the auth=success state isn't leaked via Referer); got: ${headerValue(callback, "Referrer-Policy")}")
+
+          // (6) CROSS-CHECK with the failure shape: the success
+          // Location `/?auth=success` does NOT share the failure
+          // `/?auth_error=` prefix (the two outcomes are
+          // distinguishable by the frontend)
+          assert(!headerValue(callback, "Location").exists(_.startsWith("/?auth_error=")),
+            clue = s"the SUCCESS Location MUST NOT use the failure `/?auth_error=` prefix -- success (`/?auth=success`) + failure (`/?auth_error=<reason>`) are distinct landings the frontend distinguishes; got: ${headerValue(callback, "Location")}")
+        }
+      }
+    }
+  }
+
   test("registration and login reject passwords beyond the max-length cap") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
