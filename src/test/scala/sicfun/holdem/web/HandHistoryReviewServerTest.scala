@@ -14932,6 +14932,146 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/health <-> /api/ready CROSS-ENDPOINT
+  // VALUE CONSISTENCY UNDER TIMED-OUT-WORKER at Readiness.scala
+  // readinessStatus line 45 (ReadyReasonTimedOutWorker) -- the
+  // TIMED-OUT-WORKER consistency pin closes the FOURTH + FINAL
+  // readiness reason, completing the full readiness state
+  // machine: accepting-traffic (7df0c6b) + draining (c247083) +
+  // queue-full (751825e) + timed-out-worker (THIS commit).
+  // SEVENTY-SIXTH per-emission-site SHAPE pin overall; when a
+  // worker exceeds its timeout but has NOT yet exited
+  // (timedOutWorkers = metrics.timedOutWorkersInFlight +
+  // playingHallJobStore.timedOutWorkersInFlightCount > 0 per
+  // Readiness.scala line 41), the readiness FAILS CLOSED:
+  // acceptingAnalysisJobs=false (line 42's `timedOutWorkers ==
+  // 0` conjunct) + reason=`timed-out-worker` (line 45) +
+  // ready=false, and BOTH endpoints must agree; the
+  // TIMED-OUT-WORKER readiness state is the documented
+  // FAIL-CLOSED safety response to a stuck/runaway worker -- the
+  // server stops accepting new jobs until the timed-out worker
+  // actually exits (so a thread leak doesn't silently accumulate
+  // zombie workers while the server keeps accepting load); the
+  // TIMED-OUT-WORKER CONSISTENCY contract is OPERATIONALLY
+  // CRITICAL because: (a) the fail-closed behavior is what
+  // prevents a stuck-worker situation from cascading -- if
+  // /api/ready (LB probe) didn't reflect the timed-out-worker
+  // state while /api/health did, the LB would keep routing to an
+  // instance whose worker pool is silently degraded, (b) the
+  // reason=`timed-out-worker` (vs `queue-full` vs `draining`)
+  // lets the operator distinguish a STUCK-WORKER incident
+  // (investigate the runaway job / native-call hang) from a
+  // capacity spike or a deploy -- a refactor conflating these
+  // reasons would misdirect incident response, (c) the
+  // distinction must be CONSISTENT across both endpoints; per-
+  // format regression vectors uniquely caught (NOT caught by the
+  // accepting/draining/queue-full state pins which never produce
+  // a timed-out-in-flight worker, NOR by the 22577 test which
+  // checks /api/ready ONLY): (i) refactor desyncing the
+  // timed-out-worker read between endpoints, (ii) refactor where
+  // the timed-out-worker state flips acceptingAnalysisJobs on
+  // only ONE endpoint, (iii) refactor mislabeling the reason on
+  // either endpoint; test approach (mirrors 22577): a
+  // BusyPlayingHallBackend(runForMs=2000) + playingHallTimeoutMs=
+  // 100 -- the worker times out at 100ms but stays busy until
+  // 2000ms, holding timedOutWorkersInFlight=1 for a ~1.9s window;
+  // query BOTH endpoints within that window + assert the
+  // timed-out-worker state agrees + the FULL shared-field value
+  // equality. The BusyBackend self-completes at 2000ms (no
+  // release needed), so shutdown is clean.
+  test("/api/health <-> /api/ready CROSS-ENDPOINT VALUE CONSISTENCY UNDER TIMED-OUT-WORKER: while a worker is timed-out-but-in-flight, /api/ready -> 503 + both endpoints report acceptingAnalysisJobs=false + reason==readyReason==`timed-out-worker` + timedOutWorkersInFlight=1 + draining=false + the shared fields carry IDENTICAL values -- closes the FOURTH readiness reason, completing the full state machine (accepting 7df0c6b + draining c247083 + queue-full 751825e + THIS)") {
+    withStaticSite { staticDir =>
+      val backend = new BusyPlayingHallBackend(runForMs = 2000L, result = Right(samplePlayingHallResult))
+      withServer(staticDir, playingHallBackend = backend, maxConcurrentJobs = 1,
+                 maxQueuedJobs = 1, playingHallTimeoutMs = 100L) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+        assertEquals(submit.statusCode(), 202,
+          clue = s"hall submission MUST 202 to drive the timed-out-worker state; got: ${submit.statusCode()}")
+        val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
+        assert(backend.started.await(3, TimeUnit.SECONDS),
+          "BusyPlayingHallBackend never started -- the worker must be running for the timeout to fire")
+
+        // The job times out at ~100ms; the worker stays BUSY
+        // until 2000ms, holding timedOutWorkersInFlight=1.
+        val failed = awaitTerminalJob(statusUri)
+        assertEquals(failed("status").str, "failed",
+          clue = s"the timed-out hall job MUST reach the failed state; got: ${failed("status").str}")
+        assertEquals(failed("errorStatus").num.toInt, 504,
+          clue = s"the timed-out hall job MUST carry errorStatus=504; got: ${failed("errorStatus").num.toInt}")
+
+        // Query BOTH endpoints WHILE the timed-out worker is
+        // still in-flight (within the ~1.9s busy window). The
+        // queries are back-to-back so the state is stable across
+        // both.
+        val health = getJson(s"$baseUri/api/health")
+        val readyResp = get(s"$baseUri/api/ready")
+        val ready = jsonBody(readyResp)
+
+        // (i) /api/ready 503 (fail-closed on the stuck worker)
+        assertEquals(readyResp.statusCode(), 503,
+          clue = s"/api/ready MUST 503 while a worker is timed-out-but-in-flight (fail-closed); got: ${readyResp.statusCode()}")
+
+        // (ii) reason==readyReason==`timed-out-worker` on BOTH
+        assertEquals(ready("reason").str, "timed-out-worker",
+          clue = s"/api/ready reason MUST be `timed-out-worker` while a worker is timed-out-in-flight per ReadyReasonTimedOutWorker (line 45); got: ${ready("reason").str}")
+        assertEquals(health("readyReason").str, "timed-out-worker",
+          clue = s"/api/health readyReason MUST be `timed-out-worker` (matching /api/ready); got: ${health("readyReason").str}")
+        assertEquals(ready("reason"), health("readyReason"),
+          clue = s"ready.reason MUST equal health.readyReason under timed-out-worker; got ready.reason=${ready("reason")}, health.readyReason=${health("readyReason")}")
+
+        // (iii) timedOutWorkersInFlight=1 on BOTH
+        assertEquals(ready("timedOutWorkersInFlight").num.toInt, 1,
+          clue = s"/api/ready timedOutWorkersInFlight MUST be 1 while the timed-out worker is in-flight; got: ${ready("timedOutWorkersInFlight").num.toInt}")
+        assertEquals(health("timedOutWorkersInFlight").num.toInt, 1,
+          clue = s"/api/health timedOutWorkersInFlight MUST be 1 (matching /api/ready); got: ${health("timedOutWorkersInFlight").num.toInt}")
+
+        // (iv) acceptingAnalysisJobs=false on BOTH (fail-closed)
+        assertEquals(ready("acceptingAnalysisJobs").bool, false,
+          clue = s"/api/ready acceptingAnalysisJobs MUST be false while a worker is timed-out-in-flight (the line 42 `timedOutWorkers == 0` conjunct fails closed); got: ${ready("acceptingAnalysisJobs").bool}")
+        assertEquals(health("acceptingAnalysisJobs").bool, false,
+          clue = s"/api/health acceptingAnalysisJobs MUST be false (matching /api/ready); got: ${health("acceptingAnalysisJobs").bool}")
+
+        // (v) draining=false (distinguishes timed-out-worker
+        // from drain -- it is a STUCK-WORKER signal, not a deploy)
+        assertEquals(ready("draining").bool, false,
+          clue = s"/api/ready draining MUST be false under timed-out-worker (it is a stuck-worker signal, NOT a drain); got: ${ready("draining").bool}")
+        assertEquals(health("draining").bool, false,
+          clue = s"/api/health draining MUST be false under timed-out-worker; got: ${health("draining").bool}")
+
+        // (vi) ready=false on BOTH
+        assertEquals(ready("ready").bool, false,
+          clue = s"/api/ready ready MUST be false under timed-out-worker; got: ${ready("ready").bool}")
+        assertEquals(health("ready").bool, false,
+          clue = s"/api/health ready MUST be false under timed-out-worker (matching /api/ready); got: ${health("ready").bool}")
+
+        // (vii) FULL shared-field VALUE EQUALITY under
+        // timed-out-worker (the cross-endpoint methodology in the
+        // fourth + final readiness state)
+        val sharedFields = Vector(
+          "service", "host", "port", "ready", "draining",
+          "acceptingAnalysisJobs", "authenticationEnabled", "authenticationMode",
+          "drainSignalConfigured", "drainSignalPresent", "analysisTimeoutMs",
+          "playingHallTimeoutMs", "rateLimitSubmitsPerMinute", "rateLimitStatusPerMinute",
+          "rateLimitAuthPerMinute", "rateLimitClientIpSource", "activeHttpRequests",
+          "maxConcurrentJobs", "maxQueuedJobs", "queuedJobs", "runningJobs",
+          "timedOutWorkersInFlight"
+        )
+        sharedFields.foreach { f =>
+          assertEquals(ready(f), health(f),
+            clue = s"UNDER TIMED-OUT-WORKER, shared field `$f` MUST have the SAME value in /api/ready + /api/health -- a refactor desyncing the timed-out-worker read per-endpoint would let the LB keep routing to an instance whose worker pool is silently degraded; got ready=${ready(f)}, health=${health(f)}")
+        }
+
+        // Recovery: the busy worker finishes at 2000ms, the
+        // timed-out-worker counter decrements, readiness recovers.
+        assert(backend.finished.await(5, TimeUnit.SECONDS),
+          "BusyPlayingHallBackend never finished -- the worker must exit for readiness to recover")
+        awaitReady(s"$baseUri/api/ready")
+      }
+    }
+  }
+
   // Pin the STRICT-SUBSET RELATIONSHIP between /api/ready
   // and /api/health JSON field sets at Readiness.scala lines
   // 73-112 (renderHealth) vs lines 129-153 (renderReadiness)
