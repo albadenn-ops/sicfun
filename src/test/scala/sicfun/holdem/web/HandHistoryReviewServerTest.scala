@@ -15072,6 +15072,128 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented readiness reason PRIORITY-ORDER at
+  // Readiness.scala readinessStatus lines 43-47's if/else-if
+  // chain -- when MULTIPLE degradation conditions hold
+  // SIMULTANEOUSLY, the chain picks the FIRST matching reason:
+  // draining (line 44) > timed-out-worker (line 45) >
+  // accepting-traffic (line 46) > queue-full (line 47, the
+  // default). The PRIORITY-ORDER pin verifies the most
+  // operationally-meaningful precedence: draining BEATS
+  // queue-full -- when a deploy drain is armed WHILE the bounded
+  // queue is saturated, the reason MUST be `draining` (NOT
+  // `queue-full`). SEVENTY-SEVENTH per-emission-site SHAPE pin
+  // overall; the four single-condition readiness states are
+  // pinned (7df0c6b accepting + c247083 draining + 751825e
+  // queue-full + 8b1efef timed-out-worker), but the PRECEDENCE
+  // when conditions OVERLAP is unpinned; the PRIORITY-ORDER
+  // contract is OPERATIONALLY CRITICAL because: (a) during a
+  // deploy drain at peak load BOTH drainingNow=true AND the
+  // queue can be full -- the operator + the orchestrator must
+  // see `draining` (the INTENTIONAL deploy signal) not
+  // `queue-full` (a transient capacity signal), because the
+  // response differs: draining -> let the deploy proceed +
+  // replace the instance; queue-full -> scale up / wait. A
+  // refactor reordering the chain to check queue-full first
+  // would, during every drain-at-load, mislabel the deploy as a
+  // capacity incident -- the operator would scale up (wrong)
+  // instead of letting the rollout finish, (b) the if/else-if
+  // SHORT-CIRCUIT is the documented precedence mechanism --
+  // draining is checked first BECAUSE it is the most
+  // operator-actionable + intentional signal; per-format
+  // regression vectors uniquely caught (NOT caught by the
+  // single-condition state pins which each hold ONLY ONE
+  // degradation condition): (i) refactor reordering the if-chain
+  // to check queue-full (or any other reason) before draining
+  // would silently flip the reason during a drain-at-load, (ii)
+  // refactor converting the if/else-if chain to a non-short-
+  // circuiting computation (e.g. a Set of all matching reasons,
+  // or last-match-wins) would silently change which reason
+  // surfaces when conditions overlap; test approach: configure a
+  // drain signal file + maxConcurrentJobs=1 + maxQueuedJobs=1 +
+  // a BlockingBackend, fill the queue (job1 running + job2
+  // queued), assert the reason is `queue-full` BEFORE the drain
+  // (sanity: the queue IS full), then arm the drain signal +
+  // assert the reason flips to `draining` WHILE THE QUEUE STAYS
+  // FULL (the precedence proof -- the reason changes ONLY
+  // because draining out-ranks queue-full, NOT because the queue
+  // emptied) + cross-endpoint consistency on the draining reason.
+  test("readiness reason PRIORITY-ORDER: when a drain signal is armed WHILE the bounded queue is full, the reason is `draining` (NOT `queue-full`) -- draining out-ranks queue-full in the Readiness.scala lines 44-47 if/else-if short-circuit chain, so a deploy-drain-at-peak-load reports the INTENTIONAL deploy signal not a transient capacity signal") {
+    withStaticSite { staticDir =>
+      val root = java.nio.file.Files.createTempDirectory("readiness-priority-")
+      try
+        val drainSignalFile = root.resolve("deploy-drain.signal")
+        val backend = new BlockingBackend(Right(sampleAnalysisResult))
+        withServer(staticDir, backend = backend, maxConcurrentJobs = 1, maxQueuedJobs = 1,
+                   drainSignalFile = Some(drainSignalFile)) { server =>
+         try
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Fill the bounded queue: job1 running (blocks) + job2 queued
+          val job1 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(job1.statusCode(), 202,
+            clue = s"job1 MUST 202 (running slot); got: ${job1.statusCode()}")
+          assert(backend.started.await(3, TimeUnit.SECONDS),
+            "BlockingBackend never started -- job1 must be running before job2 fills the queue")
+          val job2 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(job2.statusCode(), 202,
+            clue = s"job2 MUST 202 (queued slot); got: ${job2.statusCode()}")
+
+          // (1) SANITY before drain: the reason is `queue-full`
+          // (proves the queue IS saturated, so the precedence
+          // test below is meaningful -- the reason flips ONLY
+          // because of precedence, NOT because the queue emptied)
+          val beforeDrain = jsonBody(get(s"$baseUri/api/ready"))
+          assertEquals(beforeDrain("reason").str, "queue-full",
+            clue = s"BEFORE the drain, with the queue full, the reason MUST be `queue-full` (no higher-priority condition holds) -- this sanity-check proves the queue is genuinely saturated for the precedence test below; got: ${beforeDrain("reason").str}")
+          assertEquals(beforeDrain("draining").bool, false,
+            clue = s"BEFORE the drain, draining MUST be false; got: ${beforeDrain("draining").bool}")
+
+          // Arm the drain signal -- now BOTH drainingNow=true AND
+          // the queue is STILL full (job1 blocked, job2 queued).
+          java.nio.file.Files.writeString(drainSignalFile, "draining", StandardCharsets.UTF_8)
+
+          // (2) PRECEDENCE: the reason flips to `draining` even
+          // though the queue is STILL full -- draining out-ranks
+          // queue-full in the if/else-if short-circuit chain
+          val readyResp = get(s"$baseUri/api/ready")
+          val ready = jsonBody(readyResp)
+          assertEquals(ready("reason").str, "draining",
+            clue = s"with the drain armed WHILE the queue is full, the reason MUST be `draining` (NOT `queue-full`) per the Readiness.scala line 44-47 if/else-if order (draining checked FIRST) -- a refactor reordering the chain to check queue-full first would mislabel a deploy-drain-at-load as a capacity incident, making the operator scale up (wrong) instead of letting the rollout finish; got: ${ready("reason").str}")
+          assertEquals(readyResp.statusCode(), 503,
+            clue = s"/api/ready MUST 503 under drain+queue-full; got: ${readyResp.statusCode()}")
+
+          // (3) BOTH conditions are still active under the hood:
+          // draining=true (the new signal) AND the queue is still
+          // full -- only the REASON label changed, the
+          // degradation (acceptingAnalysisJobs=false) is consistent
+          assertEquals(ready("draining").bool, true,
+            clue = s"draining MUST be true after the signal is armed; got: ${ready("draining").bool}")
+          assertEquals(ready("drainSignalPresent").bool, true,
+            clue = s"drainSignalPresent MUST be true after the signal is armed; got: ${ready("drainSignalPresent").bool}")
+          assertEquals(ready("acceptingAnalysisJobs").bool, false,
+            clue = s"acceptingAnalysisJobs MUST be false under drain+queue-full (BOTH conditions independently force it false); got: ${ready("acceptingAnalysisJobs").bool}")
+          assertEquals(ready("queuedJobs").num.toInt, 1,
+            clue = s"the queue MUST STILL be full (queuedJobs=1) -- proving the reason flipped to `draining` due to PRECEDENCE, not because the queue emptied; got: ${ready("queuedJobs").num.toInt}")
+
+          // (4) CROSS-ENDPOINT: /api/health agrees on the
+          // `draining` reason (the precedence is consistent
+          // across both endpoints)
+          val health = getJson(s"$baseUri/api/health")
+          assertEquals(health("readyReason").str, "draining",
+            clue = s"/api/health readyReason MUST ALSO be `draining` under drain+queue-full (the precedence is consistent across endpoints, NOT just /api/ready); got: ${health("readyReason").str}")
+          assertEquals(ready("reason"), health("readyReason"),
+            clue = s"ready.reason MUST equal health.readyReason under the drain+queue-full overlap; got ready.reason=${ready("reason")}, health.readyReason=${health("readyReason")}")
+         finally
+          // Release job1 inside the block so the worker unblocks
+          // BEFORE shutdown grace (avoids the 5s shutdown wait).
+          backend.release.countDown()
+        }
+      finally
+        deleteRecursively(root)
+    }
+  }
+
   // Pin the STRICT-SUBSET RELATIONSHIP between /api/ready
   // and /api/health JSON field sets at Readiness.scala lines
   // 73-112 (renderHealth) vs lines 129-153 (renderReadiness)
