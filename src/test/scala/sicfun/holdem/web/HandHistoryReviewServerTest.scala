@@ -19660,6 +19660,124 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented profile-field MAX-LENGTH BOUNDARY
+  // contract at PlatformUserAuth.scala line 1140-1141's
+  // `sanitizeOptionalField` length check
+  // (`if value.length > maxLength then throw new
+  // IllegalArgumentException(s"$label must be at most
+  // $maxLength characters")`) -- the MAX-LENGTH-BOUNDARY pin
+  // verifies the documented per-field length caps where each
+  // profile field has a distinct documented maximum:
+  // displayName=96 (line 1136 sanitizeDisplayName), heroName=64
+  // (line 670), preferredSite=32 (line 671), timeZone=64
+  // (line 672); a value AT the cap is accepted (200), a value
+  // ONE char OVER the cap is rejected (400) with the
+  // documented `<label> must be at most <N> characters`
+  // message. FIFTY-NINTH per-emission-site SHAPE pin overall;
+  // the MAX-LENGTH-BOUNDARY contract is OPERATIONALLY CRITICAL
+  // because: (a) the per-field caps are the documented defense
+  // against unbounded-storage attacks where a hostile user
+  // inflates the persisted user-store JSON with megabyte-sized
+  // profile fields -- a refactor dropping or widening a cap
+  // would silently reopen the storage-amplification vector,
+  // (b) each field's cap is INDEPENDENTLY chosen for its
+  // semantic role (displayName=96 for full names, heroName=64
+  // for poker aliases, preferredSite=32 for site names,
+  // timeZone=64 for IANA tz identifiers) -- a refactor that
+  // HOMOGENIZED the caps (e.g. all 64) would silently change
+  // the validation envelope for displayName (truncating long
+  // legal names) and preferredSite (allowing 2x-longer site
+  // strings), (c) the boundary is INCLUSIVE at the cap
+  // (value.length > maxLength rejects, so == maxLength is
+  // accepted) -- a refactor flipping to `>=` would silently
+  // reject legal max-length values, an off-by-one that the
+  // exact-boundary test catches; per-format regression
+  // vectors uniquely caught: (i) refactor changing any per-
+  // field cap constant would silently shift the boundary --
+  // the exact-cap + cap+1 pair brackets each field's specific
+  // value, (ii) refactor changing the comparison from `>` to
+  // `>=` would silently reject the at-cap value (off-by-one),
+  // (iii) refactor changing the error-message format would
+  // silently break clients/UIs that surface the documented
+  // `must be at most N characters` text to users; test
+  // approach: register a user, then for EACH of the 4 fields
+  // POST a value at EXACTLY the documented cap (expect 200) +
+  // a value at cap+1 (expect 400 with the documented per-
+  // field message), confirming both the boundary value + the
+  // per-field cap constant.
+  test("profile-field MAX-LENGTH BOUNDARY contract: each field accepts a value AT its documented cap (displayName=96, heroName=64, preferredSite=32, timeZone=64) and rejects a value ONE char OVER with the documented `<label> must be at most <N> characters` 400 error per PlatformUserAuth.scala lines 1140-1141's sanitizeOptionalField length check") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val registerResp = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"maxlen@example.com","password":"correct-horse-battery","displayName":"X"}"""
+          )
+          assertEquals(registerResp.statusCode(), 201,
+            clue = "register MUST 201 to drive the profile max-length boundary test")
+          val csrfToken = jsonBody(registerResp)("csrfToken").str
+          val sessionCookieValue = sessionCookie(registerResp)
+
+          def postProfile(body: String): HttpResponse[String] =
+            httpClient.send(
+              HttpRequest.newBuilder()
+                .uri(URI.create(s"$baseUri/api/auth/profile"))
+                .method("POST", HttpRequest.BodyPublishers.ofString(body))
+                .header("Content-Type", "application/json")
+                .header("Cookie", sessionCookieValue)
+                .header("X-CSRF-Token", csrfToken)
+                .build(),
+              HttpResponse.BodyHandlers.ofString()
+            )
+
+          // The 4 documented per-field caps. Each tuple is
+          // (jsonKey, label-in-error-message, maxLength).
+          val fields = Vector(
+            ("displayName", "displayName", 96),
+            ("heroName", "heroName", 64),
+            ("preferredSite", "preferredSite", 32),
+            ("timeZone", "timeZone", 64)
+          )
+
+          fields.foreach { case (jsonKey, label, maxLength) =>
+            // (a) value AT the cap -> 200 (the boundary is
+            // INCLUSIVE: value.length > maxLength rejects, so
+            // == maxLength is accepted)
+            val atCapValue = "a" * maxLength
+            val atCapResp = postProfile(s"""{"$jsonKey":"$atCapValue"}""")
+            assertEquals(atCapResp.statusCode(), 200,
+              clue = s"$jsonKey at EXACTLY the documented cap ($maxLength chars) MUST be accepted (200) per PlatformUserAuth.scala line 1140's `value.length > maxLength` exclusive-upper comparison -- a refactor flipping to `>=` would silently reject this legal at-cap value (off-by-one); got: ${atCapResp.statusCode()}, body: ${atCapResp.body()}")
+            // CROSS-CHECK: the at-cap value round-trips in the
+            // response (proving it was actually stored, not
+            // silently truncated)
+            val atCapUser = ujson.read(atCapResp.body())("user").obj
+            assertEquals(atCapUser(jsonKey).str.length, maxLength,
+              clue = s"$jsonKey at-cap value MUST round-trip at full $maxLength-char length (NOT silently truncated) -- a refactor that truncated instead of rejecting would silently corrupt user data; got length: ${atCapUser(jsonKey).str.length}")
+
+            // (b) value ONE char OVER the cap -> 400 with the
+            // documented per-field error message
+            val overCapValue = "a" * (maxLength + 1)
+            val overCapResp = postProfile(s"""{"$jsonKey":"$overCapValue"}""")
+            assertEquals(overCapResp.statusCode(), 400,
+              clue = s"$jsonKey at cap+1 (${maxLength + 1} chars) MUST be rejected (400) per PlatformUserAuth.scala line 1141's IllegalArgumentException -> AuthStack.scala line 235's `400 -> error` mapping; a refactor dropping/widening the cap would silently accept this over-cap value, reopening the storage-amplification vector; got: ${overCapResp.statusCode()}, body: ${overCapResp.body()}")
+            val overCapBody = jsonBody(overCapResp)
+            // The error response is the universal 1-field
+            // {error} shape per the AuthStack Left-fold
+            assertEquals(overCapBody.obj.keys.toSet, Set("error"),
+              clue = s"$jsonKey over-cap 400 MUST emit the universal 1-field {error} shape per AuthStack.scala line 561's Left-fold; got fields: ${overCapBody.obj.keys.toVector.sorted.mkString(", ")}")
+            // The documented error message format:
+            // `<label> must be at most <N> characters`
+            val expectedMessage = s"$label must be at most $maxLength characters"
+            assertEquals(overCapBody("error").str, expectedMessage,
+              clue = s"$jsonKey over-cap 400 error message MUST be EXACTLY `$expectedMessage` per PlatformUserAuth.scala line 1141's `s\"$$label must be at most $$maxLength characters\"` template -- a refactor changing the message format would silently break UIs surfacing this text to users; got: ${overCapBody("error").str}")
+          }
+        }
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
