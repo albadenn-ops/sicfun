@@ -3,6 +3,7 @@ import sicfun.holdem.*
 import sicfun.holdem.equity.*
 import sicfun.holdem.gpu.*
 import sicfun.holdem.cli.*
+import sicfun.holdem.types.ScopedRuntimeProperties
 
 import scala.util.Random
 
@@ -48,59 +49,60 @@ object HeadsUpGpuExactParityGate:
     require(config.maxMatchups > 0L, "maxMatchups must be positive")
     require(config.parallelism > 0, "parallelism must be positive")
 
-    configureNativeRuntime(config)
-    val availability = HeadsUpGpuRuntime.availability
-    println("gpu exact parity gate")
-    println(
-      s"maxMatchups=${config.maxMatchups}, seed=${config.seed}, parallelism=${config.parallelism}, " +
-        s"provider=${availability.provider}, providerAvailable=${availability.available}"
-    )
-    println(s"providerDetail=${availability.detail}")
+    withRuntimeOverrides(baseRuntimeOverrides(config)) {
+      val availability = HeadsUpGpuRuntime.availability
+      println("gpu exact parity gate")
+      println(
+        s"maxMatchups=${config.maxMatchups}, seed=${config.seed}, parallelism=${config.parallelism}, " +
+          s"provider=${availability.provider}, providerAvailable=${availability.available}"
+      )
+      println(s"providerDetail=${availability.detail}")
 
-    if !availability.available || availability.provider != "native" then
-      fail("provider_unavailable_or_not_native")
+      if !availability.available || availability.provider != "native" then
+        fail("provider_unavailable_or_not_native")
 
-    println(s"cudaDeviceCount(best_effort)=${readCudaDeviceCount()}")
+      println(s"cudaDeviceCount(best_effort)=${readCudaDeviceCount()}")
 
-    val cpuTable = buildSlice(config, engine = "cpu")
-    val cudaTable = buildSlice(config, engine = "cuda")
+      val cpuTable = buildSlice(config, engine = "cpu")
+      val cudaTable = buildSlice(config, engine = "cuda")
 
-    val cpuKeys = cpuTable.values.keySet
-    val cudaKeys = cudaTable.values.keySet
-    if cpuKeys != cudaKeys then
-      fail("keyset_mismatch", Some(s"cpuKeys=${cpuKeys.size} cudaKeys=${cudaKeys.size}"))
+      val cpuKeys = cpuTable.values.keySet
+      val cudaKeys = cudaTable.values.keySet
+      if cpuKeys != cudaKeys then
+        fail("keyset_mismatch", Some(s"cpuKeys=${cpuKeys.size} cudaKeys=${cudaKeys.size}"))
 
-    var maxWinDelta = 0.0
-    var maxTieDelta = 0.0
-    var maxLossDelta = 0.0
-    var maxEqDelta = 0.0
-    cpuKeys.foreach { key =>
-      val cpu = cpuTable.values(key)
-      val cuda = cudaTable.values(key)
-      maxWinDelta = math.max(maxWinDelta, math.abs(cpu.win - cuda.win))
-      maxTieDelta = math.max(maxTieDelta, math.abs(cpu.tie - cuda.tie))
-      maxLossDelta = math.max(maxLossDelta, math.abs(cpu.loss - cuda.loss))
-      maxEqDelta = math.max(maxEqDelta, math.abs(cpu.equity - cuda.equity))
+      var maxWinDelta = 0.0
+      var maxTieDelta = 0.0
+      var maxLossDelta = 0.0
+      var maxEqDelta = 0.0
+      cpuKeys.foreach { key =>
+        val cpu = cpuTable.values(key)
+        val cuda = cudaTable.values(key)
+        maxWinDelta = math.max(maxWinDelta, math.abs(cpu.win - cuda.win))
+        maxTieDelta = math.max(maxTieDelta, math.abs(cpu.tie - cuda.tie))
+        maxLossDelta = math.max(maxLossDelta, math.abs(cpu.loss - cuda.loss))
+        maxEqDelta = math.max(maxEqDelta, math.abs(cpu.equity - cuda.equity))
+      }
+
+      println(f"maxAbsWinDelta=$maxWinDelta%.18f")
+      println(f"maxAbsTieDelta=$maxTieDelta%.18f")
+      println(f"maxAbsLossDelta=$maxLossDelta%.18f")
+      println(f"maxAbsEqDelta=$maxEqDelta%.18f")
+
+      val telemetry = HeadsUpGpuRuntime.lastBatchTelemetry
+        .map(t => s"provider=${t.provider}, success=${t.success}, detail=${t.detail}")
+        .getOrElse("none")
+      println(s"telemetry=$telemetry")
+
+      val usedCuda = HeadsUpGpuRuntime.lastBatchTelemetry.exists(t => t.success && t.detail.contains("nativeEngine=cuda"))
+      val deltasAreZero = maxWinDelta == 0.0 && maxTieDelta == 0.0 && maxLossDelta == 0.0 && maxEqDelta == 0.0
+      if !usedCuda then
+        fail("not_using_cuda_engine")
+      if !deltasAreZero then
+        fail("non_zero_delta")
+
+      println("gate=PASS")
     }
-
-    println(f"maxAbsWinDelta=$maxWinDelta%.18f")
-    println(f"maxAbsTieDelta=$maxTieDelta%.18f")
-    println(f"maxAbsLossDelta=$maxLossDelta%.18f")
-    println(f"maxAbsEqDelta=$maxEqDelta%.18f")
-
-    val telemetry = HeadsUpGpuRuntime.lastBatchTelemetry
-      .map(t => s"provider=${t.provider}, success=${t.success}, detail=${t.detail}")
-      .getOrElse("none")
-    println(s"telemetry=$telemetry")
-
-    val usedCuda = HeadsUpGpuRuntime.lastBatchTelemetry.exists(t => t.success && t.detail.contains("nativeEngine=cuda"))
-    val deltasAreZero = maxWinDelta == 0.0 && maxTieDelta == 0.0 && maxLossDelta == 0.0 && maxEqDelta == 0.0
-    if !usedCuda then
-      fail("not_using_cuda_engine")
-    if !deltasAreZero then
-      fail("non_zero_delta")
-
-    println("gate=PASS")
 
   private def fail(reason: String, detail: Option[String] = None): Nothing =
     val suffix = detail.map(value => s" detail=$value").getOrElse("")
@@ -115,30 +117,34 @@ object HeadsUpGpuExactParityGate:
     * are safe for a correctness-only gate.
     */
   private def buildSlice(config: Config, engine: String): HeadsUpEquityCanonicalTable =
-    sys.props.update(NativeEngineProperty, engine)
-    if engine == "cuda" then
-      // Keep tiny exact slices watchdog-safe on WDDM devices during parity checks.
-      sys.props.update(NativeCudaBlockSizeProperty, "32")
-      sys.props.update(NativeCudaMaxChunkMatchupsProperty, "1")
-    else
-      sys.props.remove(NativeCudaBlockSizeProperty)
-      sys.props.remove(NativeCudaMaxChunkMatchupsProperty)
+    withRuntimeOverrides(engineOverrides(engine)) {
+      HeadsUpEquityCanonicalTable.buildAll(
+        mode = HeadsUpEquityTable.Mode.Exact,
+        rng = new Random(config.seed),
+        maxMatchups = config.maxMatchups,
+        progress = None,
+        parallelism = config.parallelism,
+        backend = HeadsUpEquityTable.ComputeBackend.Gpu
+      )
+    }
 
-    HeadsUpEquityCanonicalTable.buildAll(
-      mode = HeadsUpEquityTable.Mode.Exact,
-      rng = new Random(config.seed),
-      maxMatchups = config.maxMatchups,
-      progress = None,
-      parallelism = config.parallelism,
-      backend = HeadsUpEquityTable.ComputeBackend.Gpu
+  private def withRuntimeOverrides[A](updates: Seq[(String, Option[String])])(thunk: => A): A =
+    ScopedRuntimeProperties.withOverrides(updates)(thunk)
+
+  private def baseRuntimeOverrides(config: Config): Seq[(String, Option[String])] =
+    Seq(
+      ProviderProperty -> Some("native"),
+      FallbackToCpuProperty -> Some("false"),
+      NativePathProperty -> config.nativePath
     )
 
-  private def configureNativeRuntime(config: Config): Unit =
-    sys.props.update(ProviderProperty, "native")
-    sys.props.update(FallbackToCpuProperty, "false")
-    config.nativePath match
-      case Some(path) => sys.props.update(NativePathProperty, path)
-      case None => ()
+  private def engineOverrides(engine: String): Seq[(String, Option[String])] =
+    Seq(
+      NativeEngineProperty -> Some(engine),
+      // Keep tiny exact slices watchdog-safe on WDDM devices during parity checks.
+      NativeCudaBlockSizeProperty -> (if engine == "cuda" then Some("32") else None),
+      NativeCudaMaxChunkMatchupsProperty -> (if engine == "cuda" then Some("1") else None)
+    )
 
   private def readCudaDeviceCount(): Int =
     try HeadsUpGpuNativeBindings.cudaDeviceCount()

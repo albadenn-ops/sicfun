@@ -2,10 +2,39 @@
 
 **Anchor commit:** `fcbc3a8af76ac80e502ed1765faf87048e79289a` (`master`)
 **Scope:** `src/main/scala`, `src/test/scala` only. `src/main/java` (12 files) and `src/main/native` (71 files) excluded. Build files, scripts, docs are touched only where they contradict `src/` reality.
-**Method:** static inspection via grep + Read against the commit above. No build or tests were run. Dependency currency claims use published release timelines and are marked `inferred`; everything else is backed by a file path and line number.
+**Method:** static inspection via grep + Read against the commit above. No build or tests were run. Dependency currency claims use published release timelines and are marked `inferred`; everything else is backed by a file path and line number. Section 0 was added later via a separate static verification pass against `HEAD` `408ca12ca73105b6e1b19310e7d44366c46cdf7c`; read it as a current-state addendum layered on top of the anchor audit.
 **Role note (per `CLAUDE.md`):** findings first, review signal for the primary agent — not a final call. Several `inferred` rows need a build/runtime confirmation before anyone acts on them.
 
-**Note on delivery location:** the user-selected folder `untitled/` was read-only for this session, so this file was written one level up at `/mnt/TECH_DEBT_AUDIT.md`. Move it to the repo root when you pull it into the working copy.
+---
+
+## 0. Current HEAD status note (2026-04-25)
+
+This document is still useful as a historical audit of anchor commit `fcbc3a8af76ac80e502ed1765faf87048e79289a`, but it is not a current HEAD debt register anymore. I re-checked the highest-signal findings against current `HEAD` `408ca12ca73105b6e1b19310e7d44366c46cdf7c` and found several already closed or materially changed.
+
+Update (2026-05-13): F3's `HandHistoryReviewServer.scala` slice is superseded at `HEAD` `52f9d4d` after the N2/HHRS split. The residual HHRS file is 119 LOC, with web responsibilities split across focused modules (`HandHistoryReviewServerApi`, `HandHistoryReviewServerRuntime`, `HandHistoryReviewServerConfig`, `JobQueue`, `Readiness`, `RateLimit`, `AuthStack`, `StaticAssetsHandler`, `WebResponses`). This update does not re-snapshot the rest of Section 0; F5 (`HoldemCfrSolver.scala`) and F6 (`TexasHoldemPlayingHall.scala`) still need separate current verification or split work. See `docs/audits/2026-04-28-whole-repo-triage.md` Section 9.7.
+
+| Item | Current status at `HEAD` | Evidence |
+|---|---|---|
+| F1 | Materially closed. `src/test/scala/sicfun/holdem/tablegen/` now exists with parity and stamp tests. The narrower canonical key encode/decode property slice is still a reasonable follow-up, but "zero tests" is no longer true. | `src/test/scala/sicfun/holdem/tablegen/GenerateHeadsUpCanonicalTableParityTest.scala`, `src/test/scala/sicfun/holdem/tablegen/HeadsUpTableGenerationStampTest.scala` |
+| F7 | Closed. The deprecated kernel/interpolation helpers are gone, the certification path now uses explicit `decideCertified(...)` naming instead of a deprecated overload, and no deprecation suppressions remain under `src/main/scala` or `src/test/scala`. | `src/main/scala/sicfun/holdem/engine/StrategicEngine.scala`, `src/main/scala/sicfun/holdem/strategic/kernel/KernelConstructor.scala`, `src/main/scala/sicfun/holdem/strategic/exploitation/ExploitationInterpolation.scala`, `src/main/scala/sicfun/holdem/strategic/state/StrategicRivalBelief.scala`, `src/test/scala/sicfun/holdem/engine/ApproximatePathTest.scala`, `src/test/scala/sicfun/holdem/engine/FormalPathTest.scala`, `src/test/scala/sicfun/holdem/engine/StrategicEngineTest.scala` |
+| F9 | Closed. The ROADMAP path now points at `docs/ai/AI_CONTEXT_ARCHIVE.md`. | `ROADMAP.md:74` |
+| F12 | Closed. The GPU gate FQCNs in `build.sbt`, `scripts/release-windows.ps1`, and the two `scripts/gpu/*.ps1` callers now use `sicfun.holdem.bench.gate.*`. | `build.sbt:183,195`, `scripts/release-windows.ps1:97,104,189,206`, `scripts/gpu/gpu-smoke-gate.ps1:70`, `scripts/gpu/gpu-exact-parity-gate.ps1:67` |
+| F16 | Materially resolved. README policy now explicitly allows tracked `data/phase2-*` summary artifacts such as `*-meta.txt` and `comparison.txt`, matching the four tracked files under `data/phase2-a3/` and `data/phase2-a4/`. | `README.md:20`, `git ls-files data/` |
+| F18 | Still open at committed `HEAD`. This working tree has a local untracked `docs/superpowers/inventory/`, but because it is not tracked, it does not change the repo-state finding for `HEAD`. | `git status --short docs/superpowers/inventory`, `git ls-files docs/superpowers/inventory` |
+
+Still visibly open at `HEAD`:
+- F2 remains materially current: `src/main/scala` still contains 641 `println` call sites.
+- F3 remains current and has grown: `HandHistoryReviewServer.scala` is now 2,875 LOC.
+- F5 remains current, though somewhat smaller than at the anchor commit: `HoldemCfrSolver.scala` is still 3,480 LOC.
+- F6 remains current, though slightly smaller than at the anchor commit: `TexasHoldemPlayingHall.scala` is now 2,382 LOC.
+- F13, F14, and F17 still appear open; nothing in current HEAD contradicted those findings during this verification pass.
+
+Working-tree delta after the `HEAD` verification above:
+- F2 is materially improved but still open. A shared `ConsoleLogger` now exists at `src/main/scala/sicfun/holdem/types/ConsoleLogger.scala`, `validation/` has been migrated (`ValidationRunner.scala`, `AdaptiveProofHarness.scala`), and the non-interactive runtime entry points now use it as well (`LiveHandSimulator.scala`, `AlwaysOnDecisionLoop.scala`, `HandHistoryAnalyzer.scala`, `TexasHoldemPlayingHall.scala`, `runtime/protocol/AcpcMatchRunner.scala`, `AcpcHeadsUpDealer.scala`, `SlumbotMatchRunner.scala`). That reduces raw `println(` call sites in `src/main/scala` from 641 to 507. Within `runtime/` / `runtime/protocol/`, only 10 direct console sites remain, almost all of them in the interactive `PokerAdvisor.scala` flow plus the intentionally raw `--help` branch in `TexasHoldemPlayingHall.scala`. The broader repo-wide logging-sprawl finding still stands, and the audit's planned "leave `bench/` alone" scope is still being respected.
+- F17 is materially improved but still open. `HeadsUpGpuExactParityGate.scala` and `HeadsUpGpuSmokeGate.scala` no longer mutate process-wide `sys.props` directly, the production GPU auto-tune paths in `HeadsUpRangeGpuRuntime.scala` and `HoldemPostflopNativeRuntime.scala` no longer persist cached CUDA tuning into global JVM properties, and the heads-up tablegen / benchmark-tuner CLIs now use scoped temporary property application instead of open-ended mutation (`GenerateHeadsUpTable.scala`, `GenerateHeadsUpCanonicalTable.scala`, `HeadsUpCanonicalExactTuner.scala`, `HeadsUpCanonicalExactBoardMajorTuner.scala`, `HeadsUpBackendAutoTuner.scala`, `HeadsUpRangeGpuAutoTuner.scala`, `HoldemPostflopGpuAutoTuner.scala`, `GlobalGpuTuningTool.scala`). `HeadsUpGpuRuntime.scala` now applies remembered autotune decisions through managed per-call scopes, and `GpuRuntimeSupportTest.scala` covers restoration, scope precedence, and suppression behavior. In `src/main/scala/sicfun/holdem/tablegen`, `src/main/scala/sicfun/holdem/bench/tuner`, and `src/main/scala/sicfun/holdem/gpu`, the only remaining direct `sys.props` mutation sites are the scoped helper internals in `GpuRuntimeSupport.scala`. The finding stays open because broader property/env coupling still exists, and `src/main/scala/sicfun/holdem/bench/*` still contains standalone benchmark/probe flows that mutate JVM properties directly.
+- F18 is partially improved. This working tree now has `docs/superpowers/README.md`, which adds a directory index plus a `draft|active|landed|abandoned` lifecycle convention, but the underlying sprawl is not closed: `plans/` still has 36 files, `specs/` has 14 files, many docs still lack any explicit status header, and `docs/superpowers/inventory/` is still local/untracked.
+
+Read the sections below as anchor-commit evidence, not a live prioritized backlog.
 
 ---
 

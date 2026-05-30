@@ -37,6 +37,13 @@ object HeadsUpCanonicalExactBoardMajorTuner:
   private val PrepareBoardsPerBlockProperty = "sicfun.gpu.native.exact.boardMajor.prepareBoardsPerBlock"
   private val AllowedOptionKeys =
     Set("maxMatchups", "seed", "warmup", "chunkBoards", "scoreThreads", "matchThreads", "prepareBoardsPerBlock")
+  private val BasePropertyOverrides = Vector(
+    ProviderProperty -> Some("native"),
+    FallbackToCpuProperty -> Some("false"),
+    NativeEngineProperty -> Some("cuda"),
+    PackedExactIoProperty -> Some("true"),
+    BoardMajorProperty -> Some("true")
+  )
 
   /** A single CUDA launch parameter combination to benchmark.
     *
@@ -82,35 +89,30 @@ object HeadsUpCanonicalExactBoardMajorTuner:
     require(config.scoreThreads.nonEmpty, "scoreThreads must be non-empty")
     require(config.matchThreads.nonEmpty, "matchThreads must be non-empty")
     require(config.prepareBoardsPerBlock.nonEmpty, "prepareBoardsPerBlock must be non-empty")
+    GpuRuntimeSupport.withTemporarySystemProperties(BasePropertyOverrides) {
+      val availability = HeadsUpGpuRuntime.availability
+      println("canonical exact board-major tuner")
+      println(
+        s"maxMatchups=${config.maxMatchups}, seed=${config.seed}, warmup=${config.warmup}, " +
+          s"provider=${availability.provider}, available=${availability.available}"
+      )
+      println(s"providerDetail=${availability.detail}")
 
-    sys.props.update(ProviderProperty, "native")
-    sys.props.update(FallbackToCpuProperty, "false")
-    sys.props.update(NativeEngineProperty, "cuda")
-    sys.props.update(PackedExactIoProperty, "true")
-    sys.props.update(BoardMajorProperty, "true")
+      if !availability.available || availability.provider != "native" then
+        throw new IllegalStateException("native provider unavailable")
 
-    val availability = HeadsUpGpuRuntime.availability
-    println("canonical exact board-major tuner")
-    println(
-      s"maxMatchups=${config.maxMatchups}, seed=${config.seed}, warmup=${config.warmup}, " +
-        s"provider=${availability.provider}, available=${availability.available}"
-    )
-    println(s"providerDetail=${availability.detail}")
+      if config.warmup then
+        runCandidate(config.maxMatchups, config.seed, Candidate(32768, 64, 96, 1), "warmup")
 
-    if !availability.available || availability.provider != "native" then
-      throw new IllegalStateException("native provider unavailable")
-
-    if config.warmup then
-      runCandidate(config.maxMatchups, config.seed, Candidate(32768, 64, 96, 1), "warmup")
-
-    val results = config.candidates.map { candidate =>
-      runCandidate(config.maxMatchups, config.seed, candidate, "candidate")
+      val results = config.candidates.map { candidate =>
+        runCandidate(config.maxMatchups, config.seed, candidate, "candidate")
+      }
+      val successful = results.collect { case (name, Some(elapsed)) => name -> elapsed }
+      if successful.isEmpty then
+        throw new IllegalStateException("no successful candidates")
+      val best = successful.minBy(_._2)
+      println(f"best=${best._1} elapsed=${best._2}%.3fs")
     }
-    val successful = results.collect { case (name, Some(elapsed)) => name -> elapsed }
-    if successful.isEmpty then
-      throw new IllegalStateException("no successful candidates")
-    val best = successful.minBy(_._2)
-    println(f"best=${best._1} elapsed=${best._2}%.3fs")
 
   /** Applies the candidate's CUDA parameters via system properties and runs a full
     * canonical table build, measuring elapsed wall time. Returns the candidate name
@@ -122,40 +124,41 @@ object HeadsUpCanonicalExactBoardMajorTuner:
       candidate: Candidate,
       tag: String
   ): (String, Option[Double]) =
-    // Set CUDA launch parameters via system properties — the native runtime reads these
-    // to configure kernel launches for this specific run.
-    sys.props.update(ChunkBoardsProperty, candidate.chunkBoards.toString)
-    sys.props.update(ScoreThreadsProperty, candidate.scoreThreads.toString)
-    sys.props.update(MatchThreadsProperty, candidate.matchThreads.toString)
-    sys.props.update(PrepareBoardsPerBlockProperty, candidate.prepareBoardsPerBlock.toString)
-
-    try
-      val started = System.nanoTime()
-      val table = HeadsUpEquityCanonicalTable.buildAll(
-        mode = HeadsUpEquityTable.Mode.Exact,
-        rng = new Random(seed),
-        maxMatchups = maxMatchups,
-        progress = None,
-        backend = HeadsUpEquityTable.ComputeBackend.Gpu
-      )
-      val elapsed = (System.nanoTime() - started).toDouble / 1_000_000_000.0
-      val telemetry = HeadsUpGpuRuntime.lastBatchTelemetry
-        .map(t => s"provider=${t.provider}, success=${t.success}, detail=${t.detail}")
-        .getOrElse("none")
-      println(
-        f"$tag%-9s ${candidate.name}%-36s size=${table.size}%6d elapsed=${elapsed}%.3fs telemetry=$telemetry"
-      )
-      (candidate.name, Some(elapsed))
-    catch
-      case ex: Throwable =>
+    val candidateOverrides = Vector(
+      ChunkBoardsProperty -> Some(candidate.chunkBoards.toString),
+      ScoreThreadsProperty -> Some(candidate.scoreThreads.toString),
+      MatchThreadsProperty -> Some(candidate.matchThreads.toString),
+      PrepareBoardsPerBlockProperty -> Some(candidate.prepareBoardsPerBlock.toString)
+    )
+    GpuRuntimeSupport.withTemporarySystemProperties(candidateOverrides) {
+      try
+        val started = System.nanoTime()
+        val table = HeadsUpEquityCanonicalTable.buildAll(
+          mode = HeadsUpEquityTable.Mode.Exact,
+          rng = new Random(seed),
+          maxMatchups = maxMatchups,
+          progress = None,
+          backend = HeadsUpEquityTable.ComputeBackend.Gpu
+        )
+        val elapsed = (System.nanoTime() - started).toDouble / 1_000_000_000.0
         val telemetry = HeadsUpGpuRuntime.lastBatchTelemetry
           .map(t => s"provider=${t.provider}, success=${t.success}, detail=${t.detail}")
           .getOrElse("none")
-        val message = Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)
         println(
-          s"$tag ${candidate.name} failed error=$message telemetry=$telemetry"
+          f"$tag%-9s ${candidate.name}%-36s size=${table.size}%6d elapsed=${elapsed}%.3fs telemetry=$telemetry"
         )
-        (candidate.name, None)
+        (candidate.name, Some(elapsed))
+      catch
+        case ex: Throwable =>
+          val telemetry = HeadsUpGpuRuntime.lastBatchTelemetry
+            .map(t => s"provider=${t.provider}, success=${t.success}, detail=${t.detail}")
+            .getOrElse("none")
+          val message = Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)
+          println(
+            s"$tag ${candidate.name} failed error=$message telemetry=$telemetry"
+          )
+          (candidate.name, None)
+    }
 
   private def parseArgs(args: Vector[String]): Config =
     val options = CliHelpers.requireOptions(args)

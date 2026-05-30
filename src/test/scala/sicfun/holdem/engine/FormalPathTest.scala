@@ -7,7 +7,6 @@ import sicfun.holdem.strategic.state.*
 import sicfun.holdem.strategic.safety.*
 import sicfun.holdem.strategic.solver.PftDpwResult
 
-@scala.annotation.nowarn("msg=deprecated")
 class FormalPathTest extends munit.FunSuite:
 
   private def card(token: String): Card =
@@ -34,7 +33,7 @@ class FormalPathTest extends munit.FunSuite:
 
   // --- Integration tests (native fallback path) ---
 
-  test("decide() on PftDpw path returns valid action (fail-closed when native unavailable)"):
+  test("decideCertified() on PftDpw path returns valid action (fail-closed when native unavailable)"):
     val config = StrategicEngine.Config(
       numSimulations = 100,
       solverBackend = StrategicEngine.SolverBackend.PftDpw,
@@ -46,7 +45,7 @@ class FormalPathTest extends munit.FunSuite:
     engine.initSession(rivalIds = Vector(PlayerId("v1")))
     engine.startHand(testHeroCards)
 
-    val chosen = engine.decide(minimalState, defaultActions)
+    val chosen = engine.decideCertified(minimalState, defaultActions)
 
     assert(defaultActions.contains(chosen), s"Action $chosen not in candidates")
     assert(engine.lastDecisionBundle.isDefined, "Bundle should be set even on PftDpw fallback")
@@ -61,7 +60,7 @@ class FormalPathTest extends munit.FunSuite:
     val engine = new StrategicEngine(config)
     engine.initSession(rivalIds = Vector(PlayerId("v1")))
     engine.startHand(testHeroCards)
-    engine.decide(minimalState, defaultActions)
+    engine.decideCertified(minimalState, defaultActions)
 
     engine.lastDecisionBundle match
       case Some(bundle) =>
@@ -82,7 +81,7 @@ class FormalPathTest extends munit.FunSuite:
     engine.initSession(rivalIds = Vector(PlayerId("v1"), PlayerId("v2")))
     engine.startHand(testHeroCards)
 
-    val chosen = engine.decide(minimalState, defaultActions)
+    val chosen = engine.decideCertified(minimalState, defaultActions)
     assert(defaultActions.contains(chosen))
     assert(engine.lastDecisionBundle.isDefined)
 
@@ -332,7 +331,7 @@ class FormalPathTest extends munit.FunSuite:
     engine.startHand(testHeroCards)
 
     val actionsWithFold = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(50.0))
-    val chosen = engine.decide(minimalState, actionsWithFold)
+    val chosen = engine.decideCertified(minimalState, actionsWithFold)
     assert(actionsWithFold.contains(chosen), s"Action $chosen not in candidates")
 
     // Native solver is available: expect TabularCertification from full formal path
@@ -460,7 +459,7 @@ class FormalPathTest extends munit.FunSuite:
     val engine = new StrategicEngine(config)
     engine.initSession(rivalIds = Vector(PlayerId("v1")))
     engine.startHand(testHeroCards)
-    engine.decide(minimalState, defaultActions)
+    engine.decideCertified(minimalState, defaultActions)
 
     engine.lastDecisionBundle match
       case Some(bundle) =>
@@ -485,7 +484,7 @@ class FormalPathTest extends munit.FunSuite:
     val engine = new StrategicEngine(config)
     engine.initSession(rivalIds = Vector(PlayerId("v1")))
     engine.startHand(testHeroCards)
-    engine.decide(minimalState, defaultActions)
+    engine.decideCertified(minimalState, defaultActions)
 
     engine.lastDecisionBundle match
       case Some(bundle) =>

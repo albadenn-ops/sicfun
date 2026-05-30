@@ -81,66 +81,62 @@ object HeadsUpRangeGpuAutoTuner:
     require(config.trials > 0, "trials must be positive")
     require(config.warmupRuns >= 0, "warmupRuns must be non-negative")
     require(config.runs > 0, "runs must be positive")
+    GpuRuntimeSupport.withTemporarySystemProperties(basePropertyUpdates(config)) {
+      HeadsUpGpuRuntime.resetLoadCacheForTests()
 
-    sys.props.update(ProviderProperty, "native")
-    sys.props.update(NativeEngineProperty, "cuda")
-    // Prevent runtime cache from overriding candidate properties while tuning.
-    sys.props.update(RangeAutoTuneProperty, "false")
-    config.nativePath.foreach(path => sys.props.update(NativePathProperty, path))
-    HeadsUpGpuRuntime.resetLoadCacheForTests()
+      val availability = HeadsUpGpuRuntime.availability
+      println("heads-up range gpu auto-tuner")
+      println(
+        s"heroes=${config.heroes}, entriesPerHero=${config.entriesPerHero}, trials=${config.trials}, " +
+          s"warmupRuns=${config.warmupRuns}, runs=${config.runs}, seedBase=${config.seedBase}"
+      )
+      println(s"provider=${availability.provider}, available=${availability.available}, detail=${availability.detail}")
+      if !availability.available || availability.provider != "native" then
+        throw new IllegalStateException(s"native provider unavailable: ${availability.detail}")
 
-    val availability = HeadsUpGpuRuntime.availability
-    println("heads-up range gpu auto-tuner")
-    println(
-      s"heroes=${config.heroes}, entriesPerHero=${config.entriesPerHero}, trials=${config.trials}, " +
-        s"warmupRuns=${config.warmupRuns}, runs=${config.runs}, seedBase=${config.seedBase}"
-    )
-    println(s"provider=${availability.provider}, available=${availability.available}, detail=${availability.detail}")
-    if !availability.available || availability.provider != "native" then
-      throw new IllegalStateException(s"native provider unavailable: ${availability.detail}")
+      val deviceCount = HeadsUpGpuNativeBindings.cudaDeviceCount()
+      if deviceCount <= 0 then
+        throw new IllegalStateException("no CUDA devices found")
 
-    val deviceCount = HeadsUpGpuNativeBindings.cudaDeviceCount()
-    if deviceCount <= 0 then
-      throw new IllegalStateException("no CUDA devices found")
+      val batch = buildSyntheticCsrBatch(config.heroes, config.entriesPerHero)
+      println(s"batchHeroes=${batch.heroCount}, batchEntries=${batch.entryCount}")
 
-    val batch = buildSyntheticCsrBatch(config.heroes, config.entriesPerHero)
-    println(s"batchHeroes=${batch.heroCount}, batchEntries=${batch.entryCount}")
+      val allCandidates =
+        for
+          block <- BlockCandidates
+          chunk <- ChunkHeroesCandidates
+          memory <- MemoryPathCandidates
+        yield Candidate(blockSize = block, maxChunkHeroes = chunk, memoryPath = memory)
 
-    val allCandidates =
-      for
-        block <- BlockCandidates
-        chunk <- ChunkHeroesCandidates
-        memory <- MemoryPathCandidates
-      yield Candidate(blockSize = block, maxChunkHeroes = chunk, memoryPath = memory)
+      val results = ArrayBuffer.empty[DeviceTuningResult]
+      var deviceIdx = 0
+      while deviceIdx < deviceCount do
+        val fingerprint = Option(HeadsUpGpuNativeBindings.cudaDeviceInfo(deviceIdx)).getOrElse("").trim
+        if fingerprint.nonEmpty then
+          println(s"tuning device[$deviceIdx]=$fingerprint")
+          val winnerOpt = tuneDevice(deviceIdx, batch, config, allCandidates.toVector)
+          winnerOpt match
+            case Some(winner) =>
+              results += DeviceTuningResult(
+                index = deviceIdx,
+                fingerprint = fingerprint,
+                winner = winner._1,
+                entriesPerSecond = winner._2,
+                elapsedSeconds = winner._3
+              )
+              println(
+                f"winner device[$deviceIdx]: ${winner._1} elapsed=${winner._3}%.4fs entries/s=${winner._2}%.1f"
+              )
+            case None =>
+              println(s"no successful candidate for device[$deviceIdx], skipping cache entry")
+        deviceIdx += 1
 
-    val results = ArrayBuffer.empty[DeviceTuningResult]
-    var deviceIdx = 0
-    while deviceIdx < deviceCount do
-      val fingerprint = Option(HeadsUpGpuNativeBindings.cudaDeviceInfo(deviceIdx)).getOrElse("").trim
-      if fingerprint.nonEmpty then
-        println(s"tuning device[$deviceIdx]=$fingerprint")
-        val winnerOpt = tuneDevice(deviceIdx, batch, config, allCandidates.toVector)
-        winnerOpt match
-          case Some(winner) =>
-            results += DeviceTuningResult(
-              index = deviceIdx,
-              fingerprint = fingerprint,
-              winner = winner._1,
-              entriesPerSecond = winner._2,
-              elapsedSeconds = winner._3
-            )
-            println(
-              f"winner device[$deviceIdx]: ${winner._1} elapsed=${winner._3}%.4fs entries/s=${winner._2}%.1f"
-            )
-          case None =>
-            println(s"no successful candidate for device[$deviceIdx], skipping cache entry")
-      deviceIdx += 1
+      if results.isEmpty then
+        throw new IllegalStateException("no successful auto-tune result for any device")
 
-    if results.isEmpty then
-      throw new IllegalStateException("no successful auto-tune result for any device")
-
-    saveCache(new File(config.cachePath), config, results.toVector, configuredNativeLibraryIdentity())
-    println(s"cache written: ${new File(config.cachePath).getAbsolutePath}")
+      saveCache(new File(config.cachePath), config, results.toVector, configuredNativeLibraryIdentity())
+      println(s"cache written: ${new File(config.cachePath).getAbsolutePath}")
+    }
 
   private def tuneDevice(
       deviceIndex: Int,
@@ -150,31 +146,10 @@ object HeadsUpRangeGpuAutoTuner:
   ): Option[(Candidate, Double, Double)] =
     var winner: Option[(Candidate, Double, Double)] = None
     candidates.foreach { candidate =>
-      applyCandidate(candidate)
-
-      var warmup = 0
-      var warmupFailed = false
-      while warmup < config.warmupRuns && !warmupFailed do
-        HeadsUpRangeGpuRuntime.computeRangeBatchMonteCarloCsrOnDevice(
-          deviceIndex,
-          batch.heroIds,
-          batch.offsets,
-          batch.villainIds,
-          batch.keyMaterial,
-          batch.probabilities,
-          config.trials,
-          config.seedBase + warmup.toLong
-        ) match
-          case Left(_) => warmupFailed = true
-          case Right(_) => ()
-        warmup += 1
-
-      if !warmupFailed then
-        val elapsedRuns = new Array[Double](config.runs)
-        var runFailed: Option[String] = None
-        var run = 0
-        while run < config.runs && runFailed.isEmpty do
-          val started = System.nanoTime()
+      GpuRuntimeSupport.withTemporarySystemProperties(candidatePropertyUpdates(candidate)) {
+        var warmup = 0
+        var warmupFailed = false
+        while warmup < config.warmupRuns && !warmupFailed do
           HeadsUpRangeGpuRuntime.computeRangeBatchMonteCarloCsrOnDevice(
             deviceIndex,
             batch.heroIds,
@@ -183,36 +158,52 @@ object HeadsUpRangeGpuAutoTuner:
             batch.keyMaterial,
             batch.probabilities,
             config.trials,
-            config.seedBase + 1000L + run.toLong
+            config.seedBase + warmup.toLong
           ) match
-            case Left(reason) => runFailed = Some(reason)
-            case Right(values) =>
-              if values.length != batch.heroCount then
-                runFailed = Some(s"result length mismatch expected=${batch.heroCount} actual=${values.length}")
-              else
-                elapsedRuns(run) = (System.nanoTime() - started).toDouble / 1_000_000_000.0
-          run += 1
+            case Left(_) => warmupFailed = true
+            case Right(_) => ()
+          warmup += 1
 
-        runFailed match
-          case Some(reason) =>
-            println(s"candidate fail device[$deviceIndex] $candidate reason=$reason")
-          case None =>
-            val avgSeconds = elapsedRuns.sum / elapsedRuns.length.toDouble
-            val entriesPerSecond = batch.entryCount.toDouble / avgSeconds
-            println(
-              f"candidate ok device[$deviceIndex] $candidate elapsed=${avgSeconds}%.4fs entries/s=${entriesPerSecond}%.1f"
-            )
-            winner match
-              case Some((_, currentEntriesPerSecond, _)) if currentEntriesPerSecond >= entriesPerSecond => ()
-              case _ =>
-                winner = Some((candidate, entriesPerSecond, avgSeconds))
+        if !warmupFailed then
+          val elapsedRuns = new Array[Double](config.runs)
+          var runFailed: Option[String] = None
+          var run = 0
+          while run < config.runs && runFailed.isEmpty do
+            val started = System.nanoTime()
+            HeadsUpRangeGpuRuntime.computeRangeBatchMonteCarloCsrOnDevice(
+              deviceIndex,
+              batch.heroIds,
+              batch.offsets,
+              batch.villainIds,
+              batch.keyMaterial,
+              batch.probabilities,
+              config.trials,
+              config.seedBase + 1000L + run.toLong
+            ) match
+              case Left(reason) => runFailed = Some(reason)
+              case Right(values) =>
+                if values.length != batch.heroCount then
+                  runFailed = Some(s"result length mismatch expected=${batch.heroCount} actual=${values.length}")
+                else
+                  elapsedRuns(run) = (System.nanoTime() - started).toDouble / 1_000_000_000.0
+            run += 1
+
+          runFailed match
+            case Some(reason) =>
+              println(s"candidate fail device[$deviceIndex] $candidate reason=$reason")
+            case None =>
+              val avgSeconds = elapsedRuns.sum / elapsedRuns.length.toDouble
+              val entriesPerSecond = batch.entryCount.toDouble / avgSeconds
+              println(
+                f"candidate ok device[$deviceIndex] $candidate elapsed=${avgSeconds}%.4fs entries/s=${entriesPerSecond}%.1f"
+              )
+              winner match
+                case Some((_, currentEntriesPerSecond, _)) if currentEntriesPerSecond >= entriesPerSecond => ()
+                case _ =>
+                  winner = Some((candidate, entriesPerSecond, avgSeconds))
+      }
     }
     winner
-
-  private def applyCandidate(candidate: Candidate): Unit =
-    sys.props.update(RangeNativeBlockSizeProperty, candidate.blockSize.toString)
-    sys.props.update(RangeNativeMaxChunkHeroesProperty, candidate.maxChunkHeroes.toString)
-    sys.props.update(RangeNativeMemoryPathProperty, candidate.memoryPath)
 
   private def saveCache(
       file: File,
@@ -302,6 +293,21 @@ object HeadsUpRangeGpuAutoTuner:
       villainIds = villainBuf.toArray,
       keyMaterial = keyMaterialBuf.toArray,
       probabilities = probabilitiesBuf.toArray
+    )
+
+  private def basePropertyUpdates(config: Config): Vector[(String, Option[String])] =
+    Vector(
+      ProviderProperty -> Some("native"),
+      NativeEngineProperty -> Some("cuda"),
+      RangeAutoTuneProperty -> Some("false"),
+      NativePathProperty -> config.nativePath
+    )
+
+  private def candidatePropertyUpdates(candidate: Candidate): Vector[(String, Option[String])] =
+    Vector(
+      RangeNativeBlockSizeProperty -> Some(candidate.blockSize.toString),
+      RangeNativeMaxChunkHeroesProperty -> Some(candidate.maxChunkHeroes.toString),
+      RangeNativeMemoryPathProperty -> Some(candidate.memoryPath)
     )
 
   private def parseArgs(args: Vector[String]): Config =

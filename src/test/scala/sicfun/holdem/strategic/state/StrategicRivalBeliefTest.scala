@@ -48,7 +48,6 @@ class StrategicRivalBeliefTest extends FunSuite:
       timing = None,
       stage = Street.Flop
     )
-    @scala.annotation.nowarn
     val updated = belief.update(signal, mkPublicState)
     assertEquals(updated, belief)
 
@@ -60,7 +59,6 @@ class StrategicRivalBeliefTest extends FunSuite:
       timing = None,
       stage = Street.Turn
     )
-    @scala.annotation.nowarn
     val updated = belief.update(signal, mkPublicState)
     assert(updated.isInstanceOf[StrategicRivalBelief])
 

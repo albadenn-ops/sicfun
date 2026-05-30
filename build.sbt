@@ -41,6 +41,7 @@ lazy val generateHeadsUpCanonicalTable = taskKey[File]("Generate canonical heads
 lazy val gpuSmokeGate = taskKey[Unit]("Run the GPU smoke gate (requires provider availability + CUDA engine execution)")
 lazy val gpuExactParityGate = taskKey[Unit]("Run exact native CPU vs CUDA parity gate on a small canonical slice")
 lazy val nativeBuild = taskKey[Unit]("Rebuild native CPU DLLs via clang++ when sources are newer than outputs")
+lazy val nativeBuildBestEffort = taskKey[Unit]("Best-effort wrapper around nativeBuild: warn and continue on any failure (used as the test-suite dependency so missing toolchain does not block pure-Scala tests)")
 
 headsUpTableMode := "mc"
 headsUpTableTrials := 200
@@ -174,7 +175,49 @@ nativeBuild := {
   }
 }
 
-Test / test := (Test / test).dependsOn(nativeBuild).value
+nativeBuildBestEffort := {
+  val log = streams.value.log
+  val nativeDir = baseDirectory.value / "src" / "main" / "native"
+  val jniDir = nativeDir / "jni"
+  val buildDir = nativeDir / "build"
+  val buildScript = nativeDir / "build-windows-llvm.ps1"
+
+  if (!buildScript.exists()) {
+    log.warn(s"nativeBuildBestEffort: build script not found ($buildScript); skipping native build")
+  } else {
+    try {
+      val sources = (jniDir ** ("*.cpp" | "*.hpp")).get
+      val cpuDllNames = Set(
+        "sicfun_native_cpu.dll", "sicfun_cfr_native.dll", "sicfun_bayes_native.dll",
+        "sicfun_ddre_native.dll", "sicfun_postflop_native.dll", "sicfun_pomcp_native.dll"
+      )
+      val cpuDlls = (buildDir * "*.dll").get.filter(f => cpuDllNames.contains(f.getName))
+      val needsRebuild = cpuDlls.size < cpuDllNames.size || {
+        val oldestDll = cpuDlls.map(_.lastModified()).min
+        sources.exists(_.lastModified() > oldestDll)
+      }
+      if (needsRebuild) {
+        log.info("nativeBuildBestEffort: native sources changed; invoking build-windows-llvm.ps1")
+        val exitCode = scala.sys.process.Process(
+          Seq("powershell", "-ExecutionPolicy", "Bypass", "-File", buildScript.getAbsolutePath),
+          nativeDir
+        ).!
+        if (exitCode != 0) {
+          log.warn(s"nativeBuildBestEffort: build script exited with code $exitCode; proceeding without rebuilt natives. Run 'sbt nativeBuild' for the full failure.")
+        } else {
+          log.info("Native DLLs rebuilt successfully")
+        }
+      } else {
+        log.info("Native DLLs up to date; skipping rebuild")
+      }
+    } catch {
+      case t: Throwable =>
+        log.warn("nativeBuildBestEffort: " + t.getClass.getSimpleName + " during native build (" + t.getMessage + "); proceeding without rebuilt natives. Run 'sbt nativeBuild' for the full failure.")
+    }
+  }
+}
+
+Test / test := (Test / test).dependsOn(nativeBuildBestEffort).value
 
 gpuSmokeGate := {
   val log = streams.value.log

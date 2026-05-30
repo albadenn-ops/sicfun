@@ -702,6 +702,7 @@ private[holdem] object AcpcActionCodec:
   * @see [[AcpcHeadsUpDealer]] for the complementary server-side dealer.
   */
 object AcpcMatchRunner:
+  private val log = ConsoleLogger.fromConfig("acpc-match-runner")
   private val ProtocolVersion = "VERSION:2.0.0"
   private[runtime] def tableRangesForMatch = HeadsUpMatchDefaults.tableRanges
   private[runtime] def preflopFoldsForMatch = HeadsUpMatchDefaults.preflopFoldsBeforeButtonOpen
@@ -780,23 +781,23 @@ object AcpcMatchRunner:
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
       case Right(summary) =>
-        println("=== ACPC Match Runner ===")
-        println(s"handsPlayed: ${summary.handsPlayed}")
-        println(s"heroNetChips: ${PokerFormatting.fmtDouble(summary.heroNetChips, 3)}")
-        println(s"heroBbPer100: ${PokerFormatting.fmtDouble(summary.heroBbPer100, 3)}")
-        println(s"heroWins: ${summary.heroWins}")
-        println(s"heroTies: ${summary.heroTies}")
-        println(s"heroLosses: ${summary.heroLosses}")
-        println(s"buttonHands: ${summary.buttonHands}")
-        println(s"buttonNetChips: ${PokerFormatting.fmtDouble(summary.buttonNetChips, 3)}")
-        println(s"bigBlindHands: ${summary.bigBlindHands}")
-        println(s"bigBlindNetChips: ${PokerFormatting.fmtDouble(summary.bigBlindNetChips, 3)}")
-        println(s"modelId: ${summary.modelId}")
-        println(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
+        log.info("=== ACPC Match Runner ===")
+        log.info(s"handsPlayed: ${summary.handsPlayed}")
+        log.info(s"heroNetChips: ${PokerFormatting.fmtDouble(summary.heroNetChips, 3)}")
+        log.info(s"heroBbPer100: ${PokerFormatting.fmtDouble(summary.heroBbPer100, 3)}")
+        log.info(s"heroWins: ${summary.heroWins}")
+        log.info(s"heroTies: ${summary.heroTies}")
+        log.info(s"heroLosses: ${summary.heroLosses}")
+        log.info(s"buttonHands: ${summary.buttonHands}")
+        log.info(s"buttonNetChips: ${PokerFormatting.fmtDouble(summary.buttonNetChips, 3)}")
+        log.info(s"bigBlindHands: ${summary.bigBlindHands}")
+        log.info(s"bigBlindNetChips: ${PokerFormatting.fmtDouble(summary.bigBlindNetChips, 3)}")
+        log.info(s"modelId: ${summary.modelId}")
+        log.info(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
       case Left(error) =>
-        if wantsHelp then println(error)
+        if wantsHelp then log.info(error)
         else
-          System.err.println(error)
+          log.error(error)
           sys.exit(1)
 
   def run(args: Array[String]): Either[String, MatchRunnerSupport.RunSummary] =
@@ -1090,7 +1091,7 @@ object AcpcMatchRunner:
 
     private def maybeReport(): Unit =
       if config.reportEvery > 0 && (stats.currentHandsPlayed % config.reportEvery == 0) then
-        println(
+        log.info(
           s"[acpc] hands=${stats.currentHandsPlayed} netChips=${PokerFormatting.fmtDouble(stats.currentHeroNetChips, 3)} bb100=${PokerFormatting.fmtDouble(stats.currentBbPer100(AcpcActionCodec.BigBlindChips.toDouble), 3)} mode=${PokerFormatting.heroModeLabel(config.heroMode)} model=$modelId"
         )
 

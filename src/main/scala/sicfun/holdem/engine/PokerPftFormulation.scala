@@ -3,7 +3,9 @@ package sicfun.holdem.engine
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.types.*
 import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.formulation.*
 import sicfun.holdem.strategic.solver.{TabularGenerativeModel, ParticleBelief}
+import sicfun.holdem.strategic.types.BridgeResult
 
 /** Builds tabular POMDP models from poker game state for PftDpw solver. */
 object PokerPftFormulation:
@@ -276,3 +278,228 @@ object PokerPftFormulation:
       weights(i) /= sum
       i += 1
     ParticleBelief(indices, weights)
+
+  /** Build grounded TabularGenerativeModel from the formulation contract. */
+  def buildTabularModel(
+      input: FormulationInput,
+      profileClass: Option[StrategicClass]
+  ): TabularGenerativeModel =
+    val heroActions = input.spot.candidateActions
+    val numStreets = 4
+    val numStates = numStreets + 1
+    val terminalState = numStates - 1
+    val numActions = heroActions.size
+    val numObs = StrategicClass.values.length
+
+    val transitionTable = new Array[Int](numStates * numActions)
+    var s = 0
+    while s < numStates do
+      if s == terminalState then
+        var a = 0
+        while a < numActions do
+          transitionTable(s * numActions + a) = terminalState
+          a += 1
+      else
+        val spot = syntheticSpot(input, s)
+        var a = 0
+        while a < numActions do
+          val semantics = actionSemantics(
+            input.actionSource.semanticsFor(spot, heroActions(a)),
+            heroActions(a)
+          )
+          val nextState = semantics.terminal match
+            case FormulationTerminalKind.HeroFold
+               | FormulationTerminalKind.RivalFold
+               | FormulationTerminalKind.Showdown =>
+              terminalState
+            case FormulationTerminalKind.Continue =>
+              if semantics.advancesStreet then math.min(s + 1, numStreets - 1) else s
+          transitionTable(s * numActions + a) = nextState
+          a += 1
+      s += 1
+
+    val obsLikelihood = new Array[Double](numStates * numActions * numObs)
+    val uniformObs = 1.0 / numObs
+    val terminalObsBase = terminalState * numActions * numObs
+    var t = 0
+    while t < numActions * numObs do
+      obsLikelihood(terminalObsBase + t) = uniformObs
+      t += 1
+
+    profileClass match
+      case Some(cls) =>
+        val profileIdx = cls.ordinal
+        val concentration = 0.7
+        val remainder = if numObs > 1 then (1.0 - concentration) / (numObs - 1) else 0.0
+        var i = 0
+        while i < numStreets * numActions do
+          var o = 0
+          while o < numObs do
+            obsLikelihood(i * numObs + o) = if o == profileIdx then concentration else remainder
+            o += 1
+          i += 1
+      case None =>
+        if input.spot.rivalBeliefs.nonEmpty then
+          val aggregate = aggregateRivalPosterior(input.spot.rivalBeliefs)
+          var i = 0
+          while i < numStreets * numActions do
+            var o = 0
+            while o < numObs do
+              obsLikelihood(i * numObs + o) = aggregate(o)
+              o += 1
+            i += 1
+        else
+          var i = 0
+          while i < numStreets * numActions * numObs do
+            obsLikelihood(i) = uniformObs
+            i += 1
+
+    val rewardTable = new Array[Double](numStates * numActions)
+    s = 0
+    while s < numStreets do
+      val spot = syntheticSpot(input, s)
+      val potFraction = spot.gameState.pot / math.max(spot.gameState.stackSize, 1.0)
+      val breakeven = spot.gameState.potOdds
+      val (rivalFoldProb, rivalRaiseProb) = profileClass match
+        case Some(cls) =>
+          val weights = normalizedPolicyWeights(
+            input.rivalPolicySource.actionPolicy(cls, spot),
+            numActions
+          )
+          var foldProb = 0.0
+          var raiseProb = 0.0
+          var i = 0
+          while i < numActions do
+            heroActions(i).category match
+              case PokerAction.Category.Fold => foldProb += weights(i)
+              case PokerAction.Category.Raise => raiseProb += weights(i)
+              case _ => ()
+            i += 1
+          (foldProb, raiseProb)
+        case None => (0.0, 0.0)
+
+      var a = 0
+      while a < numActions do
+        val baseReward = input.valueSource.estimateActionValue(spot, heroActions(a)) match
+          case BridgeResult.Exact(ev) => ev.value
+          case BridgeResult.Approximate(ev, _) => ev.value
+          case BridgeResult.Absent(_) => 0.0
+        rewardTable(s * numActions + a) = profileClass match
+          case Some(_) =>
+            heroActions(a) match
+              case PokerAction.Fold =>
+                baseReward
+              case PokerAction.Call | PokerAction.Check =>
+                baseReward - (rivalRaiseProb * breakeven * potFraction)
+              case _: PokerAction.Raise =>
+                baseReward + (rivalFoldProb * potFraction)
+          case None => baseReward
+        a += 1
+      s += 1
+
+    TabularGenerativeModel(
+      transitionTable,
+      obsLikelihood,
+      rewardTable,
+      numStates,
+      numActions,
+      numObs
+    )
+
+  /** Build open-loop model from the grounded formulation contract. */
+  def buildOpenLoopModel(
+      input: FormulationInput,
+      profileClass: Option[StrategicClass]
+  ): TabularGenerativeModel =
+    val attribModel = buildTabularModel(input, profileClass)
+    val numObs = attribModel.numObs
+    val uniformObs = Array.fill(
+      attribModel.numStates * attribModel.numActions * numObs
+    )(1.0 / numObs)
+    attribModel.copy(obsLikelihood = uniformObs)
+
+  /** Build blind-kernel model from the grounded formulation contract. */
+  def buildBlindKernelModel(input: FormulationInput): TabularGenerativeModel =
+    buildTabularModel(input, profileClass = None)
+
+  /** Build blind open-loop model from the grounded formulation contract. */
+  def buildBlindOpenLoopModel(input: FormulationInput): TabularGenerativeModel =
+    val blindModel = buildBlindKernelModel(input)
+    val numObs = blindModel.numObs
+    val uniformObs = Array.fill(
+      blindModel.numStates * blindModel.numActions * numObs
+    )(1.0 / numObs)
+    blindModel.copy(obsLikelihood = uniformObs)
+
+  /** Build design-kernel model from the grounded formulation contract. */
+  def buildDesignKernelModel(input: FormulationInput): TabularGenerativeModel =
+    val attribModel = buildTabularModel(input, profileClass = None)
+    val gs = input.spot.gameState
+    val heroActions = input.spot.candidateActions
+    val numStreets = 4
+    val numActions = attribModel.numActions
+    val designRewards = attribModel.rewardTable.clone()
+    val standardRaise = PokerAction.Raise(0.5 * gs.pot)
+
+    var s = 0
+    while s < numStreets do
+      val spot = syntheticSpot(input, s)
+      val standardReward = input.valueSource.estimateActionValue(spot, standardRaise) match
+        case BridgeResult.Exact(ev) => ev.value
+        case BridgeResult.Approximate(ev, _) => ev.value
+        case BridgeResult.Absent(_) => 0.0
+      var a = 0
+      while a < numActions do
+        heroActions(a) match
+          case _: PokerAction.Raise =>
+            designRewards(s * numActions + a) = standardReward
+          case _ => ()
+        a += 1
+      s += 1
+
+    attribModel.copy(rewardTable = designRewards)
+
+  private def syntheticSpot(input: FormulationInput, streetIdx: Int): FormulationSpot =
+    val targetStreet = Street.fromOrdinal(streetIdx)
+    val gs = input.spot.gameState
+    if targetStreet == gs.street then input.spot
+    else
+      val truncatedBoard = Board(gs.board.cards.take(targetStreet.expectedBoardSize))
+      input.spot.copy(gameState = gs.copy(street = targetStreet, board = truncatedBoard))
+
+  private def actionSemantics(
+      result: BridgeResult[FormulationActionSemantics],
+      action: PokerAction
+  ): FormulationActionSemantics =
+    result match
+      case BridgeResult.Exact(semantics) => semantics
+      case BridgeResult.Approximate(semantics, _) => semantics
+      case BridgeResult.Absent(_) =>
+        FormulationActionSemantics(
+          chipsCommitted = 0.0,
+          potDeltaChips = 0.0,
+          isAllIn = false,
+          terminal =
+            if action == PokerAction.Fold then FormulationTerminalKind.HeroFold
+            else FormulationTerminalKind.Continue,
+          advancesStreet = action != PokerAction.Fold
+        )
+
+  private def normalizedPolicyWeights(
+      result: BridgeResult[Vector[Double]],
+      numActions: Int
+  ): Vector[Double] =
+    val raw = result match
+      case BridgeResult.Exact(weights) => weights
+      case BridgeResult.Approximate(weights, _) => weights
+      case BridgeResult.Absent(_) => Vector.empty
+
+    val clipped = Array.fill(numActions)(0.0)
+    var i = 0
+    while i < math.min(numActions, raw.length) do
+      clipped(i) = math.max(0.0, raw(i))
+      i += 1
+
+    val total = clipped.sum
+    if total > 0.0 then clipped.map(_ / total).toVector
+    else Vector.fill(numActions)(1.0 / numActions.toDouble)

@@ -74,3 +74,38 @@ Notes:
 - For large tasks, chain multiple narrow delegate calls by module or concern instead of one oversized request.
 - Treat sidecar output as a second set of eyes. Do not let it replace local code reading, tests, or final judgment.
 - For trivial tasks like a single factual command or obvious one-line edit, delegated sidecars are optional.
+
+## Project Structure and Conventions
+
+This repository is a Scala 3.8.1 project using sbt as the build tool.
+
+- Source code: `src/main/scala/`
+- Test code: `src/test/scala/`
+- Scripts: `scripts/` (PowerShell scripts for various tasks)
+- Documentation: `docs/`
+- Generated data: `data/` (recreate as needed, not committed)
+- Build configuration: `build.sbt`
+
+Key build commands:
+- Compile: `sbt compile`
+- Test: `sbt test`
+- Run: `sbt run`
+
+Scala compiler options (from `build.sbt`):
+- `-deprecation`, `-feature`, `-unchecked`
+- `-Wunused:imports,privates,locals`
+- `-Werror` (warnings as errors)
+- `-new-syntax`, `-indent`
+
+Test framework: MUnit (`org.scalameta %% "munit" % "1.2.2" % Test)
+
+Native code: `src/main/native/` with C++ sources built via clang++. Tracked DLLs for performant computation (built via `sbt nativeBuild`):
+- CPU: `sicfun_native_cpu.dll`, `sicfun_cfr_native.dll`, `sicfun_bayes_native.dll`, `sicfun_ddre_native.dll`, `sicfun_postflop_native.dll`, `sicfun_pomcp_native.dll`
+- CUDA: `sicfun_bayes_cuda.dll`, `sicfun_cfr_cuda.dll`, `sicfun_ddre_cuda.dll`, `sicfun_postflop_cuda.dll`, `sicfun_gpu_kernel.dll`
+- OpenCL: `sicfun_opencl_kernel.dll`
+
+Resource generation: sbt tasks like `generateHeadsUpTable` for equity tables.
+
+For web UI development, see `docs/site-preview-hybrid/` and scripts in `scripts/packaged-hand-history-web/`.
+
+Reference `build.sbt` for detailed settings and tasks.

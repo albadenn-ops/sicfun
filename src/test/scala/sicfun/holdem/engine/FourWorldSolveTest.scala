@@ -2,6 +2,7 @@ package sicfun.holdem.engine
 
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.types.*
+import sicfun.holdem.strategic.formulation.*
 
 class FourWorldSolveTest extends munit.FunSuite:
 
@@ -18,10 +19,26 @@ class FourWorldSolveTest extends munit.FunSuite:
   private val heroBucket = 5
   private val actionPriors = StrategicEngine.defaultActionPriors
 
-  test("buildFourWorldModels builds four distinct models"):
-    val models = StrategicEngine.buildFourWorldModels(
-      gameState, Map.empty, heroActions, heroBucket, actionPriors
+  private def buildTestFormulationInput(
+      gs: GameState = gameState,
+      actions: Vector[PokerAction] = heroActions,
+      bucket: Int = heroBucket,
+      priors: Map[(StrategicClass, PokerAction.Category), Double] = actionPriors
+  ): FormulationInput =
+    val rivalPriors = LegacyRivalPriors(
+      pftActionPriors = priors,
+      pomcpClassPriors = PokerPomcpFormulation.defaultClassPriors
     )
+    LegacyToyFormulationInput.from(
+      gameState = gs,
+      candidateActions = actions,
+      rivalBeliefs = Map.empty,
+      heroBucket = bucket,
+      rivalPriors = rivalPriors
+    )
+
+  test("buildFourWorldModels builds four distinct models"):
+    val models = StrategicEngine.buildFourWorldModels(buildTestFormulationInput())
     assertEquals(models.size, 4)
     // Open-loop model has uniform obs
     val numObs = StrategicClass.values.length
@@ -87,9 +104,7 @@ class FourWorldSolveTest extends munit.FunSuite:
     assert(fw.deltaSigStar >= Ev.Zero, s"deltaSigStar=${fw.deltaSigStar} should be >= 0")
 
   test("buildFourWorldModels: blindOpenLoop has baseline rewards AND uniform obs"):
-    val models = StrategicEngine.buildFourWorldModels(
-      gameState, Map.empty, heroActions, heroBucket, actionPriors
-    )
+    val models = StrategicEngine.buildFourWorldModels(buildTestFormulationInput())
     val numObs = StrategicClass.values.length
     val uniformP = 1.0 / numObs
     // Uniform obs (like openLoop)

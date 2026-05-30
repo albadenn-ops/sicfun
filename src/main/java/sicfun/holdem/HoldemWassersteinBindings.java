@@ -4,7 +4,10 @@ package sicfun.holdem;
  * JNI bindings for Wasserstein-1 (earth mover's) distance computation.
  *
  * <p>The native implementation uses a vendored network simplex solver
- * (nbonneel/network_simplex, MIT license). When the native DLL
+ * (nbonneel/network_simplex, EGRES in-source permissive grant; the
+ * upstream repo has no LICENSE file -- see
+ * src/main/native/vendor/VENDOR.md for the actual notice and
+ * provenance). When the native DLL
  * ({@code sicfun_wasserstein_native}) is absent, callers should detect this
  * via {@link sicfun.holdem.strategic.solver.WassersteinDroRuntime#isAvailable()}
  * and fall back to the pure-Scala EMD implementation.

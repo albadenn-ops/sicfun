@@ -90,13 +90,13 @@ private[holdem] object HoldemPostflopNativeRuntime:
 
   private val cpuLoadResultRef = new AtomicReference[Either[String, String]](null)
   private val gpuLoadResultRef = new AtomicReference[Either[String, String]](null)
-  private val appliedPostflopTuneFingerprintRef = new AtomicReference[String](null)
+  private val cachedPostflopTuneOverridesRef = new AtomicReference[CachedPostflopTuneOverrides](null)
   private val runtimeConfigRef = new AtomicReference[RuntimeConfig](null)
 
   private[holdem] def resetLoadCacheForTests(): Unit =
     cpuLoadResultRef.set(null)
     gpuLoadResultRef.set(null)
-    appliedPostflopTuneFingerprintRef.set(null)
+    cachedPostflopTuneOverridesRef.set(null)
     runtimeConfigRef.set(null)
 
   def isAvailable: Boolean =
@@ -181,9 +181,6 @@ private[holdem] object HoldemPostflopNativeRuntime:
               seeds(i) = HeadsUpEquityTable.monteCarloSeed(seedBase, keyMaterial)
               i += 1
 
-            if resolved.backend == Backend.Gpu then
-              maybeApplyCachedPostflopAutoTune(deviceIndex = 0)
-
             val requestedWork = n.toLong * trials.toLong
             val executionBackend =
               if resolved.backend == Backend.Gpu &&
@@ -219,20 +216,22 @@ private[holdem] object HoldemPostflopNativeRuntime:
                     stderrs
                   )
                 case Backend.Gpu =>
-                  HoldemPostflopNativeGpuBindings.computePostflopBatchMonteCarlo(
-                    heroFirst,
-                    heroSecond,
-                    boardCards,
-                    boardCards.length,
-                    villainFirst,
-                    villainSecond,
-                    trials,
-                    seeds,
-                    wins,
-                    ties,
-                    losses,
-                    stderrs
-                  )
+                  GpuRuntimeSupport.withTemporarySystemProperties(postflopAutoTuneOverrides(deviceIndex = 0)) {
+                    HoldemPostflopNativeGpuBindings.computePostflopBatchMonteCarlo(
+                      heroFirst,
+                      heroSecond,
+                      boardCards,
+                      boardCards.length,
+                      villainFirst,
+                      villainSecond,
+                      trials,
+                      seeds,
+                      wins,
+                      ties,
+                      losses,
+                      stderrs
+                    )
+                  }
 
             if status != 0 then
               executionBackend match
@@ -372,41 +371,53 @@ private[holdem] object HoldemPostflopNativeRuntime:
   private def configuredAutoMinGpuWork: Long =
     runtimeConfig().autoMinGpuWork
 
-  /** Loads and applies cached auto-tune parameters (blockSize, maxChunkMatchups)
-    * from a device-fingerprinted properties file. Guards against redundant re-application
-    * via a fingerprint-based idempotency check.
+  /** Loads cached auto-tune parameters (blockSize, maxChunkMatchups) and
+    * returns them as per-call system-property overrides for the GPU JNI path.
     */
-  private def maybeApplyCachedPostflopAutoTune(deviceIndex: Int): Unit =
-    if !postflopAutoTuneEnabled then ()
-    else if hasExplicitPostflopCudaConfig then ()
+  private def postflopAutoTuneOverrides(deviceIndex: Int): Vector[(String, Option[String])] =
+    if !postflopAutoTuneEnabled then
+      Vector.empty
+    else if hasExplicitPostflopCudaConfig then
+      Vector.empty
     else
       val deviceCount = safeCudaDeviceCount()
-      if deviceCount <= 0 then ()
+      if deviceCount <= 0 then Vector.empty
       else
         val boundedDeviceIndex = math.max(0, math.min(deviceIndex, deviceCount - 1))
         val cacheFile = resolvedPostflopAutoTuneCacheFile
         val cacheMtime = if cacheFile.isFile then cacheFile.lastModified() else 0L
         val fingerprint = safeCudaDeviceFingerprint(boundedDeviceIndex)
-        if fingerprint.isEmpty then ()
+        if fingerprint.isEmpty then Vector.empty
         else
           val appliedKey =
             s"$boundedDeviceIndex|$fingerprint|${cacheFile.getAbsolutePath}|$cacheMtime|$configuredGpuLibraryIdentity"
-          if appliedPostflopTuneFingerprintRef.get() == appliedKey then ()
+          val cached = cachedPostflopTuneOverridesRef.get()
+          if cached != null && cached.key == appliedKey then cached.updates
           else
             loadPostflopAutoTuneDecision(cacheFile, boundedDeviceIndex, fingerprint) match
               case Some(decision) =>
-                sys.props.update(PostflopCudaBlockSizeProperty, decision.blockSize.toString)
-                sys.props.update(PostflopCudaMaxChunkMatchupsProperty, decision.maxChunkMatchups.toString)
-                appliedPostflopTuneFingerprintRef.set(appliedKey)
+                val updates = Vector(
+                  PostflopCudaBlockSizeProperty -> Some(decision.blockSize.toString),
+                  PostflopCudaMaxChunkMatchupsProperty -> Some(decision.maxChunkMatchups.toString)
+                )
+                cachedPostflopTuneOverridesRef.set(CachedPostflopTuneOverrides(appliedKey, updates))
                 GpuRuntimeSupport.log(
                   s"postflop-autotune: applied cached config for device=$boundedDeviceIndex " +
                     s"(block=${decision.blockSize}, chunkMatchups=${decision.maxChunkMatchups})"
                 )
-              case None => ()
+                updates
+              case None =>
+                cachedPostflopTuneOverridesRef.set(CachedPostflopTuneOverrides(appliedKey, Vector.empty))
+                Vector.empty
 
   private final case class PostflopAutoTuneDecision(
       blockSize: Int,
       maxChunkMatchups: Int
+  )
+
+  private final case class CachedPostflopTuneOverrides(
+      key: String,
+      updates: Vector[(String, Option[String])]
   )
 
   private def loadPostflopAutoTuneDecision(
@@ -457,7 +468,13 @@ private[holdem] object HoldemPostflopNativeRuntime:
                   idx += 1
                 None
     catch
-      case _: Throwable => None
+      case ex: Throwable =>
+        GpuRuntimeSupport.noteSwallowedException(
+          site = "HoldemPostflopNativeRuntime.loadPostflopAutoTuneDecision",
+          ex = ex,
+          fallback = "autoTuneDecision=None"
+        )
+        None
 
   private def resolvedPostflopAutoTuneCacheFile: File =
     runtimeConfig().resolvedPostflopAutoTuneCacheFile
@@ -508,12 +525,24 @@ private[holdem] object HoldemPostflopNativeRuntime:
   private def safeCudaDeviceCount(): Int =
     try HoldemPostflopNativeGpuBindings.cudaDeviceCount()
     catch
-      case _: Throwable => 0
+      case ex: Throwable =>
+        GpuRuntimeSupport.noteSwallowedException(
+          site = "HoldemPostflopNativeRuntime.safeCudaDeviceCount",
+          ex = ex,
+          fallback = "cudaDeviceCount=0"
+        )
+        0
 
   private def safeCudaDeviceFingerprint(deviceIndex: Int): String =
     try Option(HoldemPostflopNativeGpuBindings.cudaDeviceInfo(deviceIndex)).map(_.trim).getOrElse("")
     catch
-      case _: Throwable => ""
+      case ex: Throwable =>
+        GpuRuntimeSupport.noteSwallowedException(
+          site = "HoldemPostflopNativeRuntime.safeCudaDeviceFingerprint",
+          ex = ex,
+          fallback = "cudaDeviceFingerprint=''"
+        )
+        ""
 
   private def configuredGpuLibraryIdentity: String =
     GpuRuntimeSupport.resolveNonEmpty(GpuPathProperty, GpuPathEnv) match

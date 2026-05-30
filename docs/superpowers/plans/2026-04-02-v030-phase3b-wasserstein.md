@@ -41,8 +41,8 @@ V^{*,Γ,ρ}_Π(b̃) is convex in b̃ for fixed ρ. This is validated by a proper
 
 ```
 src/main/native/vendor/
-├── network_simplex_simple.h       VENDOR: nbonneel (MIT), network simplex EMD solver
-└── full_bipartitegraph.h          VENDOR: nbonneel (MIT), complete bipartite graph
+├── network_simplex_simple.h       VENDOR: nbonneel (EGRES in-source grant¹), network simplex EMD solver
+└── full_bipartitegraph.h          VENDOR: nbonneel (EGRES in-source grant¹), complete bipartite graph
 
 src/main/native/jni/
 ├── WassersteinEmd.hpp             C++ EMD engine (header-only, uses vendor headers)
@@ -69,8 +69,10 @@ src/main/native/build-windows-llvm.ps1  MODIFY: add wasserstein DLL build step
 
 | Dependency | Type | License | Source | Notes |
 |---|---|---|---|---|
-| nbonneel/network_simplex_simple.h | Vendored header | MIT | https://github.com/nbonneel/network_simplex | Single-header network simplex for optimal transport |
-| nbonneel/full_bipartitegraph.h | Vendored header | MIT | https://github.com/nbonneel/network_simplex | Complete bipartite graph structure used by solver |
+| nbonneel/network_simplex_simple.h | Vendored header | EGRES in-source grant¹ | https://github.com/nbonneel/network_simplex | Single-header network simplex for optimal transport |
+| nbonneel/full_bipartitegraph.h | Vendored header | EGRES in-source grant¹ | https://github.com/nbonneel/network_simplex | Complete bipartite graph structure used by solver |
+
+¹ License correction (2026-05-01): originally documented as "MIT" in this plan file; verified at vendor time and reclassified. The upstream repository carries no LICENSE file; what each header carries is an EGRES (Egervary Research Group on Combinatorial Optimization) in-source permissive grant requiring the copyright notice to be preserved in all copies. See `src/main/native/vendor/VENDOR.md` for the verbatim notice text, fetch metadata (commit SHA, date, blob/SHA-256 hashes), and SICFUN-side compliance requirements.
 | GLPK-java 1.12.0 | Maven dependency | GPL-3.0 | `org.gnu.glpk:glpk-java:1.12.0` | LP solver for DRO inner minimization |
 
 **GLPK native library requirement:** GLPK-java is a JNI wrapper around the native GLPK C library. The native `glpk_4_65.dll` (or equivalent) must be on the system PATH or `java.library.path`. On Windows, install via MSYS2 (`pacman -S mingw-w64-x86_64-glpk`) or download prebuilt binaries from https://winglpk.sourceforge.net/.
@@ -90,11 +92,13 @@ src/main/native/build-windows-llvm.ps1  MODIFY: add wasserstein DLL build step
 - [ ] **0.3** Download `full_bipartitegraph.h` from the same repository:
   - File: `full_bipartitegraph.h` (complete bipartite graph for EMD)
   - Place at: `src/main/native/vendor/full_bipartitegraph.h`
-- [ ] **0.4** Add MIT license header comment at top of each vendored file noting provenance:
+- [ ] **0.4** Preserve the EGRES copyright notice already present at the top of each vendored file (do NOT modify it). At vendor time, also drop a sibling `VENDOR.md` with provenance, fetch metadata, and the resolved license situation. The plan-time assumption that a "MIT license header comment" should be added was wrong — see footnote ¹ on the External Dependencies table; the upstream repo has no LICENSE file and the in-source grant is EGRES, not MIT. Example `VENDOR.md` skeleton:
   ```
-  // Vendored from: https://github.com/nbonneel/network_simplex
-  // License: MIT (see LICENSE in source repository)
-  // Vendored on: 2026-04-02
+  Vendored from: https://github.com/nbonneel/network_simplex
+  Upstream commit: <commit-sha at fetch>
+  License: EGRES in-source permissive grant (see header copyright notice; no LICENSE file in upstream repo)
+  Vendored on: <date>
+  Blob SHAs / SHA-256 of each file: <hashes>
   ```
 - [ ] **0.5** Verify both headers compile standalone with clang++ -std=c++17:
   ```powershell
@@ -230,7 +234,7 @@ We cannot unit-test C++ in isolation within this project's build, so the C++ is 
 
   /**
    * JNI bindings for Wasserstein-1 (earth mover's) distance computation.
-   * Native implementation uses vendored network simplex solver (nbonneel, MIT).
+   * Native implementation uses vendored network simplex solver (nbonneel; EGRES in-source grant — see VENDOR.md).
    * Compiled into: sicfun_wasserstein_native.dll
    */
   public final class HoldemWassersteinBindings {
@@ -653,7 +657,7 @@ We cannot unit-test C++ in isolation within this project's build, so the C++ is 
 - [ ] `WassersteinDroRuntimeTest` passes all 23+ test cases
 - [ ] Native DLL builds via `build-windows-llvm.ps1` without errors
 - [ ] GLPK-java resolves from Maven Central
-- [ ] Vendored headers have MIT license annotations
+- [ ] Vendored headers preserve the EGRES copyright notice; sibling `VENDOR.md` records source URL, upstream commit SHA, fetch date, blob/SHA-256 hashes, and the license situation
 - [ ] `WassersteinDroRuntime` lives in `sicfun.holdem.strategic.solver` (correct namespace)
 - [ ] `HoldemWassersteinBindings.java` lives in `sicfun.holdem` (JNI namespace constraint)
 - [ ] No imports from `sicfun.holdem.engine` or `sicfun.holdem.runtime` in any new file
@@ -666,7 +670,7 @@ We cannot unit-test C++ in isolation within this project's build, so the C++ is 
 | Risk | Mitigation |
 |---|---|
 | GLPK native DLL not found at runtime | Detect via `isGlpkAvailable`, skip LP tests with `assume`, document install steps |
-| nbonneel headers use C++14 features incompatible with our C++17 build | Verified at Task 0.5; if issues arise, patch vendored headers (MIT license allows) |
+| nbonneel headers use C++14 features incompatible with our C++17 build | Verified at Task 0.5; if issues arise, patch vendored headers (EGRES grant permits modification provided the copyright notice is preserved) |
 | Network simplex numeric instability on near-degenerate distributions | Rescale weights to integer supplies (1e9 factor); add epsilon-perturbation for zero-weight states |
 | GLPK GPL-3.0 license concern | Alternative noted in master plan: HiGHS via highs4j (Apache 2.0). Switch is localized to the LP construction in `solveDroLp` |
 | Large state spaces make n^2 LP variables expensive | Phase 3b scope is limited to small belief dimensions (n <= ~50 augmented states); production use in Phase 4 may require state abstraction |

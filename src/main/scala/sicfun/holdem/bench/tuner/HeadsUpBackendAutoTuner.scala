@@ -28,6 +28,8 @@ import java.util.Properties
   *   - Invalidated when the workload signature changes (e.g. different native library version)
   */
 object HeadsUpBackendAutoTuner:
+  private val ManagedOverrideScope = "heads-up-backend-autotune"
+
   private final case class CudaConfig(
       blockSize: Int,
       maxChunkMatchups: Int
@@ -128,6 +130,7 @@ object HeadsUpBackendAutoTuner:
       backend: HeadsUpEquityTable.ComputeBackend,
       forceRetune: Boolean = false
   ): Unit =
+    clearManagedEngineSettings()
     if backend != HeadsUpEquityTable.ComputeBackend.Gpu then
       ()
     else
@@ -164,6 +167,7 @@ object HeadsUpBackendAutoTuner:
       maxMatchups: Long,
       forceRetune: Boolean = false
   ): Unit =
+    clearManagedEngineSettings()
     mode match
       case HeadsUpEquityTable.Mode.Exact =>
         runAutoTuneExact(
@@ -190,12 +194,15 @@ object HeadsUpBackendAutoTuner:
       forceRetune: Boolean
   ): Unit =
     if !autoTuneEnabled then
+      clearManagedEngineSettings()
       GpuRuntimeSupport.log("gpu-autotune: disabled via sicfun.gpu.autotune/sicfun_GPU_AUTOTUNE")
     else if hasExplicitNativeRuntimeConfig then
+      clearManagedEngineSettings()
       GpuRuntimeSupport.log("gpu-autotune: skipped (native engine/block/chunk explicitly configured)")
     else
       val availability = HeadsUpGpuRuntime.availability
       if !availability.available then
+        clearManagedEngineSettings()
         GpuRuntimeSupport.log(s"gpu-autotune: skipped (provider unavailable: ${availability.detail})")
       else
         val batch = loadTuneBatch(
@@ -205,6 +212,7 @@ object HeadsUpBackendAutoTuner:
           maxEntries = TuneMaxEntries
         )
         if batch.size <= 0 then
+          clearManagedEngineSettings()
           GpuRuntimeSupport.log("gpu-autotune: skipped (empty tune batch)")
         else
           val tuneTrials = clamp(mode.trials, TuneMinTrials, TuneMaxTrials)
@@ -219,6 +227,7 @@ object HeadsUpBackendAutoTuner:
             case Some((decision, fromCache)) =>
               printDecision(decision, fromCache = fromCache, tuneTrials = tuneTrials, tuneEntries = batch.size)
             case None =>
+              clearManagedEngineSettings()
               GpuRuntimeSupport.log("gpu-autotune: no successful candidates, leaving runtime defaults unchanged")
 
   private def runAutoTuneExact(
@@ -227,12 +236,15 @@ object HeadsUpBackendAutoTuner:
       forceRetune: Boolean
   ): Unit =
     if !autoTuneEnabled then
+      clearManagedEngineSettings()
       GpuRuntimeSupport.log("gpu-autotune: disabled via sicfun.gpu.autotune/sicfun_GPU_AUTOTUNE")
     else if hasExplicitNativeRuntimeConfig then
+      clearManagedEngineSettings()
       GpuRuntimeSupport.log("gpu-autotune: skipped (native engine/block/chunk explicitly configured)")
     else
       val availability = HeadsUpGpuRuntime.availability
       if !availability.available then
+        clearManagedEngineSettings()
         GpuRuntimeSupport.log(s"gpu-autotune: skipped (provider unavailable: ${availability.detail})")
       else
         val batch = loadTuneBatch(
@@ -242,6 +254,7 @@ object HeadsUpBackendAutoTuner:
           maxEntries = ExactTuneMaxEntries
         )
         if batch.size <= 0 then
+          clearManagedEngineSettings()
           GpuRuntimeSupport.log("gpu-autotune: skipped (empty tune batch)")
         else
           val workload = TuneWorkload(
@@ -263,6 +276,7 @@ object HeadsUpBackendAutoTuner:
                   s"chunk=${showOpt(decision.maxChunkMatchups)} (entries=${batch.size}, ${decision.detail})"
               )
             case None =>
+              clearManagedEngineSettings()
               GpuRuntimeSupport.log("gpu-autotune: exact mode no successful candidates, leaving runtime defaults unchanged")
 
   private def monteCarloCandidates(
@@ -300,23 +314,24 @@ object HeadsUpBackendAutoTuner:
       workload: TuneWorkload,
       forceRetune: Boolean
   ): Option[(Decision, Boolean)] =
+    clearManagedEngineSettings()
     val cacheFile = resolvedCacheFile
     if forceRetune then
       benchmarkCandidates(batch, workload).minByOption(_.seconds).map { winner =>
         val decision = decisionForResult(winner)
-        applyDecision(decision)
+        rememberDecision(decision)
         saveDecisionToCache(cacheFile, workload.signature, decision)
         (decision, false)
       }
     else
       loadDecisionFromCache(cacheFile, workload.signature) match
         case Some(cached) =>
-          applyDecision(cached)
+          rememberDecision(cached)
           Some((cached, true))
         case None =>
           benchmarkCandidates(batch, workload).minByOption(_.seconds).map { winner =>
             val decision = decisionForResult(winner)
-            applyDecision(decision)
+            rememberDecision(decision)
             saveDecisionToCache(cacheFile, workload.signature, decision)
             (decision, false)
           }
@@ -351,27 +366,30 @@ object HeadsUpBackendAutoTuner:
       blockSize: Option[Int],
       maxChunkMatchups: Option[Int]
   ): Option[CandidateResult] =
-    applyEngineSettings(engine, blockSize, maxChunkMatchups)
-    HandEvaluator.clearCaches()
-    val started = System.nanoTime()
-    HeadsUpGpuRuntime.computeBatch(batch.packedKeys, batch.keyMaterial, mode, TuneSeedBase) match
-      case Left(reason) =>
-        GpuRuntimeSupport.log(s"gpu-autotune: candidate engine=$engine block=${showOpt(blockSize)} chunk=${showOpt(maxChunkMatchups)} failed ($reason)")
-        None
-      case Right(_) =>
-        val elapsed = (System.nanoTime() - started).toDouble / 1_000_000_000.0
-        GpuRuntimeSupport.log(
-          f"gpu-autotune: candidate engine=$engine block=${showOpt(blockSize)} chunk=${showOpt(maxChunkMatchups)} elapsed=${elapsed}%.3fs"
-        )
-        Some(
-          CandidateResult(
-            engine = engine,
-            blockSize = blockSize,
-            maxChunkMatchups = maxChunkMatchups,
-            seconds = elapsed,
-            detail = f"elapsed=${elapsed}%.3fs"
-          )
-        )
+    GpuRuntimeSupport.withManagedSystemPropertyOverridesSuspended {
+      GpuRuntimeSupport.withTemporarySystemProperties(engineSettingsOverrides(engine, blockSize, maxChunkMatchups)) {
+        HandEvaluator.clearCaches()
+        val started = System.nanoTime()
+        HeadsUpGpuRuntime.computeBatch(batch.packedKeys, batch.keyMaterial, mode, TuneSeedBase) match
+          case Left(reason) =>
+            GpuRuntimeSupport.log(s"gpu-autotune: candidate engine=$engine block=${showOpt(blockSize)} chunk=${showOpt(maxChunkMatchups)} failed ($reason)")
+            None
+          case Right(_) =>
+            val elapsed = (System.nanoTime() - started).toDouble / 1_000_000_000.0
+            GpuRuntimeSupport.log(
+              f"gpu-autotune: candidate engine=$engine block=${showOpt(blockSize)} chunk=${showOpt(maxChunkMatchups)} elapsed=${elapsed}%.3fs"
+            )
+            Some(
+              CandidateResult(
+                engine = engine,
+                blockSize = blockSize,
+                maxChunkMatchups = maxChunkMatchups,
+                seconds = elapsed,
+                detail = f"elapsed=${elapsed}%.3fs"
+              )
+            )
+      }
+    }
 
   private def loadTuneBatch(
       tableKind: String,
@@ -397,21 +415,25 @@ object HeadsUpBackendAutoTuner:
     val bounded = math.min(cap, maxEntries.toLong)
     math.max(1L, math.min(cap, math.max(minEntries.toLong, bounded)))
 
-  private def applyDecision(decision: Decision): Unit =
-    applyEngineSettings(decision.engine, decision.blockSize, decision.maxChunkMatchups)
+  private def rememberDecision(decision: Decision): Unit =
+    GpuRuntimeSupport.replaceManagedSystemPropertyOverrides(
+      ManagedOverrideScope,
+      engineSettingsOverrides(decision.engine, decision.blockSize, decision.maxChunkMatchups)
+    )
 
-  private def applyEngineSettings(
+  private def clearManagedEngineSettings(): Unit =
+    GpuRuntimeSupport.clearManagedSystemPropertyOverrides(ManagedOverrideScope)
+
+  private def engineSettingsOverrides(
       engine: String,
       blockSize: Option[Int],
       maxChunkMatchups: Option[Int]
-  ): Unit =
-    sys.props.update(NativeEngineProperty, engine)
-    blockSize match
-      case Some(v) => sys.props.update(NativeCudaBlockSizeProperty, v.toString)
-      case None => sys.props.remove(NativeCudaBlockSizeProperty)
-    maxChunkMatchups match
-      case Some(v) => sys.props.update(NativeCudaMaxChunkProperty, v.toString)
-      case None => sys.props.remove(NativeCudaMaxChunkProperty)
+  ): Vector[(String, Option[String])] =
+    Vector(
+      NativeEngineProperty -> Some(engine),
+      NativeCudaBlockSizeProperty -> blockSize.map(_.toString),
+      NativeCudaMaxChunkProperty -> maxChunkMatchups.map(_.toString)
+    )
 
   private def printDecision(
       decision: Decision,
@@ -582,6 +604,7 @@ object HeadsUpBackendAutoTuner:
       maxMatchups: Long,
       forceRetune: Boolean = false
   ): Unit =
+    clearManagedEngineSettings()
     mode match
       case HeadsUpEquityTable.Mode.Exact =>
         GpuRuntimeSupport.log("hybrid-autotune: skipped (exact mode)")

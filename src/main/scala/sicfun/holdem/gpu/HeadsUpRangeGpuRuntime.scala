@@ -56,7 +56,7 @@ object HeadsUpRangeGpuRuntime:
   private val DefaultNativeLibrary = "sicfun_gpu_kernel"
   private val RangeAutoTuneCacheVersion = "1"
   private val DefaultRangeAutoTuneCachePath = "data/headsup-range-autotune.properties"
-  private val appliedRangeTuneFingerprintRef = new AtomicReference[String](null)
+  private val cachedRangeTuneOverridesRef = new AtomicReference[CachedRangeTuneOverrides](null)
 
   /** Computes probability-weighted Monte Carlo equity for each hero hand
     * against its villain range, using the CSR layout.
@@ -114,12 +114,11 @@ object HeadsUpRangeGpuRuntime:
             else
               Left(s"native provider unavailable: ${availability.detail}")
           else
-            maybeApplyCachedRangeAutoTune(deviceIndex = 0)
             val wins = new Array[Float](heroIds.length)
             val ties = new Array[Float](heroIds.length)
             val losses = new Array[Float](heroIds.length)
             val stderrs = new Array[Float](heroIds.length)
-            val status =
+            val status = GpuRuntimeSupport.withTemporarySystemProperties(rangeAutoTuneOverrides(deviceIndex = 0)) {
               HeadsUpGpuNativeBindings.computeRangeBatchMonteCarloCsr(
                 heroIds,
                 offsets,
@@ -133,6 +132,7 @@ object HeadsUpRangeGpuRuntime:
                 losses,
                 stderrs
               )
+            }
             if status != 0 then
               if HeadsUpGpuRuntime.allowCpuFallbackOnGpuFailure then
                 Right(
@@ -193,12 +193,11 @@ object HeadsUpRangeGpuRuntime:
       if !availability.available || availability.provider != "native" then
         Left(s"native provider unavailable: ${availability.detail}")
       else
-        maybeApplyCachedRangeAutoTune(deviceIndex = deviceIndex)
         val wins = new Array[Float](heroIds.length)
         val ties = new Array[Float](heroIds.length)
         val losses = new Array[Float](heroIds.length)
         val stderrs = new Array[Float](heroIds.length)
-        val status =
+        val status = GpuRuntimeSupport.withTemporarySystemProperties(rangeAutoTuneOverrides(deviceIndex)) {
           HeadsUpGpuNativeBindings.computeRangeBatchMonteCarloCsrOnDevice(
             deviceIndex,
             heroIds,
@@ -213,6 +212,7 @@ object HeadsUpRangeGpuRuntime:
             losses,
             stderrs
           )
+        }
         if status != 0 then Left(describeNativeStatus(status))
         else Right(fromNativeArrays(wins, ties, losses, stderrs))
     catch
@@ -226,7 +226,7 @@ object HeadsUpRangeGpuRuntime:
     GpuRuntimeSupport.resolveNonEmptyLower(ProviderProperty, ProviderEnv).getOrElse("native")
 
   /** Loads cached auto-tune parameters (blockSize, maxChunkHeroes, memoryPath) from
-    * a properties file and applies them as system properties. The cache is keyed by
+    * a properties file and returns them as per-call system-property overrides. The cache is keyed by
     * CUDA device fingerprint and native library identity, so different GPUs or DLL
     * versions automatically get their own tuning profiles.
     *
@@ -234,41 +234,54 @@ object HeadsUpRangeGpuRuntime:
     *  - Auto-tuning is disabled via config
     *  - The user has explicit CUDA config properties set (manual override wins)
     *  - No CUDA devices are available
-    *  - The same fingerprint was already applied (idempotency guard)
+    *  - The same fingerprint was already resolved (cached decision reuse)
     */
-  private def maybeApplyCachedRangeAutoTune(deviceIndex: Int): Unit =
-    if !rangeAutoTuneEnabled then ()
-    else if hasExplicitRangeNativeConfig then ()
+  private def rangeAutoTuneOverrides(deviceIndex: Int): Vector[(String, Option[String])] =
+    if !rangeAutoTuneEnabled then
+      Vector.empty
+    else if hasExplicitRangeNativeConfig then
+      Vector.empty
     else
       val deviceCount = safeCudaDeviceCount()
-      if deviceCount <= 0 then ()
+      if deviceCount <= 0 then Vector.empty
       else
         val boundedDeviceIndex = math.max(0, math.min(deviceIndex, deviceCount - 1))
         val cacheFile = resolvedRangeAutoTuneCacheFile
         val cacheMtime = if cacheFile.isFile then cacheFile.lastModified() else 0L
         val fingerprint = safeCudaDeviceFingerprint(boundedDeviceIndex)
-        if fingerprint.isEmpty then ()
+        if fingerprint.isEmpty then Vector.empty
         else
           val appliedKey =
             s"$boundedDeviceIndex|$fingerprint|${cacheFile.getAbsolutePath}|$cacheMtime|$configuredNativeLibraryIdentity"
-          if appliedRangeTuneFingerprintRef.get() == appliedKey then ()
+          val cached = cachedRangeTuneOverridesRef.get()
+          if cached != null && cached.key == appliedKey then cached.updates
           else
             loadRangeAutoTuneDecision(cacheFile, boundedDeviceIndex, fingerprint) match
               case Some(decision) =>
-                sys.props.update(RangeNativeBlockSizeProperty, decision.blockSize.toString)
-                sys.props.update(RangeNativeMaxChunkHeroesProperty, decision.maxChunkHeroes.toString)
-                sys.props.update(RangeNativeMemoryPathProperty, decision.memoryPath)
-                appliedRangeTuneFingerprintRef.set(appliedKey)
+                val updates = Vector(
+                  RangeNativeBlockSizeProperty -> Some(decision.blockSize.toString),
+                  RangeNativeMaxChunkHeroesProperty -> Some(decision.maxChunkHeroes.toString),
+                  RangeNativeMemoryPathProperty -> Some(decision.memoryPath)
+                )
+                cachedRangeTuneOverridesRef.set(CachedRangeTuneOverrides(appliedKey, updates))
                 GpuRuntimeSupport.log(
                   s"range-autotune: applied cached config for device=$boundedDeviceIndex " +
                     s"(block=${decision.blockSize}, chunkHeroes=${decision.maxChunkHeroes}, memoryPath=${decision.memoryPath})"
                 )
-              case None => ()
+                updates
+              case None =>
+                cachedRangeTuneOverridesRef.set(CachedRangeTuneOverrides(appliedKey, Vector.empty))
+                Vector.empty
 
   private final case class RangeAutoTuneDecision(
       blockSize: Int,
       maxChunkHeroes: Int,
       memoryPath: String
+  )
+
+  private final case class CachedRangeTuneOverrides(
+      key: String,
+      updates: Vector[(String, Option[String])]
   )
 
   /** Reads a range auto-tune properties file and searches for a matching
@@ -348,12 +361,24 @@ object HeadsUpRangeGpuRuntime:
   private def safeCudaDeviceCount(): Int =
     try HeadsUpGpuNativeBindings.cudaDeviceCount()
     catch
-      case _: Throwable => 0
+      case ex: Throwable =>
+        GpuRuntimeSupport.noteSwallowedException(
+          site = "HeadsUpRangeGpuRuntime.safeCudaDeviceCount",
+          ex = ex,
+          fallback = "cudaDeviceCount=0"
+        )
+        0
 
   private def safeCudaDeviceFingerprint(deviceIndex: Int): String =
     try Option(HeadsUpGpuNativeBindings.cudaDeviceInfo(deviceIndex)).map(_.trim).getOrElse("")
     catch
-      case _: Throwable => ""
+      case ex: Throwable =>
+        GpuRuntimeSupport.noteSwallowedException(
+          site = "HeadsUpRangeGpuRuntime.safeCudaDeviceFingerprint",
+          ex = ex,
+          fallback = "cudaDeviceFingerprint=''"
+        )
+        ""
 
   private def configuredNativeLibraryIdentity: String =
     GpuRuntimeSupport.resolveNonEmpty(NativePathProperty, NativePathEnv) match

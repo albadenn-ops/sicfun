@@ -27,7 +27,9 @@ The most usable surface today is the local hand-history review web UI; the rest 
 - Experimental: DDRE. The current DDRE stack is plumbing and scaffolding, not a validated poker model release.
 - Not implemented: real-table integration and action execution against a live poker client.
 
-## DDRE Reality Check
+## DDRE (Deprecated/Defferred) and related artifacts are still present in the repository for historical reference and to preserve the work done.
+
+**DDRE is deprecated and no longer actively developed.** It remains in the codebase for historical reference but is excluded from production builds and should not be used.
 
 - `synthetic` DDRE is a heuristic scaffold used to exercise blending, fallback, and provider routing.
 - Native DDRE CPU/GPU currently execute the same synthetic inference core through JNI; they do not run a trained diffusion model.

@@ -9,7 +9,6 @@ import sicfun.holdem.strategic.safety.*
 import sicfun.holdem.strategic.exploitation.*
 import sicfun.holdem.strategic.solver.WPomcpRuntime
 
-@scala.annotation.nowarn("msg=deprecated")
 class StrategicEngineTest extends FunSuite:
 
   private def card(token: String): Card =
@@ -134,23 +133,23 @@ class StrategicEngineTest extends FunSuite:
       engine.startHand()
     }
 
-  test("decide falls back gracefully when native solver unavailable"):
+  test("decideCertified falls back gracefully when native solver unavailable"):
     // Native DLL for POMCP is unlikely to be loaded in unit test context.
     // Expect the fallback: first non-Fold action or Fold.
     val engine = new StrategicEngine(StrategicEngine.Config())
     engine.initSession(rivalIds = Vector(PlayerId("v1")))
     engine.startHand(testHeroCards)
     val actions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(50.0))
-    val chosen = engine.decide(minimalState, actions)
+    val chosen = engine.decideCertified(minimalState, actions)
     // Fallback path: any action from the candidate set is valid
     assert(actions.contains(chosen))
 
-  test("decide works without hero cards (position fallback)"):
+  test("decideCertified works without hero cards (position fallback)"):
     val engine = new StrategicEngine(StrategicEngine.Config())
     engine.initSession(rivalIds = Vector(PlayerId("v1")))
     engine.startHand()
     val actions = Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(50.0))
-    val chosen = engine.decide(minimalState, actions)
+    val chosen = engine.decideCertified(minimalState, actions)
     assert(actions.contains(chosen))
 
   test("endHand is idempotent — second call does not throw"):
@@ -178,7 +177,7 @@ class StrategicEngineTest extends FunSuite:
     engine.startHand(hole("As", "Ah"))
     val actions = Vector(PokerAction.Fold, PokerAction.Call)
     // This exercises the estimateHeroBucket path with real cards
-    val chosen = engine.decide(minimalState, actions)
+    val chosen = engine.decideCertified(minimalState, actions)
     assert(actions.contains(chosen))
 
   test("initSession accepts rival seat info"):
@@ -228,7 +227,7 @@ class StrategicEngineTest extends FunSuite:
     engine.observeAction(PlayerId("villain"), PokerAction.Raise(3.0), preflopState)
 
     // Hero decides
-    val action = engine.decide(preflopState, candidates)
+    val action = engine.decideCertified(preflopState, candidates)
     assert(candidates.contains(action), s"Action $action not in candidates")
 
     // End hand
@@ -236,14 +235,14 @@ class StrategicEngineTest extends FunSuite:
 
     // Hand 2: beliefs should persist
     engine.startHand(testHeroCards)
-    val action2 = engine.decide(preflopState, candidates)
+    val action2 = engine.decideCertified(preflopState, candidates)
     assert(candidates.contains(action2), s"Action $action2 not in candidates (hand 2)")
     engine.endHand()
 
   // decideHeroStrategic integration test moved to match runner tests (Tasks 5-7)
-  // — the new 2-arg signature requires a HeroDecisionContext with RealTimeAdaptiveEngine,
-  // which is wired in the full runner context. The underlying StrategicEngine.decide()
-  // path is already covered by "integration: play a complete hand with Strategic mode" above.
+  // — the helper path requires a HeroDecisionContext with RealTimeAdaptiveEngine,
+  // which is wired in the full runner context. The underlying certification-producing
+  // StrategicEngine.decideCertified() path is already covered above.
 
   test("exploitability function returns non-trivial values"):
     val engine = new StrategicEngine(StrategicEngine.Config())
@@ -381,9 +380,9 @@ class StrategicEngineTest extends FunSuite:
     // No advisory clamp — betas should be identical (only fullStep effect)
     assertEqualsDouble(betaWith, betaWithout, 1e-10)
 
-  // ---- Task 6: Deployment tracking across decide() calls ----
+  // ---- Task 6: Deployment tracking across decideCertified() calls ----
 
-  test("deployment entries accumulate across decide() calls (PftDpw integration)"):
+  test("deployment entries accumulate across decideCertified() calls (PftDpw integration)"):
     assume(nativeAvailable, "Native library not available")
     val cfg = StrategicEngine.Config(
       solverBackend = StrategicEngine.SolverBackend.PftDpw,
@@ -394,13 +393,13 @@ class StrategicEngineTest extends FunSuite:
 
     // Hand 1
     engine.startHand(testHeroCards)
-    engine.decide(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
+    engine.decideCertified(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
     engine.endHand()
     val sizeAfter1 = engine.sessionState.deploymentSet.entries.size
 
     // Hand 2
     engine.startHand(testHeroCards)
-    engine.decide(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
+    engine.decideCertified(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
     engine.endHand()
     val sizeAfter2 = engine.sessionState.deploymentSet.entries.size
 
@@ -420,13 +419,13 @@ class StrategicEngineTest extends FunSuite:
 
     // First call: no prior entries → deploymentExploitability should be None
     engine.startHand(testHeroCards)
-    engine.decide(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
+    engine.decideCertified(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
     val bundle1 = engine.lastDecisionBundle
     engine.endHand()
 
     // Second call: prior entries exist → deploymentExploitability should be Some
     engine.startHand(testHeroCards)
-    engine.decide(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
+    engine.decideCertified(minimalState, Vector(PokerAction.Fold, PokerAction.Call))
     val bundle2 = engine.lastDecisionBundle
     engine.endHand()
 

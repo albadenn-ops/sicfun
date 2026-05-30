@@ -97,6 +97,7 @@ object HeadsUpGpuRuntime:
     */
   private[holdem] def resetLoadCacheForTests(): Unit =
     telemetryRef.set(null)
+    GpuRuntimeSupport.clearAllManagedSystemPropertyOverrides()
     NativeJniProvider.resetLoadCacheForTests()
 
   /** Internal SPI for GPU computation backends. */
@@ -661,7 +662,9 @@ object HeadsUpGpuRuntime:
 
   /** Queries whether the active GPU provider is loaded and ready for computation. */
   def availability: Availability =
-    activeProvider.availability
+    GpuRuntimeSupport.withManagedSystemPropertyOverrides {
+      activeProvider.availability
+    }
 
   /** Returns `true` if CPU fallback is enabled when the GPU backend fails.
     *
@@ -689,21 +692,23 @@ object HeadsUpGpuRuntime:
       mode: HeadsUpEquityTable.Mode,
       monteCarloSeedBase: Long
   ): Either[String, Array[EquityResultWithError]] =
-    val provider = activeProvider
-    val result = provider.computeBatch(packedKeys, keyMaterial, mode, monteCarloSeedBase)
-    result match
-      case Right(success) =>
-        val suffix = success.detail.map(value => s", $value").getOrElse("")
-        telemetryRef.set(
-          BatchTelemetry(
-            provider = provider.id,
-            success = true,
-            detail = s"entries=${success.values.length}$suffix"
+    GpuRuntimeSupport.withManagedSystemPropertyOverrides {
+      val provider = activeProvider
+      val result = provider.computeBatch(packedKeys, keyMaterial, mode, monteCarloSeedBase)
+      result match
+        case Right(success) =>
+          val suffix = success.detail.map(value => s", $value").getOrElse("")
+          telemetryRef.set(
+            BatchTelemetry(
+              provider = provider.id,
+              success = true,
+              detail = s"entries=${success.values.length}$suffix"
+            )
           )
-        )
-      case Left(reason) =>
-        telemetryRef.set(BatchTelemetry(provider = provider.id, success = false, detail = reason))
-    result.map(_.values)
+        case Left(reason) =>
+          telemetryRef.set(BatchTelemetry(provider = provider.id, success = false, detail = reason))
+      result.map(_.values)
+    }
 
   /** Reads the configured provider string, defaulting to "native" (JNI/CUDA). */
   private def configuredProvider: String =

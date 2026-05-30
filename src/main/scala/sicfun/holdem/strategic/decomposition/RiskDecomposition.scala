@@ -10,7 +10,7 @@ import sicfun.holdem.strategic.types.*
   *   - Marginal layer efficiency metric rho_{k→k+1} (Def 69)
   *
   * Uses the same chain-world ordering as `ChainWorld.canonicalChain` (Wave 1)
-  * and `KernelConstructor.composeFullKernelForWorld` (Wave 2).
+  * and `KernelConstructor.composeFullKernelForWorldFull` (Wave 2).
   */
 object RiskDecomposition:
 

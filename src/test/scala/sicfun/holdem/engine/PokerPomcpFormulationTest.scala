@@ -2,6 +2,7 @@ package sicfun.holdem.engine
 
 import munit.FunSuite
 import sicfun.holdem.types.*
+import sicfun.holdem.strategic.formulation.*
 import sicfun.holdem.strategic.types.*
 import sicfun.holdem.strategic.state.*
 import sicfun.holdem.strategic.solver.WPomcpRuntime
@@ -90,6 +91,42 @@ class PokerPomcpFormulationTest extends FunSuite:
       PlayerId("rival2") -> StrategicRivalBelief.uniform
     )
 
+  private object NeutralValueSource extends FormulationValueSource:
+    override def estimateSpotEquity(spot: FormulationSpot): BridgeResult[Double] =
+      BridgeResult.Approximate(0.5, "test")
+
+    override def showdownEquityTable(
+        spot: FormulationSpot,
+        numHeroBuckets: Int,
+        numRivalBuckets: Int
+    ): BridgeResult[Array[Double]] =
+      BridgeResult.Approximate(
+        PokerPomcpFormulation.buildLinearShowdownEquity(numHeroBuckets, numRivalBuckets),
+        "test"
+      )
+
+    override def estimateActionValue(
+        spot: FormulationSpot,
+        action: PokerAction
+    ): BridgeResult[Ev] =
+      BridgeResult.Approximate(Ev.Zero, "test")
+
+  private object NoopActionSource extends FormulationActionSource:
+    override def semanticsFor(
+        spot: FormulationSpot,
+        action: PokerAction
+    ): BridgeResult[FormulationActionSemantics] =
+      BridgeResult.Approximate(
+        FormulationActionSemantics(
+          chipsCommitted = 0.0,
+          potDeltaChips = 0.0,
+          isAllIn = false,
+          terminal = FormulationTerminalKind.Continue,
+          advancesStreet = true
+        ),
+        "test"
+      )
+
   test("buildSearchInputForProfile produces valid SearchInputV2 for each profile"):
     val gs = mkGameState
     val beliefs = mkRivalBeliefs
@@ -157,3 +194,41 @@ class PokerPomcpFormulationTest extends FunSuite:
     val baselineTypes = baselineInput.rivalParticles.head.rivalTypes
     val allBluff = baselineTypes.forall(_ == StrategicClass.Bluff.ordinal)
     assert(!allBluff, "baseline (uniform belief) should NOT have all particles as Bluff")
+
+  test("FormulationInput overload consumes rivalPolicySource for mixed solve"):
+    val spot = FormulationSpot(
+      gameState = mkGameState,
+      candidateActions = testActions,
+      heroValueInput = HeroValueInput.StrengthHint(5, "test"),
+      rivalBeliefs = mkRivalBeliefs
+    )
+    val policySource = new FormulationRivalPolicySource:
+      override def actionPolicy(
+          cls: StrategicClass,
+          spot: FormulationSpot
+      ): BridgeResult[Vector[Double]] =
+        val weights =
+          if cls == StrategicClass.Value then Vector(1.0, 0.0, 0.0)
+          else Vector(0.0, 1.0, 0.0)
+        BridgeResult.Exact(weights)
+
+    val input = FormulationInput(
+      spot = spot,
+      valueSource = NeutralValueSource,
+      rivalPolicySource = policySource,
+      actionSource = NoopActionSource
+    )
+
+    val mixedInput = PokerPomcpFormulation.buildSearchInputV2(input, particlesPerRival = 10)
+    val nPub = PokerPomcpFormulation.NumPubStates
+    val nAct = testActions.size
+
+    val valueSliceBase = StrategicClass.Value.ordinal * nPub * nAct
+    assertEqualsDouble(mixedInput.model.rivalPolicy(valueSliceBase + 0), 1.0, 1e-10)
+    assertEqualsDouble(mixedInput.model.rivalPolicy(valueSliceBase + 1), 0.0, 1e-10)
+    assertEqualsDouble(mixedInput.model.rivalPolicy(valueSliceBase + 2), 0.0, 1e-10)
+
+    val bluffSliceBase = StrategicClass.Bluff.ordinal * nPub * nAct
+    assertEqualsDouble(mixedInput.model.rivalPolicy(bluffSliceBase + 0), 0.0, 1e-10)
+    assertEqualsDouble(mixedInput.model.rivalPolicy(bluffSliceBase + 1), 1.0, 1e-10)
+    assertEqualsDouble(mixedInput.model.rivalPolicy(bluffSliceBase + 2), 0.0, 1e-10)

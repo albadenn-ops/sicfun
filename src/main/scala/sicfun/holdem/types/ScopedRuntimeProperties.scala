@@ -10,8 +10,10 @@ package sicfun.holdem.types
   * Instead, overrides are stored in an `InheritableThreadLocal` stack of snapshots.
   * Each call to [[withOverrides]] pushes a new merged snapshot onto the stack and pops it
   * on exit (via try/finally), providing deterministic cleanup even when exceptions occur.
-  * Because the thread-local is inheritable, child threads (e.g. Fork-Join pool workers)
-  * automatically see the parent's overrides without explicit propagation.
+  * Newly-created child threads inherit the parent's overrides. Existing executor or
+  * Fork-Join worker threads do not receive scopes automatically, so callers should avoid
+  * assuming these overrides cross asynchronous execution boundaries unless they propagate
+  * the scope explicitly.
   *
   * The two-level `Option[Option[String]]` returned by [[get]] distinguishes three states:
   *   - `None` -- no override exists; callers should fall back to `System.getProperty`
