@@ -14574,6 +14574,112 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented UNIVERSAL 1-field {error} ERROR-SHAPE
+  // across FOUR distinct emission paths (400 parse-error + 404
+  // not-found + 405 method-not-allowed + 413 upload-cap) per
+  // AuthStack.scala line 561's JsonHandler universal Left-fold
+  // `{ case (status, error) => JsonResponse(status, Obj("error"
+  // -> Str(error))) }`. The 4-STATUS-CONSOLIDATION pin extends
+  // the existing 404+405 cross-check (which proves the routing-
+  // layer errors converge to {error}) to TWO MORE emission
+  // sites that originate in DIFFERENT code paths: 400 from the
+  // JSON parse-error branch (parseRequest's NonFatal catch) +
+  // 413 from the upload-cap branch (readRequestBody's size
+  // check). SEVENTY-THIRD per-emission-site SHAPE pin overall;
+  // the existing 404+405 consolidation proves the universal
+  // shape for routing errors, but the parse-error (400) +
+  // upload-cap (413) paths are DISTINCT emission sites that a
+  // refactor could ADD a per-path field to (e.g. 413 adding a
+  // `maxBytes` hint, or 400 adding a `parseDetail` object)
+  // WITHOUT touching the 404/405 paths -- the 14373 pin would
+  // stay green while the contract silently widened; the
+  // UNIVERSAL ERROR-SHAPE is OPERATIONALLY CRITICAL because:
+  // (a) it is THE contract that lets ALL non-2xx responses
+  // share ONE client-side error-parsing code path (read
+  // body.error as a flat string) -- a per-status field
+  // addition would force clients to branch their error parser
+  // by status code, (b) the 429 rate-limit response is the
+  // SOLE documented exception (4-field shape, pinned
+  // separately) -- every OTHER 4xx/5xx is the 1-field shape,
+  // so this pin guards the "1-field is the rule, 429 is the
+  // exception" invariant across the parse + upload paths; per-
+  // format regression vectors uniquely caught (NOT caught by
+  // the 404+405-only consolidation): (i) refactor adding a
+  // field to the 413 upload-cap response (e.g. the documented
+  // max-bytes value for client UX) would widen the shape on
+  // that path while 404/405 stay 1-field, (ii) refactor adding
+  // a field to the 400 parse-error response (e.g. the parse
+  // position) would widen the shape on that path, (iii)
+  // refactor that special-cased the parse/upload error shape
+  // would break the universal-fold contract; test approach:
+  // on a default no-auth server, trigger all 4 statuses (400
+  // malformed-JSON POST, 404 nonexistent-job GET, 405
+  // DELETE-on-analyze, 413 oversize POST), collect each
+  // response's field-name set, assert each == {error} + all 4
+  // are IDENTICAL.
+  test("UNIVERSAL 1-field {error} ERROR-SHAPE across 400 (parse) + 404 (not-found) + 405 (method) + 413 (upload-cap): all four distinct emission paths converge to EXACTLY the documented {error} shape per AuthStack.scala line 561's universal Left-fold -- extends the 404+405 consolidation to the parse-error + upload-cap emission sites a per-status field addition could silently widen") {
+    withStaticSite { staticDir =>
+      // maxUploadBytes=512 (the withServer default) so a ~620-byte
+      // body trips the 413 upload-cap.
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+        // (400) malformed JSON on the analyze submit -> parseRequest
+        // NonFatal catch -> Left(400 -> "invalid JSON request: ...")
+        val parse400 = postJson(s"$baseUri/api/analyze-hand-history", "{ this is not valid json")
+        assertEquals(parse400.statusCode(), 400,
+          clue = s"malformed-JSON analyze POST MUST 400 (parseRequest NonFatal catch); got: ${parse400.statusCode()}, body: ${parse400.body()}")
+
+        // (404) GET a nonexistent playing-hall job -> Left(404 ->
+        // "playing hall job not found: ...")
+        val notFound404 = get(s"$baseUri/api/playing-hall/jobs/00000000-0000-0000-0000-000000000000")
+        assertEquals(notFound404.statusCode(), 404,
+          clue = s"GET nonexistent hall job MUST 404; got: ${notFound404.statusCode()}")
+
+        // (405) DELETE on the analyze status route (GET/HEAD only --
+        // cancellation is hall-only) -> Left(405) via methodNotAllowed
+        val method405 = delete(s"$baseUri/api/analyze-hand-history/jobs/00000000-0000-0000-0000-000000000000")
+        assertEquals(method405.statusCode(), 405,
+          clue = s"DELETE on analyze status route MUST 405 (GET/HEAD only); got: ${method405.statusCode()}")
+
+        // (413) oversize body on the analyze submit -> readRequestBody
+        // upload-cap -> Left(413 -> ...). ~620 bytes > the 512-byte
+        // default maxUploadBytes.
+        val oversizeBody = "{\"handHistoryText\":\"" + ("a" * 620) + "\"}"
+        assert(oversizeBody.length > 512,
+          clue = s"test setup: oversize body MUST exceed the 512-byte default maxUploadBytes; got: ${oversizeBody.length}")
+        val cap413 = postJson(s"$baseUri/api/analyze-hand-history", oversizeBody)
+        assertEquals(cap413.statusCode(), 413,
+          clue = s"oversize analyze POST MUST 413 (readRequestBody upload-cap); got: ${cap413.statusCode()}, body: ${cap413.body()}")
+
+        // Collect the 4 field-name sets
+        val responses = Vector(
+          (400, parse400, "parse-error"),
+          (404, notFound404, "not-found"),
+          (405, method405, "method-not-allowed"),
+          (413, cap413, "upload-cap")
+        )
+        val expectedShape = Set("error")
+
+        // (i) each response emits EXACTLY the 1-field {error} shape
+        responses.foreach { case (status, resp, label) =>
+          val fields = jsonBody(resp).obj.keys.toSet
+          assertEquals(fields, expectedShape,
+            clue = s"the $status ($label) response MUST emit EXACTLY the documented 1-field {error} shape per AuthStack.scala line 561's universal Left-fold -- a refactor adding a per-path field (e.g. $label's `maxBytes`/`parseDetail`) would widen the shape on THIS emission site while the 404/405 paths stay 1-field, breaking the universal-error-parser contract; got fields: ${fields.toVector.sorted.mkString(", ")}")
+          // the `error` field is a flat string (NOT object/array)
+          assert(jsonBody(resp)("error").isInstanceOf[ujson.Str],
+            clue = s"the $status ($label) `error` field MUST be a flat ujson.Str per line 561's `Str(error)` -- a refactor wrapping it as {message, code} would break clients expecting a flat string; got type: ${jsonBody(resp)("error").getClass.getSimpleName}")
+        }
+
+        // (ii) CROSS-CHECK: all 4 field-sets are IDENTICAL (the
+        // universality across the routing + parse + upload paths)
+        val allFieldSets = responses.map { case (_, resp, _) => jsonBody(resp).obj.keys.toSet }.toSet
+        assertEquals(allFieldSets, Set(expectedShape),
+          clue = s"ALL FOUR error responses (400/404/405/413) MUST share the IDENTICAL 1-field {error} field-set per the universal Left-fold -- a refactor diverging the shape on ANY single status would break the documented 'ONE error-parsing code path for ALL non-2xx' contract; got distinct field-sets: $allFieldSets")
+      }
+    }
+  }
+
   // Pin the STRICT-SUBSET RELATIONSHIP between /api/ready
   // and /api/health JSON field sets at Readiness.scala lines
   // 73-112 (renderHealth) vs lines 129-153 (renderReadiness)
