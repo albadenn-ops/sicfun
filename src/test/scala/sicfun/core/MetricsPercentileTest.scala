@@ -14,7 +14,12 @@ class MetricsPercentileTest extends munit.FunSuite:
     assertEqualsDouble(Metrics.percentile(Vector.empty, 0.5), 0.0, 1e-12)
     assertEqualsDouble(Metrics.percentile(Vector(7.0), 0.9), 7.0, 1e-12)
   }
-  test("stdDev is sqrt of sample variance") {
-    val xs = Vector(2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0)
-    assertEqualsDouble(Metrics.stdDev(xs), math.sqrt(Metrics.variance(xs)), 1e-12)
+  test("stdDev equals the known sample standard deviation") {
+    // sample variance of [1,3]: mean=2, squared devs (1+1)=2, /(n-1=1)=2 -> stdDev=sqrt(2)
+    assertEqualsDouble(Metrics.stdDev(Vector(1.0, 3.0)), math.sqrt(2.0), 1e-12)
+    // textbook set 2,4,4,4,5,5,7,9 -> sample stdDev = 2.138089935299...
+    assertEqualsDouble(Metrics.stdDev(Vector(2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0)), 2.138089935299395, 1e-9)
+  }
+  test("stdDev throws on fewer than two values") {
+    intercept[IllegalArgumentException] { Metrics.stdDev(Vector(1.0)) }
   }
