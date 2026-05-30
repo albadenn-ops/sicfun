@@ -14337,6 +14337,120 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/health <-> /api/ready CROSS-ENDPOINT
+  // VALUE CONSISTENCY + STRICT-SUBSET relationship at
+  // Readiness.scala renderHealth (lines 73-112) + renderReadiness
+  // (lines 129-153) -- both endpoints compute their fields from
+  // the SAME readinessStatus snapshot + config + jobStore.metrics,
+  // so for every field present in BOTH the emitted VALUES must
+  // AGREE. SEVENTY-FIRST per-emission-site SHAPE pin overall; the
+  // individual field-set pins (08b35f1 health 34-field + the
+  // /api/ready 23-field pin above) check field NAMES only -- the
+  // cross-endpoint VALUE CONSISTENCY (shared fields report
+  // IDENTICAL values) + the LIVE-derived strict-subset
+  // relationship are unpinned; the CROSS-ENDPOINT CONSISTENCY
+  // contract is OPERATIONALLY CRITICAL because: (a) the operator
+  // dashboard reads /api/health while the orchestrator probe
+  // reads /api/ready -- if a shared field (draining,
+  // acceptingAnalysisJobs, queuedJobs, the rate-limit config,
+  // etc.) reported DIFFERENT values on the two endpoints, the
+  // operator + the orchestrator would silently disagree about the
+  // server's state (e.g. operator sees draining=true on the
+  // dashboard but the load balancer's /api/ready still shows
+  // draining=false + keeps routing traffic), (b) the documented
+  // strict-subset contract (deploy doc line 217: '/api/ready ...
+  // field set is a strict subset of /api/health's') is what lets
+  // a dashboard built for /api/health fall back to /api/ready --
+  // this pin verifies the relationship from the LIVE responses
+  // (not hardcoded literals), so it catches a coordinated change
+  // that updated both literal field-set pins in lockstep but
+  // broke the subset invariant, (c) the reason<->readyReason
+  // renamed pair must carry the SAME value (just a different
+  // field name) -- a refactor computing the readiness reason
+  // differently per-endpoint would silently desync; per-format
+  // regression vectors uniquely caught (NOT caught by the
+  // name-only field-set pins): (i) refactor computing a shared
+  // field differently per-endpoint (e.g. reading draining from a
+  // stale cache in one path) would silently desync operator vs
+  // orchestrator -- the VALUE-equality assertions catch it, (ii)
+  // refactor adding a /api/ready-only field NOT in /api/health
+  // would break the LIVE-derived strict-subset assertion even if
+  // the literal ready-field-set pin were updated in lockstep,
+  // (iii) refactor desyncing the reason<->readyReason value would
+  // be caught by the renamed-pair value-equality; test approach:
+  // query BOTH endpoints from the same server (quiet sequential
+  // calls so the dynamic counters are stable at 0), assert the 22
+  // same-named shared fields carry IDENTICAL values + the
+  // reason<->readyReason renamed pair agrees + the LIVE
+  // strict-subset (every ready field except `reason` appears in
+  // health) + health is a strict superset.
+  test("/api/health <-> /api/ready CROSS-ENDPOINT VALUE CONSISTENCY: the 22 same-named shared fields carry IDENTICAL values across both endpoints + the reason<->readyReason renamed pair agrees + /api/ready is a LIVE-derived strict subset of /api/health per Readiness.scala renderHealth + renderReadiness computing from the same readinessStatus snapshot") {
+    withStaticSite { staticDir =>
+      withServer(staticDir) { server =>
+        val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+        // Quiet sequential calls: no jobs submitted, so the
+        // dynamic counters (queuedJobs, runningJobs,
+        // timedOutWorkersInFlight) are 0 + activeHttpRequests is
+        // self-subtracted to 0 on both endpoints (renderHealth +
+        // renderReadiness both use `max(0, activeHttpRequests-1)`).
+        val health = getJson(s"$baseUri/api/health")
+        val ready = getJson(s"$baseUri/api/ready")
+
+        // The 22 fields present in BOTH endpoints with the SAME
+        // name (the /api/ready 23-field set minus the renamed
+        // `reason`).
+        val sharedFields = Vector(
+          "service", "host", "port", "ready", "draining",
+          "acceptingAnalysisJobs", "authenticationEnabled", "authenticationMode",
+          "drainSignalConfigured", "drainSignalPresent", "analysisTimeoutMs",
+          "playingHallTimeoutMs", "rateLimitSubmitsPerMinute", "rateLimitStatusPerMinute",
+          "rateLimitAuthPerMinute", "rateLimitClientIpSource", "activeHttpRequests",
+          "maxConcurrentJobs", "maxQueuedJobs", "queuedJobs", "runningJobs",
+          "timedOutWorkersInFlight"
+        )
+
+        // (i) PRESENCE: every shared field is on BOTH endpoints
+        sharedFields.foreach { f =>
+          assert(health.obj.contains(f),
+            clue = s"shared field `$f` MUST be present in /api/health (the ready-subset-of-health contract); got health keys: ${health.obj.keys.toVector.sorted.mkString(", ")}")
+          assert(ready.obj.contains(f),
+            clue = s"shared field `$f` MUST be present in /api/ready; got ready keys: ${ready.obj.keys.toVector.sorted.mkString(", ")}")
+        }
+
+        // (ii) VALUE CONSISTENCY: every shared field carries the
+        // IDENTICAL value on both endpoints (both computed from
+        // the same readinessStatus + config + metrics)
+        sharedFields.foreach { f =>
+          assertEquals(ready(f), health(f),
+            clue = s"shared field `$f` MUST have the SAME value in /api/ready + /api/health (both computed from the same readinessStatus snapshot + config + jobStore.metrics) -- a refactor computing a field differently per-endpoint would silently desync the operator dashboard (/api/health) from the orchestrator probe (/api/ready), e.g. operator sees draining=true but the load balancer's /api/ready still shows draining=false + keeps routing traffic; got ready=${ready(f)}, health=${health(f)}")
+        }
+
+        // (iii) RENAMED PAIR: ready.reason == health.readyReason
+        // (same readiness reason value, different field name)
+        assertEquals(ready("reason"), health("readyReason"),
+          clue = s"ready.reason MUST equal health.readyReason (the documented renamed pair -- same readiness reason value, different field name per Readiness.scala line 134 vs 75) -- a refactor computing the readiness reason differently per-endpoint would silently desync; got ready.reason=${ready("reason")}, health.readyReason=${health("readyReason")}")
+
+        // (iv) LIVE-DERIVED STRICT SUBSET: every /api/ready field
+        // except the renamed `reason` MUST appear in /api/health
+        // (the documented strict-subset relationship, derived from
+        // the LIVE responses NOT hardcoded literals)
+        val readyFields = ready.obj.keys.toSet
+        val healthFields = health.obj.keys.toSet
+        val readyMinusRename = readyFields - "reason"
+        val readyOnly = readyMinusRename -- healthFields
+        assertEquals(readyOnly, Set.empty[String],
+          clue = s"every /api/ready field (except the renamed `reason`) MUST appear in /api/health per the documented strict-subset contract (deploy doc line 217) -- this LIVE-derived check catches a coordinated change that updated both literal field-set pins in lockstep but broke the subset invariant; got ready-only fields (not in health, excluding the rename): $readyOnly")
+
+        // (v) STRICT SUPERSET: /api/health has MORE fields than
+        // /api/ready (the operator-side extras: ok, userAuth*,
+        // startedAtEpochMs, uptimeMs, modelConfigured, modelSource,
+        // maxUploadBytes, retainedTerminalJobs)
+        assert(healthFields.size > readyFields.size,
+          clue = s"/api/health MUST have MORE fields than /api/ready (operator-side extras like ok, userAuth*, uptimeMs, modelSource) per the documented strict-subset asymmetry; got health=${healthFields.size}, ready=${readyFields.size}")
+      }
+    }
+  }
+
   // Pin the STRICT-SUBSET RELATIONSHIP between /api/ready
   // and /api/health JSON field sets at Readiness.scala lines
   // 73-112 (renderHealth) vs lines 129-153 (renderReadiness)
