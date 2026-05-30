@@ -8759,6 +8759,142 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented OIDC /callback FAILURE-REDIRECT SHAPE
+  // at AuthStack.scala handleOidcCallback (lines 318/336/353/
+  // 364/398) + PlatformUserAuth.scala line 1368's
+  // oidcFailureRedirect + line 65's `/?auth_error=` prefix --
+  // the OIDC-FAILURE-SHAPE pin verifies the documented
+  // RESPONSE SHAPE of the OIDC callback failure paths: a 302
+  // RedirectResponse (the case-class default status at line
+  // 540) whose Location header is the documented
+  // `/?auth_error=<urlEncode(reason)>` landing, with a
+  // body-less response (writeRedirect's sendResponseHeaders
+  // (status, -1L) at WebResponses.scala line 163) + the
+  // applySecurityHeaders set (RedirectHandler line 594).
+  // SIXTY-FIFTH per-emission-site SHAPE pin overall; existing
+  // OIDC callback tests (2163 et al) extensively pin the
+  // AUDIT-LOG lines (auth.oidc.failure ... reason=<X>), but
+  // the RESPONSE-SHAPE contract -- the actual 302 + Location +
+  // body-less + security-headers the BROWSER sees -- is
+  // unpinned; the OIDC-FAILURE-SHAPE contract is OPERATIONALLY
+  // CRITICAL because: (a) the browser-visible failure landing
+  // `/?auth_error=<reason>` is what the frontend SPA reads to
+  // render a human-friendly error message ("sign-in was
+  // cancelled", "session expired, try again") -- a refactor
+  // changing the prefix or query-param name would silently
+  // break the frontend's error rendering, leaving users at a
+  // blank `/?` with no feedback, (b) the 302 (not 200 + JSON,
+  // not 401) is what makes the browser actually NAVIGATE to
+  // the landing -- a refactor emitting a JSON body instead
+  // would leave the user staring at raw JSON in their browser
+  // after an OIDC round-trip, (c) the body-less redirect +
+  // security headers match the documented universal-handler
+  // contract (every handler type calls applySecurityHeaders);
+  // per-format regression vectors uniquely caught (NOT caught
+  // by the audit-log pins which read stderr not the HTTP
+  // response): (i) refactor changing the RedirectResponse
+  // default status from 302 would silently break the browser
+  // navigation, (ii) refactor changing the `/?auth_error=`
+  // prefix (PlatformUserAuth line 65) would silently break
+  // the frontend error-landing contract, (iii) refactor that
+  // emitted the reason in a DIFFERENT form in the redirect vs
+  // the log (e.g. the provider-error path logs `provider-
+  // error:access_denied` but the redirect carries the BARE
+  // `access_denied`) would silently desync the two surfaces;
+  // test approach: configure a FakeOidcProvider, hit the
+  // callback with 3 distinct failure-triggering inputs (no
+  // params -> missing_code_or_state, ?error=access_denied ->
+  // provider-error redirect carrying the BARE error, state+
+  // code-but-no-cookie -> missing_state_cookie), verify each
+  // emits the documented 302 + Location shape + body-less +
+  // security headers. NOTE: the WARN audit lines these paths
+  // emit are captured+discarded so they don't clutter the
+  // test stream (the log CONTENT is pinned by the 2163-family
+  // tests; this pin targets the RESPONSE only).
+  test("OIDC /callback FAILURE-REDIRECT SHAPE: failures emit a 302 redirect to the documented `/?auth_error=<reason>` landing (body-less + security headers) per AuthStack.scala handleOidcCallback + PlatformUserAuth.scala line 1368's oidcFailureRedirect -- complements the 2163-family audit-log pins by pinning the browser-visible RESPONSE SHAPE not the log line") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(
+            storePath = storePath,
+            oidcProviders = Vector(provider)
+          ))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Capture+discard stderr so the expected WARN audit
+          // lines don't clutter the test stream (their CONTENT
+          // is pinned by the 2163-family tests; here we only
+          // care about the HTTP response).
+          def callbackQuiet(suffix: String): HttpResponse[String] =
+            val errBuf = new java.io.ByteArrayOutputStream()
+            val originalErr = System.err
+            System.setErr(new java.io.PrintStream(errBuf, true, StandardCharsets.UTF_8))
+            try get(s"$baseUri${provider.callbackPath}$suffix")
+            finally System.setErr(originalErr)
+
+          // (1) NO query params -> 302 to
+          // /?auth_error=missing_code_or_state (the catch-all
+          // failure path at AuthStack.scala line 398)
+          val noParams = callbackQuiet("")
+          assertEquals(noParams.statusCode(), 302,
+            clue = s"OIDC /callback with no params MUST 302 (the RedirectResponse default status per AuthStack.scala line 540) -- a non-302 (e.g. 200+JSON or 401) would leave the browser NOT navigating to the failure landing; got: ${noParams.statusCode()}")
+          assertEquals(headerValue(noParams, "Location"), Some("/?auth_error=missing_code_or_state"),
+            clue = s"OIDC /callback no-params Location MUST be `/?auth_error=missing_code_or_state` per oidcFailureRedirect(missing_code_or_state) -- the frontend SPA reads this query param to render the error; got: ${headerValue(noParams, "Location")}")
+          assertEquals(noParams.body(), "",
+            clue = s"OIDC /callback 302 MUST be body-less per writeRedirect's sendResponseHeaders(status, -1L); got body length: ${noParams.body().length}")
+
+          // (2) ?error=access_denied (provider rejected
+          // consent) -> 302 to /?auth_error=access_denied. The
+          // redirect carries the BARE error (the LOG carries
+          // `provider-error:access_denied`, but the REDIRECT
+          // carries just `access_denied` per line 318's
+          // oidcFailureRedirect(error) where error is the
+          // capped raw value, NOT the log's provider-error:
+          // prefixed form).
+          val providerError = callbackQuiet("?error=access_denied")
+          assertEquals(providerError.statusCode(), 302,
+            clue = s"OIDC /callback ?error= MUST 302; got: ${providerError.statusCode()}")
+          assertEquals(headerValue(providerError, "Location"), Some("/?auth_error=access_denied"),
+            clue = s"OIDC /callback provider-error Location MUST carry the BARE error `access_denied` (NOT the log's `provider-error:` prefixed form) per line 318's oidcFailureRedirect(capOidcErrorString(rawError)); a refactor unifying the redirect + log forms would silently change the frontend's error-param value; got: ${headerValue(providerError, "Location")}")
+
+          // (3) state+code but NO state cookie -> 302 to
+          // /?auth_error=missing_state_cookie (the OAuth 2.0
+          // BCP covert-redirect mitigation at lines 350-353)
+          val noCookie = callbackQuiet("?state=abc123&code=xyz789")
+          assertEquals(noCookie.statusCode(), 302,
+            clue = s"OIDC /callback state+code-but-no-cookie MUST 302; got: ${noCookie.statusCode()}")
+          assertEquals(headerValue(noCookie, "Location"), Some("/?auth_error=missing_state_cookie"),
+            clue = s"OIDC /callback no-state-cookie Location MUST be `/?auth_error=missing_state_cookie` per line 353's oidcFailureRedirect(reason) where reason=missing_state_cookie (cookieState.isEmpty branch at line 351); got: ${headerValue(noCookie, "Location")}")
+
+          // (4) SECURITY HEADERS on the redirect (the
+          // applySecurityHeaders call at RedirectHandler line
+          // 594 runs BEFORE the redirect branch) -- the
+          // documented universal-handler contract
+          assert(headerValue(noParams, "Content-Security-Policy").isDefined,
+            clue = s"OIDC /callback 302 MUST carry Content-Security-Policy per RedirectHandler line 594's applySecurityHeaders -- the documented universal-handler contract (every handler type sets security headers); got: ${headerValue(noParams, "Content-Security-Policy")}")
+          assertEquals(headerValue(noParams, "X-Content-Type-Options"), Some("nosniff"),
+            clue = s"OIDC /callback 302 MUST carry X-Content-Type-Options: nosniff; got: ${headerValue(noParams, "X-Content-Type-Options")}")
+          assertEquals(headerValue(noParams, "Referrer-Policy"), Some("no-referrer"),
+            clue = s"OIDC /callback 302 MUST carry Referrer-Policy: no-referrer (ESPECIALLY critical for OIDC redirects so the auth_error reason isn't leaked via Referer to downstream pages); got: ${headerValue(noParams, "Referrer-Policy")}")
+
+          // (5) CLOSED-SET: all 3 failure Locations share the
+          // documented `/?auth_error=` prefix (PlatformUserAuth
+          // line 65) -- catches a refactor changing the prefix
+          // on any single failure path
+          val locations = Vector(noParams, providerError, noCookie)
+            .flatMap(r => headerValue(r, "Location"))
+          assertEquals(locations.size, 3,
+            clue = "all 3 failure responses MUST carry a Location header")
+          assert(locations.forall(_.startsWith("/?auth_error=")),
+            clue = s"ALL OIDC failure-redirect Locations MUST share the documented `/?auth_error=` prefix per PlatformUserAuth.scala line 65; a refactor changing the prefix on any path would break the frontend's error-landing detection; got: $locations")
+        }
+      }
+    }
+  }
+
   test("registration and login reject passwords beyond the max-length cap") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
