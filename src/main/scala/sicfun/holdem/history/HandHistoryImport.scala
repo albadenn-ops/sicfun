@@ -89,7 +89,8 @@ final case class ImportedPlayer(
   * @param events               normalized poker event sequence
   * @param showdownCards        map of player name -> hole cards revealed at showdown
   * @param bigBlind             big-blind size posted this hand (0.0 if none observed),
-  *                             retained for chip-EV -> bb/100 conversion across mixed stakes
+  *                             retained for chip-EV -> bb/100 conversion across mixed stakes.
+  *                             Downstream bb-scale conversion MUST guard `bigBlind > 0` before dividing.
   */
 final case class ImportedHand(
     site: HandHistorySite,
