@@ -19930,6 +19930,149 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented profile-field WHITESPACE-TRIM contract
+  // at PlatformUserAuth.scala line 1139's sanitizeOptionalField
+  // `raw.map(_.trim).filter(_.nonEmpty)` chain -- the
+  // WHITESPACE-TRIM pin verifies the documented THIRD behavior
+  // of sanitizeOptionalField (complementing the max-length
+  // check at 1140-1141 + the control-char check at 1149-1150):
+  // (a) leading/trailing whitespace (any char <= 0x20 per
+  // Scala's String.trim, including SPACE + TAB + CR + LF) is
+  // TRIMMED off before storage, and (b) a value that is
+  // whitespace-ONLY trims to empty + is filtered out -> the
+  // Option becomes None -> the field is treated as omitted
+  // (which CLEARS heroName/preferredSite/timeZone per the
+  // 81324be asymmetry, but PRESERVES displayName via the line
+  // 669 getOrElse fallback). SIXTY-FIRST per-emission-site
+  // SHAPE pin overall; the parse-layer optionalString
+  // (HandHistoryReviewServerApi.scala lines 708-716) does NOT
+  // trim/nullify whitespace (it returns Some("   ") for a
+  // whitespace-only value), so the trim+filter behavior
+  // genuinely ORIGINATES at line 1139 -- this pin targets that
+  // emission site; the WHITESPACE-TRIM contract is
+  // OPERATIONALLY CRITICAL because: (a) trimming surrounding
+  // whitespace is the documented normalization that prevents
+  // visually-identical-but-byte-different stored values (e.g.
+  // "Hero" vs " Hero " would otherwise be distinct stored
+  // strings, confusing operator searches + breaking
+  // deduplication), (b) the whitespace-only -> None ->
+  // clear/preserve semantic is what lets a frontend form
+  // submit an empty/spaces-only field to CLEAR it (for
+  // heroName/preferredSite/timeZone) without a dedicated
+  // clear endpoint -- a refactor dropping the .filter
+  // (_.nonEmpty) would silently STORE the empty string instead
+  // of clearing, breaking the documented clear-by-empty
+  // contract, (c) the COMPLEMENTARY relationship with the
+  // control-char check is subtle + documented: leading/
+  // trailing TABS (0x09 <= 0x20) are TRIMMED AWAY (allowed,
+  // silently removed) while INTERNAL tabs are REJECTED as
+  // control chars -- because the .trim at line 1139 runs
+  // BEFORE the control-char check at 1149, so edge tabs are
+  // gone before the check sees them; per-format regression
+  // vectors uniquely caught (NOT caught by the 24b07ac
+  // max-length OR c38ad49 control-char pins): (i) refactor
+  // dropping the `.map(_.trim)` would silently store
+  // surrounding whitespace AND change leading/trailing tabs
+  // from TRIMMED to REJECTED (the control-char check would
+  // then see them), (ii) refactor dropping the `.filter
+  // (_.nonEmpty)` would silently store empty strings instead
+  // of clearing the field, breaking the clear-by-empty
+  // contract, (iii) refactor reordering trim AFTER the
+  // control-char check would silently reject leading/trailing
+  // tabs/newlines that should be trimmed; test approach:
+  // register a user, then verify (1) leading/trailing SPACES
+  // trimmed, (2) leading/trailing TABS trimmed (NOT rejected
+  // as control -- the complementary-to-control-char signal),
+  // (3) whitespace-only heroName -> CLEARED (None), (4)
+  // whitespace-only displayName -> PRESERVED (the trim+
+  // asymmetry interaction), (5) internal space PRESERVED
+  // (trim only affects edges).
+  test("profile-field WHITESPACE-TRIM contract: leading/trailing whitespace (spaces + tabs) is trimmed before storage, whitespace-only values become None (clearing heroName but preserving displayName via the asymmetry), and internal spaces are preserved per PlatformUserAuth.scala line 1139's `raw.map(_.trim).filter(_.nonEmpty)` chain -- completes the sanitizeOptionalField trifecta with the 24b07ac max-length + c38ad49 control-char pins") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val registerResp = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"trim@example.com","password":"correct-horse-battery","displayName":"X"}"""
+          )
+          assertEquals(registerResp.statusCode(), 201,
+            clue = "register MUST 201 to drive the whitespace-trim test")
+          val csrfToken = jsonBody(registerResp)("csrfToken").str
+          val sessionCookieValue = sessionCookie(registerResp)
+
+          // Build the body via ujson.write so tabs/whitespace
+          // are PROPERLY JSON-ESCAPED on the wire + arrive as a
+          // valid parsed string reaching sanitizeOptionalField.
+          def postObj(obj: ujson.Obj): HttpResponse[String] =
+            httpClient.send(
+              HttpRequest.newBuilder()
+                .uri(URI.create(s"$baseUri/api/auth/profile"))
+                .method("POST", HttpRequest.BodyPublishers.ofString(ujson.write(obj)))
+                .header("Content-Type", "application/json")
+                .header("Cookie", sessionCookieValue)
+                .header("X-CSRF-Token", csrfToken)
+                .build(),
+              HttpResponse.BodyHandlers.ofString()
+            )
+
+          // (1) Leading/trailing SPACES trimmed: " Hero " ->
+          // "Hero" stored
+          val spaceResp = postObj(ujson.Obj("heroName" -> ujson.Str(" Hero ")))
+          assertEquals(spaceResp.statusCode(), 200,
+            clue = s"heroName with surrounding spaces MUST be accepted (200) -- the trim removes them; got: ${spaceResp.statusCode()}, body: ${spaceResp.body()}")
+          assertEquals(ujson.read(spaceResp.body())("user").obj("heroName").str, "Hero",
+            clue = s"heroName ` Hero ` MUST be TRIMMED to `Hero` per line 1139's `.map(_.trim)` -- a refactor dropping the trim would silently store the surrounding whitespace, producing visually-identical-but-byte-different stored values; got: ${ujson.read(spaceResp.body())("user").obj("heroName").str}")
+
+          // (2) Leading/trailing TABS trimmed (NOT rejected as
+          // control). The tab (0x09 <= 0x20) is removed by trim
+          // BEFORE the control-char check at line 1149 sees it
+          // -- the documented complementary-to-control-char
+          // behavior (internal tabs WOULD be rejected, but edge
+          // tabs are trimmed away).
+          val tabResp = postObj(ujson.Obj("heroName" -> ujson.Str("\tHero\t")))
+          assertEquals(tabResp.statusCode(), 200,
+            clue = s"heroName with surrounding TABS MUST be accepted (200) -- the line 1139 `.trim` removes edge tabs (0x09 <= 0x20) BEFORE the line 1149 control-char check, so they are silently trimmed NOT rejected; a refactor reordering trim AFTER the control-char check would silently reject this legal value; got: ${tabResp.statusCode()}, body: ${tabResp.body()}")
+          assertEquals(ujson.read(tabResp.body())("user").obj("heroName").str, "Hero",
+            clue = s"heroName `\\tHero\\t` MUST be TRIMMED to `Hero` (edge tabs removed); got: ${ujson.read(tabResp.body())("user").obj("heroName").str}")
+
+          // (3) WHITESPACE-ONLY heroName -> CLEARED (None). The
+          // value trims to empty + is filtered out -> None ->
+          // heroName cleared (per the 81324be asymmetry where
+          // None clears heroName).
+          // First set heroName to a real value.
+          postObj(ujson.Obj("heroName" -> ujson.Str("SetHero")))
+          val clearResp = postObj(ujson.Obj("heroName" -> ujson.Str("   ")))
+          assertEquals(clearResp.statusCode(), 200,
+            clue = s"whitespace-only heroName MUST be accepted (200) -- it trims to empty + filters to None; got: ${clearResp.statusCode()}")
+          assertEquals(ujson.read(clearResp.body())("user").obj.get("heroName"), Some(ujson.Null),
+            clue = s"whitespace-only heroName MUST CLEAR the field (null) per line 1139's `.filter(_.nonEmpty)` -> None -> the 81324be asymmetry clears heroName; a refactor dropping the .filter would silently store the empty string instead of clearing, breaking the documented clear-by-empty contract; got: ${ujson.read(clearResp.body())("user").obj.get("heroName")}")
+
+          // (4) WHITESPACE-ONLY displayName -> PRESERVED (the
+          // trim + asymmetry interaction). The value trims to
+          // empty + filters to None -> sanitizeDisplayName
+          // returns None -> line 669's getOrElse(current)
+          // PRESERVES the previous displayName.
+          postObj(ujson.Obj("displayName" -> ujson.Str("KeepMe")))
+          val preserveResp = postObj(ujson.Obj("displayName" -> ujson.Str("   ")))
+          assertEquals(preserveResp.statusCode(), 200,
+            clue = s"whitespace-only displayName MUST be accepted (200); got: ${preserveResp.statusCode()}")
+          assertEquals(ujson.read(preserveResp.body())("user").obj("displayName").str, "KeepMe",
+            clue = s"whitespace-only displayName MUST PRESERVE the previous value `KeepMe` per the trim+asymmetry interaction (trims to empty -> None -> line 669 getOrElse(current.displayName)) -- this is the documented difference from heroName (which CLEARS): displayName treats None as preserve, heroName treats None as clear; got: ${ujson.read(preserveResp.body())("user").obj("displayName").str}")
+
+          // (5) Internal space PRESERVED (trim only affects
+          // edges, not internal whitespace)
+          val internalResp = postObj(ujson.Obj("displayName" -> ujson.Str("John Smith")))
+          assertEquals(internalResp.statusCode(), 200,
+            clue = s"displayName `John Smith` (internal space) MUST be accepted (200); got: ${internalResp.statusCode()}")
+          assertEquals(ujson.read(internalResp.body())("user").obj("displayName").str, "John Smith",
+            clue = s"displayName `John Smith` MUST preserve the INTERNAL space (trim only removes leading/trailing whitespace, not internal); got: ${ujson.read(internalResp.body())("user").obj("displayName").str}")
+        }
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
