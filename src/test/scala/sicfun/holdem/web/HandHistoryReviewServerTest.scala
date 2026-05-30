@@ -9039,6 +9039,135 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented OIDC /start REDIRECT SHAPE at
+  // AuthStack.scala handleOidcStart lines 260-273 +
+  // PlatformUserAuth.scala line 1310's oidcStateCookieHeader
+  // -- the OIDC-START-SHAPE pin completes the OIDC RESPONSE-
+  // SHAPE trilogy (1197ffa /callback failure + 26b7538
+  // /callback success + THIS /start). On a /start GET the
+  // handler emits a 302 RedirectResponse to the provider's
+  // authorization URL (start.location, carrying a `state`
+  // query param) WITH exactly ONE Set-Cookie header (line 272)
+  // installing the short-lived state cookie
+  // (`sicfun_oidc_state=<state>; Path=/; Max-Age=<N>; HttpOnly;
+  // SameSite=Lax`). SIXTY-SEVENTH per-emission-site SHAPE pin
+  // overall; the LOAD-BEARING contract is the STATE BINDING:
+  // the `state` value in the redirect URL query param MUST
+  // EQUAL the `state` value in the Set-Cookie -- this is the
+  // OAuth 2.0 BCP covert-redirect mitigation (the lines
+  // 266-269 comment documents it). The /callback handler later
+  // requires the cookie state to match the URL state (the
+  // missing_state_cookie / state_cookie_mismatch checks at
+  // AuthStack.scala lines 350-351, pinned in the 1197ffa
+  // failure-shape test); if /start emitted DIFFERENT state
+  // values for the URL vs the cookie, EVERY OIDC login would
+  // silently fail at the callback's state-match check; the
+  // OIDC-START-SHAPE contract is OPERATIONALLY CRITICAL
+  // because: (a) the 302 to the provider auth URL is what
+  // actually sends the user to the IdP -- a refactor breaking
+  // it would silently halt the OIDC flow at step 1, (b) the
+  // state cookie is the CSRF/covert-redirect defense -- a
+  // refactor dropping it OR desyncing it from the URL state
+  // would silently break the callback's security check
+  // (either locking out all logins OR, worse, disabling the
+  // covert-redirect mitigation), (c) the HttpOnly + SameSite=
+  // Lax attributes are the documented cookie-hardening (line
+  // 1315-1319) -- HttpOnly blocks JS theft of the state,
+  // SameSite=Lax permits the top-level callback navigation
+  // while blocking cross-site; per-format regression vectors
+  // uniquely caught (NOT caught by the 17788e7 security-
+  // headers-on-start pin which checks the 6 security headers,
+  // NOR by the callback-shape pins): (i) refactor desyncing
+  // the URL state from the cookie state would silently break
+  // all OIDC logins -- the BINDING assertion is the unique
+  // signal, (ii) refactor dropping the state Set-Cookie would
+  // silently disable the covert-redirect mitigation, (iii)
+  // refactor dropping HttpOnly from the state cookie would
+  // silently expose the state to JS (XSS state-theft), (iv)
+  // refactor changing SameSite=Lax to Strict would silently
+  // break the callback hop (the cookie wouldn't be sent on
+  // the top-level navigation back from the provider); test
+  // approach: configure a FakeOidcProvider, GET /start, assert
+  // the 302 + Location-with-state + single state Set-Cookie +
+  // the URL-state == cookie-state BINDING + cookie hardening
+  // attributes + body-less. NOTE: stdout captured+discarded
+  // around the call so the auth.oidc.start INFO line doesn't
+  // clutter the stream (its CONTENT is pinned by 976d7ad).
+  test("OIDC /start REDIRECT SHAPE: a /start GET emits a 302 to the provider authorization URL (carrying a `state` query param) WITH one short-lived state Set-Cookie whose `state` value EQUALS the URL's state (the OAuth 2.0 BCP covert-redirect binding) + HttpOnly + SameSite=Lax hardening, per AuthStack.scala lines 260-273 -- completes the OIDC response-shape trilogy with 1197ffa + 26b7538") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        val provider = new FakeOidcProvider
+        withServer(
+          staticDir,
+          platformAuth = Some(PlatformUserAuth.Config(
+            storePath = storePath,
+            oidcProviders = Vector(provider)
+          ))
+        ) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val outBuf = new java.io.ByteArrayOutputStream()
+          val originalOut = System.out
+          System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
+          val start =
+            try get(s"$baseUri${provider.startPath}")
+            finally System.setOut(originalOut)
+
+          // (1) 302 status
+          assertEquals(start.statusCode(), 302,
+            clue = s"OIDC /start MUST 302 to the provider authorization URL (the RedirectResponse default status); got: ${start.statusCode()}")
+
+          // (2) Location present + carries a `state` query param
+          val location = headerValue(start, "Location")
+            .getOrElse(fail("OIDC /start MUST emit a Location header pointing to the provider authorization URL"))
+          val urlState = queryParam(location, "state")
+            .getOrElse(fail(s"OIDC /start Location MUST carry a `state` query param per the OAuth 2.0 authorization-request shape; got Location: $location"))
+          assert(urlState.nonEmpty,
+            clue = s"OIDC /start URL `state` param MUST be non-empty; got Location: $location")
+
+          // (3) EXACTLY ONE Set-Cookie header = the state cookie
+          val setCookies = start.headers().allValues("Set-Cookie").asScala.toVector
+          assertEquals(setCookies.size, 1,
+            clue = s"OIDC /start MUST emit EXACTLY 1 Set-Cookie header (the state cookie) per AuthStack.scala line 272; got ${setCookies.size}: $setCookies")
+          val stateCookieHeader = setCookies.head
+          assert(stateCookieHeader.startsWith("sicfun_oidc_state="),
+            clue = s"OIDC /start Set-Cookie MUST be the state cookie (sicfun_oidc_state=...) per oidcStateCookieName(false); got: $stateCookieHeader")
+
+          // (4) STATE BINDING: the cookie's state value EQUALS
+          // the URL's state value (the OAuth 2.0 BCP covert-
+          // redirect mitigation -- the load-bearing contract)
+          val cookieState = stateCookieHeader.stripPrefix("sicfun_oidc_state=").takeWhile(_ != ';')
+          assertEquals(cookieState, urlState,
+            clue = s"OIDC /start state BINDING: the Set-Cookie's state value MUST EQUAL the redirect URL's `state` query param per the OAuth 2.0 BCP covert-redirect mitigation (AuthStack.scala lines 266-269) -- the /callback handler's state-match check (lines 350-351) requires this equality, so a refactor desyncing them would silently break EVERY OIDC login at the callback step; got cookieState=`$cookieState`, urlState=`$urlState`")
+
+          // (5) Cookie hardening attributes per
+          // oidcStateCookieHeader (lines 1313-1319)
+          assert(stateCookieHeader.contains("HttpOnly"),
+            clue = s"OIDC /start state cookie MUST be HttpOnly (blocks JS theft of the state value) per line 1315; got: $stateCookieHeader")
+          assert(stateCookieHeader.contains("SameSite=Lax"),
+            clue = s"OIDC /start state cookie MUST be SameSite=Lax (permits the top-level callback navigation while blocking cross-site; Strict would break the callback hop) per line 1319; got: $stateCookieHeader")
+          assert(stateCookieHeader.contains("Path=/"),
+            clue = s"OIDC /start state cookie MUST carry Path=/ per line 1313; got: $stateCookieHeader")
+          // Max-Age present + positive (short-lived per
+          // oidcStateCookieHeader's `math.max(1L, ttlMs/1000)`)
+          val maxAgeMatch = "Max-Age=(\\d+)".r.findFirstMatchIn(stateCookieHeader)
+            .getOrElse(fail(s"OIDC /start state cookie MUST carry a numeric Max-Age (short-lived) per line 1314; got: $stateCookieHeader"))
+          assert(maxAgeMatch.group(1).toLong > 0L,
+            clue = s"OIDC /start state cookie Max-Age MUST be > 0 (a short-lived TTL, NOT a session cookie) per line 1314's `math.max(1L, ttlMs/1000)`; got Max-Age=${maxAgeMatch.group(1)}")
+
+          // (6) body-less
+          assertEquals(start.body(), "",
+            clue = s"OIDC /start 302 MUST be body-less per writeRedirect's sendResponseHeaders(status, -1L); got body length: ${start.body().length}")
+
+          // (7) security headers (cross-ref 17788e7) -- the
+          // applySecurityHeaders at RedirectHandler line 594
+          assert(headerValue(start, "Content-Security-Policy").isDefined,
+            clue = s"OIDC /start 302 MUST carry Content-Security-Policy per RedirectHandler line 594 (cross-ref 17788e7); got: ${headerValue(start, "Content-Security-Policy")}")
+        }
+      }
+    }
+  }
+
   test("registration and login reject passwords beyond the max-length cap") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
