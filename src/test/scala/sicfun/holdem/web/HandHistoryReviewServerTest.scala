@@ -14795,6 +14795,143 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/health <-> /api/ready CROSS-ENDPOINT
+  // VALUE CONSISTENCY UNDER QUEUE-FULL at Readiness.scala
+  // readinessStatus line 47 (ReadyReasonQueueFull) -- the
+  // QUEUE-FULL consistency pin COMPLETES the readiness-state
+  // trilogy: accepting (7df0c6b) + draining (c247083) +
+  // queue-full (THIS commit). When the bounded job queue fills
+  // (executor.getQueue.remainingCapacity() == 0 per
+  // acceptingNewJobs at JobQueue.scala line 259), the readiness
+  // degrades to reason=`queue-full` + acceptingAnalysisJobs=
+  // false + ready=false, and BOTH endpoints must agree.
+  // SEVENTY-FIFTH per-emission-site SHAPE pin overall; the
+  // QUEUE-FULL readiness state is the THIRD of the four
+  // documented readiness reasons (accepting-traffic / draining /
+  // timed-out-worker / queue-full) and is DISTINCT from drain:
+  // it is a CAPACITY signal (the instance is healthy but
+  // saturated) NOT a deploy signal -- the orchestrator should
+  // briefly stop routing (503) to let the queue drain, then
+  // resume, WITHOUT triggering a deploy-style instance
+  // replacement; the QUEUE-FULL CONSISTENCY contract is
+  // OPERATIONALLY CRITICAL because: (a) if /api/health (operator
+  // dashboard) shows acceptingAnalysisJobs=false + reason=queue-
+  // full but /api/ready (load balancer probe) still reports
+  // ready=true, the LB keeps piling traffic onto a saturated
+  // instance, deepening the overload instead of shedding it, (b)
+  // the reason=`queue-full` (vs `draining`) is what lets the
+  // operator distinguish a TRANSIENT capacity spike (scale up /
+  // wait) from an intentional drain (deploy in progress) -- a
+  // refactor conflating the two reasons would silently misdirect
+  // the capacity-vs-deploy triage, (c) the drain-vs-queue-full
+  // distinction must be CONSISTENT across both endpoints; per-
+  // format regression vectors uniquely caught (NOT caught by
+  // 7df0c6b accepting-state NOR c247083 drain-state which never
+  // fill the queue): (i) refactor desyncing the queue-full read
+  // between endpoints would let the LB overload a saturated
+  // instance, (ii) refactor where queue-full flips
+  // acceptingAnalysisJobs on only ONE endpoint, (iii) refactor
+  // mislabeling the queue-full reason as draining (or vice
+  // versa) on either endpoint; test approach: maxConcurrentJobs=1
+  // + maxQueuedJobs=1 + a BlockingBackend, submit job1 (-> running
+  // + blocks) + job2 (-> fills the 1 queued slot), then query
+  // BOTH endpoints (the counts are stable since both jobs are
+  // blocked), assert /api/ready 503 + acceptingAnalysisJobs=false
+  // on both + reason==readyReason==`queue-full` + draining=false
+  // (distinguishing queue-full from drain) + the FULL shared-
+  // field value equality.
+  test("/api/health <-> /api/ready CROSS-ENDPOINT VALUE CONSISTENCY UNDER QUEUE-FULL: with the bounded queue saturated, /api/ready -> 503 + both endpoints report acceptingAnalysisJobs=false + reason==readyReason==`queue-full` + draining=false (capacity NOT deploy signal) + the shared fields carry IDENTICAL values -- completes the readiness-state trilogy with the accepting (7df0c6b) + draining (c247083) pins") {
+    withStaticSite { staticDir =>
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+        withServer(staticDir, backend = backend, maxConcurrentJobs = 1, maxQueuedJobs = 1) { server =>
+         try
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // job1 -> running (blocks on the BlockingBackend latch),
+          // occupying the single worker thread
+          val job1 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(job1.statusCode(), 202,
+            clue = s"job1 submission MUST 202 (the running slot); got: ${job1.statusCode()}")
+          assert(backend.started.await(3, TimeUnit.SECONDS),
+            "BlockingBackend never started -- job1 must be RUNNING (occupying the single worker) before job2 fills the queue")
+
+          // job2 -> queued (fills the single queued slot, since
+          // the only worker thread is busy with job1)
+          val job2 = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(job2.statusCode(), 202,
+            clue = s"job2 submission MUST 202 (fills the single queued slot); got: ${job2.statusCode()}")
+
+          // Now: 1 running + 1 queued -> queue remainingCapacity=0
+          // -> acceptingNewJobs=false -> readiness queue-full. The
+          // counts are STABLE across both queries (job1 blocked,
+          // job2 queued, neither completes until release).
+          val health = getJson(s"$baseUri/api/health")
+          val readyResp = get(s"$baseUri/api/ready")
+          val ready = jsonBody(readyResp)
+
+          // (i) /api/ready 503 (orchestrator stops routing to the
+          // saturated instance)
+          assertEquals(readyResp.statusCode(), 503,
+            clue = s"/api/ready MUST 503 under queue-full (so the LB sheds load while the queue drains); got: ${readyResp.statusCode()}")
+
+          // (ii) acceptingAnalysisJobs=false on BOTH
+          assertEquals(ready("acceptingAnalysisJobs").bool, false,
+            clue = s"/api/ready acceptingAnalysisJobs MUST be false under queue-full; got: ${ready("acceptingAnalysisJobs").bool}")
+          assertEquals(health("acceptingAnalysisJobs").bool, false,
+            clue = s"/api/health acceptingAnalysisJobs MUST be false under queue-full (matching /api/ready); got: ${health("acceptingAnalysisJobs").bool}")
+
+          // (iii) reason==readyReason==`queue-full` on BOTH (the
+          // CAPACITY signal, distinct from the drain DEPLOY signal)
+          assertEquals(ready("reason").str, "queue-full",
+            clue = s"/api/ready reason MUST be `queue-full` under queue saturation per ReadyReasonQueueFull (line 47) -- distinct from `draining`; got: ${ready("reason").str}")
+          assertEquals(health("readyReason").str, "queue-full",
+            clue = s"/api/health readyReason MUST be `queue-full` under queue saturation (matching /api/ready); got: ${health("readyReason").str}")
+          assertEquals(ready("reason"), health("readyReason"),
+            clue = s"under queue-full, ready.reason MUST equal health.readyReason (the renamed pair carries the SAME reason); got ready.reason=${ready("reason")}, health.readyReason=${health("readyReason")}")
+
+          // (iv) draining=false + drainSignalPresent=false on BOTH
+          // -- the documented distinction: queue-full is a
+          // CAPACITY signal, NOT a deploy/drain signal
+          assertEquals(ready("draining").bool, false,
+            clue = s"/api/ready draining MUST be false under queue-full (queue-full is a capacity signal, NOT a drain) -- a refactor conflating the two would misdirect capacity-vs-deploy triage; got: ${ready("draining").bool}")
+          assertEquals(health("draining").bool, false,
+            clue = s"/api/health draining MUST be false under queue-full; got: ${health("draining").bool}")
+          assertEquals(ready("drainSignalPresent").bool, false,
+            clue = s"/api/ready drainSignalPresent MUST be false under queue-full (no drain signal armed); got: ${ready("drainSignalPresent").bool}")
+
+          // (v) the dynamic counters reflect the saturated state +
+          // AGREE across endpoints (running=1 job1, queued=1 job2)
+          assertEquals(ready("runningJobs").num.toInt, 1,
+            clue = s"/api/ready runningJobs MUST be 1 (job1 running) under queue-full; got: ${ready("runningJobs").num.toInt}")
+          assertEquals(ready("queuedJobs").num.toInt, 1,
+            clue = s"/api/ready queuedJobs MUST be 1 (job2 queued) under queue-full; got: ${ready("queuedJobs").num.toInt}")
+
+          // (vi) FULL shared-field VALUE EQUALITY under queue-full
+          // (the cross-endpoint methodology in the third readiness
+          // state) -- the counters are non-zero now but still AGREE
+          val sharedFields = Vector(
+            "service", "host", "port", "ready", "draining",
+            "acceptingAnalysisJobs", "authenticationEnabled", "authenticationMode",
+            "drainSignalConfigured", "drainSignalPresent", "analysisTimeoutMs",
+            "playingHallTimeoutMs", "rateLimitSubmitsPerMinute", "rateLimitStatusPerMinute",
+            "rateLimitAuthPerMinute", "rateLimitClientIpSource", "activeHttpRequests",
+            "maxConcurrentJobs", "maxQueuedJobs", "queuedJobs", "runningJobs",
+            "timedOutWorkersInFlight"
+          )
+          sharedFields.foreach { f =>
+            assertEquals(ready(f), health(f),
+              clue = s"UNDER QUEUE-FULL, shared field `$f` MUST have the SAME value in /api/ready + /api/health (both read the same jobStore.metrics + readinessStatus) -- a refactor desyncing the queue-full read per-endpoint would let the LB keep overloading a saturated instance the operator sees as full; got ready=${ready(f)}, health=${health(f)}")
+          }
+         finally
+          // Release job1 INSIDE the withServer block (after the
+          // assertions) so the blocked worker unblocks BEFORE the
+          // server's shutdown grace -- otherwise shutdown waits the
+          // full shutdownGraceMs (5s) on the blocked worker.
+          backend.release.countDown()
+        }
+    }
+  }
+
   // Pin the STRICT-SUBSET RELATIONSHIP between /api/ready
   // and /api/health JSON field sets at Readiness.scala lines
   // 73-112 (renderHealth) vs lines 129-153 (renderReadiness)
