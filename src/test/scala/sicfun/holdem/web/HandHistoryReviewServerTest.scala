@@ -1526,6 +1526,106 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented ACTUAL-TIMEOUT-PATH errorStatus +
+  // MESSAGE FORMAT at JobQueue.scala timeoutFailure (analyze
+  // lines 379-389 + hall lines 668-673). The TIMEOUT-MESSAGE
+  // pin verifies the path taken when a job GENUINELY times out
+  // (the timeout executor fires after analysisTimeoutMs /
+  // playingHallTimeoutMs) -- a DISTINCT code path from the
+  // backend-Left classification (0ef2b6d): timeoutFailure
+  // HARDCODES errorStatus=504 (line 387 / 672, NOT via
+  // classifyAnalysisError) and generates the message
+  // `<endpoint> timed out after <configuredTimeoutMs>ms`
+  // reflecting the CONFIGURED timeout value. SEVENTIETH
+  // per-emission-site SHAPE pin overall (70TH MILESTONE); the
+  // existing line 22340 timeout test pins errorStatus=504 +
+  // `.contains("timed out")` (analyze-only, loose substring),
+  // but TWO dimensions are unpinned: (1) the EXACT message
+  // format with the DYNAMIC configured-timeout value (proving
+  // timeoutFailure interpolates analysisTimeoutMs, NOT a
+  // hardcoded number), and (2) the HALL timeout path mirror;
+  // the TIMEOUT-MESSAGE contract is OPERATIONALLY CRITICAL
+  // because: (a) the message carries the CONFIGURED timeout so
+  // an operator reading the failure knows the exact deadline
+  // that was exceeded (matching the deployment's
+  // USER-configured analysisTimeoutMs / playingHallTimeoutMs)
+  // -- a refactor hardcoding the value would silently show a
+  // wrong deadline that contradicts the operator's config, (b)
+  // the hardcoded-504 (NOT classify-routed) is what guarantees
+  // a genuine timeout ALWAYS surfaces as 504 even if the
+  // message format drifted away from the classifyError prefix
+  // -- the two 504 sources (hardcoded timeoutFailure + classify
+  // prefix-match) are belt-and-suspenders, (c) the dynamic
+  // value reflects the per-deployment tuning so a client
+  // computing a retry-backoff from the message gets the real
+  // deadline; per-format regression vectors uniquely caught
+  // (NOT caught by the 22340 `.contains("timed out")` loose
+  // check NOR the 0ef2b6d backend-Left classification pin
+  // which never exercises the ACTUAL timeout executor): (i)
+  // refactor hardcoding the timeout value in the message
+  // (e.g. always "120000ms") would pass `.contains("timed
+  // out")` but the exact-value assertion (expecting the
+  // configured 120ms) catches it, (ii) refactor routing
+  // timeoutFailure through classifyError instead of hardcoding
+  // 504 would still produce 504 here BUT a message-format
+  // drift could then flip it to 400 -- the hardcode is the
+  // defense, (iii) refactor breaking the hall timeout path
+  // would be caught by the hall mirror; test approach:
+  // configure a DISTINCTIVE short timeout (120ms analyze /
+  // 140ms hall -- NOT the defaults 120000/900000) with a
+  // BlockingBackend that never completes, submit, await the
+  // timeout-induced Failed state, assert errorStatus=504 +
+  // the EXACT message carrying the configured value.
+  test("timeout-path errorStatus + MESSAGE FORMAT: an ACTUAL job timeout (via timeoutFailure) hardcodes errorStatus=504 + generates `<endpoint> timed out after <configuredTimeoutMs>ms` reflecting the CONFIGURED timeout per JobQueue.scala lines 379-389 + 668-673 -- extends the 22340 timeout test (errorStatus=504 + loose `.contains` analyze-only) with the EXACT dynamic-value message + the hall mirror") {
+    withStaticSite { staticDir =>
+      // analyze: a DISTINCTIVE 120ms timeout (not the 120000ms
+      // default) proves the message interpolates the configured
+      // value. BlockingBackend never completes -> the timeout
+      // executor fires at ~120ms -> timeoutFailure.
+      val analyzeBackend = new BlockingBackend(Right(sampleAnalysisResult))
+      try
+        withServer(staticDir, backend = analyzeBackend, maxConcurrentJobs = 1,
+                   maxQueuedJobs = 1, analysisTimeoutMs = 120L) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(submit.statusCode(), 202,
+            clue = s"analyze submission MUST 202 to drive the timeout path; got: ${submit.statusCode()}")
+          assert(analyzeBackend.started.await(3, TimeUnit.SECONDS),
+            "analyze BlockingBackend never started -- the worker must enter analyze (+ schedule its timeout) for the timeout path to fire")
+          val failed = awaitTerminalJob(s"$baseUri${jsonBody(submit)("statusUrl").str}")
+          assertEquals(failed("status").str, "failed",
+            clue = s"timed-out analyze job MUST reach the failed state; got: ${failed("status").str}")
+          assertEquals(failed("errorStatus").num.toInt, 504,
+            clue = s"ACTUAL-timeout analyze errorStatus MUST be 504 (HARDCODED at timeoutFailure line 387, NOT routed through classifyAnalysisError); got: ${failed("errorStatus").num.toInt}")
+          assertEquals(failed("error").str, "analysis timed out after 120ms",
+            clue = s"ACTUAL-timeout analyze error message MUST be EXACTLY `analysis timed out after 120ms` reflecting the CONFIGURED analysisTimeoutMs=120 per line 388's `s\"analysis timed out after $${analysisTimeoutMs}ms\"` -- a refactor hardcoding the value (e.g. always 120000ms) would pass the 22340 `.contains(\"timed out\")` check but fail this exact-value assertion, silently showing a deadline that contradicts the operator's config; got: ${failed("error").str}")
+        }
+      finally analyzeBackend.release.countDown()
+
+      // hall: a DISTINCTIVE 140ms timeout (not the 900000ms
+      // default) -- the mirror of the analyze timeout path.
+      val hallBackend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      try
+        withServer(staticDir, playingHallBackend = hallBackend, maxConcurrentJobs = 1,
+                   maxQueuedJobs = 1, playingHallTimeoutMs = 140L) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val submit = postJson(s"$baseUri/api/playing-hall", validUploadPayload)
+          assertEquals(submit.statusCode(), 202,
+            clue = s"hall submission MUST 202 to drive the timeout path; got: ${submit.statusCode()}")
+          assert(hallBackend.started.await(3, TimeUnit.SECONDS),
+            "hall BlockingPlayingHallBackend never started -- the worker must enter the run call (+ schedule its timeout) for the timeout path to fire")
+          val failed = awaitTerminalJob(s"$baseUri${jsonBody(submit)("statusUrl").str}")
+          assertEquals(failed("status").str, "failed",
+            clue = s"timed-out hall job MUST reach the failed state; got: ${failed("status").str}")
+          assertEquals(failed("errorStatus").num.toInt, 504,
+            clue = s"ACTUAL-timeout hall errorStatus MUST be 504 (HARDCODED at the hall timeoutFailure line 672); got: ${failed("errorStatus").num.toInt}")
+          assertEquals(failed("error").str, "playing hall timed out after 140ms",
+            clue = s"ACTUAL-timeout hall error message MUST be EXACTLY `playing hall timed out after 140ms` reflecting the CONFIGURED playingHallTimeoutMs=140 per line 673 -- the hall mirror of the analyze timeout message; a refactor breaking the hall timeout path OR diverging its message format would be caught here; got: ${failed("error").str}")
+        }
+      finally hallBackend.release.countDown()
+    }
+  }
+
   // Pin the documented `auth.logout` audit log line format per deploy
   // doc line 218: "Auth events emit structured log lines: ...
   // auth.logout ... INFO level for success/expected events ... Each
