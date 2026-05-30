@@ -14680,6 +14680,121 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented /api/health <-> /api/ready CROSS-ENDPOINT
+  // VALUE CONSISTENCY UNDER DRAIN at Readiness.scala renderHealth
+  // + renderReadiness -- the UNDER-DRAIN consistency pin extends
+  // the 7df0c6b cross-endpoint pin (which verified value equality
+  // in the ACCEPTING state) to the DRAINING state, closing the
+  // drain-state cross-equality gap. SEVENTY-FOURTH per-emission-
+  // site SHAPE pin overall; the existing 11375 drain test checks
+  // per-endpoint values under drain (each hardcoded
+  // independently), and 7df0c6b checks cross-endpoint value
+  // equality in the ACCEPTING state -- but the cross-endpoint
+  // VALUE-EQUALITY methodology (ready(f) == health(f) for all
+  // shared fields) applied to the DRAIN state is unpinned; the
+  // UNDER-DRAIN CONSISTENCY contract is OPERATIONALLY CRITICAL
+  // because: (a) the drain transition is the single most
+  // operationally sensitive moment -- if /api/health (operator
+  // dashboard) shows draining=true but /api/ready (load balancer
+  // probe) still reports draining=false / ready=true, the LB
+  // keeps routing NEW traffic to an instance the operator
+  // believes is draining, defeating the zero-downtime-deploy
+  // contract, (b) a refactor where the two endpoints read the
+  // drain state from DIFFERENT sources (e.g. one re-reads the
+  // signal file live, the other caches a snapshot) would agree
+  // when both are false (the accepting state 7df0c6b covers) but
+  // could DIVERGE during the drain transition -- this pin
+  // catches that state-specific desync, (c) the documented
+  // status asymmetry under drain (/api/ready -> 503, /api/health
+  // -> 200) must coexist with VALUE agreement on the shared
+  // fields; per-format regression vectors uniquely caught (NOT
+  // caught by 7df0c6b accepting-state-only NOR 11375 per-endpoint
+  // hardcoded): (i) refactor desyncing the drain-state read
+  // between the two endpoints would pass the accepting-state
+  // 7df0c6b pin but fail this under-drain equality, (ii) refactor
+  // flipping only ONE endpoint's draining/acceptingAnalysisJobs
+  // under drain would break the cross-equality even if its own
+  // 11375 per-endpoint check were updated; test approach: arm a
+  // drain signal file, activate it, query BOTH endpoints, assert
+  // the documented status asymmetry (503 ready / 200 health) +
+  // the drain-state shared values agree (draining=true,
+  // acceptingAnalysisJobs=false, drainSignalPresent=true on both,
+  // reason/readyReason both "draining") + the FULL shared-field
+  // value equality holds under drain.
+  test("/api/health <-> /api/ready CROSS-ENDPOINT VALUE CONSISTENCY UNDER DRAIN: with the drain signal active, /api/ready -> 503 + /api/health -> 200 (status asymmetry) BUT the shared fields still carry IDENTICAL values (draining=true, acceptingAnalysisJobs=false, drainSignalPresent=true on both; reason==readyReason==`draining`) -- extends the 7df0c6b accepting-state cross-endpoint pin to the drain transition") {
+    withStaticSite { staticDir =>
+      val root = java.nio.file.Files.createTempDirectory("health-ready-drain-")
+      try
+        val drainSignalFile = root.resolve("deploy-drain.signal")
+        withServer(staticDir, drainSignalFile = Some(drainSignalFile)) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // Activate the drain signal
+          java.nio.file.Files.writeString(drainSignalFile, "draining", StandardCharsets.UTF_8)
+
+          val health = getJson(s"$baseUri/api/health")
+          val readyResp = get(s"$baseUri/api/ready")
+          val ready = jsonBody(readyResp)
+
+          // (i) STATUS ASYMMETRY under drain: /api/ready flips to
+          // 503 (orchestrator stops routing) while /api/health
+          // stays 200 (the instance is still alive, just draining)
+          assertEquals(readyResp.statusCode(), 503,
+            clue = s"/api/ready MUST return 503 under drain (so the load balancer stops routing new traffic); got: ${readyResp.statusCode()}")
+
+          // (ii) drain-state shared VALUES agree across endpoints
+          assertEquals(ready("draining").bool, true,
+            clue = s"/api/ready draining MUST be true under drain; got: ${ready("draining").bool}")
+          assertEquals(health("draining").bool, true,
+            clue = s"/api/health draining MUST be true under drain; got: ${health("draining").bool}")
+          assertEquals(ready("acceptingAnalysisJobs").bool, false,
+            clue = s"/api/ready acceptingAnalysisJobs MUST be false under drain; got: ${ready("acceptingAnalysisJobs").bool}")
+          assertEquals(health("acceptingAnalysisJobs").bool, false,
+            clue = s"/api/health acceptingAnalysisJobs MUST be false under drain; got: ${health("acceptingAnalysisJobs").bool}")
+          assertEquals(ready("drainSignalPresent").bool, true,
+            clue = s"/api/ready drainSignalPresent MUST be true under drain; got: ${ready("drainSignalPresent").bool}")
+          assertEquals(health("drainSignalPresent").bool, true,
+            clue = s"/api/health drainSignalPresent MUST be true under drain; got: ${health("drainSignalPresent").bool}")
+
+          // (iii) the reason<->readyReason renamed pair BOTH carry
+          // the documented `draining` value under drain
+          assertEquals(ready("reason").str, "draining",
+            clue = s"/api/ready reason MUST be `draining` under drain; got: ${ready("reason").str}")
+          assertEquals(health("readyReason").str, "draining",
+            clue = s"/api/health readyReason MUST be `draining` under drain; got: ${health("readyReason").str}")
+          assertEquals(ready("reason"), health("readyReason"),
+            clue = s"under drain, ready.reason MUST equal health.readyReason (the renamed pair carries the SAME drain reason value); got ready.reason=${ready("reason")}, health.readyReason=${health("readyReason")}")
+
+          // (iv) FULL shared-field VALUE EQUALITY holds UNDER
+          // DRAIN (the 7df0c6b methodology applied to the drain
+          // state) -- catches a refactor desyncing ANY shared
+          // field's drain-state read between the two endpoints
+          val sharedFields = Vector(
+            "service", "host", "port", "ready", "draining",
+            "acceptingAnalysisJobs", "authenticationEnabled", "authenticationMode",
+            "drainSignalConfigured", "drainSignalPresent", "analysisTimeoutMs",
+            "playingHallTimeoutMs", "rateLimitSubmitsPerMinute", "rateLimitStatusPerMinute",
+            "rateLimitAuthPerMinute", "rateLimitClientIpSource", "activeHttpRequests",
+            "maxConcurrentJobs", "maxQueuedJobs", "queuedJobs", "runningJobs",
+            "timedOutWorkersInFlight"
+          )
+          sharedFields.foreach { f =>
+            assertEquals(ready(f), health(f),
+              clue = s"UNDER DRAIN, shared field `$f` MUST have the SAME value in /api/ready + /api/health -- a refactor reading the drain state from DIFFERENT sources per-endpoint would agree in the accepting state (7df0c6b) but DIVERGE during the drain transition, silently letting the load balancer route to an instance the operator believes is draining; got ready=${ready(f)}, health=${health(f)}")
+          }
+
+          // (v) `ready` boolean is false on BOTH (the readiness
+          // signal itself agrees under drain)
+          assertEquals(ready("ready").bool, false,
+            clue = s"/api/ready ready field MUST be false under drain; got: ${ready("ready").bool}")
+          assertEquals(health("ready").bool, false,
+            clue = s"/api/health ready field MUST be false under drain (matching /api/ready); got: ${health("ready").bool}")
+        }
+      finally
+        deleteRecursively(root)
+    }
+  }
+
   // Pin the STRICT-SUBSET RELATIONSHIP between /api/ready
   // and /api/health JSON field sets at Readiness.scala lines
   // 73-112 (renderHealth) vs lines 129-153 (renderReadiness)
