@@ -8637,6 +8637,128 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented validatePassword CONTRACT at
+  // PlatformUserAuth.scala lines 1121-1133 -- the
+  // VALIDATE-PASSWORD pin verifies the 2 documented length
+  // bounds + the documented NO-TRIM semantic: (1) MIN-LENGTH
+  // of 10 chars (line 1130-1131) -> "password must be at least
+  // 10 characters", (2) MAX-LENGTH of 256 chars (line
+  // 1132-1133, MaxPasswordLength) -> "password must be at most
+  // 256 characters", (3) NO-TRIM: the password is validated +
+  // hashed AS-IS, NOT trimmed (the line 1122-1129 comment
+  // documents the NIST SP 800-63B rationale -- memorized
+  // secrets must accept any printable ASCII including spaces +
+  // explicitly forbids truncation). SIXTY-FOURTH per-emission-
+  // site SHAPE pin overall; the NO-TRIM contract is the
+  // OPERATIONALLY CRITICAL part because (per the documented
+  // comment): an earlier version trimmed before validating
+  // length, which created a foot-gun -- a register call with
+  // "  hunter22  " (12 raw / 8 trimmed) validated the TRIMMED
+  // form but stored the hash of the RAW value, and login then
+  // required the same whitespace -> silent UX failure when the
+  // user pasted with stray whitespace at register but typed
+  // cleanly at login; the fix validates + hashes the RAW form
+  // so register-validate + register-hash + login-compare all
+  // agree on the exact bytes; the length bounds are
+  // OPERATIONALLY CRITICAL because (b) the min-10 enforces a
+  // baseline entropy floor + (c) the max-256 bounds the PBKDF2
+  // per-iteration cost (a megabyte password would otherwise
+  // burn server CPU on every login attempt -- the auth-bucket
+  // rate limiter caps request RATE but the length cap bounds
+  // the WORK each request is allowed to cost); per-format
+  // regression vectors uniquely caught: (i) refactor changing
+  // the min-10 constant would shift the lower boundary (the
+  // 10/9 exact pair brackets it), (ii) refactor changing the
+  // MaxPasswordLength constant would shift the upper boundary
+  // (the 256/257 exact pair brackets it), (iii) refactor
+  // RE-INTRODUCING the trim-before-validate bug would silently
+  // accept-then-fail the whitespace-padded-short-core case OR
+  // reject the whitespace-padded-valid case -- the
+  // ` 12345678 ` (10 raw / 8 trimmed) ACCEPT assertion is the
+  // unique NO-TRIM signal (a trim-first refactor would see 8
+  // chars < 10 + reject it), (iv) refactor changing any
+  // error-message string would break UIs surfacing the text;
+  // test approach: exercise the 10/9 min boundary + the
+  // 256/257 max boundary + the no-trim accept-and-round-trip
+  // case; NOTE: rateLimitAuthPerMinute=0 disables the Auth
+  // bucket so the multiple register attempts don't trip the
+  // default 10/minute cap.
+  test("validatePassword CONTRACT: enforces the 10-char minimum + 256-char maximum length bounds AND validates/hashes the password AS-IS (NO trimming, per the NIST SP 800-63B no-truncation rationale) so a whitespace-padded password whose trimmed core is under 10 chars is still ACCEPTED + round-trips at login per PlatformUserAuth.scala lines 1121-1133") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath)),
+                   rateLimitAuthPerMinute = 0) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          def register(email: String, password: String): HttpResponse[String] =
+            postJson(s"$baseUri/api/auth/register", ujson.write(ujson.Obj(
+              "email" -> ujson.Str(email),
+              "password" -> ujson.Str(password),
+              "displayName" -> ujson.Str("P")
+            )))
+
+          // (1) MIN-LENGTH boundary: 10 chars accepted, 9
+          // rejected. The boundary is INCLUSIVE at 10 (length <
+          // 10 rejects, so == 10 is accepted).
+          val min10 = register("pwmin@example.com", "1234567890")
+          assertEquals(min10.statusCode(), 201,
+            clue = s"password at EXACTLY 10 chars MUST 201 (inclusive boundary: length < 10 rejects) per line 1130's `< 10`; got: ${min10.statusCode()}, body: ${min10.body()}")
+
+          val min9 = register("pwmin9@example.com", "123456789")
+          assertEquals(min9.statusCode(), 400,
+            clue = s"password at 9 chars MUST 400 per line 1130-1131's min-length gate; got: ${min9.statusCode()}")
+          assertEquals(jsonBody(min9).obj.keys.toSet, Set("error"),
+            clue = "9-char password 400 MUST emit the 1-field {error} shape")
+          assertEquals(jsonBody(min9)("error").str, "password must be at least 10 characters",
+            clue = s"9-char password 400 message MUST be the documented `password must be at least 10 characters`; got: ${jsonBody(min9)("error").str}")
+
+          // (2) MAX-LENGTH boundary: 256 chars accepted, 257
+          // rejected.
+          val max256 = register("pwmax@example.com", "x" * 256)
+          assertEquals(max256.statusCode(), 201,
+            clue = s"password at EXACTLY 256 chars MUST 201 (inclusive boundary: length > 256 rejects) per line 1132's `> MaxPasswordLength`; got: ${max256.statusCode()}, body: ${max256.body()}")
+
+          val max257 = register("pwmax257@example.com", "x" * 257)
+          assertEquals(max257.statusCode(), 400,
+            clue = s"password at 257 chars MUST 400 per line 1132-1133's max-length gate; got: ${max257.statusCode()}")
+          assertEquals(jsonBody(max257)("error").str, "password must be at most 256 characters",
+            clue = s"257-char password 400 message MUST be the documented `password must be at most 256 characters`; got: ${jsonBody(max257)("error").str}")
+
+          // (3) NO-TRIM: a password ` 12345678 ` (10 chars raw,
+          // 8 chars trimmed) MUST be ACCEPTED -- the unique
+          // NO-TRIM signal. A trim-first refactor would see the
+          // 8-char trimmed form (< 10) + reject it. The current
+          // code validates the RAW 10-char form.
+          val paddedPassword = " 12345678 "
+          assertEquals(paddedPassword.length, 10, clue = "test setup: padded password MUST be 10 raw chars")
+          assertEquals(paddedPassword.trim.length, 8, clue = "test setup: padded password MUST be 8 trimmed chars")
+          val notrim = register("pwtrim@example.com", paddedPassword)
+          assertEquals(notrim.statusCode(), 201,
+            clue = s"whitespace-padded password ` 12345678 ` (10 raw / 8 trimmed) MUST be ACCEPTED (201) per the line 1122-1129 NO-TRIM contract -- a trim-first refactor would see the 8-char trimmed form (< 10) + reject it (400); got: ${notrim.statusCode()}, body: ${notrim.body()}")
+
+          // (4) NO-TRIM ROUND-TRIP: login with the EXACT padded
+          // password succeeds (the RAW value was hashed), while
+          // login with the TRIMMED form does NOT (different
+          // bytes -> credential mismatch). This proves the
+          // register-hash used the raw whitespace-included value.
+          def login(email: String, password: String): HttpResponse[String] =
+            postJson(s"$baseUri/api/auth/login", ujson.write(ujson.Obj(
+              "email" -> ujson.Str(email),
+              "password" -> ujson.Str(password)
+            )))
+
+          val loginPadded = login("pwtrim@example.com", paddedPassword)
+          assertEquals(loginPadded.statusCode(), 200,
+            clue = s"login with the EXACT padded password ` 12345678 ` MUST 200 -- the register-side hash used the RAW whitespace-included value, so the same raw value matches; got: ${loginPadded.statusCode()}")
+
+          val loginTrimmed = login("pwtrim@example.com", paddedPassword.trim)
+          assertEquals(loginTrimmed.statusCode(), 401,
+            clue = s"login with the TRIMMED password `12345678` MUST 401 -- the stored hash is of the RAW ` 12345678 ` value, so the trimmed 8-char form is a DIFFERENT credential (AND would fail the min-10 validation); if this returned 200, the server would be silently trimming passwords (the documented foot-gun); got: ${loginTrimmed.statusCode()}")
+        }
+      }
+    }
+  }
+
   test("registration and login reject passwords beyond the max-length cap") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
