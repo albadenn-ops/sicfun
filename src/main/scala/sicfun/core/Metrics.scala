@@ -67,6 +67,39 @@ object Metrics:
     val m = mean(seq)
     seq.map(v => math.pow(v - m, 2)).sum / (seq.length - 1)
 
+  /** Sample standard deviation (sqrt of the unbiased n-1 variance).
+    *
+    * @param values at least two values
+    * @return the sample standard deviation
+    * @throws IllegalArgumentException if fewer than two values are provided
+    */
+  def stdDev(values: Iterable[Double]): Double = math.sqrt(variance(values))
+
+  /** Linear-interpolated percentile for `q` in [0, 1].
+    *
+    * The input is sorted defensively, so the caller need not pre-sort. `q` is
+    * clamped to [0, 1]. The rank `p = q * (n - 1)` is interpolated linearly
+    * between the two surrounding order statistics.
+    *
+    * @param values the values whose percentile is requested
+    * @param q the quantile in [0, 1] (values outside the range are clamped)
+    * @return the interpolated percentile; 0.0 for an empty input, and the sole
+    *         element for a single-element input
+    */
+  def percentile(values: Iterable[Double], q: Double): Double =
+    val sorted = values.toVector.sorted
+    if sorted.isEmpty then 0.0
+    else if sorted.sizeIs == 1 then sorted.head
+    else
+      val clamped = math.max(0.0, math.min(1.0, q))
+      val p = clamped * (sorted.size - 1).toDouble
+      val lo = math.floor(p).toInt
+      val hi = math.ceil(p).toInt
+      if lo == hi then sorted(lo)
+      else
+        val w = p - lo.toDouble
+        sorted(lo) * (1.0 - w) + sorted(hi) * w
+
   /** Computes the weighted arithmetic mean: sum(w_i * v_i) / sum(w_i).
     *
     * @param values  the values to average
