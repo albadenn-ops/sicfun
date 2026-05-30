@@ -19,4 +19,17 @@ class CanonicalFieldTest extends munit.FunSuite:
     assert(args.contains("--seed=42"))
     assert(args.contains("--hands=20000"))
     assert(args.exists(_.startsWith("--villainPool=")))
+    assert(args.contains("--saveTrainingTsv=false"))
+    assert(args.contains("--outDir=data/p0/strategic"))
+  }
+  test("Field require rejects villain count != playerCount - 1") {
+    intercept[IllegalArgumentException] {
+      CanonicalField.Field("v", playerCount = 9, villainTokens = Vector.fill(7)("station"))
+    }
+  }
+  test("rigged-stations field is 8 calling stations with its own version") {
+    val f = CanonicalField.NineMaxRiggedStations
+    assertEquals(f.version, "p0-rigged-stations-v1")
+    assertEquals(f.villainTokens.length, 8)
+    assert(f.villainTokens.forall(_ == "station"), s"expected all stations, got ${f.villainTokens}")
   }

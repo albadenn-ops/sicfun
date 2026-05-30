@@ -19,7 +19,7 @@ object CanonicalField:
         s"--outDir=$outDir",
         "--learnEveryHands=0",       // deterministic strategy: no online retraining
         "--heroExplorationRate=0.0", // no epsilon-greedy noise
-        "--fullRing=true",           // all 8 villains always active
+        "--fullRing=true",           // fullRing: every villain seat stays active (no random sit-outs)
         "--saveTrainingTsv=false"
       )
 
