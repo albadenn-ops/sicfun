@@ -15,6 +15,14 @@ import java.util.Random
   * counterfactual gain of switching from the played action to sicfun's recommended action is
   * `recommendedEv - actualEv = -evDifference`. Chip gains are normalized to big blinds via
   * [[ImportedHand.bigBlind]] (guarded `> 0`) and aggregated to bb/100 with a percentile bootstrap CI.
+  *
+  * INTERPRETATION (read before trusting the number): this is a SELF-ASSESSED counterfactual.
+  * `recommendedEv` is the engine's OWN argmax over its candidate EVs, so the per-decision gain
+  * (`recommendedEv - actualEv`) is >= 0 by construction — the engine never recommends an action it
+  * scored below the one actually played. The bb/100 figure therefore measures "EV the played line left
+  * on the table vs. what THIS engine would have done," NOT a calibrated win rate and NOT an
+  * exploitability bound. On a small corpus the figure (and its wide CI) is a smoke/sanity signal only.
+  * A real win-rate estimate comes from Track A (hall self-play vs a canonical field), not this.
   */
 object CounterfactualHandHistoryBenchmark:
 
@@ -80,7 +88,7 @@ object CounterfactualHandHistoryBenchmark:
     runFile(java.nio.file.Path.of(args(0)), args(1), seed) match
       case Right(r) =>
         println(
-          f"counterfactual bb/100 = ${r.ci.pointEstimate}%.3f  CI=[${r.ci.lower}%.3f, ${r.ci.upper}%.3f]  (hands=${r.hands}, decisions=${r.decisions}, perHandSamples=${r.ci.sampleSize})"
+          f"counterfactual (self-assessed, not a win rate) bb/100 = ${r.ci.pointEstimate}%.3f  CI=[${r.ci.lower}%.3f, ${r.ci.upper}%.3f]  (hands=${r.hands}, decisions=${r.decisions}, perHandSamples=${r.ci.sampleSize})"
         )
       case Left(err) =>
         System.err.println(s"failed: $err")
