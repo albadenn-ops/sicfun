@@ -8356,6 +8356,159 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented FULL zero-width-codepoint FAMILY in
+  // normalizeEmail at PlatformUserAuth.scala lines 1192-1194
+  // (`.filterNot(ch => val cp = ch.toInt; cp == 0xFEFF || cp ==
+  // 0x200B || cp == 0x200C || cp == 0x200D || cp == 0x2060)`)
+  // -- the ZERO-WIDTH-FAMILY pin extends the line 8322 test
+  // (which covers ONLY U+FEFF as a prefix) to ALL 5 documented
+  // codepoints at BOTH prefix AND embedded positions. SIXTY-
+  // SECOND per-emission-site SHAPE pin overall; the 5
+  // codepoints are the standard Unicode zero-width family:
+  // U+FEFF (BOM / zero-width no-break space), U+200B (zero-
+  // width space), U+200C (zero-width non-joiner), U+200D
+  // (zero-width joiner), U+2060 (word joiner) -- all have zero
+  // rendered width AND zero semantic content in an email
+  // context; the ZERO-WIDTH-FAMILY contract is OPERATIONALLY
+  // CRITICAL because (per the documented inline comment at
+  // lines 1163-1190): a user who pastes their email from a
+  // BOM-emitting source OR a clipboard pipeline that injects
+  // zero-width chars BETWEEN visually-identical characters
+  // would otherwise register with the decorated form stored,
+  // then be PERMANENTLY LOCKED OUT because their subsequent
+  // typed login lacks the invisible bytes + the stored-vs-
+  // submitted comparison misses (Scala's String.trim only
+  // removes ch <= 0x20, and BOM at 0xFEFF + the zero-width
+  // family at 0x200B-0x2060 all sit FAR above that threshold,
+  // so trim alone does NOT strip them; validateEmail's
+  // Character.isWhitespace check ALSO returns false for all 5,
+  // so they pass every gate); per-format regression vectors
+  // uniquely caught (NOT caught by the line 8322 BOM-only
+  // prefix test): (i) refactor dropping ANY of the 4 non-BOM
+  // codepoints (U+200B/U+200C/U+200D/U+2060) from the line
+  // 1194 filter would silently break round-trip login for
+  // emails decorated with that specific codepoint -- the 8322
+  // test only exercises U+FEFF so it would stay green, (ii)
+  // refactor that only stripped PREFIX/leading zero-width
+  // chars (e.g. via stripPrefix instead of filterNot) would
+  // silently leave EMBEDDED zero-width chars in the stored
+  // canonical, breaking round-trip for the documented
+  // "clipboard injects between characters" scenario, (iii)
+  // refactor changing any codepoint constant would silently
+  // shift which chars are stripped; test approach: build the
+  // zero-width chars via codepoint Int -> toChar (NOT literal
+  // invisible chars in source, per the documented rationale at
+  // lines 1185-1190 that keeps the operand pure-ASCII +
+  // immune to a lint pass stripping invisible source bytes),
+  // register a BARE email, then login with each of the 5
+  // codepoints at BOTH prefix + embedded positions (all must
+  // 200 + round-trip to the bare canonical), then register a
+  // SECOND user with an embedded zero-width form + verify the
+  // STORED canonical is bare (register-side normalization).
+  test("normalizeEmail strips ALL 5 documented zero-width codepoints (U+FEFF, U+200B, U+200C, U+200D, U+2060) at BOTH prefix + embedded positions so register-then-login round-trips for every form per PlatformUserAuth.scala lines 1192-1194 -- extends the line 8322 BOM-only-prefix test to the full zero-width family + embedded positions") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        // rateLimitAuthPerMinute=0 disables the Auth bucket so
+        // the ~13 register+login attempts this test issues don't
+        // trip the default 10/minute auth cap (the normalization
+        // contract under test is orthogonal to rate limiting).
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath)),
+                   rateLimitAuthPerMinute = 0) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          // The 5 documented zero-width codepoints, built via
+          // codepoint Int -> toChar so this test stays pure-
+          // ASCII (matching the source's documented design at
+          // lines 1185-1190).
+          val zeroWidthCodepoints = Vector(
+            (0xFEFF, "U+FEFF (BOM)"),
+            (0x200B, "U+200B (ZWSP)"),
+            (0x200C, "U+200C (ZWNJ)"),
+            (0x200D, "U+200D (ZWJ)"),
+            (0x2060, "U+2060 (WJ)")
+          )
+          val zeroWidthSet = zeroWidthCodepoints.map(_._1).toSet
+
+          def postBody(path: String, obj: ujson.Obj): HttpResponse[String] =
+            postJson(s"$baseUri$path", ujson.write(obj))
+
+          // (1) Register with the BARE email -> 201, stored
+          // canonical is the bare form
+          val bareEmail = "zwfamily@example.com"
+          val register = postBody("/api/auth/register", ujson.Obj(
+            "email" -> ujson.Str(bareEmail),
+            "password" -> ujson.Str("correcthorse"),
+            "displayName" -> ujson.Str("ZW")
+          ))
+          assertEquals(register.statusCode(), 201,
+            clue = s"register with bare email MUST 201; got: ${register.statusCode()}, body: ${register.body()}")
+          assertEquals(jsonBody(register)("user")("email").str, bareEmail,
+            clue = s"register response user.email MUST be the bare canonical form; got: ${jsonBody(register)("user")("email").str}")
+
+          // (2) For each codepoint, login with a PREFIX-
+          // decorated email -> 200 (round-trips to bare)
+          zeroWidthCodepoints.foreach { case (cp, name) =>
+            val prefixed = cp.toChar.toString + bareEmail
+            val resp = postBody("/api/auth/login", ujson.Obj(
+              "email" -> ujson.Str(prefixed),
+              "password" -> ujson.Str("correcthorse")
+            ))
+            assertEquals(resp.statusCode(), 200,
+              clue = s"login with $name PREFIX-decorated email MUST 200 (normalizeEmail strips the codepoint -> matches the stored bare canonical) per line 1194's filter -- a refactor dropping $name from the filter would silently lock out users who paste this codepoint; got: ${resp.statusCode()}, body: ${resp.body()}")
+            assertEquals(jsonBody(resp)("user")("email").str, bareEmail,
+              clue = s"login response with $name prefix MUST round-trip to the bare canonical `$bareEmail`; got: ${jsonBody(resp)("user")("email").str}")
+          }
+
+          // (3) For each codepoint, login with an EMBEDDED
+          // (internal) decorated email -> 200. This is the
+          // documented "clipboard injects between characters"
+          // scenario -- a refactor that only stripped leading
+          // zero-width chars would silently fail here.
+          zeroWidthCodepoints.foreach { case (cp, name) =>
+            val embedded = "zwfamily" + cp.toChar.toString + "@example.com"
+            val resp = postBody("/api/auth/login", ujson.Obj(
+              "email" -> ujson.Str(embedded),
+              "password" -> ujson.Str("correcthorse")
+            ))
+            assertEquals(resp.statusCode(), 200,
+              clue = s"login with $name EMBEDDED email (`zwfamily<$name>@example.com`) MUST 200 per line 1194's filterNot (which strips ALL positions, not just leading) -- a refactor using stripPrefix instead of filterNot would silently fail this; got: ${resp.statusCode()}, body: ${resp.body()}")
+          }
+
+          // (4) Register a SECOND user with an EMBEDDED zero-
+          // width form, verify the STORED canonical is bare
+          // (register-side normalization, NOT just login-side
+          // matching). Uses U+200B (a non-BOM codepoint the
+          // 8322 test never exercises) embedded mid-local-part.
+          val decoratedRegEmail = "regnorm" + 0x200B.toChar.toString + "@example.com"
+          val reg2 = postBody("/api/auth/register", ujson.Obj(
+            "email" -> ujson.Str(decoratedRegEmail),
+            "password" -> ujson.Str("correcthorse"),
+            "displayName" -> ujson.Str("R")
+          ))
+          assertEquals(reg2.statusCode(), 201,
+            clue = s"register with embedded U+200B email MUST 201 (the codepoint is stripped during normalize); got: ${reg2.statusCode()}, body: ${reg2.body()}")
+          val storedEmail = jsonBody(reg2)("user")("email").str
+          assertEquals(storedEmail, "regnorm@example.com",
+            clue = s"register-side normalization MUST store the BARE canonical `regnorm@example.com` (embedded U+200B stripped); got: $storedEmail")
+          // CROSS-CHECK: the stored canonical contains NONE of
+          // the 5 zero-width codepoints
+          assert(!storedEmail.exists(ch => zeroWidthSet.contains(ch.toInt)),
+            clue = s"stored canonical email MUST contain NONE of the 5 zero-width codepoints per line 1194's filter; got chars: ${storedEmail.map(_.toInt.toHexString).mkString(",")}")
+
+          // (5) ROUND-TRIP CONFIRMATION: login for the second
+          // user with the BARE form succeeds (the register-side
+          // normalization + login-side normalization agree)
+          val reg2Login = postBody("/api/auth/login", ujson.Obj(
+            "email" -> ujson.Str("regnorm@example.com"),
+            "password" -> ujson.Str("correcthorse")
+          ))
+          assertEquals(reg2Login.statusCode(), 200,
+            clue = s"login with the bare form MUST 200 -- the documented round-trip closure (register normalizes embedded-U+200B to bare, login normalizes bare to bare, lookup succeeds); got: ${reg2Login.statusCode()}")
+        }
+      }
+    }
+  }
+
   test("registration and login reject passwords beyond the max-length cap") {
     withStaticSite { staticDir =>
       withUserStorePath { storePath =>
