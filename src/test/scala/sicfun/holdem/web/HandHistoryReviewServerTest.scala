@@ -1405,6 +1405,127 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented job-failure errorStatus CLASSIFICATION
+  // contract at JobQueue.scala classifyAnalysisError (lines
+  // 763-766) + classifyPlayingHallError (lines 768-771), as
+  // surfaced END-TO-END in the Failed-state poll response's
+  // `errorStatus` field (the renderStatus Failed branch at
+  // lines 414-419 / 720-725 emits `json("errorStatus") =
+  // ujson.Num(errorStatus)` where errorStatus =
+  // classifyAnalysisError(error) per line 291 / 588). The
+  // ERROR-CLASSIFICATION pin verifies the documented prefix ->
+  // status-code mapping across ALL 3 branches x BOTH endpoints:
+  // (a) "<endpoint> timed out after ..." -> 504 (Gateway
+  // Timeout), (b) "<endpoint> failed: ..." -> 500 (Internal
+  // Server Error), (c) any other error -> 400 (Bad Request,
+  // the default-case branch). SIXTY-NINTH per-emission-site
+  // SHAPE pin overall; existing coverage at line 4174 pins the
+  // `job failed` AUDIT LOG line with errorStatus=400 (the
+  // default case ONLY), but the FULL 3-branch x 2-endpoint
+  // classification as surfaced in the POLL RESPONSE errorStatus
+  // field is unpinned; the ERROR-CLASSIFICATION contract is
+  // OPERATIONALLY CRITICAL because: (a) the errorStatus field
+  // is what a programmatic client (or the frontend) uses to
+  // decide whether to RETRY (504 timeout -> retry likely
+  // succeeds; 500 internal -> retry may help; 400 bad input ->
+  // retry is futile, fix the input) -- a refactor collapsing
+  // the classification to a single code would silently break
+  // the client's retry-vs-give-up decision, (b) the 504-vs-500
+  // distinction drives operator triage (504 = capacity/timeout
+  // problem -> scale workers; 500 = solver bug -> investigate
+  // the stack) -- conflating them would silently misdirect
+  // incident response, (c) the prefix-matching is the documented
+  // bridge between the worker's error STRINGS and the HTTP
+  // status taxonomy; the error string reaches classifyAnalysisError
+  // VERBATIM from the backend Left (line 290-291), so the
+  // classification is driven by the exact error text; per-format
+  // regression vectors uniquely caught (NOT caught by the 4174
+  // log-line pin which only exercises the 400 default): (i)
+  // refactor hardcoding errorStatus to a single value would
+  // silently lose the 504/500/400 distinction -- the 3-branch
+  // assertions catch it, (ii) refactor changing a prefix string
+  // (e.g. "timed out after" -> "timeout after") would silently
+  // misclassify timeouts as 400, (iii) refactor diverging the
+  // analyze + hall classifiers (e.g. hall drops the timeout
+  // branch) would silently break hall-job retry logic -- the
+  // 2-endpoint mirror catches per-endpoint drift; test approach:
+  // for each of the 3 branches x 2 endpoints, spin a server
+  // with an immediate backend returning the prefix-specific
+  // Left error, submit a job, await the terminal Failed state,
+  // assert the poll response's errorStatus == the documented
+  // code + the error field carries the verbatim string.
+  test("job-failure errorStatus CLASSIFICATION: the Failed-state poll response's errorStatus field reflects classifyAnalysisError/classifyPlayingHallError's documented prefix->code mapping (timeout->504, `failed:`->500, else->400) across BOTH endpoints per JobQueue.scala lines 763-771 + 291/588 -- extends the 4174 audit-log pin (400-only) to the full 3-branch x 2-endpoint classification surfaced in the poll response") {
+    withStaticSite { staticDir =>
+      // Spin a server whose analyze backend fails with the
+      // given verbatim error, submit, await terminal, return
+      // the Failed-state body.
+      def analyzeFailure(error: String): Value =
+        withServer(staticDir, backend = immediateBackend(Left(error))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(submit.statusCode(), 202,
+            clue = s"analyze submission MUST 202 to drive the failure classification for error `$error`; got: ${submit.statusCode()}")
+          awaitTerminalJob(s"$baseUri${jsonBody(submit)("statusUrl").str}")
+        }
+
+      def hallFailure(error: String): Value =
+        withServer(staticDir, playingHallBackend = immediatePlayingHallBackend(Left(error))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+          val submit = postJson(s"$baseUri/api/playing-hall", validUploadPayload)
+          assertEquals(submit.statusCode(), 202,
+            clue = s"hall submission MUST 202 to drive the failure classification for error `$error`; got: ${submit.statusCode()}")
+          awaitTerminalJob(s"$baseUri${jsonBody(submit)("statusUrl").str}")
+        }
+
+      // analyze cases: (errorString, expectedStatus, branchName)
+      val analyzeCases = Vector(
+        ("analysis timed out after 120000ms", 504, "timeout prefix"),
+        ("analysis failed: backend solver exception", 500, "`failed:` prefix"),
+        ("unparseable hand history at line 3", 400, "default (no matching prefix)")
+      )
+      analyzeCases.foreach { case (error, expectedStatus, branch) =>
+        val terminal = analyzeFailure(error)
+        assertEquals(terminal("status").str, "failed",
+          clue = s"analyze job with error `$error` MUST reach the failed state; got: ${terminal("status").str}")
+        assertEquals(terminal("errorStatus").num.toInt, expectedStatus,
+          clue = s"analyze failure errorStatus for the $branch (`$error`) MUST be $expectedStatus per classifyAnalysisError lines 763-766; a refactor changing the prefix matching OR hardcoding the status would misclassify -- breaking the client's retry-vs-give-up decision + operator triage; got: ${terminal("errorStatus").num.toInt}")
+        // CROSS-CHECK: the error field carries the verbatim
+        // string that drove the classification (NOT %20-escaped
+        // -- that's only the log line)
+        assertEquals(terminal("error").str, error,
+          clue = s"analyze failure error field MUST carry the verbatim error string `$error` (the SAME string that drove classifyAnalysisError); got: ${terminal("error").str}")
+      }
+
+      // hall cases mirror analyze with the playing-hall prefixes
+      val hallCases = Vector(
+        ("playing hall timed out after 900000ms", 504, "timeout prefix"),
+        ("playing hall failed: solver crashed", 500, "`failed:` prefix"),
+        ("invalid villain range entry", 400, "default (no matching prefix)")
+      )
+      hallCases.foreach { case (error, expectedStatus, branch) =>
+        val terminal = hallFailure(error)
+        assertEquals(terminal("status").str, "failed",
+          clue = s"hall job with error `$error` MUST reach the failed state; got: ${terminal("status").str}")
+        assertEquals(terminal("errorStatus").num.toInt, expectedStatus,
+          clue = s"hall failure errorStatus for the $branch (`$error`) MUST be $expectedStatus per classifyPlayingHallError lines 768-771 -- the hall mirror of the analyze classifier; a refactor diverging the two classifiers (e.g. hall drops the timeout branch) would silently break hall-job retry logic; got: ${terminal("errorStatus").num.toInt}")
+        assertEquals(terminal("error").str, error,
+          clue = s"hall failure error field MUST carry the verbatim error string `$error`; got: ${terminal("error").str}")
+      }
+
+      // CROSS-ENDPOINT SYMMETRY: the analyze + hall classifiers
+      // produce the SAME status code for the SAME branch
+      // (timeout->504, failed->500, default->400 on both). This
+      // proves the two classifiers are documented mirrors, not
+      // divergent per-endpoint logic.
+      val analyzeStatuses = analyzeCases.map(_._2)
+      val hallStatuses = hallCases.map(_._2)
+      assertEquals(analyzeStatuses, hallStatuses,
+        clue = s"the analyze + hall classifiers MUST produce the SAME status-code sequence across the 3 branches (the documented mirror contract); got analyze=$analyzeStatuses, hall=$hallStatuses")
+      assertEquals(analyzeStatuses.toSet, Set(504, 500, 400),
+        clue = s"the 3 classification branches MUST map to EXACTLY {504, 500, 400} -- a refactor adding/removing a branch would shift this closed set; got: ${analyzeStatuses.toSet}")
+    }
+  }
+
   // Pin the documented `auth.logout` audit log line format per deploy
   // doc line 218: "Auth events emit structured log lines: ...
   // auth.logout ... INFO level for success/expected events ... Each
