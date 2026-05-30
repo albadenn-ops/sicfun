@@ -184,13 +184,6 @@ object HandHistoryImport:
     6 -> Vector(Position.UTG, Position.UTG1, Position.UTG2, Position.Middle, Position.Hijack, Position.Cutoff)
   )
 
-  /** Parse a hand history file from disk.
-    *
-    * @param path     path to the hand history text file (UTF-8)
-    * @param site     optional site hint; if None, auto-detects from the file content
-    * @param heroName optional hero screen name for hole card extraction
-    * @return Right(hands) on success, Left(error) on failure
-    */
   /** A hand block that could not be parsed, retained so callers can REPORT
     * it (count + reason) instead of silently dropping it from the upload. */
   final case class SkippedHand(handOrdinal: Int, reason: String)
@@ -200,6 +193,13 @@ object HandHistoryImport:
     * ordinal and the parser's error message). */
   final case class ImportOutcome(hands: Vector[ImportedHand], skipped: Vector[SkippedHand])
 
+  /** Parse a hand history file from disk.
+    *
+    * @param path     path to the hand history text file (UTF-8)
+    * @param site     optional site hint; if None, auto-detects from the file content
+    * @param heroName optional hero screen name for hole card extraction
+    * @return Right(hands) on success, Left(error) on failure
+    */
   def parseFile(
       path: Path,
       site: Option[HandHistorySite] = None,
