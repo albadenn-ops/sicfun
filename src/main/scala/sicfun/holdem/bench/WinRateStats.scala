@@ -30,6 +30,8 @@ object WinRateStats:
       ciLevel: Double = 0.95,
       seed: Long = 42L
   ): WinRateCI =
+    require(resamples > 0, "resamples must be positive")
+    require(ciLevel > 0.0 && ciLevel < 1.0, "ciLevel must be in (0,1)")
     val n = perHandBb.length
     val point = bbPer100(perHandBb)
     if n == 0 then WinRateCI(0.0, 0.0, 0.0, ciLevel, 0, resamples)

@@ -23,4 +23,12 @@ class WinRateStatsTest extends munit.FunSuite:
     assertEqualsDouble(r.pointEstimate, 0.0, 1e-12)
     assertEqualsDouble(r.lower, 0.0, 1e-12)
     assertEqualsDouble(r.upper, 0.0, 1e-12)
+    assertEquals(r.sampleSize, 0)
+    assertEquals(r.resamples, 100)
+    assertEqualsDouble(r.ciLevel, 0.95, 1e-12)
+  }
+  test("bbPer100CI rejects non-positive resamples and out-of-range ciLevel") {
+    intercept[IllegalArgumentException] { WinRateStats.bbPer100CI(Vector(1.0, 2.0), resamples = 0) }
+    intercept[IllegalArgumentException] { WinRateStats.bbPer100CI(Vector(1.0, 2.0), ciLevel = 1.0) }
+    intercept[IllegalArgumentException] { WinRateStats.bbPer100CI(Vector(1.0, 2.0), ciLevel = 0.0) }
   }
