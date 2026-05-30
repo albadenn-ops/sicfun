@@ -19778,6 +19778,158 @@ class HandHistoryReviewServerTest extends FunSuite:
     }
   }
 
+  // Pin the documented profile-field CONTROL-CHARACTER
+  // REJECTION contract at PlatformUserAuth.scala lines
+  // 1149-1150's sanitizeOptionalField control-char check
+  // (`if value.exists(ch => ch.toInt < 0x20 || ch.toInt ==
+  // 0x7F) then throw new IllegalArgumentException(s"$label
+  // must not contain control characters")`) -- the
+  // CONTROL-CHAR-REJECTION pin verifies the documented
+  // defense where any INTERNAL C0 control character (code <
+  // 0x20: NUL, TAB, LF, CR, ESC, etc.) OR DEL (0x7F) in a
+  // profile field is rejected with a 400, while internal
+  // SPACES (0x20) + printable chars (0x21-0x7E) are allowed
+  // (so legal names like "John Smith" pass). SIXTIETH
+  // per-emission-site SHAPE pin overall; the boundary nuance
+  // is that the line 1139 `.map(_.trim)` strips
+  // leading/trailing whitespace+controls FIRST (Scala's
+  // String.trim removes ch <= 0x20), so the control-char
+  // check at lines 1149-1150 specifically catches INTERNAL
+  // controls that survive the trim; the CONTROL-CHAR-REJECTION
+  // contract is OPERATIONALLY CRITICAL because (per the
+  // documented inline comment at lines 1142-1148): (a) a
+  // newline / NUL / ESC in a stored profile field has no
+  // legitimate use and would CORRUPT audit-log fields when
+  // the value eventually surfaces (the audit log is
+  // line-oriented; an embedded newline would split one log
+  // record into two, breaking grep-based operator workflows +
+  // potentially forging fake log lines), (b) embedded
+  // controls CONFUSE JSON consumers + trip line-oriented
+  // dashboards downstream, (c) an embedded ESC could inject
+  // terminal escape sequences that execute when an operator
+  // cats the stored value in a terminal (the classic
+  // log-injection-to-terminal-escape attack); per-format
+  // regression vectors uniquely caught (NOT caught by the
+  // 24b07ac max-length boundary pin which targets the LENGTH
+  // dimension): (i) refactor dropping the lines 1149-1150
+  // control-char check would silently allow newlines/NULs/ESC
+  // into stored profile fields, reopening the
+  // audit-log-corruption + terminal-escape-injection vectors,
+  // (ii) refactor changing the boundary from `< 0x20` to `<=
+  // 0x20` would silently reject internal SPACES, breaking
+  // legal multi-word names like "John Smith" (the documented
+  // allowed case), (iii) refactor dropping the `== 0x7F` DEL
+  // check would silently allow the DEL char (which terminals
+  // interpret as backspace, enabling visual spoofing of the
+  // stored value), (iv) refactor changing the error-message
+  // format would break UIs surfacing the text; test approach:
+  // register a user, then verify (POSITIVE) an internal space
+  // is allowed, (NEGATIVE) each of the 4 fields rejects a
+  // representative internal control char with the documented
+  // message, and (BOUNDARY) the 0x1F/0x20/0x7E/0x7F sweep
+  // confirms the exact `< 0x20 || == 0x7F` predicate. NOTE:
+  // bodies are built via ujson.write so the control char is
+  // PROPERLY JSON-ESCAPED on the wire (a raw control byte
+  // would be invalid JSON + rejected by the parser at a
+  // DIFFERENT layer -- we want the char to reach the
+  // sanitizeOptionalField check, so it must arrive as a valid
+  // parsed string with an embedded control char).
+  test("profile-field CONTROL-CHARACTER REJECTION contract: internal C0 controls (< 0x20) + DEL (0x7F) are rejected with the documented `<label> must not contain control characters` 400, while internal spaces (0x20) + printables are allowed per PlatformUserAuth.scala lines 1149-1150's sanitizeOptionalField control-char check") {
+    withStaticSite { staticDir =>
+      withUserStorePath { storePath =>
+        withServer(staticDir, platformAuth = Some(PlatformUserAuth.Config(storePath = storePath))) { server =>
+          val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+
+          val registerResp = postJson(
+            s"$baseUri/api/auth/register",
+            """{"email":"ctrl-char@example.com","password":"correct-horse-battery","displayName":"X"}"""
+          )
+          assertEquals(registerResp.statusCode(), 201,
+            clue = "register MUST 201 to drive the control-char rejection test")
+          val csrfToken = jsonBody(registerResp)("csrfToken").str
+          val sessionCookieValue = sessionCookie(registerResp)
+
+          // Build the body via ujson.write so the value is
+          // PROPERLY JSON-ESCAPED on the wire (the control char
+          // arrives as a valid parsed string, reaching the
+          // sanitizeOptionalField check rather than failing at
+          // the JSON-parse layer).
+          def postField(jsonKey: String, value: String): HttpResponse[String] =
+            val body = ujson.write(ujson.Obj(jsonKey -> ujson.Str(value)))
+            httpClient.send(
+              HttpRequest.newBuilder()
+                .uri(URI.create(s"$baseUri/api/auth/profile"))
+                .method("POST", HttpRequest.BodyPublishers.ofString(body))
+                .header("Content-Type", "application/json")
+                .header("Cookie", sessionCookieValue)
+                .header("X-CSRF-Token", csrfToken)
+                .build(),
+              HttpResponse.BodyHandlers.ofString()
+            )
+
+          // (1) POSITIVE: internal space is ALLOWED -- the
+          // documented "John Smith" case (0x20 is NOT < 0x20,
+          // so it passes the control-char predicate)
+          val spaceResp = postField("displayName", "John Smith")
+          assertEquals(spaceResp.statusCode(), 200,
+            clue = s"displayName with an internal SPACE (`John Smith`) MUST be accepted (200) -- spaces (0x20) are NOT control chars per the `< 0x20` predicate; a refactor changing the boundary to `<= 0x20` would silently reject legal multi-word names; got: ${spaceResp.statusCode()}, body: ${spaceResp.body()}")
+          assertEquals(ujson.read(spaceResp.body())("user").obj("displayName").str, "John Smith",
+            clue = "displayName `John Smith` MUST round-trip intact (the internal space is preserved)")
+
+          // (2) NEGATIVE: per-field internal-control-char
+          // rejection. Each field gets a DISTINCT representative
+          // control char to spread coverage: displayName=LF,
+          // heroName=NUL, preferredSite=ESC, timeZone=DEL. The
+          // control char is INTERNAL (surrounded by printables)
+          // so it survives the line 1139 `.trim`.
+          val controlCases = Vector(
+            ("displayName", "displayName", 0x0a, "LF (0x0A)"),
+            ("heroName", "heroName", 0x00, "NUL (0x00)"),
+            ("preferredSite", "preferredSite", 0x1b, "ESC (0x1B)"),
+            ("timeZone", "timeZone", 0x7f, "DEL (0x7F)")
+          )
+          controlCases.foreach { case (jsonKey, label, codepoint, charName) =>
+            val value = "Aa" + codepoint.toChar.toString + "Bb"
+            val resp = postField(jsonKey, value)
+            assertEquals(resp.statusCode(), 400,
+              clue = s"$jsonKey with an internal $charName MUST be rejected (400) per PlatformUserAuth.scala lines 1149-1150's control-char check -> AuthStack.scala line 235's `400 -> error` mapping; a refactor dropping the check would silently allow control chars that corrupt audit logs + inject terminal escapes; got: ${resp.statusCode()}, body: ${resp.body()}")
+            val body = jsonBody(resp)
+            assertEquals(body.obj.keys.toSet, Set("error"),
+              clue = s"$jsonKey control-char 400 MUST emit the universal 1-field {error} shape per AuthStack.scala line 561's Left-fold; got: ${body.obj.keys.toVector.sorted.mkString(", ")}")
+            val expectedMessage = s"$label must not contain control characters"
+            assertEquals(body("error").str, expectedMessage,
+              clue = s"$jsonKey control-char 400 error message MUST be EXACTLY `$expectedMessage` per PlatformUserAuth.scala line 1150's template; got: ${body("error").str}")
+          }
+
+          // (3) BOUNDARY SWEEP on displayName confirming the
+          // exact `< 0x20 || == 0x7F` predicate at the 4 edge
+          // codepoints: 0x1F (US, just below space) REJECTED,
+          // 0x20 (space) ALLOWED, 0x7E (~, just below DEL)
+          // ALLOWED, 0x7F (DEL) REJECTED.
+          val boundarySweep = Vector(
+            (0x1f, true, "0x1F (US, just below space)"),
+            (0x20, false, "0x20 (space)"),
+            (0x7e, false, "0x7E (~, just below DEL)"),
+            (0x7f, true, "0x7F (DEL)")
+          )
+          boundarySweep.foreach { case (codepoint, shouldReject, charDesc) =>
+            // Internal placement so the char survives .trim
+            val value = "Aa" + codepoint.toChar.toString + "Bb"
+            val resp = postField("displayName", value)
+            if shouldReject then
+              assertEquals(resp.statusCode(), 400,
+                clue = s"displayName with internal $charDesc MUST be REJECTED (400) per the `< 0x20 || == 0x7F` predicate; got: ${resp.statusCode()}")
+              assertEquals(jsonBody(resp)("error").str, "displayName must not contain control characters",
+                clue = s"$charDesc rejection MUST carry the documented control-char message")
+            else
+              assertEquals(resp.statusCode(), 200,
+                clue = s"displayName with internal $charDesc MUST be ACCEPTED (200) -- it is NOT < 0x20 and NOT == 0x7F per the documented predicate; a refactor widening the boundary would silently reject this legal printable; got: ${resp.statusCode()}, body: ${resp.body()}")
+          }
+        }
+      }
+    }
+  }
+
   // Pin the documented Location-header-on-202 contract for BOTH
   // submission endpoints. Deploy doc line 66 explicitly says
   // "Submissions return `202 Accepted` with `Location` and
