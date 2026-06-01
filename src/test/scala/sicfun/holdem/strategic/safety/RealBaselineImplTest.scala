@@ -56,3 +56,7 @@ class RealBaselineImplTest extends FunSuite:
     val p = flop("As","Kd","7c")
     for c <- StrategicClass.values; a <- Cat.values do
       assertEqualsDouble(emptyImpl.probability(c, a, None, p), floor.probability(c, a, None, p), 1e-12)
+
+  test("rejects a non-positive alpha and a negative minCount (no silent NaN baseline — G5)"):
+    intercept[IllegalArgumentException](RealBaselineImpl(BaselineArtifact(Map.empty, meta), 0, 0.0, floor))
+    intercept[IllegalArgumentException](RealBaselineImpl(BaselineArtifact(counts, meta), -1, 1.0, floor))

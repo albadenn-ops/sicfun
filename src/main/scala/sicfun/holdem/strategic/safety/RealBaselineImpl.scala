@@ -33,6 +33,11 @@ final class RealBaselineImpl(
     fallback: RealBaseline
 ) extends RealBaseline:
 
+  // G5 (no silent degenerate baseline): a non-positive alpha makes smoothed() a 0/0 NaN
+  // when a zero-total cell is reached with minCount <= 0. Fail fast at construction instead.
+  require(alpha > 0.0, s"alpha must be > 0 for Laplace smoothing (got $alpha)")
+  require(minCount >= 0, s"minCount must be >= 0 (got $minCount)")
+
   private val actions = PokerAction.Category.values
 
   // (class, bucket, street) -> total observed
