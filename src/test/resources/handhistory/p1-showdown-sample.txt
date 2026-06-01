@@ -1,0 +1,118 @@
+PokerStars Hand #971000001:  Hold'em No Limit ($1/$2 USD) - 2026/05/02 12:00:00 ET
+Table 'P1Showdown' 9-max Seat #1 is the button
+Seat 1: Villain1 ($200 in chips)
+Seat 2: Villain2 ($200 in chips)
+Seat 3: Villain3 ($200 in chips)
+Seat 4: Hero ($200 in chips)
+Seat 5: Villain5 ($200 in chips)
+Seat 6: Villain6 ($200 in chips)
+Seat 7: Villain7 ($200 in chips)
+Seat 8: Villain8 ($200 in chips)
+Seat 9: Villain9 ($200 in chips)
+Villain2: posts small blind $1
+Villain3: posts big blind $2
+*** HOLE CARDS ***
+Dealt to Hero [As Kd]
+Hero: raises $4 to $6
+Villain5: folds
+Villain6: folds
+Villain7: folds
+Villain8: folds
+Villain9: folds
+Villain1: calls $6
+Villain2: folds
+Villain3: folds
+*** FLOP *** [Ah 7c 2s]
+Villain1: checks
+Hero: bets $8
+Villain1: calls $8
+*** TURN *** [Ah 7c 2s] [9d]
+Villain1: checks
+Hero: bets $20
+Villain1: calls $20
+*** RIVER *** [Ah 7c 2s 9d] [3c]
+Villain1: checks
+Hero: bets $50
+Villain1: calls $50
+*** SHOW DOWN ***
+Hero: shows [As Kd] (a pair of Aces)
+Villain1: shows [Qh Qd] (a pair of Queens)
+Hero collected $168 from pot
+*** SUMMARY ***
+Total pot $168 | Rake $0
+Board [Ah 7c 2s 9d 3c]
+PokerStars Hand #971000002:  Hold'em No Limit ($1/$2 USD) - 2026/05/02 12:10:00 ET
+Table 'P1Showdown' 9-max Seat #2 is the button
+Seat 1: Villain1 ($200 in chips)
+Seat 2: Villain2 ($200 in chips)
+Seat 3: Villain3 ($200 in chips)
+Seat 4: Hero ($200 in chips)
+Seat 5: Villain5 ($200 in chips)
+Seat 6: Villain6 ($200 in chips)
+Seat 7: Villain7 ($200 in chips)
+Seat 8: Villain8 ($200 in chips)
+Seat 9: Villain9 ($200 in chips)
+Villain3: posts small blind $1
+Hero: posts big blind $2
+*** HOLE CARDS ***
+Dealt to Hero [Jc Js]
+Villain5: folds
+Villain6: raises $4 to $6
+Villain7: folds
+Villain8: folds
+Villain9: folds
+Villain1: folds
+Villain2: folds
+Villain3: folds
+Hero: calls $4
+*** FLOP *** [Jh 6d 6s]
+Hero: checks
+Villain6: bets $8
+Hero: raises $20 to $28
+Villain6: calls $20
+*** TURN *** [Jh 6d 6s] [Ts]
+Hero: bets $40
+Villain6: calls $40
+*** RIVER *** [Jh 6d 6s Ts] [2h]
+Hero: bets $80
+Villain6: calls $80
+*** SHOW DOWN ***
+Hero: shows [Jc Js] (a full house, Jacks full of Sixes)
+Villain6: shows [Ac Kc] (a pair of Sixes)
+Hero collected $238 from pot
+*** SUMMARY ***
+Total pot $238 | Rake $0
+Board [Jh 6d 6s Ts 2h]
+PokerStars Hand #971000003:  Hold'em No Limit ($1/$2 USD) - 2026/05/02 12:20:00 ET
+Table 'P1Showdown' 9-max Seat #5 is the button
+Seat 1: Villain1 ($200 in chips)
+Seat 2: Villain2 ($200 in chips)
+Seat 3: Villain3 ($200 in chips)
+Seat 4: Hero ($200 in chips)
+Seat 5: Villain5 ($200 in chips)
+Seat 6: Villain6 ($200 in chips)
+Seat 7: Villain7 ($200 in chips)
+Seat 8: Villain8 ($200 in chips)
+Seat 9: Villain9 ($200 in chips)
+Villain6: posts small blind $1
+Villain7: posts big blind $2
+*** HOLE CARDS ***
+Dealt to Hero [7h 2d]
+Villain8: folds
+Villain9: folds
+Villain1: folds
+Villain2: folds
+Villain3: folds
+Hero: folds
+Villain5: raises $4 to $6
+Villain6: folds
+Villain7: calls $4
+*** FLOP *** [Kh Qs 5c]
+Villain7: checks
+Villain5: bets $8
+Villain7: folds
+Uncalled bet ($8) returned to Villain5
+Villain5 collected $14 from pot
+*** SUMMARY ***
+Total pot $14 | Rake $0
+Board [Kh Qs 5c]
