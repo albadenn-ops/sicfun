@@ -126,11 +126,25 @@ private[web] object RateLimit:
       trustedClientIpHeader: Option[String],
       trustedProxyIps: Set[String]
   ): String =
+    trustedForwardedClientIp(exchange, trustedClientIpHeader, trustedProxyIps)
+      .map(formatAuditHostOnly)
+      .getOrElse(formatAuditPeer(exchange))
+
+  /** The trusted forwarded client IP for this request, or `None`. Present only
+    * when the direct TCP peer is a trusted proxy (loopback or allow-listed in
+    * `trustedProxyIps`) AND the configured single-valued `trustedClientIpHeader`
+    * parses as an IP literal. This is the SINGLE trusted-proxy resolution shared
+    * by both the rate-limit client key and the audit-display address, so the
+    * `clientKey=` and `remote=` log fields always agree on who the client is
+    * (previously each method re-derived the same filter/flatMap chain). */
+  private def trustedForwardedClientIp(
+      exchange: HttpExchange,
+      trustedClientIpHeader: Option[String],
+      trustedProxyIps: Set[String]
+  ): Option[String] =
     trustedClientIpHeader
       .filter(_ => trustsRateLimitClientIpHeader(remoteInetAddress(exchange), trustedProxyIps))
       .flatMap(headerName => forwardedClientKey(exchange, headerName))
-      .map(formatAuditHostOnly)
-      .getOrElse(formatAuditPeer(exchange))
 
   private def formatAuditHostOnly(host: String): String =
     if host.contains(':') then s"[$host]" else host
@@ -176,9 +190,8 @@ private[web] object RateLimit:
       trustedClientIpHeader: Option[String],
       trustedProxyIps: Set[String]
   ): String =
-    trustedClientIpHeader
-      .filter(_ => trustsRateLimitClientIpHeader(remoteInetAddress(exchange), trustedProxyIps))
-      .flatMap(headerName => forwardedClientKey(exchange, headerName).map(value => s"header:$value"))
+    trustedForwardedClientIp(exchange, trustedClientIpHeader, trustedProxyIps)
+      .map(value => s"header:$value")
       .getOrElse(s"remote:${clientAddressKey(exchange)}")
 
   private def forwardedClientKey(exchange: HttpExchange, headerName: String): Option[String] =

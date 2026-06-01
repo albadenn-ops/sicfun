@@ -44,6 +44,19 @@ private[web] object JobQueue:
     def run(request: PlayingHallRequest, cancelSignal: () => Boolean = () => false): Either[String, Value]
 
 
+  /** Shared read-only metrics surface every job store exposes so readiness /
+    * health aggregation can fold over a heterogeneous collection of stores
+    * instead of hand-summing each store's counters at every call site. Both
+    * [[AnalysisJobStore]] and [[PlayingHallJobStore]] implement it; adding a
+    * third job store then only requires adding it to the aggregated `Seq` in
+    * [[Readiness]], not editing every aggregation site. */
+  trait JobStoreMetricsSource:
+    /** Workers whose per-job timeout fired but whose thread has not yet exited. */
+    def timedOutWorkersInFlightCount: Int
+    /** Terminal jobs still retained in the store for status polling. */
+    def retainedTerminalJobsCount: Int
+
+
   def newAnalysisExecutor(
       maxConcurrentJobs: Int,
       maxQueuedJobs: Int
@@ -152,7 +165,7 @@ private[web] object JobQueue:
       backend: AnalysisBackend,
       analysisTimeoutMs: Long,
       nowMillis: () => Long = () => System.currentTimeMillis()
-  ):
+  ) extends JobStoreMetricsSource:
     import AnalysisJobState.*
 
     private val jobs = new ConcurrentHashMap[String, AnalysisJobState]()
@@ -239,20 +252,30 @@ private[web] object JobQueue:
       if !accessible then None
       else Option(jobs.get(jobId)).map(renderStatus(jobId, _))
 
-    def metrics: AnalysisJobMetrics =
+    def timedOutWorkersInFlightCount: Int =
+      timedOutWorkersInFlight.get()
+
+    def retainedTerminalJobsCount: Int =
       purgeExpiredJobs()
-      var retainedTerminalJobs = 0
+      var count = 0
       val iterator = jobs.values().iterator()
       while iterator.hasNext do
-        if iterator.next().isTerminal then
-          retainedTerminalJobs += 1
+        if iterator.next().isTerminal then count += 1
+      count
+
+    def metrics: AnalysisJobMetrics =
+      // retainedTerminalJobsCount triggers the same purgeExpiredJobs() this
+      // method used to run inline; the queued/running reads below are
+      // unaffected by purge (it only evicts terminal jobs from the in-memory
+      // map, never the executor queue), so the metrics value is identical.
+      val retained = retainedTerminalJobsCount
       AnalysisJobMetrics(
         maxConcurrentJobs = executor.getMaximumPoolSize,
         maxQueuedJobs = queueCapacity(executor),
         queuedJobs = executor.getQueue.size(),
         runningJobs = executor.getActiveCount(),
-        timedOutWorkersInFlight = timedOutWorkersInFlight.get(),
-        retainedTerminalJobs = retainedTerminalJobs
+        timedOutWorkersInFlight = timedOutWorkersInFlightCount,
+        retainedTerminalJobs = retained
       )
 
     def acceptingNewJobs: Boolean =
@@ -458,7 +481,7 @@ private[web] object JobQueue:
       backend: PlayingHallBackend,
       playingHallTimeoutMs: Long,
       nowMillis: () => Long = () => System.currentTimeMillis()
-  ):
+  ) extends JobStoreMetricsSource:
     import AnalysisJobState.*
 
     private val jobs = new ConcurrentHashMap[String, AnalysisJobState]()
