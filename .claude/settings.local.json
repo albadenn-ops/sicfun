@@ -42,7 +42,9 @@
       "Bash(python:*)",
       "Bash(git rm:*)",
       "Bash(tee:*)",
-      "Bash(powershell.exe:*)"
+      "Bash(powershell.exe:*)",
+      "Bash(awk '{print $6, $7, $8, $9}')",
+      "Read(//c/Users/alexl/code/math/untitled/.claude/worktrees/gifted-lichterman-66867d/docs/superpowers/specs/**)"
     ]
   },
   "outputStyle": "default",
