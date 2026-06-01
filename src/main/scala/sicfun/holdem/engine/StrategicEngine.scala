@@ -28,9 +28,22 @@ import sicfun.holdem.engine.inference.ActionEvaluation
   */
 class StrategicEngine(val config: StrategicEngine.Config):
 
-  /** Kernel-coupled attributed baseline (Def 10). Config-only, stateless. */
+  /** Def 9 real baseline: calibrated artifact when configured, else the constants floor. */
+  private val _realBaseline: sicfun.holdem.strategic.safety.RealBaseline =
+    config.baselinePath match
+      case Some(p) =>
+        val artifact = sicfun.holdem.strategic.safety.BaselineArtifactIO.load(java.nio.file.Paths.get(p))
+        new sicfun.holdem.strategic.safety.RealBaselineImpl(
+          artifact,
+          artifact.metadata.recommendedMinCount,
+          artifact.metadata.recommendedSmoothingAlpha,
+          new sicfun.holdem.strategic.safety.ConstantRealBaseline(config.actionPriors))
+      case None =>
+        new sicfun.holdem.strategic.safety.ConstantRealBaseline(config.actionPriors)
+
+  /** Kernel-coupled attributed baseline (Def 10), now over the conditioned Def 9 base. */
   private val _attributedBaseline: PosteriorAttributedBaseline =
-    new PosteriorAttributedBaseline(config.actionPriors)
+    new PosteriorAttributedBaseline(_realBaseline)
 
   private var _sessionState: StrategicEngine.SessionState | Null = null
   private var _handActive: Boolean = false
@@ -1141,9 +1154,6 @@ class StrategicEngine(val config: StrategicEngine.Config):
       stage = gameState.street
     )
 
-  private def actionPrior(cls: StrategicClass, cat: PokerAction.Category): Double =
-    config.actionPriors.getOrElse((cls, cat), 0.25)
-
   /** Build an attrib likelihood from an AttributedBaseline (Def 18 spec-literal).
     *
     * Transposes from action-space hat_pi(a | c, ...) to class-space posterior
@@ -1181,7 +1191,7 @@ class StrategicEngine(val config: StrategicEngine.Config):
       val eta = TemperedLikelihood.defaultEta(classes.length)
 
       val basePr = classes.map { cls =>
-        actionPrior(cls, signal.action)
+        _realBaseline.probability(cls, signal.action, signal.sizing, pubState)
       }
 
       // Ref kernel (Def 18): uniform prior, ignores rival-specific history
@@ -1306,6 +1316,7 @@ object StrategicEngine:
       ),
       temperedConfig: TemperedLikelihood.TemperedConfig = TemperedLikelihood.TemperedConfig.twoLayer(0.7, 0.01),
       actionPriors: Map[(StrategicClass, sicfun.holdem.types.PokerAction.Category), Double] = defaultActionPriors,
+      baselinePath: Option[String] = None,
       detector: DetectionPredicate = FrequencyAnomalyDetection(window = 20, threshold = 0.6),
       /** Discount factor for Bellman safety operator (Def 60). */
       bellmanGamma: Double = 0.95,
