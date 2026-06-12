@@ -5044,33 +5044,47 @@ class HandHistoryReviewServerTest extends FunSuite:
   // review] service-tag prefix.
   test("submitted playing-hall job emits the documented `playing hall job accepted jobId=<id> queuedJobs=<n> runningJobs=<n> hands=<n> tableCount=<n> playerCount=<n> heroStyle=<x> heroPosition=<x> gtoMode=<x> villainPool=<list> seed=<n>` INFO audit log line at submission time (per JobQueue.scala line 503-505) -- opens the SUBMISSION-TIME emission sub-category in the JobQueue audit log family") {
     withStaticSite { staticDir =>
-      // Capture stdout around the submission. The default
-      // playingHallBackend (immediatePlayingHallBackend) completes
-      // synchronously, so the captured stream will contain BOTH
-      // the accepted line (this test's target, emitted at line
-      // 503-505) AND the completed line (already pinned by
-      // 1e030ed, emitted at line 609-611). We find the accepted
-      // line specifically by its distinctive prefix.
+      // Deterministic submission-time counters: a blocking backend occupies
+      // the single worker with job1, so job2 -- submitted while the worker is
+      // provably busy -- MUST still be in the queue when its acceptance line
+      // reads executor.getQueue.size() (the logInfo at JobQueue.scala line
+      // 503-505 after the executor.submit at line 499). Without this
+      // saturation the counters are RACY, not pinned: an idle prestarted
+      // worker can dequeue the job between executor.submit and the logInfo,
+      // legitimately emitting queuedJobs=0 (observed intermittently under
+      // suite load), so exact counter values can only be asserted by fixing
+      // the queue state by construction.
+      val backend = new BlockingPlayingHallBackend(Right(samplePlayingHallResult))
+      withServer(staticDir, playingHallBackend = backend, maxConcurrentJobs = 1) { server =>
+      try {
+      val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+      val first = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+      assertEquals(first.statusCode(), 202,
+        clue = "job1 must 202 and occupy the single worker before job2's submission-time counters are captured")
+      assert(backend.started.await(3, TimeUnit.SECONDS),
+        "blocking hall backend never started -- job1 must be RUNNING (worker occupied) so job2 deterministically stays queued at its acceptance line")
+
+      // Capture stdout around job2's submission ONLY, so the captured
+      // stream contains exactly one `playing hall job accepted` line.
       val outBuf = new java.io.ByteArrayOutputStream()
       val originalOut = System.out
       System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
-      val submitJobId =
+      val (submitJobId, submitStatusUri) =
         try
-          withServer(staticDir) { server =>
-            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
-            val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
-            assertEquals(submit.statusCode(), 202,
-              clue = "playing-hall submission must return 202 for the accepted log line to have fired")
-            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
-            val capturedJobId = jsonBody(submit)("jobId").str
-            // Wait for terminal so the captured stream has the
-            // expected lifecycle but the test only asserts on the
-            // submission-time accepted line.
-            awaitTerminalJob(statusUri)
-            capturedJobId
-          }
+          val submit = postJson(s"$baseUri/api/playing-hall", validPlayingHallPayload)
+          assertEquals(submit.statusCode(), 202,
+            clue = "playing-hall submission must return 202 for the accepted log line to have fired")
+          (jsonBody(submit)("jobId").str, s"$baseUri${jsonBody(submit)("statusUrl").str}")
         finally
           System.setOut(originalOut)
+
+      // Unblock the workers and let BOTH jobs reach terminal state BEFORE the
+      // server shuts down: a job completing DURING shutdown leaves its
+      // just-cancelled timeout task in the timeout executor's queue mid-drain,
+      // which stalls shutdown for the full grace period (observed as a 5s
+      // 'analysis-timeout executor did not drain' WARN).
+      backend.release.countDown()
+      awaitTerminalJob(submitStatusUri)
 
       val captured = outBuf.toString(StandardCharsets.UTF_8)
       val acceptedLine = captured.split('\n').iterator
@@ -5086,30 +5100,25 @@ class HandHistoryReviewServerTest extends FunSuite:
       // (iii) jobId matching the 202 response
       assert(acceptedLine.contains(s"jobId=$submitJobId"),
         clue = s"submission-time line must carry the SAME jobId='$submitJobId' from the 202 submission response; got: $acceptedLine")
-      // (iv) queuedJobs=1 (the just-submitted job IS in the queue
-      // at submission-time -- distinct from completion-time
-      // queuedJobs=0). The executor.submit at line 499 enqueues
+      // (iv) queuedJobs=1: the executor.submit at line 499 enqueues
       // the job, THEN line 503-505's logInfo reads
-      // executor.getQueue.size() which now reflects the
-      // just-enqueued job. This SUBMISSION-TIME vs
-      // COMPLETION-TIME asymmetry on queuedJobs is operationally
-      // meaningful: operators see queuedJobs=1 at the moment of
-      // acceptance (the job is enqueued but worker hasn't picked
-      // it up yet) and queuedJobs=0 at the moment of completion
-      // (the worker has dequeued + processed). A refactor that
-      // read the queue size BEFORE the executor.submit would
-      // emit queuedJobs=0 here, silently breaking the documented
+      // executor.getQueue.size(). With the single worker provably
+      // occupied by job1 (the blocking backend's started latch
+      // fired before job2 was submitted), job2 CANNOT have been
+      // dequeued yet, so the acceptance line deterministically
+      // reflects the just-enqueued job. A refactor that read the
+      // queue size BEFORE the executor.submit would emit
+      // queuedJobs=0 here, silently breaking the documented
       // "queue state AT acceptance" semantic.
       assert(acceptedLine.contains("queuedJobs=1"),
-        clue = s"submission-time line must carry queuedJobs=1 (the just-submitted job IS in the queue at submission-time per executor.submit at line 499 enqueueing BEFORE the logInfo at line 503 reads the queue size); distinct from completion-time queuedJobs=0 (1e030ed/817dd08/0a222f8) where the worker has already dequeued; a refactor that read the queue size BEFORE the executor.submit would silently emit 0 here, breaking the documented 'queue state AT acceptance' semantic; got: $acceptedLine")
-      // (v) runningJobs=0 at submission-time -- the worker
-      // hasn't started executing yet (the job was JUST queued,
-      // executor.getActiveCount() returns 0 since no worker is
-      // actively running this job). Distinct from completion-
-      // time where runningJobs could be 0 or 1 depending on
-      // executor timing.
-      assert(acceptedLine.contains("runningJobs=0"),
-        clue = s"submission-time line must carry runningJobs=0 (the worker hasn't started executing the just-queued job at submission time -- executor.getActiveCount() returns 0); distinct from completion-time runningJobs which is timing-dependent; got: $acceptedLine")
+        clue = s"submission-time line must carry queuedJobs=1: the executor.submit at line 499 enqueues job2 BEFORE the logInfo at line 503 reads the queue size, and the single worker is provably busy with job1 (blocking backend), so job2 is still queued; a refactor that read the queue size BEFORE the executor.submit would emit 0 here, breaking the documented 'queue state AT acceptance' semantic; got: $acceptedLine")
+      // (v) runningJobs=1 at job2's submission time: job1 occupies
+      // the single worker (executor.getActiveCount() == 1), which
+      // is exactly what makes tier (iv) deterministic. Catches a
+      // refactor that read the counters from a different executor
+      // or after a drain.
+      assert(acceptedLine.contains("runningJobs=1"),
+        clue = s"submission-time line must carry runningJobs=1 (job1 provably occupies the single worker -- the blocking backend's started latch fired before job2 was submitted, so executor.getActiveCount() is 1 when job2's acceptance line reads it); got: $acceptedLine")
       // (vi-xii) request.logSummary embedded fields -- the
       // OPERATOR-RELEVANT submission parameters per
       // HandHistoryReviewServerApi.scala line 837-838's
@@ -5145,6 +5154,12 @@ class HandHistoryReviewServerTest extends FunSuite:
       // (xvi) service-tag prefix
       assert(acceptedLine.contains("[hand-history-review]"),
         clue = s"submission-time line must carry the [hand-history-review] service-tag prefix matching the prior JobQueue audit log pins; got: $acceptedLine")
+      } finally {
+        // Unblock job1 inside the withServer block so the worker exits
+        // before the server's shutdown grace (avoids the 5s drain wait).
+        backend.release.countDown()
+      }
+      }
     }
   }
 
@@ -5198,10 +5213,11 @@ class HandHistoryReviewServerTest extends FunSuite:
   // `playing hall job accepted` (catches a refactor that
   // emitted both prefixes OR added the hall qualifier to the
   // analyze line), (iii) jobId matching the 202 response, (iv)
-  // queuedJobs=1 (matches the SUBMISSION-TIME queue-size
-  // asymmetry pinned by 0af1462: the just-submitted job IS in
-  // the queue at submission time, NOT 0 like completion-time),
-  // (v) runningJobs=0 (worker hasn't started yet), (vi)
+  // queuedJobs=1 (deterministic: a blocking job1 occupies the
+  // single worker, so job2 is provably still queued when its
+  // acceptance line reads the queue size -- without the
+  // saturation the counter is racy, see the hall-side pin),
+  // (v) runningJobs=1 (job1 occupies the worker), (vi)
   // bytes=18 (the exact UTF-8 byte length of
   // validUploadPayload's "PokerStars Hand #1" handHistoryText
   // -- catches a refactor changing the source field OR the
@@ -5212,36 +5228,44 @@ class HandHistoryReviewServerTest extends FunSuite:
   // (ix) [INFO] level, (x) [hand-history-review] service-tag.
   test("submitted analyze job emits the documented `job accepted jobId=<id> queuedJobs=<n> runningJobs=<n> bytes=<n>` INFO audit log line at submission time (per JobQueue.scala line 200-202) -- the analyze-side mirror to 0af1462's playing-hall submission-time pin, with the analyze-distinctive `bytes=<n>` field (instead of the hall-side's 8-field logSummary)") {
     withStaticSite { staticDir =>
-      // Capture stdout around the analyze submission + terminal-
-      // poll cycle. The default immediateBackend completes
-      // synchronously, so by the time awaitTerminalJob returns
-      // "completed", both the accepted (line 201) AND completed
-      // (line 311, pinned by a04e51a) lines are on stdout.
+      // Deterministic submission-time counters (same construction as the
+      // hall-side accepted pin): a blocking backend occupies the single
+      // worker with job1, so job2 is provably still queued when its
+      // acceptance line (JobQueue.scala line 200-202, after executor.submit
+      // at line 196) reads the queue size. Without the saturation the
+      // counters are racy -- an idle prestarted worker can dequeue between
+      // submit and logInfo, legitimately emitting queuedJobs=0.
+      val backend = new BlockingBackend(Right(sampleAnalysisResult))
+      withServer(staticDir, backend = backend, maxConcurrentJobs = 1) { server =>
+      try {
+      val baseUri = s"http://${server.binding.host}:${server.binding.port}"
+      val first = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+      assertEquals(first.statusCode(), 202,
+        clue = "job1 must 202 and occupy the single worker before job2's submission-time counters are captured")
+      assert(backend.started.await(3, TimeUnit.SECONDS),
+        "blocking analyze backend never started -- job1 must be RUNNING (worker occupied) so job2 deterministically stays queued at its acceptance line")
+
+      // Capture stdout around job2's submission ONLY, so the captured
+      // stream contains exactly one `job accepted` line.
       val outBuf = new java.io.ByteArrayOutputStream()
       val originalOut = System.out
       System.setOut(new java.io.PrintStream(outBuf, true, StandardCharsets.UTF_8))
-      val submitJobId =
+      val (submitJobId, submitStatusUri) =
         try
-          withServer(staticDir) { server =>
-            val baseUri = s"http://${server.binding.host}:${server.binding.port}"
-            val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
-            assertEquals(submit.statusCode(), 202,
-              clue = "analyze submission must return 202 before the JobQueue accepted log line fires")
-            val statusUri = s"$baseUri${jsonBody(submit)("statusUrl").str}"
-            val capturedJobId = jsonBody(submit)("jobId").str
-            awaitTerminalJob(statusUri)
-            capturedJobId
-          }
+          val submit = postJson(s"$baseUri/api/analyze-hand-history", validUploadPayload)
+          assertEquals(submit.statusCode(), 202,
+            clue = "analyze submission must return 202 before the JobQueue accepted log line fires")
+          (jsonBody(submit)("jobId").str, s"$baseUri${jsonBody(submit)("statusUrl").str}")
         finally
           System.setOut(originalOut)
 
+      // Unblock the workers and let BOTH jobs reach terminal state BEFORE the
+      // server shuts down: a job completing DURING shutdown stalls the timeout
+      // executor's drain for the full grace period (5s WARN).
+      backend.release.countDown()
+      awaitTerminalJob(submitStatusUri)
+
       val captured = outBuf.toString(StandardCharsets.UTF_8)
-      // Find the accepted line specifically. The captured stream
-      // contains BOTH the accepted line (target) AND the
-      // completed line (a04e51a's target). The "job accepted"
-      // contains-substring search finds the accepted line --
-      // the completed line is "job completed" which doesn't
-      // contain "accepted".
       val acceptedLine = captured.split('\n').iterator
         .find(_.contains("job accepted"))
         .getOrElse(fail(s"no `job accepted` line in captured stdout -- JobQueue.scala line 200-202 documents this as the INFO-level submission-time line; if missing, either the logInfo was suppressed OR the submission path took a different branch (drain/rate-limit/auth); got captured stdout: ${captured.take(2000)}"))
@@ -5255,15 +5279,16 @@ class HandHistoryReviewServerTest extends FunSuite:
       // (iii) jobId matching the 202 response
       assert(acceptedLine.contains(s"jobId=$submitJobId"),
         clue = s"analyze submission-time line must carry the SAME jobId='$submitJobId' from the 202 submission response; got: $acceptedLine")
-      // (iv) queuedJobs=1 (SUBMISSION-TIME queue-size asymmetry
-      // -- the just-submitted job IS in the queue at submission
-      // time, matching the empirical observation pinned by
-      // 0af1462 on the hall side)
+      // (iv) queuedJobs=1, deterministic because the single worker
+      // is provably occupied by job1 (blocking backend) so job2
+      // cannot have been dequeued between executor.submit (line
+      // 196) and the logInfo (line 200) reading the queue size
       assert(acceptedLine.contains("queuedJobs=1"),
-        clue = s"analyze submission-time line must carry queuedJobs=1 (the just-submitted job IS in the queue at submission time per executor.submit at line 196 enqueueing BEFORE the logInfo at line 200 reads the queue size); this matches the SUBMISSION-TIME vs COMPLETION-TIME queue-size asymmetry empirically documented + pinned by 0af1462 on the hall side; a refactor reading the queue size BEFORE executor.submit would silently emit 0 here; got: $acceptedLine")
-      // (v) runningJobs=0 (worker hasn't started yet at submission)
-      assert(acceptedLine.contains("runningJobs=0"),
-        clue = s"analyze submission-time line must carry runningJobs=0 (the worker hasn't started executing the just-queued job at submission time -- executor.getActiveCount() returns 0); matches 0af1462's pattern on the hall side; got: $acceptedLine")
+        clue = s"analyze submission-time line must carry queuedJobs=1: executor.submit at line 196 enqueues job2 BEFORE the logInfo at line 200 reads the queue size, and the single worker is provably busy with job1, so job2 is still queued; a refactor reading the queue size BEFORE executor.submit would emit 0 here; got: $acceptedLine")
+      // (v) runningJobs=1 (job1 occupies the single worker -- the
+      // saturation that makes tier (iv) deterministic)
+      assert(acceptedLine.contains("runningJobs=1"),
+        clue = s"analyze submission-time line must carry runningJobs=1 (job1 provably occupies the single worker; the blocking backend's started latch fired before job2 was submitted); got: $acceptedLine")
       // (vi) bytes=18 (UTF-8 byte length of "PokerStars Hand #1"
       // = 18 ASCII characters = 18 UTF-8 bytes); pins the
       // analyze-side-distinctive request-context field
@@ -5285,6 +5310,12 @@ class HandHistoryReviewServerTest extends FunSuite:
       // (x) service-tag
       assert(acceptedLine.contains("[hand-history-review]"),
         clue = s"analyze submission-time line must carry the [hand-history-review] service-tag prefix; got: $acceptedLine")
+      } finally {
+        // Unblock job1 inside the withServer block so the worker exits
+        // before the server's shutdown grace (avoids the 5s drain wait).
+        backend.release.countDown()
+      }
+      }
     }
   }
 
