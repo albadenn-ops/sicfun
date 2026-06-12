@@ -228,11 +228,27 @@ private[holdem] object HoldemDdreNativeRuntime:
 
   private def safeLastEngineCodeCpu(): Option[Int] =
     try Some(HoldemDdreNativeCpuBindings.lastEngineCode())
-    catch case _: Throwable => None
+    catch
+      case ex: Throwable =>
+        GpuRuntimeSupport.noteSwallowedException(
+          site = "HoldemDdreNativeRuntime.safeLastEngineCodeCpu",
+          ex = ex,
+          fallback = "engineCode=None",
+          warnPolicy = GpuRuntimeSupport.SwallowedExceptionWarnPolicy.Never
+        )
+        None
 
   private def safeLastEngineCodeGpu(): Option[Int] =
     try Some(HoldemDdreNativeGpuBindings.lastEngineCode())
-    catch case _: Throwable => None
+    catch
+      case ex: Throwable =>
+        GpuRuntimeSupport.noteSwallowedException(
+          site = "HoldemDdreNativeRuntime.safeLastEngineCodeGpu",
+          ex = ex,
+          fallback = "engineCode=None",
+          warnPolicy = GpuRuntimeSupport.SwallowedExceptionWarnPolicy.Never
+        )
+        None
 
   private def backendLabel(backend: Backend): String =
     backend match

@@ -2,6 +2,7 @@ package sicfun.holdem.validation
 
 import sicfun.holdem.runtime.TexasHoldemPlayingHall
 import sicfun.holdem.strategic.bridge.BridgeManifest
+import sicfun.holdem.types.ConsoleLogger
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
@@ -36,6 +37,7 @@ import scala.util.Random
   * @see [[TexasHoldemPlayingHall]] for the underlying simulation engine
   */
 object AdaptiveProofHarness:
+  private val log = ConsoleLogger.fromConfig("adaptive-proof-harness")
 
   /** Configuration for a proof harness run.
     *
@@ -131,16 +133,15 @@ object AdaptiveProofHarness:
     */
   def run(config: Config = Config()): RunResult =
     val rng = new Random(config.seed)
-    println("=== Adaptive Proof Harness (9-Max) ===")
-    println(s"Blocks: ${config.blocks}")
-    println(s"Hands per block: ${config.handsPerBlock}")
-    println(s"Total hands: ${config.totalHands}")
-    println()
+    log.info("=== Adaptive Proof Harness (9-Max) ===")
+    log.info(s"Blocks: ${config.blocks}")
+    log.info(s"Hands per block: ${config.handsPerBlock}")
+    log.info(s"Total hands: ${config.totalHands}")
 
     val results = (0 until config.blocks).map { blockIdx =>
       val blockSeed = rng.nextLong()
       val heroPos = heroPositions9Max(rng.nextInt(heroPositions9Max.size))
-      println(s"[Block ${blockIdx + 1}/${config.blocks}] seed=$blockSeed heroPosition=$heroPos")
+      log.info(s"[Block ${blockIdx + 1}/${config.blocks}] seed=$blockSeed heroPosition=$heroPos")
 
       val hallOutDir = config.outputDir.resolve(s"block-$blockIdx")
       val hallArgs = Array(
@@ -168,7 +169,7 @@ object AdaptiveProofHarness:
       val hallResult = TexasHoldemPlayingHall.run(hallArgs)
       hallResult match
         case Right(summary) =>
-          println(f"  -> heroNetChips: ${summary.heroNetChips}%.2f  bb/100: ${summary.heroBbPer100}%.1f")
+          log.info(f"  -> heroNetChips: ${summary.heroNetChips}%.2f  bb/100: ${summary.heroBbPer100}%.1f")
           BlockResult(blockIdx, blockSeed, heroPos, summary)
         case Left(error) =>
           throw new RuntimeException(s"Hall run failed at block $blockIdx: $error")
@@ -193,8 +194,7 @@ object AdaptiveProofHarness:
 
     val report = formatReport(result)
     Files.writeString(runDir.resolve("report.txt"), report, StandardCharsets.UTF_8)
-    println()
-    println(report)
+    log.info(report)
 
     runDir
 
@@ -252,7 +252,7 @@ object AdaptiveProofHarness:
     val config = parseArgs(args)
     val result = run(config)
     val runDir = writeOutputs(result, config.outputDir)
-    println(s"\nOutputs written to: ${runDir.toAbsolutePath.normalize()}")
+    log.info(s"Outputs written to: ${runDir.toAbsolutePath.normalize()}")
 
   /** Parse CLI arguments into Config. Supports --hands, --blocks, --seed, --budget,
     * --output, and --model flags with simple prefix matching.

@@ -22,7 +22,21 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+function Resolve-RepoRoot {
+  $current = [System.IO.DirectoryInfo]$PSScriptRoot
+  while ($null -ne $current) {
+    $sharedContract = Join-Path $current.FullName "AI_ENTRYPOINT.md"
+    $sidecarDirectory = Join-Path $current.FullName "scripts\ai"
+    if ((Test-Path $sharedContract) -and (Test-Path $sidecarDirectory -PathType Container)) {
+      return $current.FullName
+    }
+    $current = $current.Parent
+  }
+
+  throw "Unable to resolve the repository root from $PSScriptRoot"
+}
+
+$repoRoot = Resolve-RepoRoot
 $sidecarCacheDir = Join-Path $repoRoot ".tool-cache\gemini-sidecar"
 $googleAuthType = "oauth-personal"
 
@@ -142,6 +156,26 @@ function Resolve-WorkspacePath {
   return [System.IO.Path]::GetFullPath($candidate)
 }
 
+function Expand-DelimitedArguments {
+  param([string[]]$Values)
+
+  $expanded = @()
+  foreach ($value in $Values) {
+    if ([string]::IsNullOrWhiteSpace($value)) {
+      continue
+    }
+
+    foreach ($piece in ($value -split ",")) {
+      $trimmed = $piece.Trim()
+      if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+        $expanded += $trimmed
+      }
+    }
+  }
+
+  return $expanded
+}
+
 function Get-RepoRelativePath {
   param([string]$AbsolutePath)
 
@@ -211,6 +245,73 @@ function Get-DefaultArtifactPath {
   Ensure-SidecarCacheDir
   $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
   return Join-Path $sidecarCacheDir ("$timestamp-$Mode.$Suffix")
+}
+
+function Get-CapturedArtifactText {
+  param(
+    [string[]]$Lines,
+    [string]$CurrentOutputFormat
+  )
+
+  $capturedLines = @($Lines | ForEach-Object { [string]$_ })
+  if ($capturedLines.Count -eq 0) {
+    return ""
+  }
+
+  switch ($CurrentOutputFormat) {
+    "json" {
+      $jsonStart = -1
+      for ($index = 0; $index -lt $capturedLines.Count; $index++) {
+        $trimmed = $capturedLines[$index].TrimStart()
+        if ($trimmed.StartsWith("{") -or $trimmed.StartsWith("[")) {
+          $jsonStart = $index
+          break
+        }
+      }
+
+      if ($jsonStart -ge 0) {
+        for ($endIndex = $capturedLines.Count - 1; $endIndex -ge $jsonStart; $endIndex--) {
+          $candidate = (($capturedLines[$jsonStart..$endIndex]) -join [Environment]::NewLine).Trim()
+          if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+          }
+
+          try {
+            $null = $candidate | ConvertFrom-Json -ErrorAction Stop
+            return $candidate
+          }
+          catch {
+          }
+        }
+      }
+
+      return ($capturedLines -join [Environment]::NewLine).Trim()
+    }
+    "stream-json" {
+      $jsonLines = @()
+      foreach ($line in $capturedLines) {
+        $candidate = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+          continue
+        }
+
+        try {
+          $null = $candidate | ConvertFrom-Json -ErrorAction Stop
+          $jsonLines += $candidate
+        }
+        catch {
+        }
+      }
+      if ($jsonLines.Count -gt 0) {
+        return ($jsonLines -join [Environment]::NewLine).Trim()
+      }
+
+      return ($capturedLines -join [Environment]::NewLine).Trim()
+    }
+    default {
+      return ($capturedLines -join [Environment]::NewLine).TrimEnd()
+    }
+  }
 }
 
 function Get-SharedContractPath {
@@ -373,8 +474,23 @@ function Invoke-GeminiAuthAttempt {
     Write-Host "[gemini-sidecar] starting browser auth flow..."
   }
 
-  & $NodePath $Entrypoint
-  return $LASTEXITCODE
+  $hasPreferenceVariable = Test-Path Variable:PSNativeCommandUseErrorActionPreference
+  if ($hasPreferenceVariable) {
+    $previousPreference = $PSNativeCommandUseErrorActionPreference
+    $script:PSNativeCommandUseErrorActionPreference = $false
+  }
+  $previousErrorActionPreference = $ErrorActionPreference
+  $script:ErrorActionPreference = "Continue"
+  try {
+    & $NodePath $Entrypoint
+    return $LASTEXITCODE
+  }
+  finally {
+    $script:ErrorActionPreference = $previousErrorActionPreference
+    if ($hasPreferenceVariable) {
+      $script:PSNativeCommandUseErrorActionPreference = $previousPreference
+    }
+  }
 }
 
 function Invoke-GeminiAuth {
@@ -444,12 +560,12 @@ function Invoke-GeminiDelegate {
   $entrypoint = Resolve-GeminiEntrypoint
 
   $resolvedContextPaths = @()
-  foreach ($path in $ContextPath) {
+  foreach ($path in (Expand-DelimitedArguments -Values $ContextPath)) {
     $resolvedContextPaths += Resolve-WorkspacePath -Path $path
   }
 
   $resolvedIncludeDirectories = @()
-  foreach ($dir in $IncludeDirectories) {
+  foreach ($dir in (Expand-DelimitedArguments -Values $IncludeDirectories)) {
     $resolvedIncludeDirectories += Resolve-WorkspacePath -Path $dir
   }
 
@@ -504,9 +620,32 @@ function Invoke-GeminiDelegate {
 
   Push-Location $repoRoot
   try {
-    & $nodePath @cliArgs | Tee-Object -FilePath $resolvedOutputPath
+    $hasPreferenceVariable = Test-Path Variable:PSNativeCommandUseErrorActionPreference
+    if ($hasPreferenceVariable) {
+      $previousPreference = $PSNativeCommandUseErrorActionPreference
+      $script:PSNativeCommandUseErrorActionPreference = $false
+    }
+    $previousErrorActionPreference = $ErrorActionPreference
+    $script:ErrorActionPreference = "Continue"
+    try {
+      $lines = @(& $nodePath @cliArgs 2>&1 | ForEach-Object { [string]$_ })
+    }
+    finally {
+      $script:ErrorActionPreference = $previousErrorActionPreference
+      if ($hasPreferenceVariable) {
+        $script:PSNativeCommandUseErrorActionPreference = $previousPreference
+      }
+    }
+
+    $rawPath = "$resolvedOutputPath.raw.txt"
+    Write-Utf8NoBom -Path $rawPath -Value (($lines | ForEach-Object { [string]$_ }) -join [Environment]::NewLine)
+    $artifactText = Get-CapturedArtifactText -Lines $lines -CurrentOutputFormat $OutputFormat
     if ($LASTEXITCODE -ne 0) {
-      throw "Gemini CLI exited with code $LASTEXITCODE. See $resolvedOutputPath"
+      throw "Gemini CLI exited with code $LASTEXITCODE. See $rawPath"
+    }
+    Write-Utf8NoBom -Path $resolvedOutputPath -Value $artifactText
+    if (-not [string]::IsNullOrWhiteSpace($artifactText)) {
+      Write-Output $artifactText
     }
   }
   finally {

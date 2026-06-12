@@ -87,7 +87,7 @@ object HoldemPostflopGpuAutoTuner:
     )
 
     def run(): Unit =
-      withSystemProperties(propUpdates) {
+      GpuRuntimeSupport.withTemporarySystemProperties(propUpdates) {
         HoldemPostflopNativeRuntime.resetLoadCacheForTests()
         val availability = HoldemPostflopNativeRuntime.availability
 
@@ -167,35 +167,36 @@ object HoldemPostflopGpuAutoTuner:
       }
 
     private def measureCandidate(spot: Spot, candidate: Candidate): Either[String, CandidateRun] =
-      applyCandidate(candidate)
-      warmupCandidate(spot).flatMap { _ =>
-        val elapsedRuns = new Array[Double](config.runs)
-        var run = 0
-        var runFailed = Option.empty[String]
-        while run < config.runs && runFailed.isEmpty do
-          val started = System.nanoTime()
-          runOne(spot, trials = config.trials, seedBase = config.seedBase + 1000L + run.toLong) match
-            case Left(reason) =>
-              runFailed = Some(reason)
-            case Right(rows) =>
-              if rows.length != spot.villainCount then
-                runFailed = Some(s"result length mismatch expected=${spot.villainCount} actual=${rows.length}")
-              else
-                elapsedRuns(run) = math.max(1L, System.nanoTime() - started).toDouble / 1_000_000_000.0
-          run += 1
+      GpuRuntimeSupport.withTemporarySystemProperties(candidatePropertyUpdates(candidate)) {
+        warmupCandidate(spot).flatMap { _ =>
+          val elapsedRuns = new Array[Double](config.runs)
+          var run = 0
+          var runFailed = Option.empty[String]
+          while run < config.runs && runFailed.isEmpty do
+            val started = System.nanoTime()
+            runOne(spot, trials = config.trials, seedBase = config.seedBase + 1000L + run.toLong) match
+              case Left(reason) =>
+                runFailed = Some(reason)
+              case Right(rows) =>
+                if rows.length != spot.villainCount then
+                  runFailed = Some(s"result length mismatch expected=${spot.villainCount} actual=${rows.length}")
+                else
+                  elapsedRuns(run) = math.max(1L, System.nanoTime() - started).toDouble / 1_000_000_000.0
+            run += 1
 
-        runFailed match
-          case Some(reason) => Left(reason)
-          case None =>
-            val avgSeconds = elapsedRuns.sum / elapsedRuns.length.toDouble
-            val workUnits = spot.villainCount.toDouble * config.trials.toDouble
-            Right(
-              CandidateRun(
-                candidate = candidate,
-                workUnitsPerSecond = workUnits / avgSeconds,
-                elapsedSeconds = avgSeconds
+          runFailed match
+            case Some(reason) => Left(reason)
+            case None =>
+              val avgSeconds = elapsedRuns.sum / elapsedRuns.length.toDouble
+              val workUnits = spot.villainCount.toDouble * config.trials.toDouble
+              Right(
+                CandidateRun(
+                  candidate = candidate,
+                  workUnitsPerSecond = workUnits / avgSeconds,
+                  elapsedSeconds = avgSeconds
+                )
               )
-            )
+        }
       }
 
     private def warmupCandidate(spot: Spot): Either[String, Unit] =
@@ -235,10 +236,6 @@ object HoldemPostflopGpuAutoTuner:
       trials = trials,
       seedBase = seedBase
     )
-
-  private def applyCandidate(candidate: Candidate): Unit =
-    sys.props.update(PostflopCudaBlockSizeProperty, candidate.blockSize.toString)
-    sys.props.update(PostflopCudaMaxChunkMatchupsProperty, candidate.maxChunkMatchups.toString)
 
   private def saveCache(
       file: File,
@@ -337,15 +334,8 @@ object HoldemPostflopGpuAutoTuner:
       chunkCandidates = CliHelpers.optionalPositiveIntList(options, "chunkCandidates").map(_.distinct).getOrElse(DefaultChunkCandidates)
     )
 
-  private def withSystemProperties[A](updates: Seq[(String, Option[String])])(thunk: => A): A =
-    val previous = updates.map { case (key, _) => key -> sys.props.get(key) }.toMap
-    updates.foreach {
-      case (key, Some(value)) => sys.props.update(key, value)
-      case (key, None) => sys.props.remove(key)
-    }
-    try thunk
-    finally
-      previous.foreach {
-        case (key, Some(value)) => sys.props.update(key, value)
-        case (key, None) => sys.props.remove(key)
-      }
+  private def candidatePropertyUpdates(candidate: Candidate): Vector[(String, Option[String])] =
+    Vector(
+      PostflopCudaBlockSizeProperty -> Some(candidate.blockSize.toString),
+      PostflopCudaMaxChunkMatchupsProperty -> Some(candidate.maxChunkMatchups.toString)
+    )

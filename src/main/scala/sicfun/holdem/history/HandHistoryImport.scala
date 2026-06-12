@@ -184,6 +184,15 @@ object HandHistoryImport:
     6 -> Vector(Position.UTG, Position.UTG1, Position.UTG2, Position.Middle, Position.Hijack, Position.Cutoff)
   )
 
+  /** A hand block that could not be parsed, retained so callers can REPORT
+    * it (count + reason) instead of silently dropping it from the upload. */
+  final case class SkippedHand(handOrdinal: Int, reason: String)
+
+  /** Outcome of a resilient parse ([[parseTextOutcome]]): the hands that
+    * parsed successfully plus the per-hand failures (each with its 1-based
+    * ordinal and the parser's error message). */
+  final case class ImportOutcome(hands: Vector[ImportedHand], skipped: Vector[SkippedHand])
+
   /** Parse a hand history file from disk.
     *
     * @param path     path to the hand history text file (UTF-8)
@@ -217,6 +226,26 @@ object HandHistoryImport:
       site: Option[HandHistorySite],
       heroName: Option[String]
   ): Either[String, Vector[ImportedHand]] =
+    // Strict variant: any per-hand parse failure aborts with the first
+    // error, preserving the historical contract for CLI / validation
+    // callers whose input is controlled and where a bad hand is a hard error.
+    parseTextOutcome(text, site, heroName).flatMap { outcome =>
+      outcome.skipped.headOption match
+        case Some(failure) => Left(failure.reason)
+        case None => Right(outcome.hands)
+    }
+
+  /** Resilient variant of [[parseText]]: parses every hand block and returns
+    * BOTH the successfully-parsed hands and the per-hand parse failures
+    * (instead of aborting on the first bad hand). Returns Left only when the
+    * site cannot be resolved or the input contains no hand blocks at all.
+    * The web upload path uses this so one malformed hand in a large upload
+    * does not discard the analysis of every other hand. */
+  def parseTextOutcome(
+      text: String,
+      site: Option[HandHistorySite],
+      heroName: Option[String]
+  ): Either[String, ImportOutcome] =
     val normalizedHeroName = heroName.map(normalizePlayerName).filter(_.nonEmpty)
     val resolvedSiteEither = site match
       case Some(value) => Right(value)
@@ -236,7 +265,7 @@ object HandHistoryImport:
   private def parsePokerStars(
       text: String,
       heroName: Option[String]
-  ): Either[String, Vector[ImportedHand]] =
+  ): Either[String, ImportOutcome] =
     parseSite(text, heroName, "PokerStars", _.startsWith(PokerStarsHeaderPrefix))(
       parsePokerStarsHand
     )
@@ -244,7 +273,7 @@ object HandHistoryImport:
   private def parseWinamax(
       text: String,
       heroName: Option[String]
-  ): Either[String, Vector[ImportedHand]] =
+  ): Either[String, ImportOutcome] =
     parseSite(text, heroName, "Winamax", _.startsWith(WinamaxHeaderPrefix))(
       parseWinamaxHand
     )
@@ -252,7 +281,7 @@ object HandHistoryImport:
   private def parseGGPoker(
       text: String,
       heroName: Option[String]
-  ): Either[String, Vector[ImportedHand]] =
+  ): Either[String, ImportOutcome] =
     parseSite(text, heroName, "GGPoker", isGGPokerHeaderLine)(
       parseGGPokerHand
     )
@@ -264,16 +293,23 @@ object HandHistoryImport:
       isHeaderLine: String => Boolean
   )(
       parseHand: (Vector[String], Int, Option[String]) => Either[String, ImportedHand]
-  ): Either[String, Vector[ImportedHand]] =
+  ): Either[String, ImportOutcome] =
     val blocks = splitHands(text, isHeaderLine)
     if blocks.isEmpty then Left(s"no $siteLabel hands found in input")
     else
+      // Resilient aggregation: parse every hand block, collecting the
+      // successfully-parsed hands AND the per-hand failures separately
+      // instead of aborting the whole batch on the first bad hand. A single
+      // malformed hand in a large upload must not discard the analysis of
+      // every other hand. Strict callers (parseText) still fail fast on the
+      // first failure; the web upload path uses parseTextOutcome to
+      // skip-and-report the bad hands.
       val parsed = blocks.zipWithIndex.map { case (block, idx) =>
-        parseHand(block, idx + 1, heroName)
+        (idx + 1, parseHand(block, idx + 1, heroName))
       }
-      parsed.collectFirst { case Left(err) => err } match
-        case Some(err) => Left(err)
-        case None => Right(parsed.collect { case Right(hand) => hand })
+      val hands = parsed.collect { case (_, Right(hand)) => hand }
+      val skipped = parsed.collect { case (ordinal, Left(err)) => SkippedHand(ordinal, err) }
+      Right(ImportOutcome(hands, skipped))
 
   private def splitHands(
       text: String,
@@ -683,6 +719,29 @@ object HandHistoryImport:
       buttonSeatNumber: Int,
       seatRows: Vector[SeatRow]
   ): (Vector[ImportedPlayer], Map[String, Int]) =
+    // Reject duplicate nicks up front with a clear reason. Action lines in
+    // site hand-history formats identify the actor by nick ONLY, and every
+    // downstream structure here is name-keyed (seatIndexByName, the
+    // per-player stack/commitment ledgers, opponent profiling). Two seats
+    // sharing a nick would silently collapse into one player: action
+    // sequences become unreplayable (surfacing as misleading toCall
+    // failures) and, worse, hands that happen to replay cleanly merge two
+    // players' stats into one opponent profile with no warning. Real sites
+    // enforce unique nicks per table, so a duplicate is always corrupt or
+    // over-redacted input -- fail this hand loudly (the resilient web path
+    // skips it with this message as the reason) rather than mis-analyze it.
+    val duplicateNames =
+      seatRows
+        .groupBy(_.name)
+        .collect { case (name, rows) if rows.length > 1 => name -> rows.map(_.seatNumber).sorted }
+    if duplicateNames.nonEmpty then
+      val described = duplicateNames.toVector
+        .sortBy { case (name, _) => name }
+        .map { case (name, seats) => s"'$name' (seats ${seats.mkString(", ")})" }
+        .mkString("; ")
+      throw new IllegalArgumentException(
+        s"hand $handId: duplicate player name(s) $described -- action lines identify players by name, so duplicate nicks make the hand ambiguous"
+      )
     val seatByNumber = seatRows.map(row => row.seatNumber -> row).toMap
     if !seatByNumber.contains(buttonSeatNumber) then
       throw new IllegalArgumentException(s"hand $handId: button seat $buttonSeatNumber has no matching seat row")

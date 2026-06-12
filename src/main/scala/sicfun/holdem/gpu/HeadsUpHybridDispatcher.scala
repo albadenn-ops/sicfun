@@ -663,7 +663,13 @@ object HeadsUpHybridDispatcher:
       }
     catch
       case _: UnsatisfiedLinkError => Vector.empty
-      case _: Throwable => Vector.empty
+      case ex: Throwable =>
+        GpuRuntimeSupport.noteSwallowedException(
+          site = "HeadsUpHybridDispatcher.discoverCudaDevices",
+          ex = ex,
+          fallback = "cudaDevices=Vector.empty"
+        )
+        Vector.empty
 
   /** Discovers OpenCL devices, filtering out any NVIDIA GPUs that are already
     * represented by CUDA devices. This prevents the same physical GPU from
@@ -683,7 +689,13 @@ object HeadsUpHybridDispatcher:
       }
     catch
       case _: UnsatisfiedLinkError => Vector.empty
-      case _: Throwable => Vector.empty
+      case ex: Throwable =>
+        GpuRuntimeSupport.noteSwallowedException(
+          site = "HeadsUpHybridDispatcher.discoverOpenCLDevices",
+          ex = ex,
+          fallback = "openclDevices=Vector.empty"
+        )
+        Vector.empty
 
   /** Discovers the CPU device by probing whether the native library is loaded
     * (via `lastEngineCode()`). If the probe throws, we still create a CPU device

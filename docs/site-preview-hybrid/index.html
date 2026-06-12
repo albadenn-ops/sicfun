@@ -3,7 +3,36 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Inline defense-in-depth for the X-Robots-Tag header WebResponses
+       already emits. The header is authoritative for compliant crawlers,
+       but some indexers honor the meta tag more reliably (or read it
+       when proxies strip response headers). Cheap to include and
+       harmless if the page is already private. -->
+  <meta name="robots" content="noindex, nofollow">
+  <!-- The page is exclusively dark-themed (site.css :root vars use #0a0f0d
+       background, #edf6f0 ink). color-scheme=dark tells the user agent
+       to render its built-in form controls + scrollbars in the dark
+       palette so they don't flash white against the page; theme-color
+       paints the mobile browser chrome (Chrome's address bar on Android,
+       Safari's overscroll area on iOS) to match the page background
+       rather than leaving a jarring white strip above the dark UI. -->
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0f0d">
   <title>SICFUN | Hand-History Review &amp; Playing Hall</title>
+  <!-- Empty data-URI favicon suppresses the spurious GET /favicon.ico
+       that browsers default to when no rel=icon is declared. Without
+       this link, every page load fetches /favicon.ico, the static
+       handler 404s (no favicon.ico in the bundle), and the audit log
+       picks up a noise line per page load. The CSP set by
+       WebResponses.scala includes `data:` in its img-src source-list
+       specifically to permit this URI -- both halves (the CSP source
+       AND this link's `data:,` href) are co-required for the
+       suppression to work, and HandHistoryReviewServerTest's CSP-
+       directive-pin block enforces the CSP half. To ship a real
+       icon, ADD favicon.ico to the static bundle AND drop `data:`
+       from the CSP -- otherwise the policy stays unnecessarily
+       permissive (allowing a data: img source that no longer has a
+       documented consumer). -->
   <link rel="icon" href="data:,">
   <meta
     name="description"
@@ -16,7 +45,53 @@
   <a class="skip-link" href="#main-content">Skip to content</a>
   <div class="backdrop" aria-hidden="true"></div>
 
-  <main class="page" id="main-content">
+  <!-- tabindex="-1" makes the <main> element programmatically focusable
+       so the skip link above actually moves keyboard focus into the
+       content region when activated. Without it, browser behavior on
+       anchor navigation to a non-focusable target varies: Firefox /
+       Chrome may move focus, Safari historically does NOT, and even
+       on browsers that do move focus, the behavior depends on whether
+       the target is focusable. Result without this attribute: keyboard
+       user activates the skip link, viewport scrolls to <main>, but
+       their next Tab resumes from wherever focus was BEFORE the click
+       -- typically the top nav, defeating the skip-link's entire
+       purpose of bypassing repeated navigation. The -1 value keeps
+       <main> out of the normal Tab order (so a Tab user doesn't
+       suddenly stop on a content block), but allows the anchor
+       fragment + browser's :target / focus behavior to programmatically
+       focus the element when the skip link fires. -->
+  <main class="page" id="main-content" tabindex="-1">
+    <noscript>
+      <div class="noscript-notice" role="alert">
+        <p><strong>JavaScript is disabled.</strong> The hand-history upload, Playing Hall self-play, and account panels all require JavaScript to talk to the local SICFUN server.</p>
+        <p>The descriptive content below still reads, but submit buttons, progress bars, and result panels will not function until you enable JavaScript for this page's origin.</p>
+      </div>
+    </noscript>
+
+    <!-- Mirror of the noscript-notice above, but for the "JS ran but
+         boot() threw" failure mode rather than "JS disabled". The
+         noscript path covers "no JS at all"; this element covers "JS
+         loaded but the synchronous DOM setup or the async network
+         probes inside boot() threw an unhandled exception" (e.g.
+         localStorage SecurityError in a browser private mode the
+         renderRecentRuns reader hits, a CSP-violation SecurityError
+         mid-fetch in refreshAuthState/probeServerLimits, an
+         unexpected-null in mirrorHelpDataToAriaLabel after a future
+         data-help anchor drift). Hidden in the happy path via the
+         .hidden class; site.js's boot().catch() handler (see
+         showBootError in that file) removes the .hidden class to
+         reveal it when boot rejects. Visual treatment intentionally
+         reuses noscript-notice so the two failure modes share the
+         same "page-not-ready warning" affordance -- one less style
+         to maintain, identical semantic intent. role="alert" +
+         aria-live="assertive" so screen readers announce the banner
+         immediately when it gets revealed (the user doesn't have to
+         re-Tab to discover it). -->
+    <div id="page-init-error" class="noscript-notice hidden" role="alert" aria-live="assertive">
+      <p><strong>This page didn't finish loading.</strong> Some controls (sign-in, file upload, Playing Hall) may not respond.</p>
+      <p>Try reloading the page. If this keeps happening, check the browser's developer console for details and share them with your SICFUN operator.</p>
+    </div>
+
     <header class="site-header surface">
       <div class="brand-block">
         <a class="brand" href="#hero">SICFUN</a>
@@ -89,7 +164,12 @@
 
       <div class="account-grid">
         <article class="surface account-card">
-          <div class="auth-state" id="auth-state">
+          <!-- aria-live="polite" matches the review-panel / hall-panel
+               announcement contract: a screen reader hears the new
+               account state ("Signed in", "Sign in required", error
+               flashes from formatErrorMessage) without the user having
+               to re-navigate to the panel. -->
+          <div class="auth-state" id="auth-state" aria-live="polite">
             <p class="card-kicker">Checking auth</p>
             <h3>Loading account controls...</h3>
             <p class="section-note">
@@ -98,20 +178,95 @@
             </p>
           </div>
 
-          <form class="auth-form" id="auth-form">
+          <form class="auth-form" id="auth-form" method="post" action="/api/auth/login">
+            <!--
+              method="post" + action="/api/auth/login" together close a
+              defense-in-depth gap: if the JS submit handler ever fails
+              to load (404, network blip mid-deploy, CSP block) and the
+              user presses Enter in the password field, the browser's
+              default submit would otherwise serialize every field into
+              the URL as a GET against the current page, putting the
+              PASSWORD in the URL bar, browser history, and Referer
+              header. With POST + a real endpoint, the same fallback
+              submission carries the password in the request body and
+              hits an actual handler (which then 415s because the body
+              is form-urlencoded not JSON, but the password is no
+              longer in the URL). The JS handler still preventDefaults,
+              so the normal flow is unchanged.
+            -->
             <label class="field">
               <span>Email</span>
-              <input id="auth-email" type="email" autocomplete="username email" placeholder="player@example.com">
+              <!-- inputmode="email" hints the mobile soft-keyboard layout
+                   (shows @ and . prominently). spellcheck="false" keeps
+                   email addresses out of the autocorrect dictionary so
+                   "user.name" doesn't become "user.Name" on mobile. -->
+              <!-- aria-describedby + visible hint complete the auth-form
+                   a11y pattern (auth-password and auth-display-name
+                   already carry hints; this is the last field). The
+                   placeholder "player@example.com" is a format example
+                   only and never reaches an NVDA/JAWS user on Tab focus
+                   (default placeholder=off). Two non-obvious semantics
+                   land in the hint: (a) the email IS the sign-in
+                   identifier on this server (not the display name --
+                   newcomers sometimes assume the display name is the
+                   handle they log in with), and (b) the server runs
+                   normalizeEmail = trim.toLowerCase before matching,
+                   so Alice@Example.com and alice@example.com are the
+                   same account. Without the case-insensitivity signal
+                   a user who registered with mixed-case and tries to
+                   sign in with all-lowercase concludes the password is
+                   wrong; with it, they know the casing is irrelevant. -->
+              <input id="auth-email" type="email" autocomplete="username email" inputmode="email" spellcheck="false" placeholder="player@example.com" required maxlength="254" aria-describedby="auth-email-hint">
+              <small class="field-hint" id="auth-email-hint">Becomes your sign-in identifier on this server &middot; matched case-insensitively (Alice@Example.com and alice@example.com are the same account)</small>
             </label>
 
             <label class="field">
               <span>Password</span>
-              <input id="auth-password" type="password" autocomplete="current-password" placeholder="At least 10 characters">
+              <!-- minlength/maxlength match PlatformUserAuth.validatePassword
+                   (10..256). Native HTML validation runs BEFORE the form's
+                   submit event so an Enter key in a too-short password gets
+                   a native tooltip instead of a round-trip to the server's
+                   "password must be at least 10 characters" 400. The JS
+                   button-click path still goes through submitAuth without
+                   relying on these attributes. -->
+              <!-- aria-describedby + visible hint complete the auth-form
+                   a11y pattern (auth-display-name already carries one).
+                   The placeholder "At least 10 characters" never reaches
+                   an NVDA/JAWS user on Tab focus (default placeholder=off
+                   on both), so a screen-reader user hears only "Password,
+                   password edit text" -- no signal about the 10-char
+                   minimum until they submit and round-trip a server 400.
+                   The visible hint also names two things the placeholder
+                   couldn't fit: the 256-char ceiling (so a generated
+                   passphrase doesn't silently fail the maxlength gate)
+                   and the no-complexity-rule policy (so a paste from a
+                   password manager that's all-lowercase with no digits
+                   doesn't trigger the user's "this site will reject it"
+                   reflex). NIST SP 800-63B explicitly forbids composition
+                   rules, and validatePassword imposes none -- the hint
+                   surfaces that policy choice. -->
+              <input id="auth-password" type="password" autocomplete="current-password" placeholder="At least 10 characters" required minlength="10" maxlength="256" aria-describedby="auth-password-hint">
+              <small class="field-hint" id="auth-password-hint">10&ndash;256 characters &middot; spaces and any keyboard symbols are accepted, with no required mix of digit / uppercase / symbol (a password-manager-generated passphrase pastes in as-is)</small>
             </label>
 
             <label class="field">
               <span>Display name</span>
-              <input id="auth-display-name" type="text" autocomplete="nickname" placeholder="Optional for local registration">
+              <!-- maxlength matches sanitizeDisplayName cap (96). -->
+              <!-- aria-describedby + visible hint mirror the hero-name
+                   pattern: the placeholder "Optional for local
+                   registration" never reaches an NVDA/JAWS user
+                   (default placeholder=off) AND is ambiguous even
+                   when read -- "for local registration" could mean
+                   "required for local registration" or "only used by
+                   local registration". The linked hint below names
+                   the actual behavior: the value is consumed only by
+                   POST /api/auth/register, the sign-in path ignores
+                   it. A user who fills the field expecting to update
+                   their display name on sign-in would otherwise see
+                   no effect with no signal why; this tells them
+                   upfront to use the profile-save flow instead. -->
+              <input id="auth-display-name" type="text" autocomplete="nickname" placeholder="Optional for local registration" maxlength="96" aria-describedby="auth-display-name-hint">
+              <small class="field-hint" id="auth-display-name-hint">Optional · only consumed by Register; Sign In ignores it (update existing display names via the profile panel after signing in)</small>
             </label>
 
             <div class="auth-actions">
@@ -128,30 +283,106 @@
             <h3>Sign in to manage profile defaults.</h3>
           </div>
 
-          <form class="auth-form" id="profile-form">
+          <!--
+            method="post" + action="/api/auth/profile" close the same
+            JS-broken-form defense-in-depth gap the auth + analyze +
+            hall forms cover. If the JS submit handler ever fails to
+            load (404, network blip mid-deploy, CSP block) and the user
+            presses Enter in any of the four profile fields, the
+            browser's default submit would otherwise serialize display
+            name + hero name + preferred site + time zone into the URL
+            as a GET against the current page -- persisting the user's
+            identifying values (display name, the poker handle in hero
+            name, and the geo-narrowing IANA tz) into the URL bar,
+            browser history, and Referer header. With POST + the real
+            endpoint, the fallback submission lands at the profile
+            endpoint (which 415s on form-urlencoded body, matching the
+            auth/analyze/hall failure mode), and the URL stays clean.
+            The JS handler preventDefaults so the normal flow is
+            unchanged.
+          -->
+          <form class="auth-form" id="profile-form" method="post" action="/api/auth/profile">
+            <!-- maxlength caps match the server-side sanitizeOptionalField
+                 limits in PlatformUserAuth.updateProfile (displayName=96,
+                 heroName=64, preferredSite=32, timeZone=64). Native
+                 enforcement gives a cleaner UI than a server 400 after
+                 the user pastes a too-long value. -->
             <label class="field">
               <span>Display name</span>
-              <input id="profile-display-name" type="text" autocomplete="nickname" placeholder="Display name">
+              <input id="profile-display-name" type="text" autocomplete="nickname" placeholder="Display name" maxlength="96">
             </label>
 
             <label class="field">
               <span>Default hero screen name</span>
-              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form">
+              <!-- spellcheck=false: poker screen names are identifiers
+                   (e.g. 'Mig_Pro22'), not prose. iOS/Android autocorrect
+                   would otherwise capitalize them or swap chars.
+                   autocapitalize=off prevents the mobile soft keyboard
+                   from auto-uppercasing the first letter; the server's
+                   normalizePlayerName comparison is case-sensitive so
+                   'alice' typed on mobile must NOT silently become
+                   'Alice'. -->
+              <!-- aria-describedby + visible hint mirror the analyze
+                   form's hero-name treatment: most screen readers
+                   skip placeholder text by default (NVDA + JAWS),
+                   so "Prefill the upload form" never reaches an
+                   assistive-tech user on Tab focus. The linked hint
+                   below spells out what saving this field actually
+                   does (prefill the analyze form's hero-name input
+                   on next visit) so the user knows whether it's
+                   worth filling in. -->
+              <input id="profile-hero-name" type="text" placeholder="Prefill the upload form" spellcheck="false" autocapitalize="off" autocomplete="off" maxlength="64" aria-describedby="profile-hero-name-hint">
+              <small class="field-hint" id="profile-hero-name-hint">Optional · prefills the analyze form's hero-name field on this browser so you don't retype it per upload</small>
             </label>
 
             <label class="field">
               <span>Preferred site</span>
-              <select id="profile-preferred-site">
+              <!-- aria-describedby + visible hint match the rest of
+                   the profile + analyze form fields. Without it a
+                   screen reader Tabbing here hears only "Preferred
+                   site, combobox, Auto-detect, 1 of 4" with no
+                   indication of WHAT the preference actually
+                   affects -- the field name alone could plausibly
+                   mean "tag yourself as a PokerStars player" or "set
+                   account-level default" or anything in between. The
+                   linked hint names the actual prefill behavior
+                   (analyze-form site dropdown, only while it shows
+                   Auto-detect) so a user knows whether to set it. -->
+              <select id="profile-preferred-site" aria-describedby="profile-preferred-site-hint">
                 <option value="">Auto-detect</option>
                 <option value="pokerstars">PokerStars</option>
                 <option value="winamax">Winamax</option>
                 <option value="ggpoker">GGPoker</option>
               </select>
+              <small class="field-hint" id="profile-preferred-site-hint">Prefills the analyze form's site selector on this browser when it's still showing Auto-detect. Once you pick a specific site on the analyze form, your manual choice wins.</small>
             </label>
 
             <label class="field">
               <span>Time zone</span>
-              <input id="profile-time-zone" type="text" placeholder="e.g. Europe/Madrid">
+              <!-- spellcheck=false: IANA time-zone names ("Europe/Madrid",
+                   "America/Argentina/Buenos_Aires") aren't dictionary
+                   words. autocomplete=off: there is no HTML5
+                   autocomplete token for IANA time-zone identifiers
+                   (the spec covers country/country-name/language but
+                   not tz). Without the explicit "off", browsers fall
+                   back to heuristic autofill keyed on the placeholder
+                   / id and may suggest a stored country or city name
+                   that does NOT match an IANA identifier; the value
+                   then round-trips through the server's sanitize-only
+                   path and persists as a junk time-zone string. -->
+              <!-- aria-describedby + visible hint complete the profile-
+                   form a11y pattern (the other three fields already
+                   carry hints). The placeholder "e.g. Europe/Madrid"
+                   never reaches an NVDA/JAWS user on Tab focus, so
+                   without the explicit hint a screen reader hears
+                   only "Time zone, edit text" -- no signal that an
+                   IANA identifier is required vs a country name vs a
+                   numeric UTC offset (the three most common user
+                   guesses). Naming the format upfront prevents the
+                   "I typed 'Eastern Standard Time' and it saved as
+                   a junk string" support ticket. -->
+              <input id="profile-time-zone" type="text" placeholder="e.g. Europe/Madrid" spellcheck="false" autocomplete="off" maxlength="64" aria-describedby="profile-time-zone-hint">
+              <small class="field-hint" id="profile-time-zone-hint">IANA time-zone identifier (Region/City form, e.g. Europe/Madrid, America/New_York). Stored on your profile -- the server only sanitizes the string, so plain-English names like "Eastern Standard Time" persist as-is but won't be parsed correctly by anything that consumes the field.</small>
             </label>
 
             <div class="auth-actions">
@@ -176,25 +407,90 @@
 
       <div class="upload-grid">
         <article class="surface upload-card">
-          <form class="upload-form" id="hand-upload-form">
+          <!--
+            method="post" + action="/api/analyze-hand-history" close the
+            same JS-broken-form defense-in-depth gap the auth form uses.
+            If the JS submit handler ever fails to load (404, network
+            blip mid-deploy, CSP block) and the user presses Enter in
+            the hero-name input, the browser's default submit would
+            otherwise serialize the hero name + site selection into the
+            URL as a GET against the current page, persisting the hero
+            name in the URL bar, browser history, and Referer header.
+            With POST + a real endpoint, the fallback submission lands
+            at the analyze endpoint (which 415s because the body is
+            form-urlencoded not JSON, matching the auth form's failure
+            mode), and the URL stays clean. The file input can't be
+            GET-submitted per HTML5 anyway so the file content is never
+            at risk; this just keeps the URL tidy in the failure mode.
+            The JS handler preventDefaults so the normal flow is
+            unchanged.
+          -->
+          <form class="upload-form" id="hand-upload-form" method="post" action="/api/analyze-hand-history">
             <label class="field">
               <span>Hand history file</span>
-              <input id="hand-history-file" type="file" accept=".txt,text/plain">
+              <!-- aria-describedby links the file input to the size hint
+                   so screen readers announce the dynamic upload cap and
+                   the supported export sources when the input gains
+                   focus. Without it the hint is visible-only - the
+                   <small> sits inside the <label> but assistive tech
+                   reads only the <span> label name, not the trailing
+                   small text. -->
+              <input id="hand-history-file" type="file" accept=".txt,text/plain" aria-describedby="hand-history-file-hint">
+              <!-- The size hint is populated from MAX_UPLOAD_BYTES via the
+                   /api/health probe at boot so it stays in sync when an
+                   operator raises the server cap. Placeholder text gives
+                   the default before the probe lands. -->
+              <small class="field-hint" id="hand-history-file-hint">Max 2 MB · .txt export from PokerStars, Winamax, or GGPoker</small>
             </label>
 
             <label class="field">
               <span>Site</span>
-              <select id="hand-history-site">
+              <!-- aria-describedby + visible hint match the file-input
+                   and hero-name treatment on this same form: a screen
+                   reader Tabbing to the select otherwise hears only
+                   "Site, combobox, Auto-detect, 1 of 4" with no
+                   indication that Auto-detect tries to identify the
+                   site from the file's first line, or when an explicit
+                   override is warranted. The hint also helps sighted
+                   users who don't already know that PokerStars /
+                   Winamax / GGPoker exports each carry distinct
+                   first-line markers Auto-detect keys on. -->
+              <select id="hand-history-site" aria-describedby="hand-history-site-hint">
                 <option value="auto">Auto-detect</option>
                 <option value="pokerstars">PokerStars</option>
                 <option value="winamax">Winamax</option>
                 <option value="ggpoker">GGPoker</option>
               </select>
+              <small class="field-hint" id="hand-history-site-hint">Auto-detect reads the file's first non-empty line to pick the right parser. Override only when auto-detect picks the wrong site for your export.</small>
             </label>
 
             <label class="field">
               <span>Hero screen name</span>
-              <input id="hero-name" type="text" placeholder="Optional override">
+              <!-- 64 chars matches the profile heroName cap so a value
+                   pasted here behaves the same as one saved on the
+                   profile (which prefills this field). spellcheck=false
+                   + autocapitalize=off match the profile heroName field
+                   (identifier, not prose; case-sensitive compare against
+                   the hand-history file's player name). -->
+              <!-- autocomplete="off" stops the browser from offering to
+                   autofill this with stored personal-name data ("Alice
+                   Smith") or with values typed into past forms with
+                   similar field names. The hero name is a poker handle
+                   (e.g. "Mig_Pro22") matched literally against player
+                   strings in the hand-history file; auto-suggested
+                   personal names would silently produce a non-match
+                   and the review would fall back to auto-detect. -->
+              <!-- aria-describedby links the input to the hint span
+                   below so screen-reader users get the actual purpose
+                   of the field (override the auto-detected hero) on
+                   focus. Without it the placeholder "Optional override"
+                   is ambient prose -- many screen readers don't read
+                   placeholder at all, and even when they do, "Optional
+                   override" alone gives no signal of WHAT is being
+                   overridden. Mirrors the hand-history-file-hint
+                   pattern on the file input above. -->
+              <input id="hero-name" type="text" placeholder="Optional override" spellcheck="false" autocapitalize="off" autocomplete="off" maxlength="64" aria-describedby="hero-name-hint">
+              <small class="field-hint" id="hero-name-hint">Optional · overrides the auto-detected hero name when the file resolves more than one player or picks the wrong one</small>
             </label>
 
             <div class="upload-actions">
@@ -212,8 +508,22 @@
           </div>
         </article>
 
-        <article class="frame review-panel" id="review-panel" aria-live="polite">
-          <div class="review-status" id="review-status">
+        <article class="frame review-panel" id="review-panel">
+          <!-- aria-live="polite" is on the status div (not the parent article)
+               so screen readers announce ONLY the brief queued/running/completed
+               status text that renderStatus updates, NOT the entire #review-results
+               panel that fills in at completion (summary grid + decisions list +
+               opponent notes + trace). The article-level version of this attribute
+               propagated to all descendants -- so the hundreds of words inside
+               the results panel got queued for the SR voice at every job
+               completion, which the comment near #hall-elapsed (in the sibling
+               hall-panel below) correctly identified as the failure mode that
+               drove the elapsed-ticker aria-hidden patch but only fixed the
+               symptom on that one ticker. Moving aria-live down to the status
+               div is the architectural fix: only the status messages announce,
+               and the results panel (which SR users know is ready from the
+               status announcement) stays sighted-only by default. -->
+          <div class="review-status" id="review-status" aria-live="polite">
             <p class="card-kicker">Ready</p>
             <h3>Upload a hand-history file to start a local review job.</h3>
             <p class="section-note">
@@ -317,8 +627,32 @@
 
       <div class="hall-grid">
         <article class="surface hall-card">
-          <form class="hall-form" id="playing-hall-form">
-            <div class="preset-bar" id="hall-preset-bar"></div>
+          <!--
+            Same JS-broken-form defense-in-depth as the auth + analyze
+            forms. The hall form has 9+ keyboard-reachable inputs
+            (hands, tableCount, seed, exploration rate, raise size,
+            learning windows, bunching/equity trials) plus the
+            villain-pool checkboxes; without method+action, a JS-
+            failure-mode Enter press in any of them would default-
+            submit GET-to-current-URL and persist the full hall config
+            into the URL bar, browser history, and Referer header. The
+            POST to /api/playing-hall lands at the actual hall endpoint
+            (which 415s on form-urlencoded bodies the same way analyze
+            does), and the URL stays clean. The JS handler
+            preventDefaults so the normal flow is unchanged.
+          -->
+          <form class="hall-form" id="playing-hall-form" method="post" action="/api/playing-hall">
+            <!-- role="group" + aria-label gives the preset buttons a single
+                 semantic container so screen readers announce "Hall
+                 configuration presets, group" before reading each
+                 preset button. Without it the buttons are read in
+                 isolation ("Smoke 50 button, Standard 240 button, ...")
+                 with no context for what tapping one does, and a user
+                 hearing the page top-to-bottom would have to reach the
+                 fields below before realizing those buttons populate
+                 them. Mirrors the villain-pool role=group treatment
+                 added in a recent commit. -->
+            <div class="preset-bar" id="hall-preset-bar" role="group" aria-label="Hall configuration presets"></div>
 
             <details class="form-section" open>
               <summary>Run sizing</summary>
@@ -340,9 +674,33 @@
                   </select>
                 </label>
                 <div class="field field-block">
-                  <span>Seed <span class="help" tabindex="0" data-help="RNG seed for cards and villain shuffles. Same seed + config = same run.">ⓘ</span></span>
+                  <!-- Explicit <label for="hall-seed"> wraps the visible
+                       "Seed ⓘ" span so the input has a proper accessible
+                       name. The outer container is a <div> (not a
+                       <label>) because the seed-row contains a second
+                       input (the random-seed checkbox) wrapped in its
+                       own <label class="chip-check">, and nested labels
+                       are invalid HTML5 (the inner label would break
+                       the outer's implicit association with the number
+                       input). The for=hall-seed binding stays valid
+                       even with the sibling chip-check label below. -->
+                  <label for="hall-seed"><span>Seed <span class="help" tabindex="0" data-help="RNG seed for cards and villain shuffles. Same seed + config = same run.">ⓘ</span></span></label>
                   <div class="seed-row">
-                    <input id="hall-seed" type="number" min="0" step="1" value="42">
+                    <!-- No `min` attribute: the server's optionalLong accepts any
+                         Long (positive or negative) and the deployment doc's
+                         hall-body inventory documents `seed (any Long, default 42)`.
+                         Previously `min="0"` blocked negative seeds at the
+                         validateField gate, leaving the Run button stuck disabled
+                         with a "Min 0" hint when a user pasted a negative seed --
+                         e.g. one derived from a hash-output reinterpreted as a
+                         signed long. Removing min lets the frontend match the
+                         doc + server contract. step=1 stays because Long is
+                         integer-valued; partial values like 1.5 still bounce
+                         at validateField with the "Whole number required"
+                         message. The random-seed checkbox path is unaffected --
+                         it bypasses this input entirely and generates a fresh
+                         Math.random()-derived seed at submit time. -->
+                    <input id="hall-seed" type="number" step="1" value="42">
                     <label class="chip-check"><input id="hall-random-seed" type="checkbox"><span>random</span></label>
                   </div>
                 </div>
@@ -386,7 +744,20 @@
             <details class="form-section" open>
               <summary>Villains</summary>
               <div class="form-section-body">
-                <div class="field field-block">
+                <!-- role="group" + aria-label gives the six villain-pool
+                     checkboxes a single semantic container so screen
+                     readers announce "Villain pool group" before reading
+                     the checkbox names individually. Without the group
+                     the checkboxes are read in isolation ("tag checkbox
+                     checked, lag checkbox checked, ...") and the
+                     "Pool" span is rendered as ambient prose rather
+                     than as the group label. <fieldset>/<legend> would
+                     be the most native pattern but ships default
+                     borders + spacing that would clash with the
+                     existing .field-block layout; role="group" matches
+                     the visual structure exactly and adds the same
+                     accessibility tree. -->
+                <div class="field field-block" role="group" aria-label="Villain pool">
                   <span>Pool <span class="help" tabindex="0" data-help="Archetypes eligible to sit. One is picked per seat per hand.">ⓘ</span></span>
                   <div class="hall-pool">
                     <label class="chip-check"><input type="checkbox" name="villain-pool" value="tag" checked><span>tag</span></label>
@@ -446,20 +817,85 @@
           </div>
         </article>
 
-        <article class="frame review-panel hall-panel" aria-live="polite">
-          <div class="review-status" id="hall-status">
+        <article class="frame review-panel hall-panel">
+          <!-- aria-live="polite" on the status div (not the parent article)
+               for the same reason as the analyze form's review-panel above:
+               keeps the brief queued/running/completed status text announcing
+               while keeping the massive #hall-results panel (KPI grid +
+               per-villain chip flow + per-hand series + cumulative-chips
+               chart + equity histogram + output files) silent for SR users,
+               who learn the run is ready from the status announcement and
+               don't need the table of contents read out. Also makes the
+               #hall-elapsed aria-hidden patch (in the .hall-progress-meta
+               block below) defense-in-depth rather than load-bearing --
+               the elapsed ticker is no longer inside an aria-live region
+               at all, so its 1-second updates wouldn't queue announcements
+               regardless. -->
+          <div class="review-status" id="hall-status" aria-live="polite">
             <p class="card-kicker">Ready</p>
             <h3 id="hall-status-title">Configure a hall run and launch it from the browser.</h3>
             <p class="section-note" id="hall-status-note">
               The result board returns hero win-rate, action mix, per-villain chip flow, and the output
               files written for that run.
             </p>
-            <div class="hall-progress hidden" id="hall-progress">
-              <div class="hall-progress-bar"><div class="hall-progress-bar-inner"></div></div>
-              <div class="hall-progress-meta">
-                <span id="hall-elapsed">Elapsed 00:00</span>
-                <button type="button" class="button button-secondary" id="hall-cancel">Cancel Run</button>
-              </div>
+          </div>
+          <!-- hall-progress sits as a sibling of hall-status (NOT nested
+               inside it) on purpose. renderHallStatus (site.js) updates
+               the status text by setting `hallStatus.innerHTML = ...` --
+               which would wipe any nested progress card on every call,
+               including the very first "Queueing a local playing hall
+               run..." render that fires BEFORE startHallElapsed un-hides
+               the card. Pre-fix the progress card lived inside hall-
+               status and was destroyed on that first render; the const
+               hallProgress reference site.js captured at module init
+               then pointed at a detached element, so subsequent
+               classList.remove("hidden") calls had no visual effect and
+               the elapsed timer + indeterminate progress bar + Cancel
+               button were silently missing. Keeping the progress card
+               as a sibling means renderHallStatus's innerHTML wipe
+               can't reach it, the .hidden -> visible toggle works as
+               written, and the const hallProgress reference stays
+               attached for the lifetime of the page. CSS margin-top
+               on .hall-progress still spaces it below the status
+               section because the rule keys on the class, not on
+               structural nesting. -->
+          <div class="hall-progress hidden" id="hall-progress">
+            <!-- role="progressbar" + aria-label tells screen readers what
+                 the animated bar represents. Omit aria-valuenow because
+                 this is indeterminate (CSS animation slides a gradient
+                 left-to-right indefinitely; the server doesn't report a
+                 completion percentage). Per WAI-ARIA, a progressbar
+                 without aria-valuenow is interpreted as indeterminate. -->
+            <div class="hall-progress-bar" role="progressbar" aria-label="Playing hall run in progress" aria-busy="true"><div class="hall-progress-bar-inner"></div></div>
+            <div class="hall-progress-meta">
+              <!-- aria-hidden="true" excludes the elapsed ticker from
+                   announcements. Currently this is defense-in-depth:
+                   aria-live="polite" lives on the hall-status div
+                   (grep this file for `id="hall-status" aria-live` to
+                   land on the live element -- it's a few rows down
+                   from this comment in the same hall-panel article),
+                   not the parent .hall-panel article, and hall-progress
+                   is a SIBLING of hall-status -- so the elapsed ticker
+                   isn't inside any aria-live region at all, and even
+                   without aria-hidden the 1-second tickHallElapsed updates
+                   wouldn't queue any announcements. The attribute stays
+                   for two reasons: (a) a future refactor that moves
+                   aria-live back up to the article level (the prior shape)
+                   would otherwise resurrect the 1-second-tick spam,
+                   "Elapsed 1m 23s, Elapsed 1m 24s, ..." for the entire
+                   5-15 minute hall run; (b) tools that walk the
+                   accessibility tree directly (rather than via aria-live)
+                   still get the cleaner content shape without the
+                   redundantly-changing ticker. The elapsed counter is
+                   sighted-only feedback (the visible glance "how long
+                   has this been running"); SR users get the same
+                   information once at completion via renderHallResults'
+                   "(took Xm Ys)" status tail, which lands as a single
+                   polite announcement on the hall-status text. Cancel
+                   Run stays in the SR reach because aria-hidden is on
+                   the span only, not the parent .hall-progress-meta. -->
+              <span id="hall-elapsed" aria-hidden="true">Elapsed 00:00</span>
+              <button type="button" class="button button-secondary" id="hall-cancel">Cancel Run</button>
             </div>
           </div>
 

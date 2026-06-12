@@ -2,24 +2,51 @@ package sicfun.holdem.web
 
 import com.sun.net.httpserver.{HttpExchange, HttpHandler}
 
-import java.nio.file.{Files, Path, Paths}
+import java.io.ByteArrayOutputStream
+import java.nio.file.{Files, LinkOption, Path, Paths}
+import java.time.{Instant, ZoneOffset, ZonedDateTime}
+import java.time.format.DateTimeFormatter
+import java.util.zip.GZIPOutputStream
 import scala.util.control.NonFatal
 
 import sicfun.holdem.web.AuthStack.ensureAuthenticatedStatic
 import sicfun.holdem.web.HandHistoryReviewServer.BasicAuthConfig
-import sicfun.holdem.web.WebResponses.{applySecurityHeaders, contentTypeFor, writePlain}
+import sicfun.holdem.web.HandHistoryReviewServerRuntime.logHandlerException
+import sicfun.holdem.web.WebResponses.{applySecurityHeaders, clientAcceptsGzip, contentTypeFor, isCompressibleType, writePlain}
 
 private[web] final class StaticAssetsHandler(
     staticDir: Path,
     basicAuth: Option[BasicAuthConfig] = None,
     platformAuth: Option[PlatformUserAuth.Service] = None
 ) extends HttpHandler:
+
   override def handle(exchange: HttpExchange): Unit =
     try
       applySecurityHeaders(exchange)
+      val method = exchange.getRequestMethod
+      val isHead = method.equalsIgnoreCase("HEAD")
+      val isGet = method.equalsIgnoreCase("GET")
+      val isOptions = method.equalsIgnoreCase("OPTIONS")
       if !ensureAuthenticatedStatic(exchange, basicAuth, platformAuth) then ()
-      else if !exchange.getRequestMethod.equalsIgnoreCase("GET") then
-        writePlain(exchange, 405, "GET required", "text/plain; charset=utf-8")
+      else if isOptions then
+        // 204 No Content (not 200) for OPTIONS body-less responses, matching
+        // RedirectHandler's OIDC OPTIONS path. RFC 7231 sec 6.3.5: 204
+        // explicitly signals "no body, intentionally". 200 + -1L body length
+        // works too but 204 is the idiomatic status code for this case and
+        // keeps the API uniform across handler types.
+        exchange.getResponseHeaders.set("Allow", "GET, HEAD, OPTIONS")
+        exchange.sendResponseHeaders(204, -1L)
+      else if !isGet && !isHead then
+        exchange.getResponseHeaders.set("Allow", "GET, HEAD, OPTIONS")
+        writePlain(exchange, 405, "GET, HEAD, or OPTIONS required", "text/plain; charset=utf-8")
+      else if hasDotPrefixedSegment(exchange) then
+        // Reject any path segment starting with `.` as defense in depth. The static
+        // dir should never contain dot-prefixed entries (.git/, .env, .htaccess,
+        // .DS_Store), but a misconfigured deployment that points staticDir at an
+        // unsanitized bundle or a repo checkout would otherwise expose them. 404
+        // (not 403) so the response is indistinguishable from a missing file and
+        // does not confirm the rule exists.
+        writePlain(exchange, 404, "not found", "text/plain; charset=utf-8")
       else
         val requestPath = Option(exchange.getRequestURI.getPath).getOrElse("/")
         val relative = if requestPath == "/" then Paths.get("index.html") else Paths.get(requestPath.dropWhile(_ == '/'))
@@ -28,21 +55,166 @@ private[web] final class StaticAssetsHandler(
           writePlain(exchange, 403, "forbidden", "text/plain; charset=utf-8")
         else
           val target =
-            if Files.isDirectory(resolved) then resolved.resolve("index.html")
+            if Files.isDirectory(resolved, LinkOption.NOFOLLOW_LINKS) then resolved.resolve("index.html")
             else resolved
-          if Files.exists(target) && Files.isRegularFile(target) then
-            exchange.getResponseHeaders.set("Content-Type", contentTypeFor(target))
-            exchange.sendResponseHeaders(200, Files.size(target))
-            val body = exchange.getResponseBody
-            val input = Files.newInputStream(target)
-            try
-              input.transferTo(body)
+          // NOFOLLOW_LINKS: a symlink under the static dir whose target lies
+          // outside it (or anywhere on the filesystem) would otherwise be
+          // followed by Files.isRegularFile/size/getLastModifiedTime, so a
+          // misconfigured deploy that includes such a symlink would serve
+          // arbitrary host files even though the normalized path check at
+          // line 49 says "resolved.startsWith(staticDir)". Treating symlinks
+          // as non-regular files makes the static dir self-contained: only
+          // genuine files inside it get served.
+          if Files.exists(target, LinkOption.NOFOLLOW_LINKS) && Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) then
+            val size = Files.size(target)
+            val lastModified = Files.getLastModifiedTime(target).toMillis
+            // HTTP-date is second-resolution. Truncate file mtime so the value we emit
+            // can be parsed and compared losslessly by clients on the way back.
+            val lastModifiedSecond = (lastModified / 1000L) * 1000L
+            val lastModifiedHttp = DateTimeFormatter.RFC_1123_DATE_TIME
+              .format(ZonedDateTime.ofInstant(Instant.ofEpochMilli(lastModifiedSecond), ZoneOffset.UTC))
+            val contentType = contentTypeFor(target)
+            val compressible = isCompressibleType(contentType)
+            val acceptsGzip = clientAcceptsGzip(exchange)
+            // `wouldCompressIfGet` describes the VARIANT (gzipped or plain) the
+            // resource is going to be served as; HEAD must report the same
+            // variant headers and ETag as GET would for the same request shape
+            // so client caches that store HEAD-validated entries don't choke
+            // when the same client then issues GET.
+            val wouldCompressIfGet = compressible && acceptsGzip
+            // `willCompress` controls whether THIS response actually contains
+            // compressed bytes. HEAD has no body either way, so we skip the
+            // compression work for HEAD even when the variant is gzipped.
+            val willCompress = wouldCompressIfGet && isGet
+            // Variant ETag: gzipped and uncompressed are different representations.
+            // RFC 7232 sec 2.3.1: weak ETags MAY indicate equivalent representations,
+            // but conservative caches that key only on ETag (ignoring Vary) need
+            // distinct values to avoid serving the wrong encoding.
+            val etag = s"""W/"$size-$lastModified${if wouldCompressIfGet then "-gz" else ""}""""
+            val cacheControl =
+              if requestPath.startsWith("/vendor/") then "public, max-age=31536000"
+              else "public, max-age=0, must-revalidate"
+            exchange.getResponseHeaders.set("Cache-Control", cacheControl)
+            exchange.getResponseHeaders.set("ETag", etag)
+            exchange.getResponseHeaders.set("Last-Modified", lastModifiedHttp)
+            // Vary: Accept-Encoding for compressible types so caches store gzipped and
+            // uncompressed variants separately even when keying on URL + Vary headers.
+            if compressible then
+              exchange.getResponseHeaders.set("Vary", "Accept-Encoding")
+            val ifNoneMatch = Option(exchange.getRequestHeaders.getFirst("If-None-Match"))
+            val ifModifiedSince = Option(exchange.getRequestHeaders.getFirst("If-Modified-Since"))
+            // RFC 7232 sec 3.3: ignore If-Modified-Since when If-None-Match is present.
+            // Otherwise, 304 if the file has not been modified after the client's date.
+            val notModified =
+              if ifNoneMatch.isDefined then
+                ifNoneMatch.exists { raw =>
+                  val parts = raw.split(',').iterator.map(_.trim).filter(_.nonEmpty).toVector
+                  // RFC 7232 sec 2.3.2 mandates WEAK comparison for If-None-Match
+                  // ("two entity-tags are equivalent if their opaque-tags match
+                  // character-by-character, regardless of either or both being
+                  // tagged as 'weak'"). The server only ever emits weak ETags
+                  // (`W/"size-mtime"` or `W/"size-mtime-gz"` at line 93 above),
+                  // but a well-behaved client could echo back either the verbatim
+                  // weak form OR -- after a misbehaving CDN / proxy strips the
+                  // `W/` prefix in transit -- the bare opaque-tag form `"size-mtime"`.
+                  // Direct string equality would miss the latter and silently
+                  // fail revalidation, forcing a full-body re-fetch on every
+                  // poll. Normalize both sides by dropping the optional `W/`
+                  // prefix before comparing; the opaque-tag including its
+                  // surrounding DQUOTEs is the canonical form per sec 2.3.1.
+                  // `*` is special-cased: it's a wildcard rather than an
+                  // opaque-tag and never carries the `W/` prefix, so the
+                  // pre-normalization contains check still catches it.
+                  val normalizedEtag = stripWeakPrefix(etag)
+                  parts.contains("*") || parts.iterator.map(stripWeakPrefix).contains(normalizedEtag)
+                }
+              else
+                ifModifiedSince.exists { raw =>
+                  try
+                    val clientMs = ZonedDateTime
+                      .parse(raw.trim, DateTimeFormatter.RFC_1123_DATE_TIME)
+                      .toInstant
+                      .toEpochMilli
+                    lastModifiedSecond <= clientMs
+                  catch
+                    case NonFatal(_) => false
+                }
+            if notModified then
+              exchange.sendResponseHeaders(304, -1L)
+            else if isHead then
+              exchange.getResponseHeaders.set("Content-Type", contentType)
+              // Advertise the same variant headers a GET would emit, so client
+              // caches that validate via HEAD then fetch via GET see consistent
+              // headers and don't invalidate. wouldCompressIfGet -- NOT
+              // willCompress -- because willCompress is gated on `isGet`.
+              if wouldCompressIfGet then
+                exchange.getResponseHeaders.set("Content-Encoding", "gzip")
+              exchange.sendResponseHeaders(200, -1L)
+            else if willCompress then
+              // Compress in memory: static files are small (top of bundle ~50 KB),
+              // and the in-memory buffer is simpler than streaming gzip + chunked transfer.
+              val buffer = new ByteArrayOutputStream(math.max(1024, (size / 4).toInt))
+              val gz = new GZIPOutputStream(buffer)
+              try
+                val input = Files.newInputStream(target)
+                try input.transferTo(gz)
+                finally input.close()
+              finally gz.close()
+              val compressed = buffer.toByteArray
+              exchange.getResponseHeaders.set("Content-Type", contentType)
+              exchange.getResponseHeaders.set("Content-Encoding", "gzip")
+              exchange.sendResponseHeaders(200, compressed.length.toLong)
+              val body = exchange.getResponseBody
+              body.write(compressed)
               body.flush()
-            finally input.close()
+            else
+              exchange.getResponseHeaders.set("Content-Type", contentType)
+              exchange.sendResponseHeaders(200, size)
+              val body = exchange.getResponseBody
+              val input = Files.newInputStream(target)
+              try
+                input.transferTo(body)
+                body.flush()
+              finally input.close()
           else
             writePlain(exchange, 404, "not found", "text/plain; charset=utf-8")
     catch
+      case _: java.nio.file.InvalidPathException =>
+        // Paths.get on Windows throws InvalidPathException when the request
+        // path contains NTFS-reserved characters (`<`, `>`, `:`, `*`, `?`,
+        // `|`, `"`). An attacker who sends `/path%3Cfoo` (decoded to
+        // `/path<foo`) would otherwise fall through to the NonFatal branch
+        // below and produce a 500 'internal server error' plus a logged
+        // exception per request -- both noise AND a log-inflation lever via
+        // the bundled stack trace. Treat path-parse failures the same as
+        // any missing file: a clean 404 with no body amplification.
+        try writePlain(exchange, 404, "not found", "text/plain; charset=utf-8")
+        catch case NonFatal(_) => ()
       case NonFatal(e) =>
-        writePlain(exchange, 500, s"internal server error: ${e.getMessage}", "text/plain; charset=utf-8")
+        logHandlerException(exchange, e, "unhandled exception in StaticAssetsHandler")
+        try writePlain(exchange, 500, "internal server error", "text/plain; charset=utf-8")
+        catch case NonFatal(_) => ()
     finally
       exchange.close()
+
+  // Strip the optional `W/` weak-validator prefix from an entity-tag so a
+  // weak-comparison match (RFC 7232 sec 2.3.2) reduces to opaque-tag string
+  // equality. Used by the If-None-Match check above; see the inline comment
+  // there for the proxy/CDN-rewrite rationale.
+  private def stripWeakPrefix(tag: String): String =
+    if tag.startsWith("W/") then tag.substring(2) else tag
+
+  private def hasDotPrefixedSegment(exchange: HttpExchange): Boolean =
+    val raw = Option(exchange.getRequestURI.getPath).getOrElse("/")
+    // Split on BOTH '/' and '\' so an attacker sending `/%5C.git/HEAD`
+    // (percent-encoded backslash, which Windows treats as a path separator)
+    // cannot smuggle a dot-prefixed segment past the check. The path-traversal
+    // guard at staticDir.resolve(...).startsWith(staticDir) catches escapes
+    // outside the static dir, but a backslash-prefixed dotfile inside the
+    // static dir would otherwise serve up `staticDir\.git\HEAD` content.
+    //
+    // Skip the path-navigation primitives `.` and `..` so the path-traversal
+    // check downstream still produces its more informative 403 response.
+    raw.split('/').flatMap(_.split('\\')).exists(segment =>
+      segment.nonEmpty && segment.startsWith(".") && segment != "." && segment != ".."
+    )

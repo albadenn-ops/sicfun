@@ -167,8 +167,15 @@ private[web] object JobQueue:
       purgeExpiredJobs()
       rejectIfUnavailable() match
         case Some(error) =>
+          // admissionRejectedMessage produces human-readable strings with
+          // SPACES ("analysis service is draining; try another instance
+          // or retry later"). Interpolated raw, those spaces split the
+          // structured `key=value key=value` log shape so a log
+          // aggregator tokenizing on whitespace orphans every subsequent
+          // word. Same %20-escape pattern the startup banner and
+          // heroName logging already use for the same reason.
           logWarn(
-            s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+            s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
           )
           Left(error)
         case None =>
@@ -182,7 +189,7 @@ private[web] object JobQueue:
                 jobs.remove(jobId)
                 jobOwners.remove(jobId)
                 logWarn(
-                  s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+                  s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
                 )
                 Left(error)
               case None =>
@@ -207,8 +214,10 @@ private[web] object JobQueue:
               jobOwners.remove(jobId)
               rejectIfUnavailable() match
                 case Some(error) =>
+                  // Same %20-escape as the two pre-submit reject sites above --
+                  // admissionRejectedMessage strings contain spaces.
                   logWarn(
-                    s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+                    s"job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
                   )
                   Left(error)
                 case None =>
@@ -261,8 +270,14 @@ private[web] object JobQueue:
       jobs.put(jobId, Running(submittedAt, startedAt))
       val timedOut = new AtomicBoolean(false)
       val timeoutTask = scheduleTimeout(jobId, submittedAt, startedAt, timedOut)
+      // %20-escape spaces in heroName so a value like "Alice Smith" does
+      // not split the structured key=value log fields. parseRequest's
+      // 64-char cap + control-char rejection already bound the value;
+      // this is the same shape AuthStack.formatSubmittedEmailForLog uses
+      // for submitted emails.
+      val loggedHeroName = request.heroName.getOrElse("-").replace(" ", "%20")
       logInfo(
-        s"job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} heroName=${request.heroName.getOrElse("-")} site=${request.site.map(_.toString).getOrElse("auto")} analysisTimeoutMs=$analysisTimeoutMs"
+        s"job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} heroName=$loggedHeroName site=${request.site.map(_.toString).getOrElse("auto")} timeoutMs=$analysisTimeoutMs"
       )
       val completedState =
         try
@@ -296,8 +311,15 @@ private[web] object JobQueue:
             s"job completed jobId=$jobId durationMs=${completedAt - startedAt} queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
           )
         case Failed(_, _, completedAt, errorStatus, error) =>
+          // %20-escape spaces in the Failed.error value before it lands in
+          // the structured log line. The value can be a backend-returned
+          // message ('no hands found in upload'), a wrapped exception
+          // ('analysis failed: <e.getMessage>'), or the timeoutFailure
+          // string ('analysis timed out after 120000ms') -- all of which
+          // contain spaces that would split the surrounding key=value
+          // pairs when a log aggregator tokenizes on whitespace.
           logWarn(
-            s"job failed jobId=$jobId durationMs=${completedAt - startedAt} errorStatus=$errorStatus queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} error=$error"
+            s"job failed jobId=$jobId durationMs=${completedAt - startedAt} errorStatus=$errorStatus queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} error=${error.replace(" ", "%20")}"
           )
         case _ => ()
 
@@ -434,7 +456,7 @@ private[web] object JobQueue:
       executor: ThreadPoolExecutor,
       timeoutExecutor: ScheduledExecutorService,
       backend: PlayingHallBackend,
-      analysisTimeoutMs: Long,
+      playingHallTimeoutMs: Long,
       nowMillis: () => Long = () => System.currentTimeMillis()
   ):
     import AnalysisJobState.*
@@ -452,8 +474,9 @@ private[web] object JobQueue:
       purgeExpiredJobs()
       rejectIfUnavailable() match
         case Some(error) =>
+          // Same %20-escape as the analysis path -- see AnalysisJobStore.submit.
           logWarn(
-            s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+            s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
           )
           Left(error)
         case None =>
@@ -469,7 +492,7 @@ private[web] object JobQueue:
                 jobOwners.remove(jobId)
                 cancelFlags.remove(jobId)
                 logWarn(
-                  s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+                  s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
                 )
                 Left(error)
               case None =>
@@ -495,8 +518,9 @@ private[web] object JobQueue:
               cancelFlags.remove(jobId)
               rejectIfUnavailable() match
                 case Some(error) =>
+                  // Same %20-escape as the analysis path -- see AnalysisJobStore.submit.
                   logWarn(
-                    s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=$error"
+                    s"playing hall job rejected unavailable queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} reason=${error.replace(" ", "%20")}"
                   )
                   Left(error)
                 case None =>
@@ -546,7 +570,7 @@ private[web] object JobQueue:
       val cancelFlag = Option(cancelFlags.get(jobId)).getOrElse(new AtomicBoolean(false))
       val timeoutTask = scheduleTimeout(jobId, submittedAt, startedAt, timedOut)
       logInfo(
-        s"playing hall job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} timeoutMs=$analysisTimeoutMs ${request.logSummary}"
+        s"playing hall job started jobId=$jobId queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} timeoutMs=$playingHallTimeoutMs ${request.logSummary}"
       )
       val completedState =
         try
@@ -586,8 +610,9 @@ private[web] object JobQueue:
             s"playing hall job completed jobId=$jobId durationMs=${completedAt - startedAt} queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
           )
         case Failed(_, _, completedAt, errorStatus, error) =>
+          // Same Failed.error %20-escape as the analyze branch above.
           logWarn(
-            s"playing hall job failed jobId=$jobId durationMs=${completedAt - startedAt} errorStatus=$errorStatus queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} error=$error"
+            s"playing hall job failed jobId=$jobId durationMs=${completedAt - startedAt} errorStatus=$errorStatus queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()} error=${error.replace(" ", "%20")}"
           )
         case Cancelled(_, _, completedAt, _) =>
           logInfo(
@@ -601,7 +626,7 @@ private[web] object JobQueue:
         startedAt: Long,
         timedOut: AtomicBoolean
     ): Option[ScheduledFuture[?]] =
-      if analysisTimeoutMs <= 0 then None
+      if playingHallTimeoutMs <= 0 then None
       else
         val workerThread = Thread.currentThread()
         Some(
@@ -613,11 +638,11 @@ private[web] object JobQueue:
                   cancelFlags.remove(jobId)
                   timedOutWorkersInFlight.incrementAndGet()
                   logWarn(
-                    s"playing hall job timed out jobId=$jobId timeoutMs=$analysisTimeoutMs queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
+                    s"playing hall job timed out jobId=$jobId timeoutMs=$playingHallTimeoutMs queuedJobs=${executor.getQueue.size()} runningJobs=${executor.getActiveCount()}"
                   )
                   workerThread.interrupt()
             ,
-            analysisTimeoutMs,
+            playingHallTimeoutMs,
             TimeUnit.MILLISECONDS
           )
         )
@@ -645,7 +670,7 @@ private[web] object JobQueue:
         startedAt = startedAt,
         completedAt = nowMillis(),
         errorStatus = 504,
-        error = s"playing hall timed out after ${analysisTimeoutMs}ms"
+        error = s"playing hall timed out after ${playingHallTimeoutMs}ms"
       )
 
     private def terminalFailureFor(
@@ -660,6 +685,14 @@ private[web] object JobQueue:
 
     def timedOutWorkersInFlightCount: Int =
       timedOutWorkersInFlight.get()
+
+    def retainedTerminalJobsCount: Int =
+      purgeExpiredJobs()
+      var count = 0
+      val iterator = jobs.values().iterator()
+      while iterator.hasNext do
+        if iterator.next().isTerminal then count += 1
+      count
 
     private def renderStatus(jobId: String, state: AnalysisJobState): JsonResponse =
       state match

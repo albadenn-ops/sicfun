@@ -130,6 +130,17 @@ Gate:
 
 Ground `PokerPftFormulation` before `PokerPomcpFormulation`.
 
+Status note, 2026-04-17:
+
+- Implemented in the deprecated formulation path. `FormulationInput` overloads
+  now build a 5-state grounded model with a terminal sink, per-street synthetic
+  spots, provider-driven transitions/rewards, and `GroundedValueSource` when
+  exact hero cards are available.
+- The old raw-parameter `PokerPftFormulation` overloads remain as legacy
+  compatibility/test helpers for now. They are no longer used by
+  `StrategicEngine` but still retain the toy bucket-based path until a later
+  cleanup pass removes or rewires that surface.
+
 Reason:
 
 - `PokerPftFormulation` is the simpler tabular model and is closer to the
@@ -147,7 +158,9 @@ Required replacements:
 Gate:
 
 - Certification/offline tests using the PFT path pass with poker-grounded
-  inputs and no proxy bucket reward path remaining in the main formulation code.
+  inputs and no proxy bucket reward path remaining in the
+  `FormulationInput`/`StrategicEngine`-driven PFT path. Raw-parameter
+  compatibility helpers may remain temporarily until the later cleanup track.
 
 #### A4. WPomcp grounding second
 
@@ -347,8 +360,10 @@ Phase 2 should produce:
 
 Phase 2 is complete when all of the following are true:
 
-1. No main formulation path still depends on `heroBucket / 9.0`, linear
+1. No main live formulation path still depends on `heroBucket / 9.0`, linear
    showdown equity heuristics, or deterministic street-advance reward proxies.
+   Legacy raw-parameter compatibility helpers may persist until their cleanup
+   track is closed, but they must not remain wired into `StrategicEngine`.
 2. Strategic benchmark scripts and benchmark documentation support
    `strategic` mode explicitly.
 3. Baseline and post-change benchmark artifacts exist and are comparable.

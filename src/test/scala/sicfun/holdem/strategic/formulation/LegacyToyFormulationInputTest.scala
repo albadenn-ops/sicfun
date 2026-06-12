@@ -1,9 +1,10 @@
 package sicfun.holdem.strategic.formulation
 
 import munit.FunSuite
+import sicfun.core.{Card, Rank, Suit}
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.types.*
-import sicfun.holdem.engine.PokerPomcpFormulation
+import sicfun.holdem.engine.{PokerPftFormulation, PokerPomcpFormulation}
 
 class LegacyToyFormulationInputTest extends FunSuite:
 
@@ -155,3 +156,87 @@ class LegacyToyFormulationInputTest extends FunSuite:
       case BridgeResult.Approximate(sem, _) =>
         assertEquals(sem.terminal, FormulationTerminalKind.Showdown)
       case other => fail(s"Expected Approximate, got $other")
+
+  test("ExactHoleCards preserve legacy bucket-derived equity in the adapter"):
+    val cards = HoleCards(
+      Card(Rank.Ace, Suit.Spades),
+      Card(Rank.King, Suit.Spades)
+    )
+    val baseInput = LegacyToyFormulationInput.from(
+      minimalState, defaultActions, Map.empty, heroBucket = 5, legacyRivalPriors
+    )
+    val exactInput = baseInput.copy(
+      spot = baseInput.spot.copy(
+        heroValueInput = HeroValueInput.ExactHoleCards(cards)
+      )
+    )
+
+    exactInput.valueSource.estimateSpotEquity(exactInput.spot) match
+      case BridgeResult.Approximate(eq, _) =>
+        val expectedBucket = math.min(9, math.max(0, (eq * 10.0).toInt))
+        assertEquals(expectedBucket, 5)
+      case other => fail(s"Expected Approximate, got $other")
+
+  test("ExactHoleCards with Absent value source still builds a valid model"):
+    val cards = HoleCards(
+      Card(Rank.Two, Suit.Clubs),
+      Card(Rank.Seven, Suit.Hearts)
+    )
+    val legacyBase = LegacyToyFormulationInput.from(
+      minimalState, defaultActions, Map.empty, heroBucket = 5, legacyRivalPriors
+    )
+    val absentValueSource = new FormulationValueSource:
+      override def estimateSpotEquity(spot: FormulationSpot): BridgeResult[Double] =
+        BridgeResult.Absent("no equity available")
+
+      override def showdownEquityTable(
+          spot: FormulationSpot,
+          numHeroBuckets: Int,
+          numRivalBuckets: Int
+      ): BridgeResult[Array[Double]] =
+        BridgeResult.Absent("no table")
+
+      override def estimateActionValue(
+          spot: FormulationSpot,
+          action: PokerAction
+      ): BridgeResult[Ev] =
+        BridgeResult.Absent("no value")
+
+    val input = FormulationInput(
+      spot = FormulationSpot(
+        gameState = minimalState,
+        candidateActions = defaultActions,
+        heroValueInput = HeroValueInput.ExactHoleCards(cards),
+        rivalBeliefs = Map.empty
+      ),
+      valueSource = absentValueSource,
+      rivalPolicySource = legacyBase.rivalPolicySource,
+      actionSource = legacyBase.actionSource
+    )
+
+    val model = PokerPftFormulation.buildTabularModel(input, profileClass = None)
+    assertEquals(model.numStates, 5)
+    assertEquals(model.numActions, 3)
+
+  test("ExactHoleCards with profileClass builds valid profile-conditioned model"):
+    val cards = HoleCards(
+      Card(Rank.Ace, Suit.Spades),
+      Card(Rank.King, Suit.Spades)
+    )
+    val baseInput = LegacyToyFormulationInput.from(
+      minimalState, defaultActions, Map.empty, heroBucket = 5, legacyRivalPriors
+    )
+    val exactInput = baseInput.copy(
+      spot = baseInput.spot.copy(
+        heroValueInput = HeroValueInput.ExactHoleCards(cards)
+      )
+    )
+
+    val mixedModel = PokerPftFormulation.buildTabularModel(exactInput, profileClass = None)
+    val profileModel = PokerPftFormulation.buildTabularModel(
+      exactInput,
+      profileClass = Some(StrategicClass.Value)
+    )
+    assertEquals(profileModel.numActions, 3)
+    assert(!mixedModel.obsLikelihood.sameElements(profileModel.obsLikelihood),
+      "profile-conditioned obs should differ from mixed")

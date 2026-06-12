@@ -924,17 +924,7 @@ object GlobalGpuTuningTool:
       .exists(GpuRuntimeSupport.parseTruthy)
 
   private def withSystemProperties[A](updates: Seq[(String, Option[String])])(thunk: => A): A =
-    val previous = updates.map { case (key, _) => key -> sys.props.get(key) }
-    updates.foreach {
-      case (key, Some(value)) => sys.props.update(key, value)
-      case (key, None) => sys.props.remove(key)
-    }
-    try thunk
-    finally
-      previous.foreach {
-        case (key, Some(value)) => sys.props.update(key, value)
-        case (key, None) => sys.props.remove(key)
-      }
+    GpuRuntimeSupport.withTemporarySystemProperties(updates)(thunk)
 
   private def captureStdout[A](thunk: => A): (A, String) =
     val buffer = new ByteArrayOutputStream()

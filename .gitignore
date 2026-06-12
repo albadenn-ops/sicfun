@@ -101,6 +101,7 @@ validation-output/
 data/adaptive-proof/
 data/slumbot-*/
 data/playing-hall-*/
+data/web-playing-hall/
 data/benchmarks/
 data/manual-bench-auto/
 

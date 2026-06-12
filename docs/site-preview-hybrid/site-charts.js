@@ -114,7 +114,18 @@
     const sparklineValues = Array.isArray(data.sparklineValues) ? data.sparklineValues : null;
     const width = el.clientWidth || 180;
     const height = 92;
-    const card = svg("svg", {width: "100%", height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": label});
+    // Build a composite aria-label that includes the value + note.
+    // With role="img" the SVG is treated as a single atomic image
+    // and screen readers ignore the inner <text> nodes -- a label-
+    // only aria-label was leaving the actual numeric content
+    // ("+250.50", "240 hands") invisible to assistive tech. The
+    // composite form "<Label>: <Value>, <Note>" produces a natural
+    // announcement like "Net Chips: +250.50, 240 hands" while the
+    // visible card layout stays unchanged. Skip the trailing
+    // ", <Note>" when note is empty so the announcement doesn't
+    // dangle on a trailing comma.
+    const ariaLabel = note ? `${label}: ${value}, ${note}` : `${label}: ${value}`;
+    const card = svg("svg", {width: "100%", height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": ariaLabel});
     card.appendChild(svg("text", {x: 8, y: 16, fill: COLOR_MUTED, "font-family": FONT, "font-size": 10, "letter-spacing": 1.4}, [document.createTextNode(label.toUpperCase())]));
     card.appendChild(svg("text", {x: 8, y: 44, fill: COLOR_INK, "font-family": FONT, "font-size": 22, "font-weight": 700}, [document.createTextNode(value)]));
     if (note) card.appendChild(svg("text", {x: 8, y: 84, fill: COLOR_MUTED, "font-family": FONT, "font-size": 10}, [document.createTextNode(note)]));
@@ -176,6 +187,20 @@
       el.textContent = "No per-hand data";
       return;
     }
+    // Defensive fallback when vendor/uPlot.iife.min.js fails to load
+    // (404 from a misconfigured proxy, blocked by a CSP-tightening
+    // browser extension, network blip during page load). Without this
+    // guard `new uPlot(...)` throws "uPlot is not defined", which the
+    // surrounding renderHallResults / renderResults does not catch,
+    // and the whole results board half-renders -- the KPI cards (raw
+    // SVG, no uPlot dependency) and the renderBarH / renderDonut /
+    // renderStackedBarH / renderMatrix charts all silently disappear
+    // because the uncaught exception aborts the call chain. A text
+    // placeholder keeps the rest of the panel intact.
+    if (typeof uPlot === "undefined") {
+      el.textContent = "Chart library unavailable.";
+      return;
+    }
     const opts = uPlotTheme({
       width: el.clientWidth || 600,
       height: (options && options.height) || 220,
@@ -186,6 +211,18 @@
       ]
     });
     new uPlot(opts, [xs, ys], el);
+    // Label the container so screen readers announce a meaningful chart
+    // name. uPlot renders a <canvas>; canvas elements have no inherent
+    // semantics and would otherwise leave the dashboard chart slot
+    // silent to assistive tech. The 5 SVG chart primitives above
+    // (renderBarH / renderDonut / renderStackedBarH / renderMatrix /
+    // renderKpiCard) all set role + aria-label on their <svg> root
+    // directly; uPlot doesn't expose that hook, so attach to the
+    // wrapper el instead. Default "line chart" mirrors the other
+    // primitives' silent fallback so a caller omitting options.title
+    // still gets a non-empty accessible name.
+    el.setAttribute("role", "img");
+    el.setAttribute("aria-label", (options && options.title) || "line chart");
   }
 
   function renderHistogram(el, data, options) {
@@ -193,6 +230,12 @@
     const values = (data.values || []).map(Number);
     if (values.length === 0) {
       el.textContent = "No equity data";
+      return;
+    }
+    // Same vendor-script-missing fallback as renderLine -- see comment
+    // there for the failure modes that drop window.uPlot.
+    if (typeof uPlot === "undefined") {
+      el.textContent = "Chart library unavailable.";
       return;
     }
     const bucketCount = (options && options.bucketCount) || 10;
@@ -233,6 +276,12 @@
       ]
     });
     new uPlot(opts, [centers, counts], el);
+    // Same screen-reader-labeling treatment as renderLine -- uPlot's
+    // canvas is opaque to assistive tech, so attach role + aria-label
+    // to the container element. Default "histogram" mirrors the other
+    // primitives' silent fallback.
+    el.setAttribute("role", "img");
+    el.setAttribute("aria-label", (options && options.title) || "histogram");
   }
 
   global.SicfunCharts = {

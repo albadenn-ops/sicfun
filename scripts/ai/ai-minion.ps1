@@ -59,7 +59,21 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+function Resolve-RepoRoot {
+  $current = [System.IO.DirectoryInfo]$PSScriptRoot
+  while ($null -ne $current) {
+    $sharedContract = Join-Path $current.FullName "AI_ENTRYPOINT.md"
+    $sidecarDirectory = Join-Path $current.FullName "scripts\ai"
+    if ((Test-Path $sharedContract) -and (Test-Path $sidecarDirectory -PathType Container)) {
+      return $current.FullName
+    }
+    $current = $current.Parent
+  }
+
+  throw "Unable to resolve the repository root from $PSScriptRoot"
+}
+
+$repoRoot = Resolve-RepoRoot
 $cacheRoot = Join-Path $repoRoot ".tool-cache\ai-minions"
 $geminiSettingsPath = [System.IO.Path]::Combine($HOME, ".gemini", "settings.json")
 $claudeProjectRoot = [System.IO.Path]::Combine($HOME, ".claude", "projects")
@@ -117,11 +131,14 @@ function Invoke-NativeCommandCapture {
     $previousPreference = $PSNativeCommandUseErrorActionPreference
     $script:PSNativeCommandUseErrorActionPreference = $false
   }
+  $previousErrorActionPreference = $ErrorActionPreference
+  $script:ErrorActionPreference = "Continue"
 
   try {
     return @(& $FilePath @ArgumentList 2>&1 | ForEach-Object { [string]$_ })
   }
   finally {
+    $script:ErrorActionPreference = $previousErrorActionPreference
     if ($hasPreferenceVariable) {
       $script:PSNativeCommandUseErrorActionPreference = $previousPreference
     }
@@ -208,6 +225,52 @@ function Get-DefaultArtifactPath {
   $providerDir = Ensure-ProviderCacheDir -ProviderName $ProviderName
   $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
   return Join-Path $providerDir ("$timestamp-$Mode.$Extension")
+}
+
+function Get-CapturedArtifactText {
+  param(
+    [string[]]$Lines,
+    [string]$CurrentOutputFormat
+  )
+
+  $capturedLines = @($Lines | ForEach-Object { [string]$_ })
+  if ($capturedLines.Count -eq 0) {
+    return ""
+  }
+
+  switch ($CurrentOutputFormat) {
+    "json" {
+      $jsonStart = -1
+      for ($index = 0; $index -lt $capturedLines.Count; $index++) {
+        $trimmed = $capturedLines[$index].TrimStart()
+        if ($trimmed.StartsWith("{") -or $trimmed.StartsWith("[")) {
+          $jsonStart = $index
+          break
+        }
+      }
+
+      if ($jsonStart -ge 0) {
+        for ($endIndex = $capturedLines.Count - 1; $endIndex -ge $jsonStart; $endIndex--) {
+          $candidate = (($capturedLines[$jsonStart..$endIndex]) -join [Environment]::NewLine).Trim()
+          if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+          }
+
+          try {
+            $null = $candidate | ConvertFrom-Json -ErrorAction Stop
+            return $candidate
+          }
+          catch {
+          }
+        }
+      }
+
+      return ($capturedLines -join [Environment]::NewLine).Trim()
+    }
+    default {
+      return ($capturedLines -join [Environment]::NewLine).TrimEnd()
+    }
+  }
 }
 
 function Invoke-JobWithTimeout {
@@ -546,7 +609,7 @@ function Invoke-GeminiDoctor {
 }
 
 function Invoke-GeminiAuth {
-  $scriptPath = Join-Path $repoRoot "scripts\gemini-sidecar.ps1"
+  $scriptPath = Join-Path $repoRoot "scripts\ai\gemini-sidecar.ps1"
   if (-not (Test-Path $scriptPath)) {
     throw "Missing $scriptPath"
   }
@@ -614,7 +677,22 @@ function Invoke-GeminiDelegate {
           param($repoRootParam, $promptParam, $nodePathParam, $cliArgsParam)
           Push-Location $repoRootParam
           try {
-            $lines = @($promptParam | & $nodePathParam @cliArgsParam 2>&1 | ForEach-Object { [string]$_ })
+            $hasPreferenceVariable = Test-Path Variable:PSNativeCommandUseErrorActionPreference
+            if ($hasPreferenceVariable) {
+              $previousPreference = $PSNativeCommandUseErrorActionPreference
+              $script:PSNativeCommandUseErrorActionPreference = $false
+            }
+            $previousErrorActionPreference = $ErrorActionPreference
+            $script:ErrorActionPreference = "Continue"
+            try {
+              $lines = @($promptParam | & $nodePathParam @cliArgsParam 2>&1 | ForEach-Object { [string]$_ })
+            }
+            finally {
+              $script:ErrorActionPreference = $previousErrorActionPreference
+              if ($hasPreferenceVariable) {
+                $script:PSNativeCommandUseErrorActionPreference = $previousPreference
+              }
+            }
             [pscustomobject]@{
               Lines = $lines
               ExitCode = $LASTEXITCODE
@@ -629,9 +707,15 @@ function Invoke-GeminiDelegate {
         -TimeoutMessage "Gemini delegate timed out after $DelegateTimeoutSeconds seconds."
 
       $jobLines = @($jobResult.Lines)
-      $jobLines | Tee-Object -FilePath $ResolvedOutputPath
+      $rawPath = "$ResolvedOutputPath.raw.txt"
+      Write-Utf8NoBom -Path $rawPath -Value (($jobLines | ForEach-Object { [string]$_ }) -join [Environment]::NewLine)
+      $artifactText = Get-CapturedArtifactText -Lines $jobLines -CurrentOutputFormat $OutputFormat
       if ([int]$jobResult.ExitCode -ne 0) {
-        throw "Gemini CLI exited with code $($jobResult.ExitCode)."
+        throw "Gemini CLI exited with code $($jobResult.ExitCode). See $rawPath"
+      }
+      Write-Utf8NoBom -Path $ResolvedOutputPath -Value $artifactText
+      if (-not [string]::IsNullOrWhiteSpace($artifactText)) {
+        Write-Output $artifactText
       }
     }
     finally {
@@ -640,7 +724,7 @@ function Invoke-GeminiDelegate {
     return
   }
 
-  $scriptPath = Join-Path $repoRoot "scripts\gemini-sidecar.ps1"
+  $scriptPath = Join-Path $repoRoot "scripts\ai\gemini-sidecar.ps1"
   if (-not (Test-Path $scriptPath)) {
     throw "Missing $scriptPath"
   }
@@ -670,7 +754,22 @@ function Invoke-GeminiDelegate {
   $delegateResult = Invoke-JobWithTimeout `
     -ScriptBlock {
       param($scriptPathParam, $invokeParamsParam)
-      $lines = @(& $scriptPathParam @invokeParamsParam 2>&1 | ForEach-Object { [string]$_ })
+      $hasPreferenceVariable = Test-Path Variable:PSNativeCommandUseErrorActionPreference
+      if ($hasPreferenceVariable) {
+        $previousPreference = $PSNativeCommandUseErrorActionPreference
+        $script:PSNativeCommandUseErrorActionPreference = $false
+      }
+      $previousErrorActionPreference = $ErrorActionPreference
+      $script:ErrorActionPreference = "Continue"
+      try {
+        $lines = @(& $scriptPathParam @invokeParamsParam 2>&1 | ForEach-Object { [string]$_ })
+      }
+      finally {
+        $script:ErrorActionPreference = $previousErrorActionPreference
+        if ($hasPreferenceVariable) {
+          $script:PSNativeCommandUseErrorActionPreference = $previousPreference
+        }
+      }
       [pscustomobject]@{
         Lines = $lines
         ExitCode = $LASTEXITCODE
@@ -878,7 +977,22 @@ function Invoke-ClaudeDelegate {
       param($repoRootParam, $promptParam, $claudePathParam, $cliArgsParam)
       Push-Location $repoRootParam
       try {
-        $lines = @($promptParam | & $claudePathParam @cliArgsParam 2>&1 | ForEach-Object { [string]$_ })
+        $hasPreferenceVariable = Test-Path Variable:PSNativeCommandUseErrorActionPreference
+        if ($hasPreferenceVariable) {
+          $previousPreference = $PSNativeCommandUseErrorActionPreference
+          $script:PSNativeCommandUseErrorActionPreference = $false
+        }
+        $previousErrorActionPreference = $ErrorActionPreference
+        $script:ErrorActionPreference = "Continue"
+        try {
+          $lines = @($promptParam | & $claudePathParam @cliArgsParam 2>&1 | ForEach-Object { [string]$_ })
+        }
+        finally {
+          $script:ErrorActionPreference = $previousErrorActionPreference
+          if ($hasPreferenceVariable) {
+            $script:PSNativeCommandUseErrorActionPreference = $previousPreference
+          }
+        }
         [pscustomobject]@{
           Stdout = $lines
           ExitCode = $LASTEXITCODE
@@ -1062,7 +1176,22 @@ function Invoke-GptDelegate {
       param($repoRootParam, $promptPathParam, $nodePathParam, $cliArgsParam)
       Push-Location $repoRootParam
       try {
-        $lines = @(Get-Content -Raw $promptPathParam | & $nodePathParam @cliArgsParam 2>&1 | ForEach-Object { [string]$_ })
+        $hasPreferenceVariable = Test-Path Variable:PSNativeCommandUseErrorActionPreference
+        if ($hasPreferenceVariable) {
+          $previousPreference = $PSNativeCommandUseErrorActionPreference
+          $script:PSNativeCommandUseErrorActionPreference = $false
+        }
+        $previousErrorActionPreference = $ErrorActionPreference
+        $script:ErrorActionPreference = "Continue"
+        try {
+          $lines = @(Get-Content -Raw $promptPathParam | & $nodePathParam @cliArgsParam 2>&1 | ForEach-Object { [string]$_ })
+        }
+        finally {
+          $script:ErrorActionPreference = $previousErrorActionPreference
+          if ($hasPreferenceVariable) {
+            $script:PSNativeCommandUseErrorActionPreference = $previousPreference
+          }
+        }
         [pscustomobject]@{
           Lines = $lines
           ExitCode = $LASTEXITCODE

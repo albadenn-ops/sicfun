@@ -3,7 +3,9 @@ package sicfun.holdem.engine
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.types.*
 import sicfun.holdem.strategic.state.*
+import sicfun.holdem.strategic.formulation.*
 import sicfun.holdem.strategic.solver.WPomcpRuntime
+import sicfun.holdem.strategic.types.BridgeResult
 
 /** Builds flat array inputs for the WPomcp V2 factored tabular model.
   *
@@ -53,6 +55,29 @@ object PokerPomcpFormulation:
         System.arraycopy(priors, 0, result, base, numActions)
     result
 
+  /** Build rival policy table from a formulation contract's rivalPolicySource. */
+  private def buildRivalPolicy(
+      input: FormulationInput,
+      numRivalTypes: Int,
+      numPubStates: Int,
+      numActions: Int
+  ): Array[Double] =
+    val size = numRivalTypes * numPubStates * numActions
+    val result = new Array[Double](size)
+    for typeIdx <- 0 until numRivalTypes do
+      val cls = StrategicClass.fromOrdinal(typeIdx)
+      val fallback = classPriors(cls, numActions)
+      val priors = input.rivalPolicySource.actionPolicy(cls, input.spot) match
+        case BridgeResult.Exact(weights) if weights.length == numActions =>
+          normalizeWeights(weights.toArray, fallback)
+        case BridgeResult.Approximate(weights, _) if weights.length == numActions =>
+          normalizeWeights(weights.toArray, fallback)
+        case _ => fallback
+      for pub <- 0 until numPubStates do
+        val base = typeIdx * numPubStates * numActions + pub * numActions
+        System.arraycopy(priors, 0, result, base, numActions)
+    result
+
   /** Per-class action distribution: (foldP, passiveP, raiseP) per StrategicClass.
     * Exposed as a val so callers can override with calibrated values.
     */
@@ -81,6 +106,14 @@ object PokerPomcpFormulation:
     val sum = raw.sum
     if sum > 0 then for i <- raw.indices do raw(i) /= sum
     raw
+
+  private def normalizeWeights(raw: Array[Double], fallback: Array[Double]): Array[Double] =
+    val cleaned = raw.map(w => math.max(0.0, w))
+    val sum = cleaned.sum
+    if sum > 0.0 then
+      for i <- cleaned.indices do cleaned(i) /= sum
+      cleaned
+    else fallback
 
   /** Build action effects: [numActions * 3] fields per action.
     *
@@ -305,4 +338,91 @@ object PokerPomcpFormulation:
       numRivalBuckets = NumHandBuckets,
       terminalFlags = buildTerminalFlags(NumPubStates, numActions),
       potBucketSize = DefaultPotBucketSize
+    )
+
+  private def buildFactoredModel(
+      input: FormulationInput,
+      showdownEquityFn: (Int, Int) => Array[Double]
+  ): WPomcpRuntime.FactoredModel =
+    val numActions = input.spot.candidateActions.size
+    WPomcpRuntime.FactoredModel(
+      rivalPolicy = buildRivalPolicy(input, NumRivalTypes, NumPubStates, numActions),
+      numRivalTypes = NumRivalTypes,
+      numPubStates = NumPubStates,
+      actionEffects = buildActionEffects(
+        input.spot.candidateActions,
+        input.spot.gameState.pot,
+        input.spot.gameState.stackSize,
+        input.spot.gameState.toCall
+      ),
+      showdownEquity = showdownEquityFn(NumHandBuckets, NumHandBuckets),
+      numHeroBuckets = NumHandBuckets,
+      numRivalBuckets = NumHandBuckets,
+      terminalFlags = buildTerminalFlags(NumPubStates, numActions),
+      potBucketSize = DefaultPotBucketSize
+    )
+
+  /** Extract heroBucket from A2 contract, falling back through spot equity when exact cards are present. */
+  private def extractHeroBucket(input: FormulationInput): Int =
+    input.spot.heroValueInput match
+      case HeroValueInput.StrengthHint(bucket, _) => bucket
+      case _: HeroValueInput.ExactHoleCards =>
+        input.valueSource.estimateSpotEquity(input.spot) match
+          case BridgeResult.Exact(eq) => math.min(9, math.max(0, (eq * 10.0).toInt))
+          case BridgeResult.Approximate(eq, _) => math.min(9, math.max(0, (eq * 10.0).toInt))
+          case BridgeResult.Absent(_) => 5
+
+  /** Extract showdown equity function from A2 contract. */
+  private def extractShowdownEquityFn(input: FormulationInput): (Int, Int) => Array[Double] =
+    (h, r) =>
+      input.valueSource.showdownEquityTable(input.spot, h, r) match
+        case BridgeResult.Exact(table) => table
+        case BridgeResult.Approximate(table, _) => table
+        case BridgeResult.Absent(_) => buildLinearShowdownEquity(h, r)
+
+  /** Build SearchInputV2 from the shared formulation contract. */
+  def buildSearchInputV2(
+      input: FormulationInput,
+      particlesPerRival: Int
+  ): WPomcpRuntime.SearchInputV2 =
+    val heroBucket = extractHeroBucket(input)
+    val rivalParticles = buildRivalParticles(
+      input.spot.rivalBeliefs,
+      particlesPerRival,
+      heroBucket
+    )
+    val showdownEquityFn = extractShowdownEquityFn(input)
+    val model = buildFactoredModel(input, showdownEquityFn)
+    WPomcpRuntime.SearchInputV2(
+      publicState = WPomcpRuntime.PublicState(
+        input.spot.gameState.street.ordinal,
+        input.spot.gameState.pot.toDouble
+      ),
+      rivalParticles = rivalParticles,
+      model = model,
+      heroBucket = heroBucket
+    )
+
+  /** Build SearchInputV2 for profile-conditional evaluation from the shared contract. */
+  def buildSearchInputForProfile(
+      input: FormulationInput,
+      particlesPerRival: Int,
+      profileId: JointRivalProfileId
+  ): WPomcpRuntime.SearchInputV2 =
+    val heroBucket = extractHeroBucket(input)
+    val profileTypeOrdinal = StrategicClass.fromOrdinal(profileId.ordinal).ordinal
+    val rivalParticles = buildProfileParticles(
+      input.spot.rivalBeliefs,
+      particlesPerRival,
+      profileTypeOrdinal
+    )
+    val model = buildFactoredModel(input, extractShowdownEquityFn(input))
+    WPomcpRuntime.SearchInputV2(
+      publicState = WPomcpRuntime.PublicState(
+        input.spot.gameState.street.ordinal,
+        input.spot.gameState.pot.toDouble
+      ),
+      rivalParticles = rivalParticles,
+      model = model,
+      heroBucket = heroBucket
     )

@@ -8,6 +8,7 @@ import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths, StandardCopyOption}
 import java.security.{MessageDigest, SecureRandom}
+import java.time.Duration
 import java.util.{Base64, UUID}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -45,6 +46,7 @@ import scala.util.control.NonFatal
 object PlatformUserAuth:
   private val LocalProviderId = "local"
   private val DefaultSessionCookieName = "sicfun_session"
+  private val DefaultOidcStateCookieName = "sicfun_oidc_state"
   private val DefaultSessionTtlMs = 12L * 60L * 60L * 1000L
   private val DefaultOidcFlowTtlMs = 10L * 60L * 1000L
   private val PasswordAlgorithm = "PBKDF2WithHmacSHA256"
@@ -67,9 +69,19 @@ object PlatformUserAuth:
       sessionTtlMs: Long = DefaultSessionTtlMs,
       allowLocalRegistration: Boolean = true,
       cookieSecure: Boolean = false,
-      oidcProviders: Vector[OidcProvider] = Vector.empty
+      oidcProviders: Vector[OidcProvider] = Vector.empty,
+      // Defensive cap on the total number of stored users. Without a cap, a
+      // bot abusing public registration (10/min/IP via the auth rate limit)
+      // can grow the user store ~43 MB/day/IP indefinitely -- a slow disk-
+      // fill DoS over weeks. 100k is generous for any realistic private
+      // deployment and far below the point where the in-memory linear-scan
+      // by-email lookup becomes a perf concern. Operators expecting a much
+      // larger user base or running heavy load-test scenarios can raise it;
+      // tests use a much smaller value to exercise the rejection path.
+      maxUsers: Int = 100_000
   ):
     require(sessionTtlMs > 0L, "sessionTtlMs must be positive")
+    require(maxUsers > 0, "maxUsers must be positive")
 
   final case class UserProfile(
       displayName: String,
@@ -145,6 +157,22 @@ object PlatformUserAuth:
       cookieHeader: String
   )
 
+  /** Result of starting an OIDC authorization flow.
+    *
+    * `state` is the random value embedded in the redirect URL; the same value
+    * is bound to a short-lived Set-Cookie (`stateCookieHeader`) the caller must
+    * emit alongside the redirect. The callback handler will then require both
+    * the URL state and the cookie state to match -- without the cookie, an
+    * attacker who hijacks a valid state value cannot redirect a victim to our
+    * callback URL and impersonate them (OAuth 2.0 BCP "mix-up" /
+    * "covert-redirect" mitigation: bind the state to the user agent that
+    * initiated the flow). */
+  final case class OidcStartResult(
+      location: String,
+      state: String,
+      stateCookieHeader: String
+  )
+
   final case class OidcIdentity(
       subject: String,
       email: String,
@@ -174,9 +202,21 @@ object PlatformUserAuth:
     require(redirectUri.trim.nonEmpty, "redirectUri must be non-empty")
     require(scopes.nonEmpty, "scopes must be non-empty")
 
+  // Default OIDC HTTP timeouts. Without these the JDK HttpClient blocks
+  // indefinitely on a slow/hung token or userinfo endpoint, holding a server
+  // executor thread per callback. 5s to connect and 10s end-to-end is well
+  // above Google's typical latency (sub-second) and below anything that
+  // would feel responsive to a user waiting on the OIDC redirect.
+  private val DefaultOidcConnectTimeout = Duration.ofSeconds(5)
+  private val DefaultOidcRequestTimeout = Duration.ofSeconds(10)
+
+  private[web] def defaultOidcHttpClient(): HttpClient =
+    HttpClient.newBuilder.connectTimeout(DefaultOidcConnectTimeout).build()
+
   final class GoogleOidcProvider(
       config: GoogleOidcConfig,
-      httpClient: HttpClient = HttpClient.newHttpClient()
+      httpClient: HttpClient = defaultOidcHttpClient(),
+      requestTimeout: Duration = DefaultOidcRequestTimeout
   ) extends OidcProvider:
     override val id = "google"
     override val displayName = "Google"
@@ -202,6 +242,7 @@ object PlatformUserAuth:
       try
         val tokenRequest = HttpRequest.newBuilder(URI.create(GoogleTokenEndpoint))
           .header("Content-Type", "application/x-www-form-urlencoded")
+          .timeout(requestTimeout)
           .POST(
             HttpRequest.BodyPublishers.ofString(
               formEncode(
@@ -229,6 +270,7 @@ object PlatformUserAuth:
             case Some(token) =>
               val userInfoRequest = HttpRequest.newBuilder(URI.create(GoogleUserInfoEndpoint))
                 .header("Authorization", s"Bearer $token")
+                .timeout(requestTimeout)
                 .GET()
                 .build()
               val userInfoResponse = httpClient.send(
@@ -301,6 +343,30 @@ object PlatformUserAuth:
     def resolveSession(cookieHeader: Option[String]): Option[AuthenticatedUser] =
       sessionManager.resolve(cookieHeader, userStore)
 
+    /** Number of users currently in the in-memory store. Exposed for the
+      * `/api/health` dashboard so operators can see live usage against the
+      * `maxUsers` cap. O(1) read of a volatile snapshot -- no lock taken --
+      * because state is the @volatile var in JsonUserStore. */
+    def storedUserCount: Int = userStore.storedUserCount
+
+    /** Number of session records currently held in memory. Approximate -- may
+      * include expired sessions that have not yet been purged by the next
+      * resolve() or cleanup pass -- but accurate enough for the
+      * `/api/health` dashboard. Useful as a capacity proxy: a steady-state
+      * count higher than expected (e.g. an unusual spike during off-hours)
+      * is a heads-up about credential stuffing succeeded or a leaked
+      * automation script. Includes anonymous-OIDC-flow start cookies? No;
+      * the state-cookie store is separate. */
+    def activeSessionCount: Int = sessionManager.activeSessionCount
+
+    /** Number of OIDC flows that have called /start without yet completing
+      * /callback. Each entry has a 10-minute Max-Age so a healthy
+      * deployment's steady state is "very small". Used for the
+      * /api/health dashboard so operators can spot a /start storm without
+      * matching callbacks (typical cause: misconfigured redirect URI on
+      * the provider side, or an automation script exercising /start). */
+    def pendingOidcFlows: Int = oidcStateStore.pendingFlowCount
+
     def registerLocal(
         email: String,
         password: String,
@@ -324,12 +390,20 @@ object PlatformUserAuth:
     def revokeSession(cookieHeader: Option[String]): String =
       sessionManager.revoke(cookieHeader)
 
-    def startOidc(providerId: String): Either[String, String] =
+    def startOidc(providerId: String): Either[String, OidcStartResult] =
       providersById.get(providerId).toRight(s"unknown OIDC provider '$providerId'").map { provider =>
         val codeVerifier = randomBase64Url(OidcCodeVerifierBytes)
         val state = oidcStateStore.issue(provider.id, codeVerifier)
-        provider.authorizationUri(state, codeChallenge(codeVerifier))
+        OidcStartResult(
+          location = provider.authorizationUri(state, codeChallenge(codeVerifier)),
+          state = state,
+          stateCookieHeader = oidcStateCookieHeader(state, DefaultOidcFlowTtlMs, config.cookieSecure)
+        )
       }
+
+    def expectedOidcStateCookieName: String = oidcStateCookieName(config.cookieSecure)
+
+    def oidcStateClearCookieHeader: String = clearOidcStateCookieHeader(config.cookieSecure)
 
     def finishOidc(providerId: String, state: String, code: String): Either[String, LoginResult] =
       for
@@ -353,22 +427,70 @@ object PlatformUserAuth:
       if !config.allowLocalRegistration && config.oidcProviders.isEmpty then
         Left("user auth requires at least one sign-in method")
       else
-        try
-          val store = new JsonUserStore(config.storePath)
-          Right(
-            new Service(
-              config = config,
-              userStore = store,
-              sessionManager = new SessionManager(config.sessionTtlMs, config.cookieSecure),
-              oidcStateStore = new OidcStateStore()
+        validateOidcProviderIds(config.oidcProviders).flatMap { _ =>
+          try
+            val store = new JsonUserStore(config.storePath, config.maxUsers)
+            Right(
+              new Service(
+                config = config,
+                userStore = store,
+                sessionManager = new SessionManager(config.sessionTtlMs, config.cookieSecure),
+                oidcStateStore = new OidcStateStore()
+              )
             )
-          )
-        catch
-          case NonFatal(e) => Left(s"user auth failed to initialize: ${e.getMessage}")
+          catch
+            case NonFatal(e) => Left(s"user auth failed to initialize: ${e.getMessage}")
+        }
+
+    /** Reject OIDC provider configurations that would either shadow the local
+      * password provider or collide with another OIDC entry. Without this
+      * check, two providers with the same id would silently collapse to one
+      * in `providersById.toMap` AND then crash HTTP server registration with
+      * an opaque "context already exists" IllegalArgumentException; an OIDC
+      * provider with id="local" would shadow the local-password provider in
+      * the /api/auth/me providers list. Both are deployment configuration
+      * bugs the operator wants to see surfaced at startup, not at first use. */
+    private def validateOidcProviderIds(providers: Vector[OidcProvider]): Either[String, Unit] =
+      // Provider id ends up directly in URL paths (/api/auth/oidc/<id>/start
+      // and /callback) AND as a JDK HttpServer context key. Empty / slash-
+      // bearing / non-URL-safe ids would either fail context registration
+      // at startup with an opaque JDK error, or register routes the
+      // extractOidcProviderId 5-segment match couldn't reach. Restrict to
+      // a conservative slug shape so misconfigured deployments fail fast
+      // at startup with a clear message instead of silently shipping an
+      // unreachable provider.
+      val invalidShape = providers
+        .map(_.id)
+        // ASCII alphanumerics only -- ch.isLetterOrDigit accepts Unicode
+        // letters (e.g. ñ, ü, ø) which would round-trip safely in URL
+        // paths but break the operator-grep contract: a provider id of
+        // "ñoñ" surfaces as `provider=%C3%B1o%C3%B1` in some audit-log
+        // contexts (URL-encoded) and `provider=ñoñ` in others (raw),
+        // making grep brittle. Stick to ASCII for predictability.
+        .filterNot(id => id.nonEmpty && id.length <= 64 && id.forall(ch =>
+          (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_'
+        ))
+        .distinct
+        .sorted
+      val reserved = providers.map(_.id).filter(_ == LocalProviderId)
+      if invalidShape.nonEmpty then
+        Left(s"OIDC provider ids must be non-empty and contain only letters, digits, '-', or '_' (at most 64 chars); invalid: ${invalidShape.mkString(", ")}")
+      else if reserved.nonEmpty then
+        Left(s"OIDC provider id '$LocalProviderId' is reserved for local password sign-in; choose a different id")
+      else
+        val duplicates = providers
+          .map(_.id)
+          .groupBy(identity)
+          .collect { case (id, occurrences) if occurrences.size > 1 => id }
+          .toVector
+          .sorted
+        if duplicates.nonEmpty then
+          Left(s"OIDC providers must have unique ids; duplicates: ${duplicates.mkString(", ")}")
+        else Right(())
 
   private final case class StoreState(users: Vector[StoredUser])
 
-  private final class JsonUserStore(path: Path):
+  private final class JsonUserStore(path: Path, maxUsers: Int):
     @volatile private var state = load()
 
     def registerLocal(
@@ -383,6 +505,14 @@ object PlatformUserAuth:
           validatePassword(password)
           if findByEmailInternal(normalizedEmail).nonEmpty then
             Left("an account with that email already exists")
+          else if state.users.length >= maxUsers then
+            // Hard cap on the user store to keep public-registration
+            // deployments from being slow-disk-filled by a bot that abuses
+            // the auth bucket (10/min/IP -> ~14400 registrations/day/IP ->
+            // ~43 MB/day/IP of stored user records). Generic error keeps
+            // the response small AND avoids letting the attacker
+            // fingerprint the limit by probing.
+            Left("registration is temporarily unavailable")
           else
             val now = System.currentTimeMillis()
             val resolvedDisplayName = sanitizeDisplayName(displayName).getOrElse(defaultDisplayNameFor(normalizedEmail))
@@ -409,28 +539,73 @@ object PlatformUserAuth:
           case NonFatal(e) => Left(e.getMessage)
 
     def authenticateLocal(email: String, password: String): Either[String, StoredUser] =
-      synchronized:
-        val normalizedEmail = normalizeEmail(email)
-        findByEmailInternal(normalizedEmail) match
-          case None => Left("invalid email or password")
-          case Some(user) =>
-            user.localPassword match
-              case None => Left("this account does not support password sign-in")
-              case Some(credential) =>
-                if verifyPassword(password, credential) then Right(user)
-                else Left("invalid email or password")
+      // Reject oversize password BEFORE any lookup or hashing so all email values
+      // get the same fast response. Both the DoS guard (avoid PBKDF2 on multi-MB
+      // input) and the timing-leak guard (no per-email branching) fall out of
+      // this single short-circuit.
+      if password.length > MaxPasswordLength then Left("invalid email or password")
+      else
+        synchronized:
+          val normalizedEmail = normalizeEmail(email)
+          findByEmailInternal(normalizedEmail) match
+            case None =>
+              // Do equivalent PBKDF2 work in the "no such user" path so the
+              // response time matches the "known user, wrong password" path.
+              // Otherwise an attacker can enumerate registered email addresses
+              // by measuring login latency, even though the error string is
+              // identical across both branches.
+              dummyVerifyPassword(password)
+              Left("invalid email or password")
+            case Some(user) =>
+              user.localPassword match
+                case None =>
+                  // OIDC-only user: keep timing AND message indistinguishable
+                  // from the "no such user" and "wrong password" branches so
+                  // neither email existence nor account type leaks.
+                  dummyVerifyPassword(password)
+                  Left("invalid email or password")
+                case Some(credential) =>
+                  if verifyPassword(password, credential) then Right(user)
+                  else Left("invalid email or password")
 
     def upsertOidcIdentity(providerId: String, identity: OidcIdentity): Either[String, StoredUser] =
       synchronized:
         val normalizedEmail = normalizeEmail(identity.email)
+        // Validate the email format and length the OIDC provider returned even
+        // though Google checks emailVerified upstream. Defense in depth: a
+        // future provider or a tampered userinfo response could deliver a
+        // malformed or oversize value, and the local-register path applies
+        // the same check -- keep both code paths consistent.
+        try validateEmail(normalizedEmail)
+        catch case e: IllegalArgumentException => return Left(e.getMessage)
+        // Reject suspiciously long OIDC subject identifiers. Google's are
+        // ~21 chars; 256 is two orders of magnitude over that, plenty for any
+        // legitimate provider, but bounded so a hostile provider can't poison
+        // the user store with megabyte-sized subjects (which are also used as
+        // map keys for provider-identity lookup). Truncation here is unsafe --
+        // two distinct subjects could collide on a truncated prefix.
+        if identity.subject.length > 256 then return Left("OIDC subject is too long")
+        // Truncate the provider-supplied display name to the same 96-char cap
+        // the local-register path enforces. We truncate (rather than reject)
+        // for the OIDC flow: a legitimate user with a long display name on
+        // Google should still be able to sign in -- they can shorten it via
+        // /api/auth/profile afterward. Without this, a malformed or huge
+        // upstream `name` would bloat the user-store JSON unbounded.
+        val truncatedDisplayName = identity.displayName.take(96)
+        // Drop an avatar URL that exceeds a generous URL-length bound. Stored
+        // verbatim but never rendered today; even so, an unbounded value would
+        // bloat the user store and a future renderer would have to defend
+        // against the bloat itself. 2048 is the de-facto URL length browsers
+        // and proxies accept.
+        val cappedAvatarUrl = identity.avatarUrl.filter(_.length <= 2048)
         val now = System.currentTimeMillis()
         findByProviderIdentityInternal(providerId, identity.subject) match
           case Some(existing) =>
             val updated = existing.copy(
               email = normalizedEmail,
               profile = existing.profile.copy(
-                displayName = preferNonBlank(existing.profile.displayName, identity.displayName),
-                avatarUrl = identity.avatarUrl.orElse(existing.profile.avatarUrl)
+                displayName = preferNonBlank(existing.profile.displayName, truncatedDisplayName),
+                avatarUrl = cappedAvatarUrl.orElse(existing.profile.avatarUrl)
               ),
               identities = existing.identities.map { current =>
                 if current.provider == providerId && current.subject == identity.subject then
@@ -445,13 +620,22 @@ object PlatformUserAuth:
             findByEmailInternal(normalizedEmail) match
               case Some(_) =>
                 Left("an account with that email already exists; sign in with its existing method")
+              case None if state.users.length >= maxUsers =>
+                // Apply the same cap registerLocal does. Without this, OIDC
+                // sign-up was a back door past the disk-fill defense: a
+                // deployment with OIDC enabled would let any new Google
+                // account create a user record even after the local-
+                // registration path was already saturated. Generic
+                // message matches the local path so a probing attacker
+                // cannot distinguish the two cases by response shape.
+                Left("registration is temporarily unavailable")
               case None =>
                 val created = StoredUser(
                   userId = UUID.randomUUID().toString,
                   email = normalizedEmail,
                   profile = UserProfile(
-                    displayName = identity.displayName,
-                    avatarUrl = identity.avatarUrl
+                    displayName = truncatedDisplayName,
+                    avatarUrl = cappedAvatarUrl
                   ),
                   identities = Vector(
                     ProviderIdentity(
@@ -513,16 +697,42 @@ object PlatformUserAuth:
       synchronized:
         findByUserIdInternal(userId)
 
+    // Lock-free read of the live user count for the /api/health JSON. state
+    // is @volatile so the read sees a consistent snapshot without contending
+    // for the per-store synchronized block; registerLocal / upsertOidcIdentity
+    // / updateProfile all serialize on that lock so the value cannot tear.
+    def storedUserCount: Int = state.users.length
+
     private def load(): StoreState =
       if !Files.exists(path) then StoreState(Vector.empty)
       else
-        val json = ujson.read(Files.readString(path, StandardCharsets.UTF_8))
-        val users = json.obj.get("users").map(_.arr.toVector.map(readStoredUser)).getOrElse(Vector.empty)
-        StoreState(users = users)
+        try
+          val raw = Files.readString(path, StandardCharsets.UTF_8)
+          val json = ujson.read(raw)
+          val users = json.obj.get("users").map(_.arr.toVector.map(readStoredUser)).getOrElse(Vector.empty)
+          StoreState(users = users)
+        catch
+          case NonFatal(e) =>
+            // Wrap with file path + recovery hint so the operator can act. A bare ujson
+            // parse error like "expected ']' got '}' at offset 1234" otherwise reaches
+            // Service.create's catch with no indication of which file is corrupted.
+            throw new RuntimeException(
+              s"user store at ${path.toAbsolutePath} is unreadable: ${e.getMessage}. " +
+                "Back up the file and restore from backup, or remove it to start fresh.",
+              e
+            )
 
     private def persist(next: StoreState): Unit =
-      state = next
+      // Write to disk FIRST, publish to memory only on success. The previous
+      // order (state = next; writeState(...)) left the in-memory store ahead
+      // of disk if the write failed -- the caller saw an error and the user
+      // store quietly held a ghost record that disappeared on the next
+      // restart. With the journal-then-publish order, a failed write keeps
+      // memory and disk consistent; the IOException propagates to the
+      // synchronized caller (registerLocal / updateProfile / upsertOidcIdentity)
+      // which returns Left and the user can retry cleanly.
       writeState(path, next)
+      state = next
 
     private def replaceUser(userId: String, updated: StoredUser): StoreState =
       sortedState(state.users.map(current => if current.userId == userId then updated else current))
@@ -558,6 +768,26 @@ object PlatformUserAuth:
       nowMillis: () => Long = () => System.currentTimeMillis()
   ):
     private val sessions = new ConcurrentHashMap[String, SessionRecord]()
+    // Throttle purgeExpired runs to at most once per PurgeIntervalMs.
+    // resolve() (called on every authenticated request) and create() (called
+    // on every login) used to run purgeExpired unconditionally, scanning all
+    // sessions on every auth check. For a deployment near maxUsers=100k that
+    // is 100k iterations per request; at hundreds of req/s the wasted CPU
+    // adds up. With per-entry compare-and-remove the GC-side cost is already
+    // bounded, but the iteration itself is still O(N). Throttling drops the
+    // amortized cost to O(N) per minute rather than O(N) per request, with
+    // no correctness impact -- expired sessions stop resolving anyway via
+    // the in-line TTL check in resolve(), and the purge sweep only matters
+    // for memory hygiene (which can wait a minute).
+    private val PurgeIntervalMs = 60_000L
+    private val lastPurgeAtMs = new AtomicLong(0L)
+
+    // Approximate count of in-memory session records. ConcurrentHashMap.size
+    // is documented as "not a constant-time operation" but for our scale
+    // (typically dozens to thousands of sessions) it's microseconds.
+    // Includes records that have expired but not yet been purged by the
+    // next resolve() / cleanup pass; close enough for dashboarding.
+    def activeSessionCount: Int = sessions.size()
 
     def create(user: StoredUser): SessionMaterial =
       purgeExpired()
@@ -585,44 +815,71 @@ object PlatformUserAuth:
         userStore: JsonUserStore
     ): Option[AuthenticatedUser] =
       purgeExpired()
-      extractCookie(cookieHeader, DefaultSessionCookieName)
+      extractCookie(cookieHeader, sessionCookieName(cookieSecure))
         .flatMap { token =>
           val key = sha256Hex(token)
-          Option(sessions.get(key))
-            .filter(_.expiresAtEpochMs > nowMillis())
-            .flatMap { session =>
-              val now = nowMillis()
-              sessions.put(
-                key,
-                session.copy(
-                  expiresAtEpochMs = now + sessionTtlMs,
-                  lastSeenAtEpochMs = now
-                )
+          // computeIfPresent atomically reads + conditionally updates + writes,
+          // closing two concurrency races a plain get/filter/put loop has:
+          //   - resurrection: a logout that calls `revoke` (sessions.remove)
+          //     between our get and put would otherwise be undone by the put,
+          //     bringing a revoked session back to life.
+          //   - false expiry: a concurrent `purgeExpired` evicting an entry we
+          //     just refreshed; with compute, both writes serialize on the bin
+          //     so whichever runs second sees the other's update.
+          // Returning null from the remapping function removes the entry, which
+          // is what we want when the snapshot read fires for a session that
+          // expired between the purge sweep and this lookup.
+          val refreshed = sessions.computeIfPresent(
+            key,
+            (_, current) =>
+              if current.expiresAtEpochMs > nowMillis() then
+                val now = nowMillis()
+                current.copy(expiresAtEpochMs = now + sessionTtlMs, lastSeenAtEpochMs = now)
+              else
+                null
+          )
+          Option(refreshed).flatMap { session =>
+            userStore.findByUserId(session.userId).map { user =>
+              AuthenticatedUser(
+                userId = user.userId,
+                email = user.email,
+                profile = toUserView(user),
+                csrfToken = session.csrfToken
               )
-              userStore.findByUserId(session.userId).map { user =>
-                AuthenticatedUser(
-                  userId = user.userId,
-                  email = user.email,
-                  profile = toUserView(user),
-                  csrfToken = session.csrfToken
-                )
-              }
             }
+          }
         }
 
     def revoke(cookieHeader: Option[String]): String =
-      extractCookie(cookieHeader, DefaultSessionCookieName).foreach { token =>
+      extractCookie(cookieHeader, sessionCookieName(cookieSecure)).foreach { token =>
         sessions.remove(sha256Hex(token))
       }
       clearSessionCookieHeader(cookieSecure)
 
     private def purgeExpired(): Unit =
       val now = nowMillis()
+      val lastPurge = lastPurgeAtMs.get()
+      // Run at most once per PurgeIntervalMs. CAS guards against multiple
+      // concurrent callers racing to start a sweep -- whichever wins claims
+      // the work, the rest fall through immediately. Same pattern used by
+      // RateLimit.cleanupIfDue and OidcStateStore.cleanupIfDue elsewhere
+      // in this file.
+      if now - lastPurge < PurgeIntervalMs then return
+      if !lastPurgeAtMs.compareAndSet(lastPurge, now) then return
       val iterator = sessions.entrySet().iterator()
       while iterator.hasNext do
         val entry = iterator.next()
         if entry.getValue.expiresAtEpochMs <= now then
-          iterator.remove()
+          // Compare-and-remove: iterator.remove() would unconditionally drop the
+          // key, but a concurrent resolve() that refreshed the session between
+          // the entry.getValue snapshot and this line would have its work
+          // erased. computeIfPresent re-reads the current value under the bin
+          // lock and only removes if the entry is STILL expired.
+          sessions.computeIfPresent(
+            entry.getKey,
+            (_, current) =>
+              if current.expiresAtEpochMs <= nowMillis() then null else current
+          )
 
   private final case class OidcPendingState(
       providerId: String,
@@ -636,6 +893,14 @@ object PlatformUserAuth:
   ):
     private val states = new ConcurrentHashMap[String, OidcPendingState]()
     private val lastCleanupAtMs = new AtomicLong(0L)
+
+    // Approximate count of in-flight OIDC flows. Useful for the /api/health
+    // dashboard: a steady-state count well above the normal "few" is a hint
+    // that /start is being hit without /callback ever completing (provider
+    // redirect URI misconfigured, automation exercising the start path, or
+    // user-agent rejecting Google's cookies). Includes records that have
+    // expired but not yet been removed by the next cleanup pass.
+    def pendingFlowCount: Int = states.size()
 
     def issue(providerId: String, codeVerifier: String): String =
       cleanupIfDue()
@@ -652,8 +917,22 @@ object PlatformUserAuth:
 
     def consume(providerId: String, state: String): Option[OidcPendingState] =
       cleanupIfDue()
-      Option(states.remove(state))
-        .filter(record => record.providerId == providerId && nowMillis() - record.issuedAtEpochMs <= flowTtlMs)
+      // Atomically remove only when providerId and TTL both match. The earlier
+      // version called `states.remove(state)` unconditionally and then
+      // filtered, which meant a callback with a valid state but the wrong
+      // provider id would still evict the entry -- the legitimate user's
+      // subsequent correct callback would then 404 because their state had
+      // already been consumed (and discarded) by the wrong-provider request.
+      // Non-exploitable in practice because state is 32-byte random, but the
+      // atomic form removes the latent foot-gun.
+      val holder = new java.util.concurrent.atomic.AtomicReference[Option[OidcPendingState]](None)
+      states.computeIfPresent(state, (_, record) =>
+        if record.providerId == providerId && nowMillis() - record.issuedAtEpochMs <= flowTtlMs then
+          holder.set(Some(record))
+          null  // signal removal
+        else record
+      )
+      holder.get()
 
     private def cleanupIfDue(): Unit =
       val now = nowMillis()
@@ -687,12 +966,25 @@ object PlatformUserAuth:
     val encoded = ujson.write(json, indent = 2)
     val parent = Option(absolutePath.getParent).getOrElse(Paths.get(".").toAbsolutePath.normalize())
     val temp = Files.createTempFile(parent, "platform-users-", ".json.tmp")
-    Files.writeString(temp, encoded, StandardCharsets.UTF_8)
     try
-      Files.move(temp, absolutePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-    catch
-      case _: UnsupportedOperationException | _: java.nio.file.AtomicMoveNotSupportedException =>
-        Files.move(temp, absolutePath, StandardCopyOption.REPLACE_EXISTING)
+      Files.writeString(temp, encoded, StandardCharsets.UTF_8)
+      try
+        Files.move(temp, absolutePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+      catch
+        case _: UnsupportedOperationException | _: java.nio.file.AtomicMoveNotSupportedException =>
+          Files.move(temp, absolutePath, StandardCopyOption.REPLACE_EXISTING)
+    finally
+      // If the move succeeded, the temp path no longer exists and this is a no-op.
+      // If writeString or a non-fallback move exception threw mid-way, this prevents
+      // the orphaned tmp file from accumulating in the user-store directory across
+      // repeated failures (disk full, permission flap, etc.).
+      //
+      // Swallow IOException here so a delete failure (e.g. the temp file was
+      // locked by another process on Windows) does not mask the original
+      // exception that triggered the cleanup. The original exception is the
+      // useful diagnostic; an orphaned tmp file is a much smaller problem.
+      try Files.deleteIfExists(temp)
+      catch case _: java.io.IOException => ()
 
   private def writeStoredUser(user: StoredUser): Value =
     Obj(
@@ -794,15 +1086,51 @@ object PlatformUserAuth:
       "linkedProviders" -> Arr.from(user.linkedProviders.map(Str(_)))
     )
 
+  // RFC 5321 sec 4.5.3.1.3: an email address (local-part @ domain) cannot exceed
+  // 254 octets. Without this cap an attacker can register with a multi-megabyte
+  // "email" that passes structural validation, persists in the user store JSON,
+  // and slows future startups when load() reads it back. The cap is a fixed
+  // defensive bound; legitimate addresses are well under it (most real-world
+  // emails are under 50 chars).
+  private val MaxEmailLength = 254
+
   private def validateEmail(email: String): Unit =
+    if email.length > MaxEmailLength then
+      throw new IllegalArgumentException(s"email must be at most $MaxEmailLength characters")
+    // RFC 5321 §4.1.2 says local-part is built from `atext` which excludes
+    // whitespace (unless quoted, which we do not support). Rejecting any
+    // whitespace also keeps our `key=value` audit log lines parseable: a
+    // value with an embedded space would split as two tokens for any line-
+    // oriented parser. Same for any C0 control char.
+    if email.exists(ch => ch.isWhitespace || ch.toInt < 0x20 || ch.toInt == 0x7F) then
+      throw new IllegalArgumentException("email must not contain whitespace or control characters")
     val at = email.indexOf('@')
     val dot = email.lastIndexOf('.')
     if at <= 0 || dot <= at + 1 || dot == email.length - 1 then
       throw new IllegalArgumentException("email must be a valid address")
 
+  // Cap the password length the server is willing to hash. PBKDF2's per-iteration
+  // cost scales with input length, so without this cap an attacker submitting a 2 MB
+  // password (just under MAX_UPLOAD_BYTES) and a high-iteration count could burn the
+  // server's CPU on each login attempt. The auth-bucket rate limiter (default 10/min
+  // /IP) caps requests, but the length cap is what bounds the work each individual
+  // request is allowed to cost. 256 chars is generous for any realistic passphrase
+  // and well above OWASP's 64-char minimum recommendation.
+  private val MaxPasswordLength = 256
+
   private def validatePassword(password: String): Unit =
-    if password.trim.length < 10 then
+    // Validate the password as-is, NOT trimmed. NIST SP 800-63B says memorized
+    // secrets must accept any printable ASCII including spaces, and explicitly
+    // forbids truncation. The earlier version trimmed before validating length,
+    // which created a foot-gun: a register call with "  hunter22  " (12 chars
+    // raw, 8 trimmed) passed the length check on the trimmed form but stored
+    // the hash of the RAW (whitespace-included) value, and login then required
+    // the same whitespace -- silent UX failure when the user pasted with stray
+    // whitespace at register but typed cleanly at login.
+    if password.length < 10 then
       throw new IllegalArgumentException("password must be at least 10 characters")
+    if password.length > MaxPasswordLength then
+      throw new IllegalArgumentException(s"password must be at most $MaxPasswordLength characters")
 
   private def sanitizeDisplayName(displayName: Option[String]): Option[String] =
     sanitizeOptionalField(displayName, "displayName", 96)
@@ -811,6 +1139,15 @@ object PlatformUserAuth:
     raw.map(_.trim).filter(_.nonEmpty).map { value =>
       if value.length > maxLength then
         throw new IllegalArgumentException(s"$label must be at most $maxLength characters")
+      // Reject embedded C0 controls and DEL. validateEmail already rejects ALL
+      // whitespace + controls because email syntax forbids them; profile fields
+      // (displayName, heroName, preferredSite, timeZone) allow internal spaces
+      // for things like "John Smith", but a newline / NUL / ESC in a stored
+      // profile field has no legitimate use and would either confuse JSON
+      // consumers, corrupt audit log fields when the value eventually surfaces,
+      // or trip line-oriented dashboards downstream.
+      if value.exists(ch => ch.toInt < 0x20 || ch.toInt == 0x7F) then
+        throw new IllegalArgumentException(s"$label must not contain control characters")
       value
     }
 
@@ -823,7 +1160,41 @@ object PlatformUserAuth:
     if existing.trim.nonEmpty then existing else fallback
 
   private def normalizeEmail(email: String): String =
-    email.trim.toLowerCase(java.util.Locale.ROOT)
+    // Strip BOM and other zero-width characters BEFORE trim+lowercase so a
+    // user who pastes their email from a source that prepends one (some
+    // text editors emit U+FEFF when saving as UTF-8 with BOM; some clipboard
+    // pipelines inject U+200B/U+200C/U+200D between visually-identical
+    // characters) doesn't end up with a canonical form that fails round-trip
+    // lookup. The footgun without this filter: Scala's `String.trim` only
+    // removes chars where `ch <= 0x20` (ASCII control + space), and BOM
+    // (U+FEFF) sits at 0xFEFF, far above that threshold; `validateEmail`'s
+    // whitespace check is `Character.isWhitespace`, which also returns false
+    // for BOM and the zero-width family. So a register call with
+    // "<U+FEFF>alice@example.com" passes every gate, gets stored with the
+    // BOM still embedded, and the user can never sign in afterwards because
+    // their subsequent typed input lacks the BOM and the stored-vs-submitted
+    // string comparison misses. Stripping here closes both halves of the
+    // round trip: register normalizes to the bare ASCII form, login does
+    // too, the lookup succeeds. The five codepoints filtered are the
+    // standard Unicode zero-width family: U+FEFF (BOM / zero-width no-break
+    // space), U+200B (zero-width space), U+200C (zero-width non-joiner),
+    // U+200D (zero-width joiner), and U+2060 (word joiner). All five have
+    // zero rendered width AND zero semantic content in an email-address
+    // context, so silent stripping doesn't change what the user typed --
+    // it just removes invisible bytes that the user couldn't have
+    // intended to include. Comparing by `.toInt == 0xNNNN` (rather than
+    // against literal Char glyphs in the source) keeps this file pure
+    // ASCII for review and is immune to a future text-editor / lint
+    // pass that strips invisible bytes from source -- the filter would
+    // silently break if those literal chars were lost from the operand
+    // side, since `ch == ''` reduces to a non-meaningful comparison.
+    email
+      .filterNot(ch =>
+        val cp = ch.toInt
+        cp == 0xFEFF || cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0x2060
+      )
+      .trim
+      .toLowerCase(java.util.Locale.ROOT)
 
   private def hashPassword(password: String, updatedAtEpochMs: Long): LocalPasswordCredential =
     val salt = randomBytes(PasswordSaltBytes)
@@ -842,6 +1213,15 @@ object PlatformUserAuth:
     val actual = pbkdf2(password, salt, credential.iterations, credential.keyLengthBits)
     MessageDigest.isEqual(expected, actual)
 
+  // Fixed salt used only to make the "no such user" and "OIDC-only user" branches
+  // of authenticateLocal spend equivalent CPU time to the "real verify" branch.
+  // The output is discarded so no comparison occurs; the salt value cannot leak
+  // useful information.
+  private val PlaceholderSalt: Array[Byte] = Array.fill(PasswordSaltBytes)(0.toByte)
+
+  private def dummyVerifyPassword(password: String): Unit =
+    val _ = pbkdf2(password, PlaceholderSalt, PasswordIterations, PasswordKeyLengthBits)
+
   private def pbkdf2(
       password: String,
       salt: Array[Byte],
@@ -853,9 +1233,16 @@ object PlatformUserAuth:
     try factory.generateSecret(spec).getEncoded
     finally spec.clearPassword()
 
+  // Shared SecureRandom: instantiation is non-trivial (the JDK's strong-DRBG
+  // setup samples OS entropy on first use), and SecureRandom.nextBytes is
+  // documented thread-safe. Reusing one instance avoids repeating that work
+  // for every session/CSRF/OIDC-state mint -- which on login fires four times
+  // (session token, csrf token, oidc state, code verifier).
+  private val secureRandom: SecureRandom = new SecureRandom()
+
   private def randomBytes(length: Int): Array[Byte] =
     val bytes = new Array[Byte](length)
-    new SecureRandom().nextBytes(bytes)
+    secureRandom.nextBytes(bytes)
     bytes
 
   private def randomBase64Url(length: Int): String =
@@ -872,14 +1259,34 @@ object PlatformUserAuth:
       .mkString
 
   private def extractCookie(cookieHeader: Option[String], cookieName: String): Option[String] =
-    cookieHeader
-      .flatMap(_.split(';').iterator.map(_.trim).find(_.startsWith(s"$cookieName=")))
-      .map(_.substring(cookieName.length + 1))
-      .filter(_.nonEmpty)
+    // Find the FIRST NON-EMPTY value among segments matching `<name>=`. RFC
+    // 6265 permits multiple cookies with the same name and leaves ordering
+    // up to the user agent, so picking strictly the first match (and then
+    // dropping it if empty) would let an attacker with a foothold on a
+    // sibling subdomain in plain-HTTP mode plant an empty
+    // `sicfun_session=` cookie that masks the real session and logs the
+    // victim out. Continuing the scan past empty matches defeats that
+    // narrow DoS without relying on which cookie the browser sorts first.
+    cookieHeader.flatMap { header =>
+      header.split(';').iterator
+        .map(_.trim)
+        .filter(_.startsWith(s"$cookieName="))
+        .map(_.substring(cookieName.length + 1))
+        .find(_.nonEmpty)
+    }
+
+  // Resolve the wire-format cookie name for a given secure-mode setting. When
+  // the deployment is HTTPS-backed (cookieSecure=true), use the `__Host-` prefix
+  // so the browser enforces three extra invariants: the cookie was set over
+  // HTTPS, Path=/, and no Domain attribute. That blocks a sibling subdomain
+  // (compromised or rogue) from overwriting our session cookie or planting a
+  // pre-set one. RFC 6265 sec 4.1.3.
+  private[web] def sessionCookieName(secure: Boolean): String =
+    if secure then s"__Host-$DefaultSessionCookieName" else DefaultSessionCookieName
 
   private def sessionCookieHeader(token: String, ttlMs: Long, secure: Boolean): String =
     val parts = Vector.newBuilder[String]
-    parts += s"$DefaultSessionCookieName=$token"
+    parts += s"${sessionCookieName(secure)}=$token"
     parts += "Path=/"
     parts += s"Max-Age=${math.max(1L, ttlMs / 1000L)}"
     parts += "HttpOnly"
@@ -888,9 +1295,46 @@ object PlatformUserAuth:
       parts += "Secure"
     parts.result().mkString("; ")
 
+  // OIDC state cookie binds the random `state` value embedded in the
+  // authorization URL to the user-agent that initiated the flow. Without this
+  // binding, an attacker who completes their own authorization up to the
+  // redirect step can forward `?state=X&code=ATTACKER_CODE` to a victim; our
+  // callback would happily exchange the code and the victim's browser would
+  // end up holding a session for the attacker's account (OAuth 2.0 BCP
+  // "covert-redirect" / "login CSRF"). With the cookie, only the user agent
+  // that received the Set-Cookie at /start can supply the matching cookie at
+  // /callback.
+  private[web] def oidcStateCookieName(secure: Boolean): String =
+    if secure then s"__Host-$DefaultOidcStateCookieName" else DefaultOidcStateCookieName
+
+  private def oidcStateCookieHeader(state: String, ttlMs: Long, secure: Boolean): String =
+    val parts = Vector.newBuilder[String]
+    parts += s"${oidcStateCookieName(secure)}=$state"
+    parts += "Path=/"
+    parts += s"Max-Age=${math.max(1L, ttlMs / 1000L)}"
+    parts += "HttpOnly"
+    // SameSite=Lax: the OIDC callback is a top-level GET navigation back from
+    // the provider, which Lax permits. SameSite=Strict would block the cookie
+    // on the callback hop and break the flow.
+    parts += "SameSite=Lax"
+    if secure then
+      parts += "Secure"
+    parts.result().mkString("; ")
+
+  private def clearOidcStateCookieHeader(secure: Boolean): String =
+    val parts = Vector.newBuilder[String]
+    parts += s"${oidcStateCookieName(secure)}="
+    parts += "Path=/"
+    parts += "Max-Age=0"
+    parts += "HttpOnly"
+    parts += "SameSite=Lax"
+    if secure then
+      parts += "Secure"
+    parts.result().mkString("; ")
+
   private def clearSessionCookieHeader(secure: Boolean): String =
     val parts = Vector.newBuilder[String]
-    parts += s"$DefaultSessionCookieName="
+    parts += s"${sessionCookieName(secure)}="
     parts += "Path=/"
     parts += "Max-Age=0"
     parts += "HttpOnly"
@@ -909,5 +1353,21 @@ object PlatformUserAuth:
 
   def oidcSuccessRedirect: String = OidcSuccessRedirect
 
+  // Cap the error string that flows into the auth-failure redirect URL.
+  // Callers in AuthStack already cap the provider's ?error= callback param
+  // upfront, but finishOidc returns wrapped error messages from internal
+  // failures (e.g. "Google OIDC exchange failed: <ujson InvalidData with the
+  // full response body>" if Google returned a non-JSON or unexpectedly-large
+  // payload) and those flow through oidcFailureRedirect unchecked. Without a
+  // cap here, a 2 MB upstream parse-error message becomes a 2 MB Location
+  // header -- which browsers refuse to follow (~2-8 KB practical limit) AND
+  // round-trips attacker-controllable bytes back through the failure
+  // landing redirect. 256 chars matches the OAuth-error-code cap in
+  // AuthStack and is plenty for any operator-facing failure string.
+  private val MaxOidcFailureRedirectErrorLength = 256
   def oidcFailureRedirect(error: String): String =
-    s"$OidcFailureRedirectPrefix${urlEncode(error)}"
+    val capped =
+      if error == null then ""
+      else if error.length <= MaxOidcFailureRedirectErrorLength then error
+      else error.substring(0, MaxOidcFailureRedirectErrorLength) + "...(truncated)"
+    s"$OidcFailureRedirectPrefix${urlEncode(capped)}"

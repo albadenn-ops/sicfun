@@ -2,6 +2,7 @@ package sicfun.holdem.equity
 import sicfun.holdem.types.*
 
 import munit.FunSuite
+import java.nio.file.Files
 import scala.concurrent.duration.*
 import scala.util.Random
 
@@ -81,5 +82,37 @@ class HeadsUpEquityCanonicalTableTest extends FunSuite:
         parallelism = 4
       )
       assertEquals(sequential.values, parallel.values)
+    }
+  }
+
+  test("canonical table write/read roundtrip preserves metadata and values") {
+    TestSystemPropertyScope.withSystemProperties(
+      Vector(PreflopBackendProperty -> Some("cpu"))
+    ) {
+      val table = HeadsUpEquityCanonicalTable.buildAll(
+        mode = HeadsUpEquityTable.Mode.MonteCarlo(8),
+        rng = new Random(29L),
+        maxMatchups = 24L,
+        parallelism = 1
+      )
+      val path = Files.createTempFile("sicfun-canonical-roundtrip-", ".bin")
+      try
+        val meta = HeadsUpEquityTableMeta(
+          formatVersion = HeadsUpEquityTableFormat.Version,
+          mode = "mc",
+          trials = 8,
+          seed = 29L,
+          maxMatchups = 24L,
+          totalMatchups = HeadsUpEquityCanonicalTable.totalCanonicalKeys.toLong,
+          count = table.values.size,
+          canonical = true,
+          createdAtMillis = 123456789L
+        )
+        HeadsUpEquityCanonicalTableIO.write(path.toString, table, meta)
+        val (roundTripped, readMeta) = HeadsUpEquityCanonicalTableIO.readWithMeta(path.toString)
+        assertEquals(readMeta, meta)
+        assertEquals(roundTripped.values, table.values)
+      finally
+        Files.deleteIfExists(path)
     }
   }

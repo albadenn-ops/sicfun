@@ -12,9 +12,11 @@ final case class StrategicRivalBelief(
     typePosterior: DiscreteDistribution[StrategicClass]
 ) extends RivalBeliefState:
 
-  /** Identity update — real Bayesian update happens via kernel pipeline in Dynamics.fullStep(). */
-  // REDUCTIONISM: identity pass-through — real update happens in kernel pipeline StateEmbeddingUpdater
-  @deprecated("Use kernel pipeline StateEmbeddingUpdater instead — update happens via Dynamics.fullStep", "v0.32")
+  /** Identity update retained for the [[RivalBeliefState]] contract.
+    *
+    * Real Bayesian updates flow through the kernel pipeline and [[StateEmbeddingUpdater]]
+    * in `Dynamics.fullStep`; this method remains an explicit no-op adapter.
+    */
   def update(signal: ActionSignal, publicState: PublicState): StrategicRivalBelief =
     this
 

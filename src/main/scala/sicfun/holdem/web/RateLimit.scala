@@ -12,15 +12,17 @@ private[web] object RateLimit:
   val ClientIpSourceRemoteAddress = "remote-address"
 
   enum RateLimitBucket:
-    case Submit, JobStatus
+    case Submit, JobStatus, Auth
 
     def id: String = this match
       case Submit => "submit"
       case JobStatus => "job-status"
+      case Auth => "auth"
 
     def description: String = this match
       case Submit => "submit"
       case JobStatus => "job status"
+      case Auth => "auth"
 
   final case class RateLimitRejection(
       bucket: RateLimitBucket,
@@ -32,6 +34,7 @@ private[web] object RateLimit:
   final class RequestRateLimiter(
       submitsPerMinute: Int,
       statusPerMinute: Int,
+      authPerMinute: Int,
       trustedClientIpHeader: Option[String],
       trustedProxyIps: Set[String],
       nowMillis: () => Long = () => System.currentTimeMillis()
@@ -47,6 +50,7 @@ private[web] object RateLimit:
       val limitPerMinute = bucket match
         case RateLimitBucket.Submit => submitsPerMinute
         case RateLimitBucket.JobStatus => statusPerMinute
+        case RateLimitBucket.Auth => authPerMinute
       if limitPerMinute <= 0 then None
       else
         val now = nowMillis()
@@ -82,7 +86,17 @@ private[web] object RateLimit:
         while iterator.hasNext do
           val entry = iterator.next()
           if entry.getValue.windowStartedAtMs < cutoff then
-            iterator.remove()
+            // Compare-and-remove: iterator.remove() unconditionally drops the
+            // key, but a concurrent check() that just refreshed the entry into
+            // a NEW window between this snapshot read and the remove call
+            // would have its update erased. computeIfPresent re-checks the
+            // current value under the bin lock so a refreshed window stays in
+            // place. Same race shape SessionManager.purgeExpired had.
+            windows.computeIfPresent(
+              entry.getKey,
+              (_, current) =>
+                if current.windowStartedAtMs < cutoff then null else current
+            )
 
   def rateLimitClientIpSource(
       trustedClientIpHeader: Option[String],
@@ -95,6 +109,38 @@ private[web] object RateLimit:
         s"header:$header via loopback-only"
       case None =>
         ClientIpSourceRemoteAddress
+
+  /** Resolve the audit-display client address for the given request, applying the
+    * same trusted-proxy policy as rate limiting so audit `remote=` log fields and
+    * rate-limit `clientKey=` values agree on who the client is.
+    *
+    * Behind a trusted reverse proxy (peer is loopback or in `trustedProxyIps` and a
+    * single-valued `trustedClientIpHeader` parses as an IP), returns the resolved
+    * client IP without a port (X-Forwarded-For carries no port). Otherwise returns
+    * the formatted direct TCP peer `host:port` with IPv6 brackets per RFC 3986 §3.2.2.
+    *
+    * IPv6 hosts get bracketed in both cases so a log-line parser splitting on the
+    * trailing `:port` cannot mistake the address's internal `:` for a port delimiter. */
+  def resolveAuditClientAddress(
+      exchange: HttpExchange,
+      trustedClientIpHeader: Option[String],
+      trustedProxyIps: Set[String]
+  ): String =
+    trustedClientIpHeader
+      .filter(_ => trustsRateLimitClientIpHeader(remoteInetAddress(exchange), trustedProxyIps))
+      .flatMap(headerName => forwardedClientKey(exchange, headerName))
+      .map(formatAuditHostOnly)
+      .getOrElse(formatAuditPeer(exchange))
+
+  private def formatAuditHostOnly(host: String): String =
+    if host.contains(':') then s"[$host]" else host
+
+  private[web] def formatAuditPeer(exchange: HttpExchange): String =
+    Option(exchange.getRemoteAddress).map { address =>
+      val host = address.getHostString
+      val port = address.getPort
+      if host.contains(':') then s"[$host]:$port" else s"$host:$port"
+    }.getOrElse("-")
 
   def trustedProxyIpSummary(trustedProxyIps: Set[String]): String =
     trustedProxyIps.toVector.sorted match

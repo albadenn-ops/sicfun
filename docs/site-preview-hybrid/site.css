@@ -72,6 +72,60 @@ body::before {
   top: 12px;
 }
 
+/* The skip-link target (<main id="main-content"> in index.html) carries
+   tabindex="-1" so the link actually moves keyboard focus into the
+   content region (without that attribute the skip link silently no-op's
+   on Safari and some Chromium configs). With the
+   attribute in place, browsers may render a focus indicator on <main>
+   when the user activates the skip link -- a large outline around the
+   entire content block, which reads as a visual defect rather than
+   useful feedback. The WAI-ARIA Authoring Practices skip-link pattern
+   suppresses this outline: the scroll-to-content is the feedback the
+   USER perceives (their viewport jumped to a new section), and their
+   next Tab key moves focus to the first interactive child of <main>
+   which has its OWN per-element focus-visible style. So the interim
+   "main is focused" state needs no outline of its own. Screen reader
+   users get audio cues regardless of the visual outline. Scoped to
+   the specific ID rather than `main:focus` so a future page with
+   multiple <main> elements (rare but valid in HTML5) doesn't lose
+   focus indication on other regions. */
+#main-content:focus {
+  outline: none;
+}
+
+/* No-script fallback banner: hand-history upload, Playing Hall self-play,
+   and account auth panels are all JS-driven (fetch + polling against the
+   local server). Users with JS disabled would otherwise see static prose
+   plus apparently-broken submit buttons. The banner is the first thing
+   inside <main> so it appears above the page header. Visual treatment
+   borrows the site's existing alert palette (--warning #ff4d00 on
+   rgba(255, 77, 0, 0.14) tint with a thicker left border, matching
+   .warning-block) so it reads as "important notice" rather than a
+   decorative element. */
+.noscript-notice {
+  margin: 0 0 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--warning);
+  border-left-width: 3px;
+  background: var(--warning-soft);
+  color: var(--ink);
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.noscript-notice strong {
+  color: var(--warning);
+  letter-spacing: 0.02em;
+}
+
+.noscript-notice p {
+  margin: 0;
+}
+
+.noscript-notice p + p {
+  margin-top: 8px;
+}
+
 .page {
   position: relative;
   width: min(1180px, calc(100% - 32px));
@@ -300,6 +354,65 @@ h3 {
   box-shadow: none;
 }
 
+/* In-flight / unavailable button styling. Without an explicit rule the
+   browser default disabled styling varies (Chrome lowers opacity to
+   ~60%, Firefox lightens colors via filter, Safari does its own
+   thing), so an operator-facing button stuck on "Queueing Review..."
+   / "Running Hall..." / "Signing out..." / "Saving..." while a
+   request is in flight looks different across browsers AND may not
+   read clearly against the dark signal-green theme on any of them.
+   `opacity:0.6` is the consistent visual signal -- the button is
+   visibly faded vs its enabled neighbor. `cursor:not-allowed` is
+   the pointer cue ("you can't click this right now"). `box-shadow:
+   none` overrides the hover/focus glow (which has equal specificity
+   to :disabled but loses on source order via this rule sitting
+   after the hover rules above; both .button:hover and .button-
+   secondary:hover only set box-shadow + color/border properties
+   that compose acceptably with the disabled opacity reduction).
+   Covers .button + .button-secondary; .preset-button never gets
+   disabled in the JS (presets are stateless triggers), and the
+   .button-google anchor isn't a <button> so :disabled doesn't
+   apply to it anyway -- the JS toggles its .hidden class to
+   show/hide instead. forced-colors mode: the system disabled-text
+   color (GrayText) takes over via the browser default rendering;
+   no additional rule needed -- forced-colors flattens opacity
+   anyway, and CanvasText / GrayText already distinguishes enabled
+   from disabled. */
+.button:disabled,
+.button-secondary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* Forced-colors mode (Windows High Contrast) automatically applies
+   `color: GrayText` to :disabled elements via the UA stylesheet --
+   that's the system-defined "this control is disabled" signal in the
+   user's chosen high-contrast palette. But opacity is NOT among the
+   properties forced-colors flattens (only colors, background-color,
+   border-color, box-shadow get the flattening treatment), so the
+   opacity:0.6 from the rule above is still in effect inside forced-
+   colors. Result: a GrayText-colored button rendered at 60% opacity
+   against the system Canvas -- significantly REDUCED contrast vs the
+   100% opacity GrayText that forced-colors users explicitly opted
+   into for maximum visibility. The whole point of the high-contrast
+   theme is to maximize signal in low-vision conditions, and the
+   opacity-faded variant defeats that. Reset opacity to 1 so the
+   system's GrayText color provides the disabled signal at full
+   contrast, the way the user's accessibility settings intend. The
+   earlier comment block on `.button:disabled` was wrong to claim
+   "forced-colors flattens opacity anyway" -- it doesn't, and this
+   override is needed. cursor + box-shadow don't need forced-colors
+   overrides: cursor isn't a color property, and box-shadow is
+   already none in the base disabled rule (and forced-colors would
+   strip it anyway). */
+@media (forced-colors: active) {
+  .button:disabled,
+  .button-secondary:disabled {
+    opacity: 1;
+  }
+}
+
 .info-card-muted,
 .fit-card-muted {
   border-left: 2px solid rgba(255, 77, 0, 0.4);
@@ -450,8 +563,44 @@ h3 {
   font-size: 0.95rem;
 }
 
+/* Keyboard focus indicator: the default browser focus ring (typically a
+   blue 1-2px outline) is hard to spot on the dark #0b120f input
+   background and doesn't match the site's signal-green palette that
+   .button:focus-visible already uses. Use :focus-visible (not :focus)
+   so a click on a select doesn't permanently show the ring; keyboard
+   Tab focus AND arrow-key navigation both trigger :focus-visible.
+   outline-offset:2px keeps the ring outside the existing 1px border
+   so it stays visible even when the field is .invalid (which paints
+   the border --warning orange). */
+.field input:focus-visible,
+.field select:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
 .field input[type="file"] {
   padding: 12px 14px;
+}
+
+/* iOS Safari (and some Android browsers) auto-zoom the viewport on
+   input/select focus when the effective font-size is below 16px. The
+   .field rule above uses 0.95rem (~15.2px) for desktop visual density,
+   which is fine on hover-capable pointers but trips the zoom on touch
+   devices. Once it fires there is no scripted way to undo the zoom --
+   the user is stuck zoomed in until they pinch-zoom out manually, and
+   on a one-handed phone hold that's an awkward two-handed gesture. We
+   key on (pointer: coarse) -- which catches iPhone, iPad, and Android
+   touch devices regardless of viewport width -- and bump the font-size
+   to exactly 16px so the auto-zoom threshold isn't crossed. Desktop
+   rendering is unaffected because pointer:fine doesn't match the
+   query. The change is purely visual (text reads at 16px instead of
+   15.2px on touch), no layout consequences -- min-height: 48px on the
+   inputs already accommodates the slightly taller text. */
+@media (pointer: coarse) {
+  .field input,
+  .field select {
+    font-size: 16px;
+  }
 }
 
 .field input::file-selector-button {
@@ -509,6 +658,69 @@ h3 {
   background: rgba(74, 246, 38, 0.12);
   color: var(--ink);
   box-shadow: 0 0 18px rgba(74, 246, 38, 0.12);
+}
+
+/* Windows High Contrast Mode (Contrast Themes in Win 11, surfaced as
+   the `forced-colors: active` media query) strips the green-tinted
+   background, the box-shadow glow, AND collapses the border-color
+   flip from --line to --signal because both colors get remapped to
+   the same system CanvasText slot. The result: checked and unchecked
+   chip-check / toggle controls render identically -- the user cannot
+   tell which villain-pool entries are selected, which gtoMode is
+   active, or which seed/fullRing toggles are on. Re-introduce a
+   forced-colors-aware checked signal with an inner CanvasText
+   outline; outline width is exempt from forced-colors color flattening
+   and -2px offset draws the outline INSIDE the existing border so it
+   reads as a double-rule chip rather than colliding with the
+   surrounding flex layout. */
+@media (forced-colors: active) {
+  .chip-check input:checked + span,
+  .toggle input:checked + span {
+    outline: 2px solid CanvasText;
+    outline-offset: -2px;
+  }
+
+  /* In normal mode, buttons signal keyboard focus via box-shadow (the
+     green glow on .button:focus-visible / .button-secondary:focus-
+     visible / .button-google:focus-visible above). The CSS Color
+     Adjustment Module Level 1 spec lets UAs suppress box-shadow when
+     `forced-colors: active` is in effect (Windows High Contrast /
+     Contrast Themes in Win 11), and the major browsers do exactly
+     that -- box-shadow is treated as a decorative effect rather than
+     a structural style. The net result on a button in forced-colors
+     mode: NO visible focus indicator on Tab-through, because the
+     focused-state's only difference from the resting state was the
+     glow that just got suppressed. Add an explicit outline so
+     keyboard users in forced-colors-active environments still see
+     where focus lands. Uses `CanvasText` (the system foreground
+     color) so the outline tracks the user's chosen high-contrast
+     scheme rather than carrying a hardcoded hex that the OS might
+     remap unpredictably. outline-offset: 2px draws the indicator
+     OUTSIDE the button's border so it doesn't collide with the
+     button text or the resting-state border styling. Same
+     `outline: 2px solid CanvasText` shape as the chip-check rule
+     above for visual consistency across the page's keyboard-focus
+     affordances. */
+  .button:focus-visible,
+  .button-secondary:focus-visible,
+  .button-google:focus-visible {
+    outline: 2px solid CanvasText;
+    outline-offset: 2px;
+  }
+}
+
+/* The actual <input type="checkbox"> is visually hidden (opacity:0,
+   position:absolute) and the sibling <span> is the painted chip.
+   Without this rule, keyboard users Tabbing through the villain-pool
+   / toggle chips see NO focus indicator -- the focus is on the
+   invisible checkbox. Mirror the focus state onto the visible span so
+   the user can tell where the cursor is before they hit Space to
+   toggle. Same signal-green outline used for the text/select fields
+   above, for consistency. */
+.chip-check input:focus-visible + span,
+.toggle input:focus-visible + span {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
 }
 
 .hall-toggles {
@@ -579,6 +791,14 @@ h3 {
   font-family: "Bahnschrift SemiCondensed", "Arial Narrow", "Franklin Gothic Medium", "Segoe UI", sans-serif;
   font-size: 1.6rem;
   line-height: 1;
+  /* The Model card sometimes holds a full Windows path
+     ('C:\Program Files\sicfun\artifacts\model-v3'). Default overflow-wrap
+     would let it bust the grid column (.summary-grid uses minmax(0,1fr)
+     which is permissive about overflow). `anywhere` lets the browser
+     break inside the path so the card just gets taller rather than
+     wider. Site/Hands/Decisions/EV-Lost cards hold short values and
+     are unaffected. */
+  overflow-wrap: anywhere;
 }
 
 .summary-note {
@@ -632,6 +852,13 @@ h3 {
   font-family: "Consolas", "Courier New", monospace;
   font-size: 0.84rem;
   line-height: 1.7;
+  /* Hall output cards drop full file paths into .opponent-meta. A path
+     like 'C:\Users\Alex\code\math\untitled\data\web-playing-hall\<jobId>\
+     run-output.txt' has no break points, so default overflow-wrap would
+     let it bust the card width. `anywhere` lets the browser break inside
+     the path as needed; opponent player names + hints are short enough
+     that the rule doesn't affect them. */
+  overflow-wrap: anywhere;
 }
 
 .decision-grid {
@@ -692,6 +919,11 @@ h3 {
   color: var(--ink);
   font-family: "Consolas", "Courier New", monospace;
   font-size: 0.8rem;
+  /* #model-source ('Model: <abs path>') is the long-path consumer of this
+     class; other usages are short static labels or formatted counts. The
+     wrap is harmless for the short cases and prevents the model-source
+     line from busting its container on narrow viewports. */
+  overflow-wrap: anywhere;
 }
 
 .output-grid {
@@ -906,6 +1138,21 @@ h3 {
 .form-section > summary::-webkit-details-marker { display: none; }
 .form-section > summary::before { content: "▸ "; color: var(--signal); }
 .form-section[open] > summary::before { content: "▾ "; }
+
+/* Visible keyboard-focus ring for the page's <details> disclosure
+   widgets (collapsible form sections, recent-runs drawer, dashboard-
+   chart drilldowns). Browser-default focus on a <summary> is a thin
+   blue outline that's hard to spot against the dark #0a0f0d
+   background, the same problem the .field input :focus-visible rule
+   solves. Use :focus-visible (not :focus) so a click-to-toggle does
+   not pin the ring on every closed summary; keyboard Tab and
+   space/enter activation still trigger :focus-visible. Generic
+   `summary:focus-visible` covers every <details> on the page in one
+   rule. */
+summary:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
 .form-section-body {
   padding: 12px 14px 14px;
   display: grid;
@@ -928,6 +1175,27 @@ h3 {
 .help:hover, .help:focus {
   outline: none;
   border-color: var(--signal);
+}
+/* Keyboard focus needs an actual ring -- the :hover/:focus rule above
+   strips the user-agent default outline (which clashes with the dark
+   theme as a thin blue line) but the border-color shift from --line
+   (12% green) to --signal (100% green) is a thin 1px change that's easy
+   to miss on Tab, especially in lower-vision setups. Mirror the same
+   2px signal-green outline the .field input / .button / .chip-check /
+   summary :focus-visible rules use elsewhere on the page so keyboard
+   focus on the help icon reads identically to every other focusable
+   element. :focus-visible (not :focus) so a mouse-click on the icon
+   does not paint the ring -- the user has the mouse on the element
+   already and gets the tooltip via :hover::after, no focus indicator
+   needed. :focus-visible has higher source-order weight than the
+   :hover/:focus rule above so this outline wins over outline:none for
+   keyboard focus. Older browsers without :focus-visible support (pre-
+   Chrome 86 / Firefox 85 / Safari 15.4, March 2022) ignore this rule
+   and keep the existing outline-none + green-border behavior, so no
+   regression -- only modern browsers gain the explicit ring. */
+.help:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
 }
 .help:hover::after, .help:focus::after {
   content: attr(data-help);
@@ -970,6 +1238,27 @@ h3 {
   border-color: var(--signal);
   color: var(--ink);
 }
+/* Keyboard focus needs a real ring, not just the 1px border-color shift
+   from --line (12% green) to --signal (100% green) above -- same low-
+   contrast problem the .help :focus rule had before its outline fix.
+   The preset-button hover and focus-visible declarations above are
+   shared today, so a sighted KEYBOARD user Tabbing across the preset
+   row sees the same visual state as a hovering mouse user (no
+   distinguishing focus indicator). The main .button uses a box-shadow
+   glow for its focus-visible state (grep `.button:focus-visible` in
+   this file); the smaller preset buttons inherit a thinner visual
+   treatment and the 1px border shift alone is easy to miss, especially
+   on a lower-vision setup. Add the same 2px signal-green outline
+   pattern the .field input / .help / .chip-check / summary focus-
+   visible rules use elsewhere so keyboard focus on a preset button
+   reads identically to keyboard focus on any other focusable control.
+   :focus-visible (not :focus) so a mouse-click on the preset still
+   gets the existing hover-equivalent styling without the additional
+   ring. */
+.preset-button:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
 
 .field input.invalid,
 .field select.invalid {
@@ -982,9 +1271,40 @@ h3 {
   font-size: 0.72rem;
   letter-spacing: 0.08em;
 }
+.field-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+}
 .chip-check span.invalid {
   border-color: var(--warning) !important;
   color: var(--warning) !important;
+}
+
+/* Forced-colors parity for the .invalid validation state. The orange
+   --warning border on input/select fields + the inset box-shadow glow
+   + the warning-colored chip border all collapse in Windows High
+   Contrast Mode: --warning gets remapped to the same system
+   CanvasText slot as --line, so an invalid field's border looks
+   identical to a valid field's, and the rgba box-shadow drops
+   entirely. The .field-error message below the input still renders,
+   so a careful reader can still spot the rejected value -- but the
+   at-a-glance "which field is bad?" cue the colored border was
+   carrying is gone. Replace it with a dashed outline (geometry-only
+   signal that survives the color flattening); pairs with the
+   :checked-state forced-colors rule earlier on this file so both
+   "user input is wrong" and "this chip is selected" remain
+   distinguishable from their neutral states in High Contrast. */
+@media (forced-colors: active) {
+  .field input.invalid,
+  .field select.invalid,
+  .chip-check span.invalid {
+    outline: 2px dashed CanvasText;
+    outline-offset: -2px;
+  }
 }
 
 .recent-runs {
@@ -1002,12 +1322,34 @@ h3 {
 .recent-runs[open] > summary::before { content: "▾ "; }
 .recent-runs-count { color: var(--muted); margin-left: 6px; font-family: "Consolas", "Courier New", monospace; font-size: 0.82rem; }
 .recent-runs-body { padding: 10px 14px 14px; display: grid; gap: 8px; }
+.recent-runs-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding-bottom: 4px; }
 .recent-run { padding: 8px 10px; border: 1px solid var(--line); background: rgba(74, 246, 38, 0.04); }
 .recent-run-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .recent-run-ts { color: var(--muted); font-family: "Consolas", "Courier New", monospace; font-size: 0.82rem; }
+/* "(cancelled)" suffix on a recent-run timestamp. Uses --warning to
+   visually distinguish from successful runs without shouting -- the
+   user clicked Cancel intentionally so the entry is informational
+   rather than an error. Same font as the timestamp so it doesn't
+   visually separate from the ts string. */
+.recent-run-cancelled { color: var(--warning); }
 .recent-run-meta { margin: 6px 0 0; color: var(--muted); font-family: "Consolas", "Courier New", monospace; font-size: 0.8rem; }
+/* Group the Load + remove buttons so flex space-between keeps them
+   together on the right instead of distributing across the row. The
+   remove button is narrow (single ×) so a tighter gap reads as a unit. */
+.recent-run-actions { display: inline-flex; align-items: center; gap: 6px; }
+.recent-run-remove { padding: 4px 10px; min-width: 0; }
 
-.hall-progress { display: grid; gap: 8px; margin-top: 12px; }
+/* margin-top dropped when hall-progress was promoted from a nested
+   child of hall-status to a sibling under .review-panel. The previous
+   12px margin was sized to space the progress card from the
+   section-note above it inside hall-status (block layout, no gap), but
+   .review-panel uses `display: grid; gap: 18px` -- so any vertical
+   spacing between hall-status and hall-progress comes from the grid
+   gap automatically. Keeping the margin-top stacked an asymmetric
+   30px above the card (18px gap + 12px margin) vs the clean 18px
+   below it; the grid gap alone gives consistent spacing with the
+   sibling cards (hall-status above, hall-results below). */
+.hall-progress { display: grid; gap: 8px; }
 .hall-progress-bar {
   position: relative;
   height: 6px;
@@ -1026,6 +1368,20 @@ h3 {
 @keyframes hall-indeterminate {
   from { left: -40%; }
   to   { left: 100%; }
+}
+/* Respect prefers-reduced-motion: users who opted into less animation
+   (e.g., vestibular disorders, motion-triggered migraines) shouldn't see
+   the gradient sliding left-to-right forever. Pin the indicator at the
+   left edge so the bar still SHOWS the work-in-progress region (the
+   user knows polling is alive) without the perpetual horizontal slide.
+   aria-busy=true on the wrapper keeps the assistive-tech signal. */
+@media (prefers-reduced-motion: reduce) {
+  .hall-progress-bar-inner {
+    animation: none;
+    left: 0;
+    width: 100%;
+    opacity: 0.45;
+  }
 }
 .hall-progress-meta {
   display: flex;

@@ -4,7 +4,6 @@ import sicfun.core.Card
 import sicfun.holdem.types.*
 import sicfun.holdem.strategic.types.*
 
-@scala.annotation.nowarn("msg=deprecated")
 class ApproximatePathTest extends munit.FunSuite:
 
   private def card(token: String): Card =
@@ -29,7 +28,7 @@ class ApproximatePathTest extends munit.FunSuite:
   private def defaultActions: Vector[PokerAction] =
     Vector(PokerAction.Fold, PokerAction.Call, PokerAction.Raise(50.0))
 
-  test("decide() on WPomcp path produces DecisionEvaluationBundle"):
+  test("decideCertified() on WPomcp path produces DecisionEvaluationBundle"):
     val config = StrategicEngine.Config(
       numSimulations = 100,
       solverBackend = StrategicEngine.SolverBackend.WPomcp,
@@ -41,7 +40,7 @@ class ApproximatePathTest extends munit.FunSuite:
     engine.initSession(rivalIds = Vector(PlayerId("v1")))
     engine.startHand(testHeroCards)
 
-    val chosen = engine.decide(minimalState, defaultActions)
+    val chosen = engine.decideCertified(minimalState, defaultActions)
 
     // Action must come from the candidate set
     assert(defaultActions.contains(chosen), s"Action $chosen not in candidates")
@@ -60,7 +59,7 @@ class ApproximatePathTest extends munit.FunSuite:
     val engine = new StrategicEngine(config)
     engine.initSession(rivalIds = Vector(PlayerId("v1")))
     engine.startHand(testHeroCards)
-    engine.decide(minimalState, defaultActions)
+    engine.decideCertified(minimalState, defaultActions)
 
     engine.lastDecisionBundle match
       case Some(bundle) =>
@@ -79,7 +78,7 @@ class ApproximatePathTest extends munit.FunSuite:
         // This is acceptable; the fallback still populates the bundle
         ()
 
-  test("decide() fallback path still populates bundle when solver unavailable"):
+  test("decideCertified() fallback path still populates bundle when solver unavailable"):
     // This test verifies the fallback path (native DLL not loaded) still produces
     // a bundle with BaselineFallback-style certification
     val config = StrategicEngine.Config(
@@ -92,12 +91,12 @@ class ApproximatePathTest extends munit.FunSuite:
     val engine = new StrategicEngine(config)
     engine.initSession(rivalIds = Vector(PlayerId("v1")))
     engine.startHand(testHeroCards)
-    val chosen = engine.decide(minimalState, defaultActions)
+    val chosen = engine.decideCertified(minimalState, defaultActions)
     assert(defaultActions.contains(chosen))
     // Bundle should always be set (even on fallback)
     assert(engine.lastDecisionBundle.isDefined, "Bundle should be set even on fallback")
 
-  test("decide() with multiple rivals produces valid bundle"):
+  test("decideCertified() with multiple rivals produces valid bundle"):
     val config = StrategicEngine.Config(
       numSimulations = 100,
       solverBackend = StrategicEngine.SolverBackend.WPomcp,
@@ -108,7 +107,7 @@ class ApproximatePathTest extends munit.FunSuite:
     val engine = new StrategicEngine(config)
     engine.initSession(rivalIds = Vector(PlayerId("v1"), PlayerId("v2")))
     engine.startHand(testHeroCards)
-    val chosen = engine.decide(minimalState, defaultActions)
+    val chosen = engine.decideCertified(minimalState, defaultActions)
     assert(defaultActions.contains(chosen))
     assert(engine.lastDecisionBundle.isDefined)
 
@@ -126,7 +125,7 @@ class ApproximatePathTest extends munit.FunSuite:
     val engine = new StrategicEngine(config)
     engine.initSession(rivalIds = Vector(PlayerId("v1")))
     engine.startHand(testHeroCards)
-    engine.decide(minimalState, defaultActions)
+    engine.decideCertified(minimalState, defaultActions)
 
     engine.lastDecisionBundle.foreach { bundle =>
       bundle.certification match

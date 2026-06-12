@@ -74,7 +74,7 @@ $previousSbtOpts = $null
 Push-Location $repoRoot
 try {
   $previousSbtOpts = $env:SBT_OPTS
-  $env:SBT_OPTS = "-Dsbt.server.autostart=false"
+  $env:SBT_OPTS = "-Dsbt.server.autostart=false --add-opens java.base/java.lang=ALL-UNNAMED -XX:+IgnoreUnrecognizedVMOptions"
 
   if ($Quick) {
     Write-Host "Quick proof covers core engine/runtime smoke. Run the full proof for hand-history review end-to-end coverage."

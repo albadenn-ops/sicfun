@@ -204,3 +204,41 @@ if (-not (Test-Path $pomcpDll)) {
 }
 
 Write-Host "Built: $pomcpDll"
+
+# --- Wasserstein EMD (uses vendored LEMON network simplex; requires OpenMP) ---
+# The vendored LEMON header (src/main/native/vendor/network_simplex_simple.h)
+# unconditionally includes <omp.h> and uses omp_get_max_threads /
+# omp_get_thread_num plus #pragma omp parallel. Compile with -fopenmp; libomp
+# ships with LLVM's Windows toolchain under bin\libomp.dll and must be on PATH
+# at runtime (or copied alongside the produced DLL). The pure-Scala fallback in
+# WassersteinDroRuntime.scala covers callers when this DLL is not built/loaded.
+$wassSrc = Join-Path $PSScriptRoot "jni\HoldemWassersteinBindings.cpp"
+$wassDll = Join-Path $OutDir "sicfun_wasserstein_native.dll"
+$wassLib = Join-Path $OutDir "sicfun_wasserstein_native.lib"
+$wassExp = Join-Path $OutDir "sicfun_wasserstein_native.exp"
+
+if (Test-Path $wassDll) { Remove-Item $wassDll -Force }
+if (Test-Path $wassLib) { Remove-Item $wassLib -Force }
+if (Test-Path $wassExp) { Remove-Item $wassExp -Force }
+
+& $clang `
+  -std=c++17 `
+  -O3 `
+  -DNDEBUG `
+  -D_CRT_SECURE_NO_WARNINGS `
+  -fopenmp `
+  -shared `
+  "-I$jniInclude" `
+  "-I$jniWinInclude" `
+  -o $wassDll `
+  $wassSrc
+
+if ($LASTEXITCODE -ne 0) {
+  throw "Native Wasserstein CPU build failed with exit code $LASTEXITCODE"
+}
+
+if (-not (Test-Path $wassDll)) {
+  throw "Build did not produce $wassDll"
+}
+
+Write-Host "Built: $wassDll"

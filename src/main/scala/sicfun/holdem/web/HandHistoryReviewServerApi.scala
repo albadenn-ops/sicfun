@@ -25,6 +25,39 @@ import sicfun.holdem.web.Readiness.{ReadinessStatus, admissionRejectedMessage}
 
 /** API submit/status handlers and request parsing for [[HandHistoryReviewServer]]. */
 private[web] object HandHistoryReviewServerApi:
+
+  /** Build the comma-separated Allow value the JSON handlers advertise. We
+    * always answer OPTIONS (see optionsResponse), so OPTIONS belongs in
+    * Allow per RFC 7231 sec 7.4.1: "The Allow header field lists the
+    * methods supported by the resource". */
+  private def allowValue(supported: String): String = s"$supported, OPTIONS"
+
+  /** Build a 405 JsonResponse with the Allow header set per RFC 7231 sec 6.5.5,
+    * which requires the server "MUST generate an Allow header field in a 405
+    * response containing a list of the target resource's currently supported
+    * methods." `supported` is a single token like "GET" or a comma-separated
+    * list like "GET, DELETE"; OPTIONS is appended automatically because the
+    * handler answers it. */
+  private[web] def methodNotAllowed(supported: String): JsonResponse =
+    JsonResponse(
+      status = 405,
+      value = Obj("error" -> Str(s"$supported required")),
+      headers = Vector("Allow" -> allowValue(supported))
+    )
+
+  /** Build an OPTIONS response advertising the supported methods. Per RFC 7231
+    * sec 4.3.7, OPTIONS responses SHOULD include an Allow header so clients
+    * (and capability-discovery tools) can learn what verbs the resource
+    * accepts without trying each one and parsing the 405 fallback. OPTIONS
+    * is appended to Allow so the advertised set is complete. */
+  private[web] def optionsResponse(supported: String): JsonResponse =
+    val allow = allowValue(supported)
+    JsonResponse(
+      status = 200,
+      value = Obj("allow" -> Str(allow)),
+      headers = Vector("Allow" -> allow)
+    )
+
   private val DefaultPlayingHallRoot = Paths.get("data", "web-playing-hall")
   private val DefaultPlayingHallHands = 240
   private val DefaultPlayingHallTableCount = 2
@@ -43,7 +76,8 @@ private[web] object HandHistoryReviewServerApi:
       readiness: () => ReadinessStatus,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Left(405 -> "POST required")
+    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("POST"))
+    else if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
     else if !ensurePlatformCsrf(exchange, platformAuth) then Left(403 -> SessionCsrfRequiredMessage)
     else if !readiness().acceptingAnalysisJobs then
       Left(503 -> admissionRejectedMessage(readiness()))
@@ -86,7 +120,8 @@ private[web] object HandHistoryReviewServerApi:
       readiness: () => ReadinessStatus,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Left(405 -> "POST required")
+    if exchange.getRequestMethod.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("POST"))
+    else if !exchange.getRequestMethod.equalsIgnoreCase("POST") then Right(methodNotAllowed("POST"))
     else if !ensurePlatformCsrf(exchange, platformAuth) then Left(403 -> SessionCsrfRequiredMessage)
     else if !readiness().acceptingAnalysisJobs then
       Left(503 -> admissionRejectedMessage(readiness(), "playing hall"))
@@ -128,7 +163,15 @@ private[web] object HandHistoryReviewServerApi:
       jobStore: AnalysisJobStore,
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
-    if !exchange.getRequestMethod.equalsIgnoreCase("GET") then Left(405 -> "GET required")
+    // GET or HEAD: same response shape; writeBytes is HEAD-aware and
+    // suppresses the body so monitoring tools probing job existence with
+    // HEAD see the 200/404 status + security headers without paying for
+    // the JSON payload. Same convention used by /api/health, /api/ready,
+    // /api/auth/me, and the static handler.
+    val method = exchange.getRequestMethod
+    if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, HEAD"))
+    else if !method.equalsIgnoreCase("GET") && !method.equalsIgnoreCase("HEAD") then
+      Right(methodNotAllowed("GET, HEAD"))
     else
       extractJobId(exchange, AnalyzeJobPathPrefix, "analysis").flatMap { jobId =>
         jobStore
@@ -146,7 +189,9 @@ private[web] object HandHistoryReviewServerApi:
       platformAuth: Option[PlatformUserAuth.Service]
   ): Either[(Int, String), JsonResponse] =
     val method = exchange.getRequestMethod
-    if method.equalsIgnoreCase("GET") then
+    if method.equalsIgnoreCase("OPTIONS") then Right(optionsResponse("GET, HEAD, DELETE"))
+    // GET or HEAD: same response shape (writeBytes drops the body on HEAD).
+    else if method.equalsIgnoreCase("GET") || method.equalsIgnoreCase("HEAD") then
       extractJobId(exchange, PlayingHallJobPathPrefix, "playing hall").flatMap { jobId =>
         jobStore
           .status(
@@ -157,7 +202,16 @@ private[web] object HandHistoryReviewServerApi:
           .toRight(404 -> s"playing hall job not found: $jobId")
       }
     else if method.equalsIgnoreCase("DELETE") then
-      extractJobId(exchange, PlayingHallJobPathPrefix, "playing hall").flatMap { jobId =>
+      // DELETE is state-changing -- enforce CSRF the same way the POST
+      // submit and the auth state-changing endpoints do. Browsers
+      // preflight non-simple methods (DELETE included) and our origin
+      // emits no CORS headers, so the cross-origin browser path is
+      // already blocked, but a scripted local proxy or a future CORS
+      // relaxation shouldn't be able to fire cooperative cancel without
+      // the explicit X-CSRF-Token. ensurePlatformCsrf is a no-op when
+      // platform auth is disabled.
+      if !ensurePlatformCsrf(exchange, platformAuth) then Left(403 -> SessionCsrfRequiredMessage)
+      else extractJobId(exchange, PlayingHallJobPathPrefix, "playing hall").flatMap { jobId =>
         jobStore.cancel(
           jobId = jobId,
           requesterUserId = authenticatedUser(exchange).map(_.userId),
@@ -170,7 +224,15 @@ private[web] object HandHistoryReviewServerApi:
           case CancelOutcome.NotFound =>
             Left(404 -> s"playing hall job not found: $jobId")
       }
-    else Left(405 -> "GET or DELETE required")
+    else Right(methodNotAllowed("GET, HEAD, DELETE"))
+
+  // Loose upper bound on job-id length. We generate UUID.randomUUID().toString
+  // (36 chars), so anything dramatically longer is the URL being abused. Use a
+  // generous cap (128 chars) so a future migration to a different id scheme
+  // does not box us in, but tight enough that an attacker cannot force the
+  // jobStore.get hash to chew on a 64 KB key per request or echo a big jobId
+  // back through the 404 response body.
+  private val MaxJobIdLength = 128
 
   private def extractJobId(
       exchange: HttpExchange,
@@ -181,25 +243,53 @@ private[web] object HandHistoryReviewServerApi:
     if !path.startsWith(pathPrefix) then Left(404 -> "not found")
     else
       val jobId = path.substring(pathPrefix.length).trim
-      Either.cond(jobId.nonEmpty && !jobId.contains("/"), jobId, 400 -> s"$label job id is required")
+      if jobId.isEmpty || jobId.contains("/") then Left(400 -> s"$label job id is required")
+      // Oversize jobIds get 404, not 400. The downstream "job not found" is
+      // the same status code; treating oversize as "definitely not a job
+      // we know about" avoids both echoing the oversize value back through
+      // the error body AND giving the attacker a separate response shape
+      // they can use to fingerprint the length cutoff.
+      else if jobId.length > MaxJobIdLength then Left(404 -> s"$label job not found")
+      else Right(jobId)
 
   private def parseRequest(body: String): Either[(Int, String), HandHistoryReviewService.AnalysisRequest] =
     try
       val json = ujson.read(body)
       val obj = json.obj
-      val handHistoryText = requiredString(obj, "handHistoryText").map(_.trim)
-      val heroName = optionalString(obj, "heroName").map(_.trim).filter(_.nonEmpty)
+      // Trim FIRST (and strip BOM), then re-check non-empty: requiredString
+      // filters empty pre-trim, so an all-whitespace handHistoryText
+      // ("   ", "\n\n\n") would otherwise survive validation and queue a
+      // job whose payload is "" -- the parser then produces a confusing
+      // "no playable hands" failure deep in the pipeline instead of a
+      // clean 400 at the API boundary. Strip a leading BOM (U+FEFF) too
+      // because String.trim only drops chars <= U+0020, so a file
+      // containing just a BOM + newlines would survive trim and reach the
+      // worker. HandHistoryImport already strips BOM per-line downstream,
+      // so doing it once here keeps the empty-content check in sync with
+      // what the parser actually sees.
+      val handHistoryText = requiredString(obj, "handHistoryText")
+        .map(_.stripPrefix("\uFEFF").trim)
+        .filterOrElse(_.nonEmpty, 400 -> "handHistoryText is required")
+      // Cap heroName at 64 chars to match the frontend maxlength and the
+      // PlatformUserAuth profile heroName cap. The HTML <input maxlength=64>
+      // prevents legitimate UI input from exceeding the limit; this server
+      // check is defense in depth against a hand-crafted curl/scripted
+      // client and also keeps the value out of the audit log if any future
+      // code path logs the heroName. Reject upfront so the worker never
+      // sees a multi-kilobyte heroName in the comparison loop.
+      val heroName = parseOptionalHeroName(optionalString(obj, "heroName"))
       val site = parseOptionalSite(optionalString(obj, "site"))
       for
         text <- handHistoryText
+        parsedHeroName <- heroName
         parsedSite <- site
       yield HandHistoryReviewService.AnalysisRequest(
         handHistoryText = text,
         site = parsedSite,
-        heroName = heroName
+        heroName = parsedHeroName
       )
     catch
-      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${e.getMessage}")
+      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${capParseErrorMessage(e.getMessage)}")
 
   private def parsePlayingHallRequest(body: String): Either[(Int, String), PlayingHallRequest] =
     try
@@ -309,7 +399,7 @@ private[web] object HandHistoryReviewServerApi:
         seed = seed
       )
     catch
-      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${e.getMessage}")
+      case NonFatal(e) => Left(400 -> s"invalid JSON request: ${capParseErrorMessage(e.getMessage)}")
 
   private def requiredIntInRange(
       obj: collection.Map[String, Value],
@@ -349,6 +439,16 @@ private[web] object HandHistoryReviewServerApi:
       .get(normalized)
       .toRight(400 -> s"$key must be one of: ${allowed.toVector.sorted.mkString(", ")}")
 
+  // Cap individual villainPool entries upfront. All supported archetype names
+  // are <= 16 chars ("callingstation" is the longest). 32 is a generous
+  // ceiling that lets us reject oversize entries WITHOUT echoing the
+  // attacker-controlled value through the "unsupported entries: ..." error
+  // body. Without this cap, a request like {"villainPool":["<1KB string>"]}
+  // would land a 1 KB attacker value in the JSON error response per request
+  // -- the same bandwidth-amplification shape the OIDC ?error= and jobId
+  // caps closed elsewhere.
+  private val MaxVillainPoolEntryLength = 32
+
   private def requiredVillainPool(
       obj: collection.Map[String, Value]
   ): Either[(Int, String), Vector[String]] =
@@ -363,6 +463,11 @@ private[web] object HandHistoryReviewServerApi:
     if parsed.isEmpty then Left(400 -> "villainPool must include at least one entry")
     else if parsed.length > MaxPlayingHallVillainPoolEntries then
       Left(400 -> s"villainPool must include at most $MaxPlayingHallVillainPoolEntries entries")
+    else if parsed.exists(_.length > MaxVillainPoolEntryLength) then
+      // Reject oversize entries before the "unsupported entries: ..." error
+      // path would otherwise echo the long attacker-controlled string back
+      // through the response body. Generic message keeps the response tiny.
+      Left(400 -> s"villainPool entries must be at most $MaxVillainPoolEntryLength characters")
     else
       val normalized = parsed.map(_.toLowerCase(Locale.ROOT))
       val allowed = Set("nit", "tag", "lag", "callingstation", "station", "maniac", "gto")
@@ -371,6 +476,36 @@ private[web] object HandHistoryReviewServerApi:
         Left(400 -> s"villainPool contains unsupported entries: ${invalid.distinct.sorted.mkString(", ")}")
       else Right(normalized)
 
+  // Map a ujson.Value to its JSON-type label without serializing the value.
+  // `ujson.write(other)` for an Arr/Obj field can produce a multi-megabyte
+  // string that then lands verbatim in the 400 response body -- an attacker
+  // who sends {"hands": <1.9 MB nested object>} via /api/playing-hall (2 MB
+  // body cap) gets 1.9 MB of their own payload echoed back through the error
+  // response. The TYPE alone is enough information for legitimate clients to
+  // fix their request; the value adds nothing the client doesn't already
+  // know but inflates the response by the full attacker payload.
+  private def jsonTypeName(value: Value): String = value match
+    case _: ujson.Str => "string"
+    case _: ujson.Num => "number"
+    case _: ujson.Bool => "boolean"
+    case ujson.Null => "null"
+    case _: ujson.Arr => "array"
+    case _: ujson.Obj => "object"
+
+  // Cap the exception message we surface in JSON parse-error responses. The
+  // main exposure is ujson.Value.InvalidData (thrown by .obj on a non-object
+  // body), whose getMessage is "Expected Obj: <data.toString>" -- and for a
+  // 16 KB request body shaped as a giant string or array, data.toString is
+  // ~16 KB of attacker-controlled payload that would otherwise round-trip
+  // through the 400 response body. 256 chars matches the per-field caps
+  // applied elsewhere and is plenty for any genuine parser error message
+  // (positions, expected tokens, etc.).
+  private val MaxParseErrorMessageLength = 256
+  private[web] def capParseErrorMessage(raw: String): String =
+    if raw == null then ""
+    else if raw.length <= MaxParseErrorMessageLength then raw
+    else raw.substring(0, MaxParseErrorMessageLength) + "...(truncated)"
+
   private def optionalInt(
       obj: collection.Map[String, Value],
       key: String
@@ -378,7 +513,7 @@ private[web] object HandHistoryReviewServerApi:
     obj.get(key).map {
       case ujson.Num(value) if value.isWhole => Right(value.toInt)
       case Str(value) => value.trim.toIntOption.toRight(400 -> s"$key must be an integer")
-      case other => Left(400 -> s"$key must be an integer, got ${ujson.write(other)}")
+      case other => Left(400 -> s"$key must be an integer, got ${jsonTypeName(other)}")
     }
 
   private def optionalLong(
@@ -388,7 +523,7 @@ private[web] object HandHistoryReviewServerApi:
     obj.get(key).map {
       case ujson.Num(value) if value.isWhole => Right(value.toLong)
       case Str(value) => value.trim.toLongOption.toRight(400 -> s"$key must be a long")
-      case other => Left(400 -> s"$key must be a long, got ${ujson.write(other)}")
+      case other => Left(400 -> s"$key must be a long, got ${jsonTypeName(other)}")
     }
 
   private def optionalDouble(
@@ -398,7 +533,7 @@ private[web] object HandHistoryReviewServerApi:
     obj.get(key).map {
       case ujson.Num(value) => Right(value)
       case Str(value) => value.trim.toDoubleOption.toRight(400 -> s"$key must be a number")
-      case other => Left(400 -> s"$key must be a number, got ${ujson.write(other)}")
+      case other => Left(400 -> s"$key must be a number, got ${jsonTypeName(other)}")
     }
 
   private def optionalBoolean(
@@ -412,7 +547,7 @@ private[web] object HandHistoryReviewServerApi:
           case "true" => Right(true)
           case "false" => Right(false)
           case _ => Left(400 -> s"$key must be true or false")
-      case other => Left(400 -> s"$key must be true or false, got ${ujson.write(other)}")
+      case other => Left(400 -> s"$key must be true or false, got ${jsonTypeName(other)}")
     }
 
   private def optionalStringArray(
@@ -421,10 +556,19 @@ private[web] object HandHistoryReviewServerApi:
   ): Option[Vector[String]] =
     obj.get(key).flatMap {
       case Arr(values) =>
+        // For non-string entries, surface only the JSON type name rather
+        // than `other.str` (which works for Num and throws InvalidData --
+        // exception message includes data.toString -- for Bool/Obj/Arr/Null,
+        // and that exception was being caught by parsePlayingHallRequest's
+        // NonFatal handler and re-emitted as "invalid JSON request:
+        // <full attacker-controlled value>" in the 400 response body). The
+        // downstream allowlist check produces a clean
+        // "unsupported entries: object" instead of echoing the offending
+        // object verbatim back to the client.
         Some(
-          values.collect {
+          values.map {
             case Str(value) => value
-            case other => other.str
+            case other => jsonTypeName(other)
           }.toVector
         )
       case _ => None
@@ -571,34 +715,97 @@ private[web] object HandHistoryReviewServerApi:
       case other => Some(other.str)
     }
 
+  // Loose upper bound on the operator-facing "site" field. Recognised aliases
+  // (pokerstars/stars/winamax/wina/ggpoker/gg/ggnetwork) are all under 12
+  // chars; 64 is plenty of slack for any future alias and tight enough that
+  // an attacker cannot stuff a multi-KB attacker payload into the
+  // "unsupported hand-history site: <value>" error message that
+  // HandHistorySite.parse echoes for unknown inputs.
+  private val MaxSiteFieldLength = 64
+
+  // Cap for the analyze-hand-history heroName field. Matches the frontend
+  // <input maxlength="64"> and the PlatformUserAuth profile heroName cap,
+  // so a value behaves consistently whether it came from the saved profile,
+  // a manual upload-form entry, or a scripted curl request.
+  private val MaxAnalyzeHeroNameLength = 64
+
+  private def parseOptionalHeroName(raw: Option[String]): Either[(Int, String), Option[String]] =
+    raw.map(_.trim).filter(_.nonEmpty) match
+      case None => Right(None)
+      case Some(value) if value.length > MaxAnalyzeHeroNameLength =>
+        Left(400 -> s"heroName must be at most $MaxAnalyzeHeroNameLength characters")
+      // Reject C0 control chars and DEL, same shape as
+      // PlatformUserAuth.sanitizeOptionalField. heroName is compared
+      // against player names parsed from the hand-history file (which
+      // never contain controls) so a control-bearing value would never
+      // match anyway -- but a newline-bearing value WOULD splice fake
+      // structured key=value entries into any future log line that
+      // included heroName. Defense in depth.
+      case Some(value) if value.exists(ch => ch.toInt < 0x20 || ch.toInt == 0x7F) =>
+        Left(400 -> "heroName must not contain control characters")
+      case Some(value) => Right(Some(value))
+
   private def parseOptionalSite(raw: Option[String]): Either[(Int, String), Option[HandHistorySite]] =
     raw.map(_.trim).filter(_.nonEmpty).filterNot(_.equalsIgnoreCase("auto")) match
       case None => Right(None)
+      case Some(value) if value.length > MaxSiteFieldLength =>
+        // Reject oversize values BEFORE HandHistorySite.parse echoes them
+        // back through the "unsupported hand-history site: <value>" error.
+        // Generic length message keeps the response tiny.
+        Left(400 -> s"site must be at most $MaxSiteFieldLength characters")
       case Some(value) => HandHistorySite.parse(value).left.map(err => 400 -> err).map(Some(_))
 
   def readRequestBody(
       exchange: HttpExchange,
       maxUploadBytes: Int
   ): Either[(Int, String), String] =
-    Option(exchange.getRequestHeaders.getFirst("Content-Length"))
-      .flatMap(_.toLongOption)
-      .filter(_ > maxUploadBytes.toLong) match
-        case Some(_) =>
-          Left(413 -> s"request body exceeds max upload size of $maxUploadBytes bytes")
-        case None =>
-          val input = exchange.getRequestBody
-          val buffer = Array.ofDim[Byte](8192)
-          val output = new ByteArrayOutputStream(math.min(maxUploadBytes, 8192))
-          var total = 0
-          var bytesRead = input.read(buffer)
-          while bytesRead != -1 && total <= maxUploadBytes do
-            total += bytesRead
-            if total <= maxUploadBytes then
-              output.write(buffer, 0, bytesRead)
-            bytesRead = input.read(buffer)
-          if total > maxUploadBytes then
+    // Require application/json on every body-reading endpoint. All real callers
+    // -- the frontend's fetch() calls, curl, integration tests -- already set
+    // Content-Type: application/json. Rejecting other Content-Type values
+    // closes the "login CSRF via cross-origin form POST" door belt-and-braces:
+    // a malicious site that auto-submits a <form action="/api/auth/login">
+    // gets browser-default application/x-www-form-urlencoded, which now 415s
+    // before any body parsing. Custom Content-Type would trigger a CORS
+    // preflight that our server doesn't allow (no Access-Control-Allow-Origin
+    // is configured), so the only path that delivers JSON is same-origin --
+    // exactly what we want for state-changing endpoints. Match a prefix so
+    // `application/json; charset=utf-8` and similar variants still work.
+    val contentType = Option(exchange.getRequestHeaders.getFirst("Content-Type"))
+      .map(_.trim.toLowerCase)
+    val contentEncoding = Option(exchange.getRequestHeaders.getFirst("Content-Encoding"))
+      .map(_.trim.toLowerCase)
+      .filter(_.nonEmpty)
+    if !contentType.exists(value => value == "application/json" || value.startsWith("application/json;")) then
+      Left(415 -> "Content-Type must be application/json")
+    else if contentEncoding.exists(_ != "identity") then
+      // The server reads the request body as raw UTF-8 bytes and parses as JSON;
+      // it does NOT decompress. A client sending Content-Encoding: gzip would
+      // otherwise produce a confusing "invalid JSON request" 400 (the body is
+      // gzip bytes, not JSON). Reject upfront with a clear 415. Skipping
+      // decompression is also a deliberate defense -- a hostile client could
+      // otherwise mail in a small compressed payload that decompresses to MB or
+      // GB of attacker-controlled JSON, defeating the maxUploadBytes cap.
+      Left(415 -> s"request Content-Encoding '${contentEncoding.get}' is not supported; send uncompressed application/json")
+    else
+      Option(exchange.getRequestHeaders.getFirst("Content-Length"))
+        .flatMap(_.toLongOption)
+        .filter(_ > maxUploadBytes.toLong) match
+          case Some(_) =>
             Left(413 -> s"request body exceeds max upload size of $maxUploadBytes bytes")
-          else Right(new String(output.toByteArray, StandardCharsets.UTF_8))
+          case None =>
+            val input = exchange.getRequestBody
+            val buffer = Array.ofDim[Byte](8192)
+            val output = new ByteArrayOutputStream(math.min(maxUploadBytes, 8192))
+            var total = 0
+            var bytesRead = input.read(buffer)
+            while bytesRead != -1 && total <= maxUploadBytes do
+              total += bytesRead
+              if total <= maxUploadBytes then
+                output.write(buffer, 0, bytesRead)
+              bytesRead = input.read(buffer)
+            if total > maxUploadBytes then
+              Left(413 -> s"request body exceeds max upload size of $maxUploadBytes bytes")
+            else Right(new String(output.toByteArray, StandardCharsets.UTF_8))
 
   final case class JsonResponse(
       status: Int,

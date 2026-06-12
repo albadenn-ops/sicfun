@@ -1,9 +1,11 @@
 package sicfun.holdem.gpu
 import sicfun.holdem.*
-import sicfun.holdem.types.ScopedRuntimeProperties
+import sicfun.holdem.types.{ConsoleLogger, ScopedRuntimeProperties}
 
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicReference
+import scala.collection.immutable.VectorMap
 
 /** Shared helpers for GPU/OpenCL runtime configuration and native library loading.
   *
@@ -23,9 +25,10 @@ import java.util.Locale
   *    [[describeOpenCLStatus]] map integer JNI return codes to human-readable
   *    descriptions for CUDA, OpenCL, and common JNI validation errors.
   *
-  *  - '''Logging''': a lightweight facility (`log` / `warn`) controlled by the
-  *    `sicfun.verbose` system property or `sicfun_VERBOSE` env var. Info-level
-  *    output is suppressed by default; warnings always go to stderr.
+  *  - '''Logging''': a lightweight `ConsoleLogger`-backed facility. `sicfun.verbose`
+  *    / `sicfun_VERBOSE` remains a compatibility gate for debug-style progress output,
+  *    and that progress output participates in `sicfun.log.level` / `SICFUN_LOG_LEVEL`
+  *    filtering. Warnings remain visible by default to preserve fallback diagnostics.
   *
   * Design decisions:
   *  - All methods are pure functions or side-effect-free lookups, making this
@@ -36,6 +39,20 @@ import java.util.Locale
 private[holdem] object GpuRuntimeSupport:
   private val VerboseProperty = "sicfun.verbose"
   private val VerboseEnv = "sicfun_VERBOSE"
+  private val SystemPropertyOverrideLock = Object()
+  private val ManagedSystemPropertyOverridesRef =
+    new AtomicReference[VectorMap[String, Vector[(String, Option[String])]]](VectorMap.empty)
+  private val ManagedSystemPropertyOverrideSuppressionDepth = new ThreadLocal[Int]:
+    override def initialValue(): Int = 0
+  private val progressLogger = ConsoleLogger.fromConfig("gpu-runtime", defaultLevel = ConsoleLogger.Level.Debug)
+  private val warningLogger = ConsoleLogger("gpu-runtime", ConsoleLogger.Level.Warn)
+  private val SwallowedExceptionCountsRef = new AtomicReference[Map[String, Long]](Map.empty)
+  private val WarnedSwallowedExceptionSitesRef = new AtomicReference[Set[String]](Set.empty)
+
+  enum SwallowedExceptionWarnPolicy:
+    case Never
+    case Once
+    case Always
 
   /** Returns true when info-level output is enabled. */
   private[holdem] def verbose: Boolean =
@@ -44,11 +61,46 @@ private[holdem] object GpuRuntimeSupport:
 
   /** Info-level log: only prints when `sicfun.verbose=true`. */
   private[holdem] def log(msg: => String): Unit =
-    if verbose then println(msg)
+    if verbose then progressLogger.debug(msg)
 
-  /** Warning-level log: always prints to stderr. */
+  /** Warning-level log routed through the shared console logger without suppressing fallback diagnostics. */
   private[holdem] def warn(msg: => String): Unit =
-    System.err.println(msg)
+    warningLogger.warn(msg)
+
+  /** Records that a runtime swallowed an exception while degrading to a fallback path.
+    *
+    * The event is always counted per `site`. Warning emission is controlled per site:
+    *  - `Never`: counter only
+    *  - `Once`: warn only on the first occurrence for this site
+    *  - `Always`: warn every time
+    */
+  private[holdem] def noteSwallowedException(
+      site: String,
+      ex: Throwable,
+      fallback: String,
+      warnPolicy: SwallowedExceptionWarnPolicy = SwallowedExceptionWarnPolicy.Once
+  ): Unit =
+    incrementSwallowedExceptionCount(site)
+    val shouldWarn =
+      warnPolicy match
+        case SwallowedExceptionWarnPolicy.Never => false
+        case SwallowedExceptionWarnPolicy.Once => markSwallowedExceptionSiteWarned(site)
+        case SwallowedExceptionWarnPolicy.Always => true
+    if shouldWarn then
+      val detail = describeThrowable(ex)
+      warningLogger.warn(
+        s"$site swallowed ${ex.getClass.getSimpleName}: $detail; using fallback=$fallback"
+      )
+
+  private[holdem] def swallowedExceptionCount(site: String): Long =
+    SwallowedExceptionCountsRef.get().getOrElse(site, 0L)
+
+  private[holdem] def swallowedExceptionCounts: Map[String, Long] =
+    SwallowedExceptionCountsRef.get()
+
+  private[holdem] def resetSwallowedExceptionTrackingForTests(): Unit =
+    SwallowedExceptionCountsRef.set(Map.empty)
+    WarnedSwallowedExceptionSitesRef.set(Set.empty)
 
   /** Resolves a configuration value by checking (in priority order):
     *  1. `ScopedRuntimeProperties` thread-local overlay (set by tests)
@@ -93,6 +145,99 @@ private[holdem] object GpuRuntimeSupport:
     */
   def isConfigured(property: String, env: String): Boolean =
     resolveNonEmpty(property, env).nonEmpty
+
+  /** Registers scoped managed system-property overrides for later JNI call sites.
+    *
+    * The overrides are inert until [[withManagedSystemPropertyOverrides]] is used.
+    * This lets higher-level auto-tuners remember decisions without mutating the JVM's
+    * global property map between compute calls. Scopes are applied in registration
+    * order; when duplicate keys exist, later registrations win.
+    */
+  def replaceManagedSystemPropertyOverrides(
+      scope: String,
+      updates: Seq[(String, Option[String])]
+  ): Unit =
+    val normalized = normalizePropertyUpdates(updates)
+    ManagedSystemPropertyOverridesRef.updateAndGet(current =>
+      if normalized.isEmpty then current - scope else (current - scope).updated(scope, normalized)
+    )
+    ()
+
+  /** Removes any previously-registered managed overrides for `scope`. */
+  def clearManagedSystemPropertyOverrides(scope: String): Unit =
+    replaceManagedSystemPropertyOverrides(scope, Seq.empty)
+
+  /** Clears every managed override scope. Intended for test reset boundaries. */
+  def clearAllManagedSystemPropertyOverrides(): Unit =
+    ManagedSystemPropertyOverridesRef.set(VectorMap.empty)
+
+  /** Temporarily applies every currently managed override scope for the duration of `thunk`. */
+  def withManagedSystemPropertyOverrides[A](thunk: => A): A =
+    if ManagedSystemPropertyOverrideSuppressionDepth.get() > 0 then thunk
+    else
+      val updates = ManagedSystemPropertyOverridesRef.get().valuesIterator.flatten.toVector
+      withTemporarySystemProperties(updates)(thunk)
+
+  /** Temporarily disables managed override application on the current thread. */
+  def withManagedSystemPropertyOverridesSuspended[A](thunk: => A): A =
+    val depth = ManagedSystemPropertyOverrideSuppressionDepth.get()
+    ManagedSystemPropertyOverrideSuppressionDepth.set(depth + 1)
+    try thunk
+    finally ManagedSystemPropertyOverrideSuppressionDepth.set(depth)
+
+  /** Temporarily overrides real JVM system properties for the duration of `thunk`.
+    *
+    * Native JNI code in this repo sometimes reads properties directly through
+    * `java.lang.System.getProperty`, so thread-local overlays are not sufficient.
+    * This helper narrows the global mutation to a synchronized, restore-on-exit scope.
+    * The lock intentionally covers `thunk`: native reads use process-global properties,
+    * so overlapping scopes with different values cannot be made concurrent safely here.
+    */
+  def withTemporarySystemProperties[A](updates: Seq[(String, Option[String])])(thunk: => A): A =
+    if updates.isEmpty then thunk
+    else
+      SystemPropertyOverrideLock.synchronized {
+        val previous = updates.iterator.map { case (key, _) => key -> sys.props.get(key) }.toVector
+        updates.foreach {
+          case (key, Some(value)) => sys.props.update(key, value)
+          case (key, None) => sys.props.remove(key)
+        }
+        try thunk
+        finally
+          previous.foreach {
+            case (key, Some(value)) => sys.props.update(key, value)
+            case (key, None) => sys.props.remove(key)
+          }
+      }
+
+  private def normalizePropertyUpdates(updates: Seq[(String, Option[String])]): Vector[(String, Option[String])] =
+    val normalized = scala.collection.mutable.LinkedHashMap.empty[String, Option[String]]
+    updates.foreach { case (key, value) => normalized.update(key, value) }
+    normalized.iterator.toVector
+
+  private def incrementSwallowedExceptionCount(site: String): Unit =
+    SwallowedExceptionCountsRef.updateAndGet { current =>
+      current.updated(site, current.getOrElse(site, 0L) + 1L)
+    }
+    ()
+
+  private def markSwallowedExceptionSiteWarned(site: String): Boolean =
+    var shouldWarn = false
+    var done = false
+    while !done do
+      val current = WarnedSwallowedExceptionSitesRef.get()
+      if current.contains(site) then
+        done = true
+      else
+        shouldWarn = true
+        done = WarnedSwallowedExceptionSitesRef.compareAndSet(current, current + site)
+    shouldWarn
+
+  private def describeThrowable(ex: Throwable): String =
+    Option(ex.getMessage)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .getOrElse(ex.getClass.getName)
 
   /** Parses a human-friendly boolean value.
     * Accepts "1", "true", "yes", "on" (case-insensitive) as truthy; everything else is falsy.

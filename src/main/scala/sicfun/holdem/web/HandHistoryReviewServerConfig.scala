@@ -17,6 +17,10 @@ private[web] object HandHistoryReviewServerConfig:
   private val DefaultShutdownGraceMs = 5000L
   private val DefaultRateLimitSubmitsPerMinute = 6
   private val DefaultRateLimitStatusPerMinute = 240
+  // 10 attempts/min/IP leaves room for a few legitimate fat-finger retries but
+  // throttles a credential-stuffing attacker to ~600 attempts/hour — well below
+  // what is useful for a dictionary attack against PBKDF2-hashed credentials.
+  private val DefaultRateLimitAuthPerMinute = 10
 
   def parseArgs(args: Array[String]): Either[String, ServerConfig] =
     if args.contains("--help") || args.contains("-h") then Left(usage)
@@ -88,6 +92,17 @@ private[web] object HandHistoryReviewServerConfig:
           (),
           "--rateLimitStatusPerMinute must be zero or positive"
         )
+        rateLimitAuthPerMinute <- resolveIntOption(
+          options,
+          "rateLimitAuthPerMinute",
+          env("RATE_LIMIT_AUTH_PER_MINUTE"),
+          DefaultRateLimitAuthPerMinute
+        )
+        _ <- Either.cond(
+          rateLimitAuthPerMinute >= 0,
+          (),
+          "--rateLimitAuthPerMinute must be zero or positive"
+        )
         rateLimitClientIpHeader = options
           .get("rateLimitClientIpHeader")
           .orElse(env("RATE_LIMIT_CLIENT_IP_HEADER"))
@@ -137,6 +152,13 @@ private[web] object HandHistoryReviewServerConfig:
           12L * 60L * 60L * 1000L
         )
         _ <- Either.cond(userAuthSessionTtlMs > 0L, (), "--userAuthSessionTtlMs must be positive")
+        userAuthMaxUsers <- resolveIntOption(
+          options,
+          "userAuthMaxUsers",
+          env("USER_AUTH_MAX_USERS"),
+          100_000
+        )
+        _ <- Either.cond(userAuthMaxUsers > 0, (), "--userAuthMaxUsers must be positive")
         userAuthCookieSecure <- resolveBooleanOption(
           options,
           "userAuthCookieSecure",
@@ -156,7 +178,8 @@ private[web] object HandHistoryReviewServerConfig:
           allowLocalRegistration = userAuthAllowRegistration,
           sessionTtlMs = userAuthSessionTtlMs,
           cookieSecure = userAuthCookieSecure,
-          oidcProviders = googleOidc.toVector
+          oidcProviders = googleOidc.toVector,
+          maxUsers = userAuthMaxUsers
         )
         _ <- Either.cond(
           basicAuth.isEmpty || platformAuth.isEmpty,
@@ -193,6 +216,7 @@ private[web] object HandHistoryReviewServerConfig:
         shutdownGraceMs = shutdownGraceMs,
         rateLimitSubmitsPerMinute = rateLimitSubmitsPerMinute,
         rateLimitStatusPerMinute = rateLimitStatusPerMinute,
+        rateLimitAuthPerMinute = rateLimitAuthPerMinute,
         rateLimitClientIpHeader = rateLimitClientIpHeader,
         rateLimitTrustedProxyIps = rateLimitTrustedProxyIps,
         drainSignalFile = drainSignalFile,
@@ -293,16 +317,27 @@ private[web] object HandHistoryReviewServerConfig:
     (maybeClientId, maybeClientSecret, maybeRedirectUri) match
       case (None, None, None) => Right(None)
       case (Some(clientId), Some(clientSecret), Some(redirectUri)) =>
-        parseAbsoluteHttpUri(redirectUri, "--googleOidcRedirectUri/GOOGLE_OIDC_REDIRECT_URI").map { _ =>
-          Some(
-            new PlatformUserAuth.GoogleOidcProvider(
-              PlatformUserAuth.GoogleOidcConfig(
-                clientId = clientId,
-                clientSecret = clientSecret,
-                redirectUri = redirectUri
-              )
+        parseAbsoluteHttpUri(redirectUri, "--googleOidcRedirectUri/GOOGLE_OIDC_REDIRECT_URI").flatMap { uri =>
+          val provider = new PlatformUserAuth.GoogleOidcProvider(
+            PlatformUserAuth.GoogleOidcConfig(
+              clientId = clientId,
+              clientSecret = clientSecret,
+              redirectUri = redirectUri
             )
           )
+          // The server's runtime registers exactly one context per provider at
+          // `provider.callbackPath` (e.g. `/api/auth/oidc/google/callback`).
+          // A redirect URI whose path does not match that means Google would
+          // send the user to a path the server never registered -- the static
+          // handler's catch-all returns a generic 404 with no breadcrumb that
+          // OIDC was involved. Catch the mismatch at config time so the
+          // operator sees a precise error in startup logs.
+          val redirectPath = Option(uri.getPath).getOrElse("")
+          if redirectPath != provider.callbackPath then
+            Left(
+              s"--googleOidcRedirectUri/GOOGLE_OIDC_REDIRECT_URI path must be '${provider.callbackPath}' so the server's registered callback handler matches the redirect URI Google sees; got '$redirectPath'"
+            )
+          else Right(Some(provider))
         }
       case _ =>
         Left(
@@ -338,7 +373,8 @@ private[web] object HandHistoryReviewServerConfig:
       allowLocalRegistration: Boolean,
       sessionTtlMs: Long,
       cookieSecure: Boolean,
-      oidcProviders: Vector[PlatformUserAuth.OidcProvider]
+      oidcProviders: Vector[PlatformUserAuth.OidcProvider],
+      maxUsers: Int
   ): Either[String, Option[PlatformUserAuth.Config]] =
     userStorePath match
       case None if oidcProviders.nonEmpty =>
@@ -352,7 +388,8 @@ private[web] object HandHistoryReviewServerConfig:
               sessionTtlMs = sessionTtlMs,
               allowLocalRegistration = allowLocalRegistration,
               cookieSecure = cookieSecure,
-              oidcProviders = oidcProviders
+              oidcProviders = oidcProviders,
+              maxUsers = maxUsers
             )
           )
         )
@@ -404,6 +441,7 @@ private[web] object HandHistoryReviewServerConfig:
       |  --shutdownGraceMs=5000   Grace window for draining requests/jobs on shutdown (falls back to SHUTDOWN_GRACE_MS env)
       |  --rateLimitSubmitsPerMinute=6 Submit request cap per rate-limit key per minute; 0 disables it (falls back to RATE_LIMIT_SUBMITS_PER_MINUTE env)
       |  --rateLimitStatusPerMinute=240 Job-status poll cap per rate-limit key per minute; 0 disables it (falls back to RATE_LIMIT_STATUS_PER_MINUTE env)
+      |  --rateLimitAuthPerMinute=10 Auth (register/login) cap per rate-limit key per minute; 0 disables it (falls back to RATE_LIMIT_AUTH_PER_MINUTE env)
       |  --rateLimitClientIpHeader=<header> Optional trusted single-value client-IP header for rate limiting behind a reverse proxy (falls back to RATE_LIMIT_CLIENT_IP_HEADER env)
       |  --rateLimitTrustedProxyIps=<csv> Optional comma-separated proxy peer IP allowlist for trusting --rateLimitClientIpHeader; loopback is always trusted (falls back to RATE_LIMIT_TRUSTED_PROXY_IPS env)
       |  --drainSignalFile=<path> Optional file that makes /api/ready fail and rejects new analysis submissions while present (falls back to DRAIN_SIGNAL_FILE env)
@@ -411,6 +449,7 @@ private[web] object HandHistoryReviewServerConfig:
       |  --basicAuthPassword=<pw> Optional HTTP Basic auth password (falls back to BASIC_AUTH_PASSWORD env)
       |  --allowUnauthenticatedPublicBind=<bool> Allow non-loopback binds without auth for trusted private networks only (falls back to ALLOW_UNAUTHENTICATED_PUBLIC_BIND env)
       |  --allowInsecureUserAuth=<bool> Allow non-loopback platform-user auth without secure cookies / HTTPS OIDC callback only for trusted private-network testing (falls back to ALLOW_INSECURE_USER_AUTH env)
+      |  --userAuthMaxUsers=100000 Hard cap on the total number of stored users; further registrations return 'temporarily unavailable' (falls back to USER_AUTH_MAX_USERS env)
       |  --model=<dir>            Optional model artifact directory (falls back to MODEL_DIR env)
       |  --seed=42                RNG seed (falls back to SEED env)
       |  --bunchingTrials=200     Monte Carlo bunching trials per analysis

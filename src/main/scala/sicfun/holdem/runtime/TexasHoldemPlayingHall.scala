@@ -479,6 +479,14 @@ object TexasHoldemPlayingHall:
       strategicHelperOpt.foreach { helper =>
         val villainPositions = tableScenario.activePositions
           .filterNot(_ == config.heroPosition)
+        // Position -> profile PlayerId. Injective by construction: parseArgs
+        // rejects strategic configs whose villainPool is smaller than the
+        // worst-case simultaneous villain seat count (maxActiveVillainDemand),
+        // so the round-robin assignment above never seats one profile twice
+        // and two positions never share a PlayerId within a hand. Profile-level
+        // ids (rather than per-seat ids) are intentional ACROSS hands: seats
+        // rotate every hand, and the belief tracks model the persistent
+        // profile personas.
         val posMapping = villainPositions.map { pos =>
           pos -> PlayerId(tableScenario.villainProfileByPosition(pos).name)
         }.toMap
@@ -1988,6 +1996,25 @@ object TexasHoldemPlayingHall:
       Position.Button
     ).indexOf(position)
 
+  /** Maximum number of villain seats `buildTableScenario` can activate in a single
+    * hand for this configuration. Mirrors the scenario's branch structure exactly:
+    * full-ring activates every non-hero position; review mode without full-ring is
+    * heads-up (one villain); otherwise multiway draws are capped at 3 villains for
+    * 6-max-and-up tables and 2 below that. Shared by parseArgs' strategic-mode
+    * validation (the strategic overlay keys one rival belief per profile, so the
+    * villain pool must cover the worst-case simultaneous seat count) so the rule
+    * cannot drift from the scenario logic.
+    */
+  private[runtime] def maxActiveVillainDemand(
+      playerCount: Int,
+      fullRing: Boolean,
+      headsUpOnly: Boolean
+  ): Int =
+    val availableVillains = math.max(1, playerCount - 1)
+    if fullRing then availableVillains
+    else if headsUpOnly then 1
+    else math.min(availableVillains, if playerCount >= 6 then 3 else 2)
+
   /** Constructs the table layout for one hand. Randomly selects which villain positions are
     * active (respecting heads-up-only and full-ring constraints), assigns villain profiles
     * from the pool in round-robin order, and generates seat numbers and player names.
@@ -2016,7 +2043,7 @@ object TexasHoldemPlayingHall:
           if availableVillains.length <= 1 then 1
           else math.min(2, availableVillains.length)
         val maxVillainCount =
-          math.min(availableVillains.length, if playerCount >= 6 then 3 else 2)
+          maxActiveVillainDemand(playerCount, fullRing = false, headsUpOnly = false)
         val villainCount =
           if maxVillainCount <= minVillainCount then minVillainCount
           else minVillainCount + rng.nextInt(maxVillainCount - minVillainCount + 1)
@@ -2034,13 +2061,37 @@ object TexasHoldemPlayingHall:
       }.toMap
     val seatNumberByPosition =
       modeledPositions.zipWithIndex.map { case (position, idx) => position -> (idx + 1) }.toMap
-    val playerNameByPosition =
+    // Seat DISPLAY names for the review hand-history export. These are
+    // deliberately separate from VillainProfile.name (the engine identity
+    // that keys rival beliefs and perVillainNetChips): when the round-robin
+    // above assigns one profile to multiple seats, the exported text would
+    // otherwise show the same nick on two seats. PokerStars-format action
+    // lines identify actors by nick ONLY, and real sites enforce unique
+    // nicks per table, so any name-keyed consumer (HandHistoryImport,
+    // opponent profiling) collapses duplicate-named seats into one player --
+    // producing unreplayable action sequences ("folded player acts again")
+    // and silently merged opponent stats. Suffix duplicates with their seat
+    // number so every seat is unambiguous; names stay unchanged whenever the
+    // pool covers the active seats, keeping existing exports byte-identical.
+    val baseNameByPosition =
       modeledPositions.zipWithIndex.map { case (position, idx) =>
         val name =
           if position == heroPosition then ReviewHeroName
           else if villainProfileByPosition.contains(position) then villainProfileByPosition(position).name
           else f"Player${idx + 1}%02d_${position.toString}"
         position -> name
+      }
+    val collidingNames =
+      baseNameByPosition
+        .groupBy { case (_, name) => name }
+        .collect { case (name, entries) if entries.length > 1 => name }
+        .toSet
+    val playerNameByPosition =
+      baseNameByPosition.map { case (position, name) =>
+        val seatName =
+          if collidingNames.contains(name) then s"${name}_s${seatNumberByPosition(position)}"
+          else name
+        position -> seatName
       }.toMap
 
     TableScenario(
@@ -2430,6 +2481,27 @@ object TexasHoldemPlayingHall:
         saveDdreTrainingTsv <- boolOpt(options, "saveDdreTrainingTsv", false)
         saveReviewHandHistory <- boolOpt(options, "saveReviewHandHistory", false)
         fullRing <- boolOpt(options, "fullRing", false)
+        // Strategic mode keys one rival belief per villain PROFILE (PlayerId from
+        // profile name; every StrategicEngine session structure is Map[PlayerId, _]),
+        // so a profile occupying two seats in one hand is unrepresentable: both
+        // seats' actions would merge under one actor in the engine's action history
+        // and rival accounting. Require the pool to cover the worst-case number of
+        // simultaneously active villain seats instead of silently corrupting rival
+        // tracking. Adaptive/GTO heroes are unaffected (they do not use the
+        // strategic overlay), as are heads-up runs (demand 1).
+        strategicVillainDemand = maxActiveVillainDemand(
+          playerCount,
+          fullRing = fullRing,
+          headsUpOnly = saveReviewHandHistory && !fullRing
+        )
+        _ <-
+          if heroMode != HeroMode.Strategic || villainPool.length >= strategicVillainDemand then Right(())
+          else
+            Left(
+              s"--heroStyle=strategic requires --villainPool with at least $strategicVillainDemand styles for playerCount=$playerCount" +
+                (if fullRing then " with --fullRing" else "") +
+                s" (got ${villainPool.length}): the strategic overlay keys one rival belief per profile, so a profile must not occupy two seats in the same hand"
+            )
       yield Config(
         hands = hands,
         tableCount = tableCount,
@@ -2537,7 +2609,7 @@ object TexasHoldemPlayingHall:
       |  --seed=<long>                 default 42
       |  --outDir=<path>               default data/playing-hall
       |  --modelArtifactDir=<path>     optional initial trained model
-      |  --heroStyle=<style>           adaptive|gto
+      |  --heroStyle=<style>           adaptive|gto|strategic (strategic requires a villainPool covering the max simultaneous villain seats)
       |  --heroPosition=<Position>     explicit table position (defaults to Button)
       |  --heroSeat=<seat>             legacy heads-up alias: button|bigblind
       |  --gtoMode=<mode>              fast|exact (default exact)

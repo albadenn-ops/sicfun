@@ -12,6 +12,16 @@ import sicfun.holdem.strategic.types.*
   * position-derived IDs. In heads-up match play the remote opponent flips between
   * Button and BigBlind each hand — Position.toString would split belief tracks.
   *
+  * Within-hand uniqueness: the mapping must also be INJECTIVE per hand — two
+  * positions must never share a PlayerId, because every engine session structure
+  * (rivalBeliefs, exploitationStates, rivalSeats, endHand's showdown map, the
+  * actor-attributed action history feeding anomaly detection) is keyed by
+  * PlayerId and cannot represent two simultaneous seats under one id. The hall
+  * enforces this at config time: strategic mode requires a villainPool at least
+  * as large as the worst-case simultaneous villain seat count
+  * (TexasHoldemPlayingHall.maxActiveVillainDemand), so its per-hand round-robin
+  * never seats one profile twice.
+  *
   *   - ACPC/Slumbot: PlayerId("villain")
   *   - Hall: PlayerId from VillainProfile name
   *   - Advisor: PlayerId("villain")

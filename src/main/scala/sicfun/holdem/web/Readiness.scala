@@ -61,7 +61,8 @@ private[web] object Readiness:
       jobStore: AnalysisJobStore,
       playingHallJobStore: PlayingHallJobStore,
       activeHttpRequests: Int,
-      draining: AtomicBoolean
+      draining: AtomicBoolean,
+      platformAuthService: Option[PlatformUserAuth.Service]
   ): JsonResponse =
     val metrics = jobStore.metrics
     val readiness = readinessStatus(config, jobStore, playingHallJobStore, draining)
@@ -76,6 +77,14 @@ private[web] object Readiness:
         "acceptingAnalysisJobs" -> Bool(readiness.acceptingAnalysisJobs),
         "authenticationEnabled" -> Bool(authenticationEnabled(config.basicAuth, config.platformAuth)),
         "authenticationMode" -> Str(authenticationMode(config.basicAuth, config.platformAuth)),
+        // Surface the user-store cap so dashboards can show "users / maxUsers"
+        // and alert when capacity is being approached. Only present when
+        // platform-user auth is enabled (basic auth and no-auth modes have
+        // no user store).
+        "userAuthMaxUsers" -> config.platformAuth.map(c => Num(c.maxUsers.toDouble)).getOrElse(ujson.Null),
+        "userAuthStoredUsers" -> platformAuthService.map(s => Num(s.storedUserCount.toDouble)).getOrElse(ujson.Null),
+        "userAuthActiveSessions" -> platformAuthService.map(s => Num(s.activeSessionCount.toDouble)).getOrElse(ujson.Null),
+        "userAuthPendingOidcFlows" -> platformAuthService.map(s => Num(s.pendingOidcFlows.toDouble)).getOrElse(ujson.Null),
         "service" -> Str("hand-history-review"),
         "host" -> Str(config.host),
         "port" -> Num(boundPort.toDouble),
@@ -90,6 +99,7 @@ private[web] object Readiness:
         "playingHallTimeoutMs" -> Num(config.playingHallTimeoutMs.toDouble),
         "rateLimitSubmitsPerMinute" -> Num(config.rateLimitSubmitsPerMinute.toDouble),
         "rateLimitStatusPerMinute" -> Num(config.rateLimitStatusPerMinute.toDouble),
+        "rateLimitAuthPerMinute" -> Num(config.rateLimitAuthPerMinute.toDouble),
         "rateLimitClientIpSource" -> Str(rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)),
         "maxConcurrentJobs" -> Num(metrics.maxConcurrentJobs.toDouble),
         "maxQueuedJobs" -> Num(metrics.maxQueuedJobs.toDouble),
@@ -97,7 +107,9 @@ private[web] object Readiness:
         "queuedJobs" -> Num(metrics.queuedJobs.toDouble),
         "runningJobs" -> Num(metrics.runningJobs.toDouble),
         "timedOutWorkersInFlight" -> Num(readiness.timedOutWorkersInFlight.toDouble),
-        "retainedTerminalJobs" -> Num(metrics.retainedTerminalJobs.toDouble)
+        // Sum both stores so the operator sees the true number of completed
+        // jobs being held for status polling, not just the analysis half.
+        "retainedTerminalJobs" -> Num((metrics.retainedTerminalJobs + playingHallJobStore.retainedTerminalJobsCount).toDouble)
       )
     )
 
@@ -130,6 +142,7 @@ private[web] object Readiness:
         "playingHallTimeoutMs" -> Num(config.playingHallTimeoutMs.toDouble),
         "rateLimitSubmitsPerMinute" -> Num(config.rateLimitSubmitsPerMinute.toDouble),
         "rateLimitStatusPerMinute" -> Num(config.rateLimitStatusPerMinute.toDouble),
+        "rateLimitAuthPerMinute" -> Num(config.rateLimitAuthPerMinute.toDouble),
         "rateLimitClientIpSource" -> Str(rateLimitClientIpSource(config.rateLimitClientIpHeader, config.rateLimitTrustedProxyIps)),
         "activeHttpRequests" -> Num(otherActiveHttpRequests.toDouble),
         "maxConcurrentJobs" -> Num(metrics.maxConcurrentJobs.toDouble),
@@ -151,10 +164,22 @@ private[web] object Readiness:
 
   def trackActiveRequests(
       activeHttpRequests: AtomicInteger,
+      trustedClientIpHeader: Option[String],
+      trustedProxyIps: Set[String],
       delegate: HttpHandler
   ): HttpHandler =
     new HttpHandler:
       override def handle(exchange: HttpExchange): Unit =
+        // Stash the audit-display client address on the exchange before the
+        // handler runs so AuthStack.remoteAddress (and any other audit code
+        // path that wants to log "who connected") sees the same identity the
+        // rate limiter keys on. Behind a trusted proxy, that's the
+        // X-Forwarded-For IP (or whichever header is configured), not the
+        // proxy's loopback peer.
+        exchange.setAttribute(
+          AuthStack.AuditClientAddressAttribute,
+          RateLimit.resolveAuditClientAddress(exchange, trustedClientIpHeader, trustedProxyIps)
+        )
         activeHttpRequests.incrementAndGet()
         try delegate.handle(exchange)
         finally activeHttpRequests.decrementAndGet()

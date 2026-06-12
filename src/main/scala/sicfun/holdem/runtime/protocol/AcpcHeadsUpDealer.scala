@@ -2,7 +2,7 @@ package sicfun.holdem.runtime.protocol
 
 import sicfun.core.{Card, Deck, HandEvaluator}
 import sicfun.holdem.cli.CliHelpers
-import sicfun.holdem.types.{Board, HoleCards, Street}
+import sicfun.holdem.types.{Board, ConsoleLogger, HoleCards, Street}
 
 import java.io.{BufferedReader, BufferedWriter, InputStreamReader, OutputStreamWriter}
 import java.net.{ServerSocket, Socket}
@@ -43,6 +43,7 @@ import scala.util.Random
   * @see [[AcpcMatchRunner]] for the complementary client-side runner that connects to an external dealer.
   */
 object AcpcHeadsUpDealer:
+  private val log = ConsoleLogger.fromConfig("acpc-heads-up-dealer")
   private val ProtocolVersion = "VERSION:2.0.0"
   private val SmallBlindChips = 50
   private val BigBlindChips = 100
@@ -462,19 +463,19 @@ object AcpcHeadsUpDealer:
     val wantsHelp = args.contains("--help") || args.contains("-h")
     run(args) match
       case Right(summary) =>
-        println("=== ACPC Heads-Up Dealer ===")
-        println(s"handsPlayed: ${summary.handsPlayed}")
-        println(s"elapsedSeconds: ${fmt(summary.elapsedSeconds, 3)}")
-        println(s"handsPerSecond: ${fmt(summary.handsPerSecond, 3)}")
-        println(s"${summary.playerAName}NetChips: ${fmt(summary.playerANetChips, 3)}")
-        println(s"${summary.playerAName}BbPer100: ${fmt(summary.playerABbPer100, 3)}")
-        println(s"${summary.playerBName}NetChips: ${fmt(summary.playerBNetChips, 3)}")
-        println(s"${summary.playerBName}BbPer100: ${fmt(summary.playerBBbPer100, 3)}")
-        println(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
+        log.info("=== ACPC Heads-Up Dealer ===")
+        log.info(s"handsPlayed: ${summary.handsPlayed}")
+        log.info(s"elapsedSeconds: ${fmt(summary.elapsedSeconds, 3)}")
+        log.info(s"handsPerSecond: ${fmt(summary.handsPerSecond, 3)}")
+        log.info(s"${summary.playerAName}NetChips: ${fmt(summary.playerANetChips, 3)}")
+        log.info(s"${summary.playerAName}BbPer100: ${fmt(summary.playerABbPer100, 3)}")
+        log.info(s"${summary.playerBName}NetChips: ${fmt(summary.playerBNetChips, 3)}")
+        log.info(s"${summary.playerBName}BbPer100: ${fmt(summary.playerBBbPer100, 3)}")
+        log.info(s"outDir: ${summary.outDir.toAbsolutePath.normalize()}")
       case Left(error) =>
-        if wantsHelp then println(error)
+        if wantsHelp then log.info(error)
         else
-          System.err.println(error)
+          log.error(error)
           sys.exit(1)
 
   def run(args: Array[String]): Either[String, MatchSummary] =
@@ -681,7 +682,7 @@ object AcpcHeadsUpDealer:
     /** Print a progress line to stdout at the configured reporting interval. */
     private def maybeReport(handNumber: Int): Unit =
       if config.reportEvery > 0 && (handNumber % config.reportEvery == 0 || handNumber == config.hands) then
-        println(
+        log.info(
           s"[acpc-hu] hand=$handNumber ${config.playerAName}=${fmt(playerNet(0), 3)} ${config.playerBName}=${fmt(playerNet(1), 3)}"
         )
 

@@ -117,10 +117,6 @@ object GenerateHeadsUpTable:
           else HeadsUpEquityTable.ComputeBackend.Cpu
 
   private def providerAvailability(provider: String): HeadsUpGpuRuntime.Availability =
-    val previous = sys.props.get(ProviderProperty)
-    sys.props.update(ProviderProperty, provider)
-    try HeadsUpGpuRuntime.availability
-    finally
-      previous match
-        case Some(value) => sys.props.update(ProviderProperty, value)
-        case None => sys.props.remove(ProviderProperty)
+    GpuRuntimeSupport.withTemporarySystemProperties(Seq(ProviderProperty -> Some(provider))) {
+      HeadsUpGpuRuntime.availability
+    }

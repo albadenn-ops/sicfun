@@ -7,7 +7,7 @@ import sicfun.core.DiscreteDistribution
 // STATUS (post-Wave 7 — v0.31.1 formal closure complete)
 // -------------------------------------------------------
 // PosteriorDivergencePolarization — real KL divergence implemented; proxy fallback preserved
-// KernelVariant.Design            — concrete design kernel via KernelConstructor.buildDesignKernel
+// KernelVariant.Design            — concrete design kernel via KernelConstructor.buildDesignKernelFull
 
 /** Type alias for a function that updates a model state M given a posterior
   * distribution over strategic classes. Used to embed classification posteriors
@@ -35,7 +35,7 @@ trait ShowdownKernel[M]:
   *   - Which action kernel variant is applied (Blind/Ref/Attrib/Design)
   *   - Whether showdown evidence is incorporated (ShowdownMode.On) or gated off (ShowdownMode.Off)
   *
-  * Use [[KernelConstructor.composeFullKernelForWorld]] to obtain a FullKernel
+  * Use [[KernelConstructor.composeFullKernelForWorldFull]] to obtain a FullKernel
   * correctly configured for a given ChainWorld.
   */
 trait FullKernel[M]:
