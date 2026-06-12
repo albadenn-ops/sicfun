@@ -380,6 +380,83 @@ class TexasHoldemPlayingHallTest extends FunSuite:
     assert(result.isLeft, "expected invalid hero position for 4-handed table")
   }
 
+  // Strategic mode keys one rival belief per villain profile (PlayerId from the
+  // profile name), so a profile occupying two seats in one hand is
+  // unrepresentable in the engine's session maps. parseArgs must reject pools
+  // smaller than the worst-case simultaneous villain seat count instead of
+  // letting the round-robin silently merge two seats under one rival id.
+  test("playing hall rejects strategic fullRing configs whose villain pool cannot cover the seats") {
+    val result = TexasHoldemPlayingHall.run(Array(
+      "--heroStyle=strategic",
+      "--playerCount=6",
+      "--fullRing=true",
+      "--villainPool=tag,lag,maniac"
+    ))
+    assert(result.isLeft, "expected strategic fullRing with 3-profile pool over 5 villain seats to fail")
+    val message = result.swap.getOrElse("")
+    assert(message.contains("--heroStyle=strategic") && message.contains("villainPool"),
+      s"rejection must name the strategic/villainPool rule so the config is actionable; got: $message")
+    assert(message.contains("at least 5"),
+      s"rejection must state the demanded pool size (5 villain seats at fullRing 6-max); got: $message")
+  }
+
+  test("playing hall rejects strategic six-max configs whose pool is smaller than the multiway draw cap") {
+    // Mirrors the web API's defaults (playerCount=6, two pool styles, no
+    // fullRing): non-fullRing six-max can draw up to 3 villains per hand, so a
+    // 2-profile pool would seat one profile twice on every 3-villain hand.
+    val result = TexasHoldemPlayingHall.run(Array(
+      "--heroStyle=strategic",
+      "--playerCount=6",
+      "--villainPool=tag,gto"
+    ))
+    assert(result.isLeft, "expected strategic six-max with 2-profile pool (draw cap 3) to fail")
+    val message = result.swap.getOrElse("")
+    assert(message.contains("at least 3"),
+      s"rejection must state the non-fullRing six-max demand of 3; got: $message")
+  }
+
+  test("playing hall rejects strategic multiway configs without a villain pool") {
+    // Without --villainPool the hall builds a single fallback profile, but a
+    // 3-handed table draws 2 villains every hand -- guaranteed collision.
+    val result = TexasHoldemPlayingHall.run(Array(
+      "--heroStyle=strategic",
+      "--playerCount=3"
+    ))
+    assert(result.isLeft, "expected strategic 3-handed run with single fallback profile to fail")
+  }
+
+  test("playing hall runs strategic mode when the villain pool covers the seat demand") {
+    // Boundary acceptance (pool size == demand) and the first automated
+    // strategic-mode hall run: 4-handed non-fullRing draws at most 2 villains,
+    // so a 2-profile pool is exactly sufficient and no two seats can share a
+    // rival id.
+    val root = Files.createTempDirectory("playing-hall-strategic-test-")
+    try
+      val out = root.resolve("hall-strategic-out")
+      val result = TexasHoldemPlayingHall.run(Array(
+        "--hands=2",
+        "--reportEvery=2",
+        "--learnEveryHands=0",
+        "--learningWindowSamples=50",
+        "--seed=59",
+        s"--outDir=$out",
+        "--heroStyle=strategic",
+        "--playerCount=4",
+        "--villainPool=tag,lag",
+        "--heroExplorationRate=0.0",
+        "--raiseSize=2.5",
+        "--bunchingTrials=8",
+        "--equityTrials=80",
+        "--saveTrainingTsv=false",
+        "--saveDdreTrainingTsv=false"
+      ))
+      assert(result.isRight, s"strategic hall run with covering pool failed: $result")
+      val summary = result.toOption.getOrElse(fail("missing strategic hall summary"))
+      assertEquals(summary.playerCount, 4)
+    finally
+      deleteRecursively(root)
+  }
+
   test("playing hall supports six-max cutoff contexts") {
     val root = Files.createTempDirectory("playing-hall-sixmax-test-")
     try
