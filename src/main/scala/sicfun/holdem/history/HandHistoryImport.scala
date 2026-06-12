@@ -719,6 +719,29 @@ object HandHistoryImport:
       buttonSeatNumber: Int,
       seatRows: Vector[SeatRow]
   ): (Vector[ImportedPlayer], Map[String, Int]) =
+    // Reject duplicate nicks up front with a clear reason. Action lines in
+    // site hand-history formats identify the actor by nick ONLY, and every
+    // downstream structure here is name-keyed (seatIndexByName, the
+    // per-player stack/commitment ledgers, opponent profiling). Two seats
+    // sharing a nick would silently collapse into one player: action
+    // sequences become unreplayable (surfacing as misleading toCall
+    // failures) and, worse, hands that happen to replay cleanly merge two
+    // players' stats into one opponent profile with no warning. Real sites
+    // enforce unique nicks per table, so a duplicate is always corrupt or
+    // over-redacted input -- fail this hand loudly (the resilient web path
+    // skips it with this message as the reason) rather than mis-analyze it.
+    val duplicateNames =
+      seatRows
+        .groupBy(_.name)
+        .collect { case (name, rows) if rows.length > 1 => name -> rows.map(_.seatNumber).sorted }
+    if duplicateNames.nonEmpty then
+      val described = duplicateNames.toVector
+        .sortBy { case (name, _) => name }
+        .map { case (name, seats) => s"'$name' (seats ${seats.mkString(", ")})" }
+        .mkString("; ")
+      throw new IllegalArgumentException(
+        s"hand $handId: duplicate player name(s) $described -- action lines identify players by name, so duplicate nicks make the hand ambiguous"
+      )
     val seatByNumber = seatRows.map(row => row.seatNumber -> row).toMap
     if !seatByNumber.contains(buttonSeatNumber) then
       throw new IllegalArgumentException(s"hand $handId: button seat $buttonSeatNumber has no matching seat row")

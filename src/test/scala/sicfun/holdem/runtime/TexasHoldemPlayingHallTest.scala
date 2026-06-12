@@ -3,6 +3,7 @@ package sicfun.holdem.runtime
 import munit.FunSuite
 import sicfun.core.{Card, DiscreteDistribution}
 import sicfun.holdem.cli.CliHelpers
+import sicfun.holdem.history.{HandHistoryImport, HandHistorySite}
 import sicfun.holdem.model.PokerActionModel
 import sicfun.holdem.types.*
 import sicfun.core.MultinomialLogistic
@@ -581,6 +582,84 @@ class TexasHoldemPlayingHallTest extends FunSuite:
           line.split(": ", 2).lift(1).map(_.takeWhile(_ != ' ')).getOrElse("")
       }.filter(_.nonEmpty).toSet
       assert(villainNames.size >= 2, s"expected multiple reproducible villain identities, got $villainNames")
+    finally
+      deleteRecursively(root)
+  }
+
+  test("fullRing review export keeps seat names unique and strict-parseable when the villain pool is smaller than the table".tag(munit.Slow)) {
+    // Regression test for the duplicate-seat-name fabrication bug: with
+    // --fullRing, all five non-hero positions at a 6-max table are active,
+    // and a 3-profile pool is assigned round-robin -- before the fix, two
+    // seats shared one nick (e.g. "Villain02_lag" on seats 4 AND 5), which
+    // made the exported PokerStars text ambiguous for any name-keyed parser
+    // (action lines identify actors by nick only). HandHistoryImport then
+    // collapsed both seats into one player and the replay failed with the
+    // misleading "call action requires toCall > 0". The fix suffixes
+    // colliding seat names with their seat number (profile names -- the
+    // engine identity and perVillainNetChips keys -- stay untouched).
+    val root = Files.createTempDirectory("playing-hall-fullring-names-test-")
+    try
+      val out = root.resolve("hall-fullring-names-out")
+      val result = TexasHoldemPlayingHall.run(Array(
+        "--hands=10",
+        "--reportEvery=10",
+        "--learnEveryHands=0",
+        "--learningWindowSamples=50",
+        "--seed=53",
+        s"--outDir=$out",
+        "--playerCount=6",
+        "--heroPosition=BigBlind",
+        "--heroStyle=adaptive",
+        "--heroExplorationRate=0.0",
+        "--villainPool=tag,lag,maniac",
+        "--fullRing=true",
+        "--raiseSize=2.5",
+        "--bunchingTrials=8",
+        "--equityTrials=80",
+        "--saveTrainingTsv=false",
+        "--saveDdreTrainingTsv=false",
+        "--saveReviewHandHistory=true"
+      ))
+      assert(result.isRight, s"fullRing review export run failed: $result")
+
+      val upload = out.resolve("review-upload-pokerstars.txt")
+      assert(Files.exists(upload), "expected fullRing review upload export")
+      val text = Files.readString(upload, StandardCharsets.UTF_8)
+
+      // The STRICT parser must accept every hand: this is the end-to-end
+      // contract that the fabricated history is legal, unambiguous
+      // PokerStars text. Pre-fix this fails (duplicate nicks make hands
+      // unreplayable / are rejected by the importer's duplicate-name guard).
+      val parsed = HandHistoryImport.parseText(text, Some(HandHistorySite.PokerStars), Some("Hero"))
+      assert(parsed.isRight, s"fullRing export must strict-parse in full, got: ${parsed.swap.getOrElse("")}")
+      val hands = parsed.toOption.getOrElse(Vector.empty)
+      assertEquals(hands.length, 10, "expected every fabricated hand to parse")
+
+      // Per-hand seat-name uniqueness, asserted directly from the parsed
+      // structure (not just absence of parser errors).
+      hands.foreach { hand =>
+        val names = hand.players.map(_.name)
+        assertEquals(
+          names.distinct.length,
+          names.length,
+          s"hand ${hand.handId}: duplicate seat names in export: ${names.mkString(", ")}"
+        )
+      }
+
+      // The collision path must actually fire in this configuration (five
+      // active villains over a 3-profile pool guarantees at least one
+      // duplicated profile per hand) -- otherwise this test would be
+      // vacuously green. Suffixed names keep the profile-name prefix so the
+      // per-profile aggregation keys remain recoverable.
+      val suffixedNames = hands.iterator
+        .flatMap(_.players.iterator.map(_.name))
+        .filter(_.matches(""".+_s\d+"""))
+        .toSet
+      assert(suffixedNames.nonEmpty, "expected at least one seat-suffixed villain name; the collision path was not exercised")
+      assert(
+        suffixedNames.forall(name => name.startsWith("Villain")),
+        s"seat-suffixed names must keep the profile-name prefix, got: $suffixedNames"
+      )
     finally
       deleteRecursively(root)
   }

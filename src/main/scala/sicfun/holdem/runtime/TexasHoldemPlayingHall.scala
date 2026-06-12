@@ -2034,13 +2034,37 @@ object TexasHoldemPlayingHall:
       }.toMap
     val seatNumberByPosition =
       modeledPositions.zipWithIndex.map { case (position, idx) => position -> (idx + 1) }.toMap
-    val playerNameByPosition =
+    // Seat DISPLAY names for the review hand-history export. These are
+    // deliberately separate from VillainProfile.name (the engine identity
+    // that keys rival beliefs and perVillainNetChips): when the round-robin
+    // above assigns one profile to multiple seats, the exported text would
+    // otherwise show the same nick on two seats. PokerStars-format action
+    // lines identify actors by nick ONLY, and real sites enforce unique
+    // nicks per table, so any name-keyed consumer (HandHistoryImport,
+    // opponent profiling) collapses duplicate-named seats into one player --
+    // producing unreplayable action sequences ("folded player acts again")
+    // and silently merged opponent stats. Suffix duplicates with their seat
+    // number so every seat is unambiguous; names stay unchanged whenever the
+    // pool covers the active seats, keeping existing exports byte-identical.
+    val baseNameByPosition =
       modeledPositions.zipWithIndex.map { case (position, idx) =>
         val name =
           if position == heroPosition then ReviewHeroName
           else if villainProfileByPosition.contains(position) then villainProfileByPosition(position).name
           else f"Player${idx + 1}%02d_${position.toString}"
         position -> name
+      }
+    val collidingNames =
+      baseNameByPosition
+        .groupBy { case (_, name) => name }
+        .collect { case (name, entries) if entries.length > 1 => name }
+        .toSet
+    val playerNameByPosition =
+      baseNameByPosition.map { case (position, name) =>
+        val seatName =
+          if collidingNames.contains(name) then s"${name}_s${seatNumberByPosition(position)}"
+          else name
+        position -> seatName
       }.toMap
 
     TableScenario(
